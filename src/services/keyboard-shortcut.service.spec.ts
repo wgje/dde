@@ -16,6 +16,7 @@ type KeyboardShortcutPrivate = {
   uiState: { sidebarOpen: { set: ReturnType<typeof vi.fn> } };
   dynamicModal: { hasOpenModal: () => boolean };
   modal: { hasOpenModal: () => boolean };
+  toast: { warning: ReturnType<typeof vi.fn> };
   started: boolean;
   searchFocusTimer: ReturnType<typeof setTimeout> | null;
 };
@@ -27,6 +28,7 @@ function createContext(): KeyboardShortcutPrivate {
   context.uiState = { sidebarOpen: { set: vi.fn() } };
   context.dynamicModal = { hasOpenModal: vi.fn(() => false) };
   context.modal = { hasOpenModal: vi.fn(() => false) };
+  context.toast = { warning: vi.fn() };
   context.started = false;
   context.searchFocusTimer = null;
   return context;
@@ -170,6 +172,43 @@ describe('KeyboardShortcutService 撤销/重做', () => {
       consoleWarn.mockRestore();
     }
   });
+
+  it('撤销/重做失败时应通过 Toast 提示用户并保留 warn', async () => {
+    const context = createContext();
+    const error = new Error('undo failed');
+    const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    try {
+      context.taskOpsAdapter.performUndo.mockRejectedValue(error);
+
+      expect(context.handleUndoRedo(makeEvent({ key: 'z', ctrlKey: true }), 'z')).toBe(true);
+      await Promise.resolve();
+
+      expect(context.toast.warning).toHaveBeenCalledTimes(1);
+      expect(context.toast.warning).toHaveBeenCalledWith('撤销/重做失败', expect.any(String));
+      expect(consoleWarn).toHaveBeenCalledWith('Keyboard shortcut undo/redo failed', error);
+    } finally {
+      consoleWarn.mockRestore();
+    }
+  });
+
+  it('同步抛出的撤销失败也应提示用户', () => {
+    const context = createContext();
+    const error = new Error('sync undo failed');
+    const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    try {
+      context.runUndoRedoCommand(() => {
+        throw error;
+      });
+
+      expect(context.toast.warning).toHaveBeenCalledTimes(1);
+      expect(context.toast.warning).toHaveBeenCalledWith('撤销/重做失败', expect.any(String));
+      expect(consoleWarn).toHaveBeenCalledWith('Keyboard shortcut undo/redo failed', error);
+    } finally {
+      consoleWarn.mockRestore();
+    }
+  });
 });
 
 describe('KeyboardShortcutService 搜索与黑盒', () => {
@@ -220,6 +259,50 @@ describe('KeyboardShortcutService 搜索与黑盒', () => {
     expect(context.handleSearch(event, 'f')).toBe(true);
     expect(context.uiState.sidebarOpen.set).toHaveBeenCalledWith(true);
     expect(event.preventDefault).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['动态', 'dynamicModal'],
+    ['传统', 'modal'],
+  ] as const)('延迟聚焦提交前打开%s模态框时不应查询或聚焦后台搜索框', (_kind, modalKey) => {
+    vi.useFakeTimers();
+    const context = createContext();
+    const querySelector = vi.spyOn(document, 'querySelector');
+
+    try {
+      context.focusGlobalSearchInput();
+      context[modalKey].hasOpenModal = vi.fn(() => true);
+      vi.advanceTimersByTime(50);
+
+      expect(context.searchFocusTimer).toBeNull();
+      expect(querySelector).not.toHaveBeenCalled();
+    } finally {
+      querySelector.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('无模态框时替换旧 timer 并只聚焦和选中一次', () => {
+    vi.useFakeTimers();
+    const context = createContext();
+    const focus = vi.fn();
+    const select = vi.fn();
+    const querySelector = vi.spyOn(document, 'querySelector')
+      .mockReturnValue({ focus, select } as unknown as Element);
+
+    try {
+      context.focusGlobalSearchInput();
+      context.focusGlobalSearchInput();
+      vi.advanceTimersByTime(50);
+
+      expect(context.searchFocusTimer).toBeNull();
+      expect(querySelector).toHaveBeenCalledTimes(1);
+      expect(focus).toHaveBeenCalledTimes(1);
+      expect(select).toHaveBeenCalledTimes(1);
+    } finally {
+      querySelector.mockRestore();
+      vi.useRealTimers();
+    }
   });
 
   it('销毁时应取消待执行的搜索聚焦 timer', () => {

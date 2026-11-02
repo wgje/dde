@@ -20,6 +20,7 @@ import { TaskOperationAdapterService } from './task-operation-adapter.service';
 import { UiStateService } from './ui-state.service';
 import { DynamicModalService } from './dynamic-modal.service';
 import { ModalService } from './modal.service';
+import { ToastService } from './toast.service';
 import { showBlackBoxPanel } from '../state/focus-stores';
 
 /** 侧栏搜索框聚焦前的等待时长（毫秒）—— 等待侧栏展开动画落定 */
@@ -31,6 +32,7 @@ export class KeyboardShortcutService {
   private readonly uiState = inject(UiStateService);
   private readonly dynamicModal = inject(DynamicModalService);
   private readonly modal = inject(ModalService);
+  private readonly toast = inject(ToastService);
   private started = false;
   private searchFocusTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -110,11 +112,20 @@ export class KeyboardShortcutService {
   private runUndoRedoCommand(command: () => Promise<unknown>): void {
     try {
       void Promise.resolve(command()).catch(error => {
-        console.warn('Keyboard shortcut undo/redo failed', error);
+        this.reportUndoRedoFailure(error);
       });
     } catch (error) {
-      console.warn('Keyboard shortcut undo/redo failed', error);
+      this.reportUndoRedoFailure(error);
     }
+  }
+
+  /**
+   * 撤销/重做失败上报：warn 保留诊断线索，Toast 让用户看到失败。
+   * ToastService.warning 自带同文案去重（ERROR_DEDUP_INTERVAL），连按快捷键不会刷屏。
+   */
+  private reportUndoRedoFailure(error: unknown): void {
+    console.warn('Keyboard shortcut undo/redo failed', error);
+    this.toast.warning('撤销/重做失败', '操作未生效，请重试');
   }
 
   private handleSearch(event: KeyboardEvent, key: string): boolean {
@@ -132,6 +143,7 @@ export class KeyboardShortcutService {
     }
     this.searchFocusTimer = setTimeout(() => {
       this.searchFocusTimer = null;
+      if (this.dynamicModal.hasOpenModal() || this.modal.hasOpenModal()) return;
       if (typeof document === 'undefined') return;
       const searchInput = document.querySelector<HTMLInputElement>('aside input[aria-label="搜索项目或任务"]');
       searchInput?.focus();
