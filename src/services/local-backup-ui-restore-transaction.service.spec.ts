@@ -23,6 +23,7 @@ import type {
   LocalBackupUiRestorePreImage,
   LocalBackupUiRestoreStage,
 } from './local-backup-ui-restore-types';
+import { LOCAL_BACKUP_UI_RESTORE_STAGES } from './local-backup-ui-restore-types';
 import type { LocalBackupUiRestoreStageOperations } from './local-backup-ui-restore-stage-protocol';
 import type { PreparedLocalBackupUiRestoreWriterQuiescence } from './local-backup-ui-restore-writer-quiescence.service';
 import {
@@ -554,7 +555,7 @@ describe('prepareLocalBackupUiRestoreTransaction', () => {
     const marker = makeStartupRecoveryMarker(quiescenceMarker, {
       state: 'completed',
       phase: 'finalizing',
-      completedStages: ['projects'],
+      completedStages: [...LOCAL_BACKUP_UI_RESTORE_STAGES],
     });
     await journal.create(marker);
     vi.setSystemTime(new Date(Date.parse(quiescenceMarker.leaseExpiresAt) + 1));

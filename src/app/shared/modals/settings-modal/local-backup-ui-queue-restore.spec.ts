@@ -221,6 +221,12 @@ describe('LocalBackupUIService queue restore', () => {
       ownerUserId: 'user-1',
       backup: backupData,
     }));
+    expect(restoreTransactionMock.prepare).toHaveBeenCalledWith(expect.objectContaining({
+      restoredActionQueueItems: [expect.objectContaining({
+        id: 'restored-action',
+        operationId: '99999999-9999-4999-8999-999999999999',
+      })],
+    }));
     expect(queueBackupMock.updateQueue).not.toHaveBeenCalled();
     expect(importServiceMock.executeImport).not.toHaveBeenCalled();
     expect(service.restoreResultMsg()).toBe('恢复成功！已导入 1 个项目，已恢复 1 个待同步操作');

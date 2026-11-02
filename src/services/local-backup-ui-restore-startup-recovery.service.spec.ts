@@ -9,7 +9,10 @@ import {
 } from './local-backup-ui-restore-journal';
 import { LocalBackupUiRestorePreImageService } from './local-backup-ui-restore-pre-image.service';
 import { decodeLocalBackupUiRestoreStageSnapshots } from './local-backup-ui-restore-stage-snapshots';
-import type { LocalBackupUiRestoreMarker } from './local-backup-ui-restore-types';
+import {
+  LOCAL_BACKUP_UI_RESTORE_STAGES,
+  type LocalBackupUiRestoreMarker,
+} from './local-backup-ui-restore-types';
 import type { LocalBackupUiRestoreStageOperations } from './local-backup-ui-restore-stage-protocol';
 import {
   LocalBackupUiRestoreStageService,
@@ -155,6 +158,11 @@ describe('LocalBackupUiRestoreStartupRecoveryService', () => {
         state,
         phase: 'projects',
         completedStages: [...completedStages],
+        rollbackErrors: state === 'rollback-failed' ? [{
+          stage: 'projects',
+          message: 'previous rollback failed',
+          recordedAt: STARTED_AT.toISOString(),
+        }] : [],
       });
       vi.setSystemTime(new Date(Date.parse(evidence.quiescenceMarker.leaseExpiresAt) + 1));
 
@@ -312,11 +320,39 @@ describe('LocalBackupUiRestoreStartupRecoveryService', () => {
     )).toThrow(LocalBackupUiRestoreWriterPausedError);
   });
 
+  it('blocks an impossible phase/completedStages pair without claiming or writing evidence', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
+    vi.setSystemTime(STARTED_AT);
+    const evidence = await seedEvidence({ state: 'restoring', phase: 'projects' });
+    const inconsistentMarker = { ...evidence.marker, phase: 'metadata' as const };
+    await overwriteDurableMarker(inconsistentMarker);
+    vi.setSystemTime(new Date(Date.parse(evidence.quiescenceMarker.leaseExpiresAt) + 1));
+    const putSpy = vi.spyOn(IDBObjectStore.prototype, 'put');
+    const deleteSpy = vi.spyOn(IDBObjectStore.prototype, 'delete');
+
+    try {
+      await expect(service.recover(OWNER_USER_ID))
+        .resolves.toEqual({ status: 'blocked', reason: 'invalid-evidence' });
+
+      expect(transaction.takeoverExpired).not.toHaveBeenCalled();
+      expect(mockStageService.createRecoveryOperations).not.toHaveBeenCalled();
+      expect(queueBackup.applyPersonalBackupRestoreTransitionV2).not.toHaveBeenCalled();
+      expect(putSpy).not.toHaveBeenCalled();
+      expect(deleteSpy).not.toHaveBeenCalled();
+      await expect(evidence.journal.read()).rejects.toThrow(/schema validation/i);
+      await expect(evidence.quiescence.readStartupRecoveryEvidence(OWNER_USER_ID))
+        .resolves.toEqual(evidence.quiescenceMarker);
+    } finally {
+      putSpy.mockRestore();
+      deleteSpy.mockRestore();
+    }
+  });
+
   it.each([
     ['restoring', 'projects', [], undefined],
     ['rolling-back', 'projects', ['projects'], undefined],
     ['rollback-failed', 'projects', ['projects'], undefined],
-    ['completed', 'finalizing', ['projects'], 'completed'],
+    ['completed', 'finalizing', [...LOCAL_BACKUP_UI_RESTORE_STAGES], 'completed'],
   ] as const)(
     'rejects malformed expired %s recovery evidence before takeover',
     async (state, phase, completedStages, finalizationOutcome) => {
@@ -326,6 +362,11 @@ describe('LocalBackupUiRestoreStartupRecoveryService', () => {
         state,
         phase,
         completedStages: [...completedStages],
+        rollbackErrors: state === 'rollback-failed' ? [{
+          stage: 'projects',
+          message: 'previous rollback failed',
+          recordedAt: STARTED_AT.toISOString(),
+        }] : [],
       }, finalizationOutcome);
       const preImage = evidence.marker.preImage;
       if (!preImage || typeof preImage !== 'object'
@@ -418,20 +459,23 @@ describe('LocalBackupUiRestoreStartupRecoveryService', () => {
   it('blocks prepared evidence that contains rollback error history', async () => {
     vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
     vi.setSystemTime(STARTED_AT);
-    const evidence = await seedEvidence({
+    const evidence = await seedEvidence();
+    const malformedMarker = {
+      ...evidence.marker,
       rollbackErrors: [{
-        stage: 'projects',
+        stage: 'projects' as const,
         message: 'rollback was attempted',
         recordedAt: STARTED_AT.toISOString(),
       }],
-    });
+    };
+    await overwriteDurableMarker(malformedMarker);
     vi.setSystemTime(new Date(STARTED_AT.getTime() + 2_000));
     await expect(service.recover(OWNER_USER_ID))
       .resolves.toMatchObject({ status: 'blocked' });
 
     expect(mockStageService.createRecoveryOperations).not.toHaveBeenCalled();
     expect(transaction.takeoverExpired).not.toHaveBeenCalled();
-    await expect(evidence.journal.read()).resolves.toEqual(evidence.marker);
+    await expect(evidence.journal.read()).rejects.toThrow(/schema validation/i);
     await expect(evidence.quiescence.readStartupRecoveryEvidence(OWNER_USER_ID))
       .resolves.toEqual(evidence.quiescenceMarker);
   });
@@ -450,7 +494,7 @@ describe('LocalBackupUiRestoreStartupRecoveryService', () => {
     const evidence = await seedEvidence({
       state: outcome,
       phase: 'finalizing',
-      completedStages: outcome === 'completed' ? ['projects'] : [],
+      completedStages: outcome === 'completed' ? [...LOCAL_BACKUP_UI_RESTORE_STAGES] : [],
     }, quiescenceState === 'quiesced' ? undefined : quiescenceState);
     vi.setSystemTime(new Date(Date.parse(evidence.quiescenceMarker.leaseExpiresAt) + 1));
     await expect(service.recover(OWNER_USER_ID)).resolves.toEqual({ status: 'recovered' });
@@ -475,7 +519,10 @@ describe('LocalBackupUiRestoreStartupRecoveryService', () => {
     vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
     vi.setSystemTime(STARTED_AT);
     const evidence = await seedEvidence({
-      state: 'completed', phase: 'finalizing', completedStages: ['projects'], ...markerOverrides,
+      state: 'completed',
+      phase: 'finalizing',
+      completedStages: [...LOCAL_BACKUP_UI_RESTORE_STAGES],
+      ...markerOverrides,
     }, quiescenceOutcome);
     vi.setSystemTime(new Date(STARTED_AT.getTime() + elapsedMs));
     await expect(service.recover(OWNER_USER_ID)).resolves.toMatchObject({ status: 'blocked' });
@@ -489,7 +536,9 @@ describe('LocalBackupUiRestoreStartupRecoveryService', () => {
     vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
     vi.setSystemTime(STARTED_AT);
     const evidence = await seedEvidence({
-      state: 'completed', phase: 'finalizing', completedStages: ['projects'],
+      state: 'completed',
+      phase: 'finalizing',
+      completedStages: [...LOCAL_BACKUP_UI_RESTORE_STAGES],
     }, undefined, 'foreign-owner');
     vi.setSystemTime(new Date(STARTED_AT.getTime() + 2_000));
     await expect(service.recover(OWNER_USER_ID)).resolves.toMatchObject({ status: 'blocked' });
@@ -513,7 +562,9 @@ describe('LocalBackupUiRestoreStartupRecoveryService', () => {
     const quiescenceMarker = preparedQuiescence.marker();
     const journal = createLocalBackupUiRestoreJournal(OWNER_USER_ID);
     const finalMarker = makeMarker(quiescenceMarker, {
-      state: outcome, phase: 'finalizing', completedStages: outcome === 'completed' ? ['projects'] : [],
+      state: outcome,
+      phase: 'finalizing',
+      completedStages: outcome === 'completed' ? [...LOCAL_BACKUP_UI_RESTORE_STAGES] : [],
     });
     await journal.create(finalMarker);
     await expect(journal.clear(finalMarker)).resolves.toBe(true);

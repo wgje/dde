@@ -249,7 +249,7 @@ export class LocalBackupUiRestoreStageService {
   ): Promise<LocalBackupUiRestoreStageApplyResult> {
     const plan = await this.importService.prepareLocalBackupRestorePlan(
       input.data,
-      input.existingProjects,
+      this.projectState.getProjectsWithCurrentData(),
       context.checkpoint,
     );
     await context.checkpoint();

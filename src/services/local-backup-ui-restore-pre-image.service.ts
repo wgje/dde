@@ -1,9 +1,11 @@
 import { Injectable, inject } from '@angular/core';
 
 import { SYNC_CONFIG } from '../config';
+import { AUTH_CONFIG } from '../config/auth.config';
 import { RetryQueueService } from '../core-bridge';
 import type { Project } from '../models';
 import { ExternalSourceCacheService } from '../app/core/external-sources/external-source-cache.service';
+import { AuthService } from './auth.service';
 import {
   AttachmentUploadOutboxService,
   type PendingAttachmentUploadRecord,
@@ -16,6 +18,7 @@ import {
 } from './data-safety-indexeddb-local-state';
 import type { DataSafetyMetadataRestoreState } from './import-backup-data-safety-metadata.helpers';
 import { normalizeLocalBackupUiRestoreRetryQueueFootprint } from './local-backup-ui-restore-stage-snapshots';
+import { ProjectStateService } from './project-state.service';
 import type {
   LocalBackupUiRestoreJsonValue,
   LocalBackupUiRestorePreImage,
@@ -42,13 +45,16 @@ export interface LocalBackupUiRestorePreImageReaders {
 
 @Injectable({ providedIn: 'root' })
 export class LocalBackupUiRestorePreImageService {
+  private readonly authService = inject(AuthService);
   private readonly metadata = inject(BackupDataSafetyMetadataRestoreService);
+  private readonly projectState = inject(ProjectStateService);
   private readonly externalSourceCache = inject(ExternalSourceCacheService);
   private readonly attachmentUploadOutbox = inject(AttachmentUploadOutboxService, { optional: true });
   private readonly retryQueue = inject(RetryQueueService);
 
   capture(input: CaptureLocalBackupUiRestorePreImageInput): Promise<LocalBackupUiRestorePreImage> {
-    return captureLocalBackupUiRestorePreImage(input, {
+    const currentProjects = this.readCurrentProjects(input.ownerUserId);
+    return captureLocalBackupUiRestorePreImage({ ...input, currentProjects }, {
       readLocalStateSnapshot: ownerUserId => readLocalStateRestoreSnapshot(ownerUserId),
       readMetadata: (ownerUserId, touchedProjectIds) => (
         this.metadata.readCurrent(ownerUserId, touchedProjectIds)
@@ -66,6 +72,20 @@ export class LocalBackupUiRestorePreImageService {
       maxItemAgeMs: SYNC_CONFIG.MAX_RETRY_ITEM_AGE,
       maxRetries: this.retryQueue.MAX_RETRIES,
     });
+  }
+
+  private readCurrentProjects(ownerUserId: string): Project[] {
+    this.assertCurrentOwner(ownerUserId);
+    const projects = this.projectState.getProjectsWithCurrentData();
+    this.assertCurrentOwner(ownerUserId);
+    return projects;
+  }
+
+  private assertCurrentOwner(ownerUserId: string): void {
+    const currentOwner = this.authService.currentUserId() || AUTH_CONFIG.LOCAL_MODE_USER_ID;
+    if (currentOwner !== ownerUserId) {
+      throw new Error('local backup UI restore pre-image owner changed');
+    }
   }
 }
 

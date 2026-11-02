@@ -130,6 +130,58 @@ describe('createLocalBackupUiRestoreStageOperations', () => {
     await expect(operations.verifyApplied('projects', makeContext())).rejects.toThrow(/read-back/i);
   });
 
+  it('prepares project restore against authoritative Store entities instead of settings shells', async () => {
+    const authoritativeProject = {
+      id: 'project-1',
+      name: 'Project 1',
+      description: '',
+      createdDate: '2026-07-27T00:00:00.000Z',
+      updatedAt: '2026-07-27T00:01:00.000Z',
+      version: 1,
+      tasks: [{ id: 'task-1', content: 'authoritative task content' }],
+      connections: [{ id: 'connection-1' }],
+    };
+    const shellProject = { ...authoritativeProject, tasks: [], connections: [] };
+    const data = {} as never;
+    const prepareLocalBackupRestorePlan = vi.fn(async () => ({
+      projects: [],
+      externalSourceLinks: [],
+      importedCount: 0,
+    }));
+    const projectState = {
+      getProjectsWithCurrentData: vi.fn(() => [authoritativeProject]),
+      updateProjects: vi.fn(() => {
+        throw new Error('stop after project plan capture');
+      }),
+    } as unknown as Pick<ProjectStateService, 'getProjectsWithCurrentData' | 'updateProjects'>;
+    const service = makeStageService(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      projectState,
+      { prepareLocalBackupRestorePlan },
+    );
+    const marker = makeStageMarker();
+    const operations = service.createOperations({
+      ownerUserId: OWNER_USER_ID,
+      data,
+      backup: makeConflictBackup(),
+      existingProjects: [shellProject as never],
+      actionQueueRestore: makeActionQueueRestore(),
+    });
+    operations.decodePreImage(marker);
+
+    await expect(operations.apply('projects', makeContext(marker)))
+      .rejects.toThrow('stop after project plan capture');
+    expect(prepareLocalBackupRestorePlan).toHaveBeenCalledWith(
+      data,
+      [authoritativeProject],
+      expect.any(Function),
+    );
+  });
+
   it('delegates the action-queue stage to the prepared QueueBackup participant only', async () => {
     const legacyQueueBackup = {
       updateQueue: vi.fn(async (
@@ -711,13 +763,15 @@ function makeStageService(
     savePendingUpload: vi.fn(async () => undefined),
     removePendingUpload: vi.fn(async () => undefined),
   },
+  projectState: Pick<ProjectStateService, 'getProjectsWithCurrentData' | 'updateProjects'> = {} as never,
+  importService: Pick<ImportService, 'prepareLocalBackupRestorePlan'> = {} as never,
 ): LocalBackupUiRestoreStageService {
   TestBed.resetTestingModule();
   TestBed.configureTestingModule({
     providers: [
       LocalBackupUiRestoreStageService,
-      { provide: ImportService, useValue: {} },
-      { provide: ProjectStateService, useValue: {} },
+      { provide: ImportService, useValue: importService },
+      { provide: ProjectStateService, useValue: projectState },
       { provide: ProjectDataService, useValue: {} },
       { provide: ExternalSourceCacheService, useValue: {} },
       { provide: AttachmentUploadOutboxService, useValue: attachmentOutbox },

@@ -1,9 +1,17 @@
+import { TestBed } from '@angular/core/testing';
+import { signal } from '@angular/core';
 import { describe, expect, it, vi } from 'vitest';
 
 import { SYNC_CONFIG } from '../config';
+import { RetryQueueService } from '../core-bridge';
 import type { Project } from '../models';
+import { ExternalSourceCacheService } from '../app/core/external-sources/external-source-cache.service';
+import { AuthService } from './auth.service';
+import { BackupDataSafetyMetadataRestoreService } from './backup-data-safety-metadata-restore.service';
+import { ProjectStateService } from './project-state.service';
 import {
   captureLocalBackupUiRestorePreImage,
+  LocalBackupUiRestorePreImageService,
   type LocalBackupUiRestorePreImageReaders,
 } from './local-backup-ui-restore-pre-image.service';
 
@@ -194,6 +202,82 @@ describe('captureLocalBackupUiRestorePreImage', () => {
       new Set(['project-1', 'project-new']),
     );
     expect(readers.readExternalPendingLinks).toHaveBeenCalledWith(OWNER_USER_ID);
+  });
+
+  it('captures authoritative project entities instead of a metadata shell supplied by the settings entry point', async () => {
+    localStorage.clear();
+    const authoritativeProject = {
+      id: 'project-authoritative',
+      name: 'Authoritative project',
+      description: '',
+      createdDate: '2026-07-27T00:00:00.000Z',
+      updatedAt: '2026-07-27T00:01:00.000Z',
+      version: 1,
+      tasks: [{
+        id: 'task-authoritative',
+        title: 'Task',
+        content: 'entity data must survive compensation',
+        stage: 1,
+        parentId: null,
+        order: 0,
+        rank: 100,
+        status: 'active',
+        displayId: 'task-authoritative',
+        x: 0,
+        y: 0,
+        createdDate: '2026-07-27T00:00:00.000Z',
+      }],
+      connections: [],
+    } as Project;
+    const settingsShell = { ...authoritativeProject, tasks: [], connections: [] } as Project;
+    const projectState = {
+      getProjectsWithCurrentData: vi.fn(() => [authoritativeProject]),
+    };
+    TestBed.configureTestingModule({
+      providers: [
+        LocalBackupUiRestorePreImageService,
+        { provide: AuthService, useValue: { currentUserId: signal(OWNER_USER_ID) } },
+        { provide: ProjectStateService, useValue: projectState },
+        { provide: BackupDataSafetyMetadataRestoreService, useValue: {
+          readCurrent: vi.fn(async () => ({
+            projectCursors: [],
+            lastSyncTime: null,
+            replayLog: [],
+            lastWriteExplain: null,
+            taskTombstones: {},
+            connectionTombstones: [],
+          })),
+        } },
+        { provide: ExternalSourceCacheService, useValue: {
+          loadLinks: vi.fn(async () => []),
+          loadPendingLinks: vi.fn(async () => []),
+        } },
+        { provide: RetryQueueService, useValue: { MAX_RETRIES: 5 } },
+      ],
+    });
+
+    try {
+      const preImage = await TestBed.inject(LocalBackupUiRestorePreImageService).capture({
+        ownerUserId: OWNER_USER_ID,
+        touchedProjectIds: [authoritativeProject.id],
+        currentProjects: [settingsShell],
+        retryQueueRestoreItems: [],
+      });
+
+      expect(projectState.getProjectsWithCurrentData).toHaveBeenCalledOnce();
+      expect(preImage.projectState).toMatchObject({
+        projects: [{
+          existed: true,
+          project: {
+            tasks: [{ content: 'entity data must survive compensation' }],
+            connections: [],
+          },
+        }],
+      });
+    } finally {
+      TestBed.resetTestingModule();
+      localStorage.clear();
+    }
   });
 
   it('binds pending links to the transaction owner across a transient A to B to A auth change', async () => {

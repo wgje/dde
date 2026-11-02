@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { deleteDataSafetyRestoreMarkerJournalDatabaseForTests } from './data-safety-restore-marker-journal';
 import {
   buildLocalBackupUiRestoreMarker,
+  LOCAL_BACKUP_UI_RESTORE_STAGES,
   validateLocalBackupUiRestoreMarker,
   type BuildLocalBackupUiRestoreMarkerInput,
   type LocalBackupUiRestoreMarker,
@@ -124,6 +125,42 @@ describe('local backup UI restore journal foundation', () => {
     expect(validateLocalBackupUiRestoreMarker({
       ...marker,
       rollbackErrors: [{ stage: 'metadata', message: '', recordedAt: 'not-a-date' }],
+    }, OWNER_USER_ID)).toBe(false);
+  });
+
+  it('rejects phase progress that cannot come from the restore protocol', () => {
+    const marker = makeMarker();
+    const completedPrefix = [...LOCAL_BACKUP_UI_RESTORE_STAGES].slice(0, 6);
+
+    expect(validateLocalBackupUiRestoreMarker({
+      ...marker,
+      state: 'restoring',
+      phase: 'metadata',
+      completedStages: completedPrefix,
+    }, OWNER_USER_ID)).toBe(true);
+    expect(validateLocalBackupUiRestoreMarker({
+      ...marker,
+      state: 'restoring',
+      phase: 'metadata',
+      completedStages: [],
+    }, OWNER_USER_ID)).toBe(false);
+    expect(validateLocalBackupUiRestoreMarker({
+      ...marker,
+      state: 'restoring',
+      phase: 'retry-queue',
+      completedStages: ['projects', 'action-queue'],
+    }, OWNER_USER_ID)).toBe(false);
+    expect(validateLocalBackupUiRestoreMarker({
+      ...marker,
+      state: 'rollback-failed',
+      phase: 'retry-queue',
+      completedStages: ['projects', 'attachment-outbox', 'action-queue'],
+      rollbackCompletedStages: ['metadata'],
+      rollbackErrors: [{
+        stage: 'retry-queue',
+        message: 'rollback failed',
+        recordedAt: '2026-07-27T00:00:00.000Z',
+      }],
     }, OWNER_USER_ID)).toBe(false);
   });
 

@@ -198,22 +198,34 @@ export function validateLocalBackupUiRestoreMarker(
   expectedOwnerUserId?: string,
 ): value is LocalBackupUiRestoreMarker {
   if (!isRecordWithExactKeys(value, MARKER_KEYS)) return false;
+  const state = value['state'];
+  const phase = value['phase'];
+  const completedStages = value['completedStages'];
+  const rollbackCompletedStages = value['rollbackCompletedStages'];
+  const rollbackErrors = value['rollbackErrors'];
   if (value['schemaVersion'] !== LOCAL_BACKUP_UI_RESTORE_MARKER_SCHEMA_VERSION) return false;
   if (!isNonEmptyString(value['ownerUserId']) || !isNonEmptyString(value['runId'])) return false;
   if (!isNonEmptyString(value['restoreRunId']) || value['restoreRunId'] === value['runId']) return false;
   if (expectedOwnerUserId !== undefined && value['ownerUserId'] !== expectedOwnerUserId) return false;
   if (!isIsoTimestamp(value['createdAt']) || !isIsoTimestamp(value['leaseExpiresAt'])) return false;
-  if (!isOneOf(value['state'], LOCAL_BACKUP_UI_RESTORE_STATES)) return false;
-  if (!isOneOf(value['phase'], LOCAL_BACKUP_UI_RESTORE_PHASES)) return false;
-  if (!isCanonicalStageSubset(value['completedStages'], LOCAL_BACKUP_UI_RESTORE_STAGES)) return false;
+  if (!isOneOf(state, LOCAL_BACKUP_UI_RESTORE_STATES)) return false;
+  if (!isOneOf(phase, LOCAL_BACKUP_UI_RESTORE_PHASES)) return false;
+  if (!isCanonicalStagePrefix(completedStages)) return false;
   if (!isCanonicalStageSubset(
-    value['rollbackCompletedStages'],
+    rollbackCompletedStages,
     [...LOCAL_BACKUP_UI_RESTORE_STAGES].reverse(),
   )) return false;
   if (!validateSource(value['source']) || !validateActionQueueIdentity(value)) return false;
   if (!isUniqueStringArray(value['touchedProjectIds'])) return false;
   if (!validatePreImage(value['preImage'])) return false;
-  return validateRollbackErrors(value['rollbackErrors']);
+  if (!validateRollbackErrors(rollbackErrors)) return false;
+  return isProgressConsistent(
+    state,
+    phase,
+    completedStages,
+    rollbackCompletedStages,
+    rollbackErrors,
+  );
 }
 
 function validateSource(value: unknown): value is LocalBackupUiRestoreSource {
@@ -253,7 +265,10 @@ function validateRollbackErrors(value: unknown): value is LocalBackupUiRestoreRo
   ));
 }
 
-function isCanonicalStageSubset(value: unknown, order: readonly LocalBackupUiRestoreStage[]): boolean {
+function isCanonicalStageSubset(
+  value: unknown,
+  order: readonly LocalBackupUiRestoreStage[],
+): value is LocalBackupUiRestoreStage[] {
   if (!Array.isArray(value)) return false;
   let previousIndex = -1;
   for (const stage of value) {
@@ -262,6 +277,97 @@ function isCanonicalStageSubset(value: unknown, order: readonly LocalBackupUiRes
     previousIndex = index;
   }
   return true;
+}
+
+function isCanonicalStagePrefix(value: unknown): value is LocalBackupUiRestoreStage[] {
+  return Array.isArray(value)
+    && value.every((stage, index) => stage === LOCAL_BACKUP_UI_RESTORE_STAGES[index]);
+}
+
+function isProgressConsistent(
+  state: LocalBackupUiRestoreState,
+  phase: LocalBackupUiRestorePhase,
+  completedStages: LocalBackupUiRestoreStage[],
+  rollbackCompletedStages: LocalBackupUiRestoreStage[],
+  rollbackErrors: LocalBackupUiRestoreRollbackError[],
+): boolean {
+  const phaseIndex = LOCAL_BACKUP_UI_RESTORE_STAGES.indexOf(
+    phase as LocalBackupUiRestoreStage,
+  );
+  switch (state) {
+    case 'prepared':
+      return phase === 'pre-image-captured'
+        && completedStages.length === 0
+        && rollbackCompletedStages.length === 0
+        && rollbackErrors.length === 0;
+    case 'restoring':
+      return phaseIndex >= 0
+        && completedStages.length >= phaseIndex
+        && completedStages.length <= phaseIndex + 1
+        && rollbackCompletedStages.length === 0
+        && rollbackErrors.length === 0;
+    case 'rolling-back':
+      return phaseIndex >= 0 && isRollbackProgressConsistent(
+        phaseIndex,
+        completedStages,
+        rollbackCompletedStages,
+      );
+    case 'rollback-failed':
+      return phaseIndex >= 0
+        && rollbackErrors.at(-1)?.stage === phase
+        && isRollbackProgressConsistent(
+          phaseIndex,
+          completedStages,
+          rollbackCompletedStages,
+        );
+    case 'completed':
+      return phase === 'finalizing'
+        && completedStages.length === LOCAL_BACKUP_UI_RESTORE_STAGES.length
+        && rollbackCompletedStages.length === 0
+        && rollbackErrors.length === 0;
+    case 'rolled-back':
+      return phase === 'finalizing'
+        && isCompleteRollbackProgress(completedStages, rollbackCompletedStages);
+  }
+}
+
+function isRollbackProgressConsistent(
+  phaseIndex: number,
+  completedStages: LocalBackupUiRestoreStage[],
+  rollbackCompletedStages: LocalBackupUiRestoreStage[],
+): boolean {
+  const highIndex = rollbackCompletedStages.length > 0
+    ? LOCAL_BACKUP_UI_RESTORE_STAGES.indexOf(rollbackCompletedStages[0])
+    : Math.max(phaseIndex, completedStages.length - 1);
+  if (highIndex < phaseIndex
+    || (completedStages.length !== highIndex && completedStages.length !== highIndex + 1)) {
+    return false;
+  }
+
+  const expectedRollbackStages = LOCAL_BACKUP_UI_RESTORE_STAGES
+    .slice(0, highIndex + 1)
+    .reverse();
+  if (!rollbackCompletedStages.every((stage, index) => stage === expectedRollbackStages[index])) {
+    return false;
+  }
+
+  const completedRollbackCount = rollbackCompletedStages.length;
+  return phaseIndex === highIndex - completedRollbackCount
+    || phaseIndex === highIndex - completedRollbackCount + 1;
+}
+
+function isCompleteRollbackProgress(
+  completedStages: LocalBackupUiRestoreStage[],
+  rollbackCompletedStages: LocalBackupUiRestoreStage[],
+): boolean {
+  if (rollbackCompletedStages.length === 0) return completedStages.length === 0;
+  const highIndex = LOCAL_BACKUP_UI_RESTORE_STAGES.indexOf(rollbackCompletedStages[0]);
+  const expectedRollbackStages = LOCAL_BACKUP_UI_RESTORE_STAGES
+    .slice(0, highIndex + 1)
+    .reverse();
+  return (completedStages.length === highIndex || completedStages.length === highIndex + 1)
+    && rollbackCompletedStages.length === expectedRollbackStages.length
+    && rollbackCompletedStages.every((stage, index) => stage === expectedRollbackStages[index]);
 }
 
 function isUniqueStringArray(value: unknown): value is string[] {
