@@ -60,7 +60,7 @@ flowchart LR
 | LWW diagnostics | `sync_upsert_task` now reports comprehensive `changed_fields` for all persisted task fields, including `content`, structure, collections, parking, and attention metadata. | `20260715017000_sync_upsert_task_explainability.sql` |
 | Migration gate | Migrations are classified as transaction-safe or explicit-risk. Risk migrations require an export and written rollback strategy; transaction-safe migrations produce a savepoint/rollback dry-run plan. | `quality:guard:migration-dry-run` |
 
-The user-facing restore transaction received an incremental verification on 2026-11-02: 21 related spec files passed serially (447/447 tests), `npm run typecheck` passed, and `git diff --check` passed. This evidence closes only the restore transaction scope described above; the remaining data-safety groups stay open.
+The user-facing restore transaction received a verification refresh on 2026-11-02: 21 related spec files passed serially (442/442 tests), `npm run typecheck` passed, and `git diff --check` passed. `npm ci` remains blocked because `package.json` requires `@emnapi/wasi-threads@1.2.3` while the lockfile records `1.2.2`; verification used `npm install --package-lock=false` in an isolated worktree without changing the lockfile. This evidence closes only the restore transaction scope described above; the remaining data-safety groups stay open.
 
 Terminal cleanup also performs a second durable ActionQueue receipt read-back before clearing the restore journal. A mismatch retains the journal and defers the quiescence heartbeat so startup can take over only after the lease expires.
 
