@@ -142,6 +142,11 @@ export function registerSyncCoordinatorRuntimeSpecs(context: SyncCoordinatorRunt
       });
 
       mockSyncService.loadProjectListMetadataFromCloud.mockResolvedValueOnce([]);
+      mockSyncService.getAccessibleProjectProbe.mockResolvedValueOnce({
+        projectId: localProject.id,
+        accessible: false,
+        watermark: null,
+      });
       mockProjectStateService.projects.set([localProject]);
       mockProjectStateService.activeProjectId.set('local-deleted');
       mockChangeTrackerService.hasProjectChanges.mockReturnValue(false);
@@ -165,6 +170,11 @@ export function registerSyncCoordinatorRuntimeSpecs(context: SyncCoordinatorRunt
 
       mockSyncService.loadProjectListMetadataFromCloud.mockResolvedValueOnce([remoteProject]);
       mockSyncService.loadProjectsFromCloud.mockResolvedValueOnce([remoteProject]);
+      mockSyncService.getAccessibleProjectProbe.mockResolvedValueOnce({
+        projectId: localProject.id,
+        accessible: false,
+        watermark: null,
+      });
       mockProjectStateService.projects.set([localProject]);
       mockProjectStateService.activeProjectId.set('local-stale');
       mockChangeTrackerService.hasProjectChanges.mockReturnValue(false);
@@ -175,6 +185,30 @@ export function registerSyncCoordinatorRuntimeSpecs(context: SyncCoordinatorRunt
 
       expect(mockProjectStateService.projects().map((project: Project) => project.id)).toEqual(['remote-1']);
       expect(mockProjectStateService.activeProjectId()).toBe('remote-1');
+    });
+
+    it('缺少项目可访问性探针时，应保留远端清单中缺失的本地项目', async () => {
+      const remoteProject = createTestProject({ id: 'remote-1' });
+      const localProject = createTestProject({
+        id: 'local-probe-unknown',
+        syncSource: 'synced',
+        pendingSync: false,
+      });
+
+      mockSyncService.loadProjectListMetadataFromCloud.mockResolvedValueOnce([remoteProject]);
+      mockSyncService.loadProjectsFromCloud.mockResolvedValueOnce([remoteProject]);
+      mockSyncService.getAccessibleProjectProbe.mockResolvedValueOnce(null);
+      mockProjectStateService.projects.set([localProject]);
+      mockProjectStateService.activeProjectId.set(localProject.id);
+      mockChangeTrackerService.hasProjectChanges.mockReturnValue(false);
+      mockActionQueueService.getPendingActionsForProject.mockReturnValue([]);
+
+      await (service as unknown as { downloadAndMerge: (userId: string) => Promise<void> })
+        .downloadAndMerge('user-123');
+
+      const mergedProjects: Project[] = mockProjectStateService.projects();
+      expect(mergedProjects.map(project => project.id)).toEqual(['remote-1', localProject.id]);
+      expect(mockProjectStateService.activeProjectId()).toBe(localProject.id);
     });
 
     it('远端元数据获取失败时，应保留本地项目避免误删', async () => {
@@ -233,6 +267,11 @@ export function registerSyncCoordinatorRuntimeSpecs(context: SyncCoordinatorRunt
 
       mockSyncService.loadProjectListMetadataFromCloud.mockResolvedValueOnce([remoteProject]);
       mockSyncService.loadProjectsFromCloud.mockResolvedValueOnce([remoteProject]);
+      mockSyncService.getAccessibleProjectProbe.mockResolvedValueOnce({
+        projectId: localProject.id,
+        accessible: false,
+        watermark: null,
+      });
       mockProjectStateService.projects.set([localProject]);
       mockChangeTrackerService.hasProjectChanges.mockReturnValue(false);
       mockActionQueueService.getPendingActionsForProject.mockReturnValue([]);

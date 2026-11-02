@@ -16,6 +16,11 @@
 import { Project, Task, Connection } from '../models';
 import type { TaskDeleteBaseUpdatedAtMap } from './action-queue.types';
 
+export interface LocalProjectRefreshState {
+  watermarkMs: number;
+  signature: string;
+}
+
 export function computeLocalProjectWatermark(project: Project | undefined): number {
   if (!project) return 0;
 
@@ -39,6 +44,15 @@ export function computeLocalProjectWatermark(project: Project | undefined): numb
   }
 
   return maxUpdatedAtMs;
+}
+
+export function captureLocalProjectRefreshState(
+  project: Project | undefined,
+): LocalProjectRefreshState {
+  return {
+    watermarkMs: computeLocalProjectWatermark(project),
+    signature: stableStringify(project ?? null),
+  };
 }
 
 export function resolveScopedWatermarkKey(prefix: string, userId: string | null | undefined): string | null {
@@ -111,4 +125,18 @@ export function buildPersistDataSignature(project: Project): string {
     .map(connection => buildPersistConnectionSignature(connection));
 
   return JSON.stringify({ taskSignature, connectionSignature });
+}
+
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(item => stableStringify(item)).join(',')}]`;
+  }
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .sort()
+      .map(key => `${JSON.stringify(key)}:${stableStringify(record[key])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'undefined';
 }

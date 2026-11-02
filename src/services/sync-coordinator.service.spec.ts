@@ -163,8 +163,8 @@ const mockTaskSyncOpsService = {
   getTombstoneIds: mockSyncService.getTombstoneIds,
   getTombstoneIdsWithStatus: vi.fn().mockResolvedValue({
     ids: new Set<string>(),
-    fromRemote: false,
-    localCacheOnly: true,
+    fromRemote: true,
+    localCacheOnly: false,
     timestamp: Date.now(),
   }),
   softDeleteTasksBatch: vi.fn().mockResolvedValue(0),
@@ -177,11 +177,17 @@ const mockActionQueueService = {
   validateProcessors: vi.fn().mockReturnValue([]),
   getRegisteredProcessorTypes: vi.fn().mockReturnValue([]),
   getPendingActionsForProject: vi.fn().mockReturnValue([]),
+  getProjectPendingWriteState: vi.fn(),
   enqueue: vi.fn().mockResolvedValue(true),
   enqueueForOwner: vi.fn().mockResolvedValue(true),
   processQueue: vi.fn().mockResolvedValue(undefined),
   queueFrozen: signal(false),
 };
+mockActionQueueService.getProjectPendingWriteState.mockImplementation(
+  (projectId: string) => (
+    mockActionQueueService.getPendingActionsForProject(projectId).length > 0 ? 'pending' : 'clear'
+  ),
+);
 
 const mockRetryQueueService = {
   length: 0,
@@ -507,8 +513,8 @@ describe('SyncCoordinatorService', () => {
     mockTaskSyncOpsService.getTombstoneIdsWithStatus.mockReset();
     mockTaskSyncOpsService.getTombstoneIdsWithStatus.mockImplementation(async (projectId: string) => ({
       ids: await mockSyncService.getTombstoneIds(projectId),
-      fromRemote: false,
-      localCacheOnly: true,
+      fromRemote: true,
+      localCacheOnly: false,
       timestamp: Date.now(),
     }));
     mockSyncService.saveProjectSmart.mockReset();
@@ -606,6 +612,7 @@ describe('SyncCoordinatorService', () => {
   registerSyncCoordinatorRuntimeSpecs({
     service: () => service,
     mockSyncService: () => mockSyncService,
+    mockTaskSyncOperationsService: () => mockTaskSyncOpsService,
     mockTabSyncService: () => mockTabSyncService,
     mockProjectStateService: () => mockProjectStateService,
     mockChangeTrackerService: () => mockChangeTrackerService,

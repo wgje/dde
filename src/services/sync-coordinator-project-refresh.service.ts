@@ -15,45 +15,25 @@ import { AUTH_CONFIG } from '../config/auth.config';
 import { FEATURE_FLAGS } from '../config/feature-flags.config';
 import { TIMEOUT_CONFIG } from '../config/timeout.config';
 import {
+  captureLocalProjectRefreshState,
   computeLocalProjectWatermark,
   resolveScopedWatermarkKey,
 } from './sync-coordinator-signatures';
 import { createTaskTombstoneSnapshot } from './conflict-resolution-merge.helpers';
+import {
+  createDownloadMergeLocalProjectsSignature,
+  hasPendingRetryQueueItemForProject, isActiveProjectRefreshFastPath,
+  isExplicitProjectInaccessibleProbe,
+} from './sync-coordinator-project-refresh-retention.helpers';
+import type {
+  ActiveProjectWatermarkProbeResult,
+  DownloadMergeContext,
+  DownloadMergeRemoteSnapshot,
+  RefreshActiveProjectContext,
+  RefreshActiveProjectResult,
+} from './sync-coordinator-project-refresh.types';
 
-interface DownloadMergeRemoteSnapshot {
-  metas: Project[] | null;
-  projects: Project[];
-}
-
-interface DownloadMergeContext {
-  userId: string;
-  accessibleProjectIds: Set<string>;
-  localProjects: Project[];
-  localProjectsSignature: string;
-  localProjectMap: Map<string, Project>;
-  remoteProjects: Project[];
-  remoteProjectMap: Map<string, Project>;
-  missingRemoteProjectMetas: Project[];
-  mergedProjects: Project[];
-}
-
-interface RefreshActiveProjectContext {
-  ownerId: string;
-  projectId: string;
-  localProject: Project | undefined;
-  localWatermarkMs: number;
-}
-
-export type RefreshActiveProjectResult = {
-  refreshed: boolean;
-  skippedReason?: string;
-  fastPathHit?: boolean;
-};
-
-interface ActiveProjectWatermarkProbeResult {
-  result?: RefreshActiveProjectResult;
-  remoteWatermark: string | null;
-}
+export type { RefreshActiveProjectResult };
 
 @Injectable({ providedIn: 'root' })
 export class SyncCoordinatorProjectRefreshService {
@@ -77,14 +57,18 @@ export class SyncCoordinatorProjectRefreshService {
   private readonly blackBoxManifestWatermarkKeyPrefix = 'nanoflow.blackbox-manifest-watermark';
 
   async downloadAndMerge(userId: string): Promise<void> {
+    if (!this.isRefreshOwnerCurrent(userId)) return;
     const remoteSnapshot = await this.loadDownloadMergeRemoteProjects(userId);
-    if (remoteSnapshot.metas === null) return;
+    if (!this.isRefreshOwnerCurrent(userId) || remoteSnapshot.metas === null) return;
 
     const context = this.createDownloadMergeContext(userId, remoteSnapshot.metas, remoteSnapshot.projects);
     await this.mergeDownloadedRemoteProjects(context);
+    if (!this.isRefreshOwnerCurrent(userId)) return;
     this.appendMissingRemoteMetaShells(context);
-    this.appendPreservedLocalProjects(context);
+    await this.appendPreservedLocalProjects(context);
+    if (!this.isRefreshOwnerCurrent(userId)) return;
     if (this.hasDownloadMergeLocalProjectsChanged(context)) return;
+    if (!this.isRefreshOwnerCurrent(userId)) return;
     this.applyDownloadedProjects(context.mergedProjects);
   }
 
@@ -96,6 +80,10 @@ export class SyncCoordinatorProjectRefreshService {
     if (currentUserId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
       return { refreshed: false, skippedReason: 'local-mode' };
     }
+    const hasPendingLocalWrites = (): boolean =>
+      this.actionQueue.getProjectPendingWriteState(activeProjectId, currentUserId) !== 'clear'
+      || this.retryQueue.getProjectPendingWriteState(activeProjectId, currentUserId) !== 'clear';
+    if (hasPendingLocalWrites()) return { refreshed: false, skippedReason: 'pending-local-writes' };
 
     const context = this.createRefreshActiveProjectContext(activeProjectId, currentUserId);
     const probeResult = await this.probeActiveProjectRemoteWatermark(context, reason);
@@ -109,12 +97,15 @@ export class SyncCoordinatorProjectRefreshService {
     if (!remoteProject) {
       return { refreshed: false, skippedReason: 'remote-project-missing' };
     }
+    if (hasPendingLocalWrites()) return { refreshed: false, skippedReason: 'pending-local-writes' };
     const localChangedAfterRemoteLoad = this.getLocalProjectChangedDuringRefreshResult(context);
     if (localChangedAfterRemoteLoad) return localChangedAfterRemoteLoad;
 
     const validatedProject = await this.mergeAndValidateActiveProjectRefresh(context, remoteProject);
+    if (!validatedProject) return { refreshed: false, skippedReason: 'tombstone-query-incomplete' };
     const staleAfterMerge = this.getStaleActiveProjectRefreshResult(context);
     if (staleAfterMerge) return staleAfterMerge;
+    if (hasPendingLocalWrites()) return { refreshed: false, skippedReason: 'pending-local-writes' };
     const localChangedAfterMerge = this.getLocalProjectChangedDuringRefreshResult(context);
     if (localChangedAfterMerge) return localChangedAfterMerge;
     await this.applyActiveProjectRefresh(context.projectId, validatedProject);
@@ -225,6 +216,10 @@ export class SyncCoordinatorProjectRefreshService {
   }
 
   private async loadDownloadMergeRemoteProjects(userId: string): Promise<DownloadMergeRemoteSnapshot> {
+    if (!this.isRefreshOwnerCurrent(userId)) {
+      return { metas: null, projects: [] };
+    }
+
     const metas = await this.projectData.loadProjectListMetadataFromCloud(userId, {
       timeout: TIMEOUT_CONFIG.STANDARD,
       retries: 1,
@@ -232,6 +227,10 @@ export class SyncCoordinatorProjectRefreshService {
       purpose: 'sync-download-merge',
       treatTransientFailureAsSoft: true,
     });
+
+    if (!this.isRefreshOwnerCurrent(userId)) {
+      return { metas: null, projects: [] };
+    }
 
     if (metas === null) {
       this.logger.info('远端项目元数据暂不可用，已跳过 download merge', { userId });
@@ -241,6 +240,10 @@ export class SyncCoordinatorProjectRefreshService {
     const projects = metas.length > 0
       ? await this.projectData.loadProjectsFromCloud(userId)
       : [];
+
+    if (!this.isRefreshOwnerCurrent(userId)) {
+      return { metas: null, projects: [] };
+    }
 
     if (projects === null) {
       this.logger.info('远端完整项目暂不可用，已跳过 download merge', {
@@ -284,7 +287,7 @@ export class SyncCoordinatorProjectRefreshService {
       userId,
       accessibleProjectIds: new Set(remoteProjectMetas.map(project => project.id)),
       localProjects,
-      localProjectsSignature: this.createDownloadMergeLocalProjectsSignature(localProjects),
+      localProjectsSignature: createDownloadMergeLocalProjectsSignature(localProjects),
       localProjectMap,
       remoteProjects,
       remoteProjectMap,
@@ -350,20 +353,25 @@ export class SyncCoordinatorProjectRefreshService {
     }
   }
 
-  private appendPreservedLocalProjects(context: DownloadMergeContext): void {
+  private async appendPreservedLocalProjects(context: DownloadMergeContext): Promise<void> {
     for (const localProject of context.localProjects) {
+      if (!this.isRefreshOwnerCurrent(context.userId)) return;
       if (context.remoteProjectMap.has(localProject.id)) continue;
 
-      const preservedProject = this.resolvePreservedLocalProject(context, localProject);
+      const preservedProject = await this.resolvePreservedLocalProject(context, localProject);
+      if (!this.isRefreshOwnerCurrent(context.userId)) return;
       if (preservedProject) context.mergedProjects.push(preservedProject);
     }
   }
 
-  private resolvePreservedLocalProject(context: DownloadMergeContext, localProject: Project): Project | null {
+  private async resolvePreservedLocalProject(
+    context: DownloadMergeContext,
+    localProject: Project,
+  ): Promise<Project | null> {
     const hasPendingChanges = localProject.pendingSync === true
       || this.changeTracker.hasProjectChanges(localProject.id)
       || this.hasPendingActionsForProject(localProject.id)
-      || this.hasPendingRetryQueueItemForProject(localProject.id);
+      || hasPendingRetryQueueItemForProject(this.retryQueue.getItems(), localProject.id);
 
     if (context.accessibleProjectIds.has(localProject.id)) {
       return this.projectSyncOps.validateAndRebalance({
@@ -373,7 +381,17 @@ export class SyncCoordinatorProjectRefreshService {
       });
     }
 
-    if (!hasPendingChanges && localProject.syncSource !== 'local-only') {
+    if (hasPendingChanges || localProject.syncSource === 'local-only') {
+      return this.projectSyncOps.validateAndRebalance({
+        ...localProject,
+        syncSource: 'local-only',
+        pendingSync: true,
+      });
+    }
+
+    const probe = await this.projectData.getAccessibleProjectProbe(localProject.id);
+    if (!this.isRefreshOwnerCurrent(context.userId)) return null;
+    if (isExplicitProjectInaccessibleProbe(probe, localProject.id)) {
       this.logger.info('远端缺席且无待同步改动，已裁剪本地 synced 项目', {
         projectId: localProject.id,
       });
@@ -382,8 +400,8 @@ export class SyncCoordinatorProjectRefreshService {
 
     return this.projectSyncOps.validateAndRebalance({
       ...localProject,
-      syncSource: 'local-only',
-      pendingSync: true,
+      syncSource: 'synced',
+      pendingSync: false,
     });
   }
 
@@ -398,7 +416,7 @@ export class SyncCoordinatorProjectRefreshService {
 
   private hasDownloadMergeLocalProjectsChanged(context: DownloadMergeContext): boolean {
     const currentProjects = this.projectState.getProjectsWithCurrentData();
-    const currentSignature = this.createDownloadMergeLocalProjectsSignature(currentProjects);
+    const currentSignature = createDownloadMergeLocalProjectsSignature(currentProjects);
     if (currentSignature === context.localProjectsSignature) {
       return false;
     }
@@ -411,28 +429,8 @@ export class SyncCoordinatorProjectRefreshService {
     return true;
   }
 
-  private createDownloadMergeLocalProjectsSignature(projects: Project[]): string {
-    return projects
-      .map(project => `${project.id}:${computeLocalProjectWatermark(project)}`)
-      .sort()
-      .join('|');
-  }
-
   private hasPendingActionsForProject(projectId: string): boolean {
     return this.actionQueue.getPendingActionsForProject(projectId).length > 0;
-  }
-
-  private hasPendingRetryQueueItemForProject(projectId: string): boolean {
-    return this.retryQueue.getItems().some(item => {
-      if (item.type === 'project' && item.operation === 'delete') {
-        return false;
-      }
-      if (item.projectId === projectId) {
-        return true;
-      }
-      const data = item.data as { id?: unknown; projectId?: unknown };
-      return data?.projectId === projectId || (item.type === 'project' && data?.id === projectId);
-    });
   }
 
   private isRefreshOwnerCurrent(ownerId: string | null): boolean {
@@ -440,12 +438,12 @@ export class SyncCoordinatorProjectRefreshService {
   }
 
   private createRefreshActiveProjectContext(projectId: string, ownerId: string): RefreshActiveProjectContext {
-    const localProject = this.projectState.getProject(projectId);
+    const localProject = this.projectState.getProjectWithCurrentData(projectId);
     return {
       ownerId,
       projectId,
       localProject,
-      localWatermarkMs: computeLocalProjectWatermark(localProject),
+      localState: captureLocalProjectRefreshState(localProject),
     };
   }
 
@@ -465,16 +463,16 @@ export class SyncCoordinatorProjectRefreshService {
   private getLocalProjectChangedDuringRefreshResult(
     context: RefreshActiveProjectContext,
   ): RefreshActiveProjectResult | null {
-    const currentProject = this.projectState.getProject(context.projectId);
-    const currentWatermarkMs = computeLocalProjectWatermark(currentProject);
-    if (currentWatermarkMs === context.localWatermarkMs) {
+    const currentProject = this.projectState.getProjectWithCurrentData(context.projectId);
+    const currentState = captureLocalProjectRefreshState(currentProject);
+    if (currentState.signature === context.localState.signature) {
       return null;
     }
 
     this.logger.info('活动项目刷新期间检测到新的本地变更，已跳过旧远端结果', {
       projectId: context.projectId,
-      refreshStartWatermark: context.localWatermarkMs > 0 ? new Date(context.localWatermarkMs).toISOString() : null,
-      currentWatermark: currentWatermarkMs > 0 ? new Date(currentWatermarkMs).toISOString() : null,
+      refreshStartWatermark: context.localState.watermarkMs > 0 ? new Date(context.localState.watermarkMs).toISOString() : null,
+      currentWatermark: currentState.watermarkMs > 0 ? new Date(currentState.watermarkMs).toISOString() : null,
     });
     return { refreshed: false, skippedReason: 'local-project-changed-during-refresh' };
   }
@@ -507,7 +505,7 @@ export class SyncCoordinatorProjectRefreshService {
     const pullCursorMs = await this.resolveActiveProjectPullCursorMs(context.projectId);
     const staleAfterCursorLoad = this.getStaleActiveProjectRefreshResult(context);
     if (staleAfterCursorLoad) return { result: staleAfterCursorLoad, remoteWatermark };
-    if (!this.isActiveProjectRefreshFastPath(pullCursorMs, remoteWatermark)) {
+    if (!isActiveProjectRefreshFastPath(pullCursorMs, remoteWatermark)) {
       return { remoteWatermark };
     }
 
@@ -534,12 +532,6 @@ export class SyncCoordinatorProjectRefreshService {
     return Number.isFinite(cursorMs) ? cursorMs : null;
   }
 
-  private isActiveProjectRefreshFastPath(pullCursorMs: number | null, remoteWatermark: string): boolean {
-    if (pullCursorMs === null) return false;
-    const remoteUpdatedAtMs = new Date(remoteWatermark).getTime();
-    return Number.isFinite(remoteUpdatedAtMs) && remoteUpdatedAtMs <= pullCursorMs;
-  }
-
   private async recordActiveProjectRefreshFastPath(
     context: RefreshActiveProjectContext,
     reason: string,
@@ -556,7 +548,7 @@ export class SyncCoordinatorProjectRefreshService {
         projectId: context.projectId,
         remoteWatermark,
         pullCursor: pullCursorMs !== null ? new Date(pullCursorMs).toISOString() : null,
-        localWatermark: context.localWatermarkMs > 0 ? new Date(context.localWatermarkMs).toISOString() : null,
+        localWatermark: context.localState.watermarkMs > 0 ? new Date(context.localState.watermarkMs).toISOString() : null,
       },
     });
     return {
@@ -569,12 +561,11 @@ export class SyncCoordinatorProjectRefreshService {
   private async mergeAndValidateActiveProjectRefresh(
     context: RefreshActiveProjectContext,
     remoteProject: Project,
-  ): Promise<Project> {
-    if (!context.localProject) {
-      return this.projectSyncOps.validateAndRebalance(remoteProject);
-    }
+  ): Promise<Project | null> {
+    if (!context.localProject) return this.projectSyncOps.validateAndRebalance(remoteProject);
 
     const tombstoneResult = await this.taskSyncOps.getTombstoneIdsWithStatus(context.projectId);
+    if (!tombstoneResult.fromRemote || tombstoneResult.localCacheOnly) return null;
     const mergedProject = this.conflictCoordinator.smartMerge(
       context.localProject,
       remoteProject,
@@ -589,7 +580,9 @@ export class SyncCoordinatorProjectRefreshService {
       if (!exists) return [...projects, validatedProject];
       return projects.map(project => project.id === projectId ? validatedProject : project);
     });
-    await this.projectData.saveOfflineSnapshotAndWait(this.projectState.projects());
+    await this.projectData.saveOfflineSnapshotAndWait(
+      this.projectState.getProjectsWithCurrentData(),
+    );
   }
 
   private async commitActiveProjectRefreshCursor(
