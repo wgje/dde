@@ -279,26 +279,30 @@ describe('FlowViewComponent - selectNodeWithRetry', () => {
       taskId: string;
       openDetail: boolean;
     }
+    interface CenterCommandClaim {
+      id: number;
+      payload: CenterCommandPayload;
+    }
 
-    let pendingCenterCommand: CenterCommandPayload | null;
+    let pendingCenterCommand: CenterCommandClaim | null;
     let centerNodeCommand: CenterCommandPayload | null;
     let executedCommands: CenterCommandPayload[];
-    let clearCenterCommandCalls: number;
+    let nextCommandId: number;
 
     const flowCommand = {
       centerOnNode(taskId: string, openDetail: boolean = true): void {
         const payload = { taskId, openDetail };
         centerNodeCommand = payload;
-        pendingCenterCommand = payload;
+        pendingCenterCommand = { id: ++nextCommandId, payload };
       },
-      consumePendingCenterCommand(): CenterCommandPayload | null {
-        const command = pendingCenterCommand;
+      claimPendingCenterCommand(): CenterCommandClaim | null {
+        return pendingCenterCommand;
+      },
+      acknowledgePendingCenterCommand(claim: CenterCommandClaim): boolean {
+        if (pendingCenterCommand !== claim) return false;
         pendingCenterCommand = null;
-        return command;
-      },
-      clearCenterCommand(): void {
         centerNodeCommand = null;
-        clearCenterCommandCalls += 1;
+        return true;
       },
     };
 
@@ -313,22 +317,17 @@ describe('FlowViewComponent - selectNodeWithRetry', () => {
     const runCenterCommandEffect = (diagramInitialized: boolean): void => {
       const command = centerNodeCommand;
       if (!command || !diagramInitialized) return;
-      executeCenterOnNode(command.taskId, command.openDetail);
-      flowCommand.clearCenterCommand();
-    };
-
-    const onDiagramInitialized = (): void => {
-      const pendingCommand = flowCommand.consumePendingCenterCommand();
-      if (!pendingCommand) return;
-      executeCenterOnNode(pendingCommand.taskId, pendingCommand.openDetail);
-      flowCommand.clearCenterCommand();
+      const claim = flowCommand.claimPendingCenterCommand();
+      if (!claim) return;
+      executeCenterOnNode(claim.payload.taskId, claim.payload.openDetail);
+      flowCommand.acknowledgePendingCenterCommand(claim);
     };
 
     beforeEach(() => {
       pendingCenterCommand = null;
       centerNodeCommand = null;
       executedCommands = [];
-      clearCenterCommandCalls = 0;
+      nextCommandId = 0;
     });
 
     it('diagram 未 ready 时应该在初始化后补执行一次待处理命令', () => {
@@ -338,10 +337,9 @@ describe('FlowViewComponent - selectNodeWithRetry', () => {
       expect(executedCommands).toHaveLength(0);
       expect(centerNodeCommand).toEqual({ taskId: 'task-buffered', openDetail: true });
 
-      onDiagramInitialized();
+      runCenterCommandEffect(true);
 
       expect(executedCommands).toEqual([{ taskId: 'task-buffered', openDetail: true }]);
-      expect(clearCenterCommandCalls).toBe(1);
       expect(centerNodeCommand).toBeNull();
       expect(pendingCenterCommand).toBeNull();
     });
@@ -352,9 +350,17 @@ describe('FlowViewComponent - selectNodeWithRetry', () => {
       runCenterCommandEffect(true);
 
       expect(executedCommands).toEqual([{ taskId: 'task-immediate', openDetail: false }]);
-      expect(clearCenterCommandCalls).toBe(1);
       expect(centerNodeCommand).toBeNull();
-      expect(pendingCenterCommand).toEqual({ taskId: 'task-immediate', openDetail: false });
+      expect(pendingCenterCommand).toBeNull();
+    });
+
+    it('late acknowledgement cannot clear a newer command', () => {
+      centerOnNode('task-old');
+      const oldClaim = flowCommand.claimPendingCenterCommand()!;
+      centerOnNode('task-new');
+
+      expect(flowCommand.acknowledgePendingCenterCommand(oldClaim)).toBe(false);
+      expect(centerNodeCommand).toEqual({ taskId: 'task-new', openDetail: true });
     });
   });
 });
