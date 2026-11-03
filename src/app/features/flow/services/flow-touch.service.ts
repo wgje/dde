@@ -5,20 +5,13 @@ import { Task } from '../../../../models';
 import { UnassignedTouchState, createInitialUnassignedTouchState } from '../../../../models/flow-view-state';
 import { TIMEOUT_CONFIG, UI_CONFIG } from '../../../../config';
 import * as go from 'gojs';
+import {
+  createTrackedTouchResizeHandler,
+  type TouchResizeHandler,
+  type TouchResizeOptions,
+} from './flow-touch-resize.helpers';
 
 const POINTER_FALLBACK_GRACE_MS = TIMEOUT_CONFIG.QUICK;
-
-interface TouchResizeHandler {
-  startResize: (event: TouchEvent) => void;
-  cleanup: () => void;
-}
-
-interface TouchResizeOptions {
-  onHeightChange: (height: number) => void;
-  getInitialHeight: () => number;
-  calculateHeight: (startHeight: number, startY: number, currentY: number) => number;
-  onResizingChange?: (isResizing: boolean) => void;
-}
 
 /**
  * 触摸拖放回调
@@ -514,61 +507,10 @@ export class FlowTouchService {
   }
 
   private createTouchResizeHandler(options: TouchResizeOptions): TouchResizeHandler {
-    let isResizing = false;
-    let startY = 0;
-    let startHeight = 0;
-    let onMove: ((ev: TouchEvent) => void) | null = null;
-    let onEnd: (() => void) | null = null;
-
-    const removeListeners = () => {
-      const moveHandler = onMove;
-      const endHandler = onEnd;
-      onMove = null;
-      onEnd = null;
-      if (moveHandler) {
-        this.removeTrackedWindowListener('touchmove', moveHandler as EventListener);
-      }
-      if (endHandler) {
-        this.removeTrackedWindowListener('touchend', endHandler);
-        this.removeTrackedWindowListener('touchcancel', endHandler);
-      }
-    };
-
-    return {
-      startResize: (event: TouchEvent) => {
-        if (event.touches.length !== 1) return;
-        event.preventDefault();
-        removeListeners();
-
-        isResizing = true;
-        options.onResizingChange?.(true);
-        startY = event.touches[0].clientY;
-        startHeight = options.getInitialHeight();
-
-        onMove = (ev: TouchEvent) => {
-          if (!isResizing || ev.touches.length !== 1) return;
-          ev.preventDefault();
-
-          options.onHeightChange(options.calculateHeight(startHeight, startY, ev.touches[0].clientY));
-        };
-
-        onEnd = () => {
-          isResizing = false;
-          options.onResizingChange?.(false);
-          removeListeners();
-        };
-
-        window.addEventListener('touchmove', onMove as EventListener, { passive: false });
-        window.addEventListener('touchend', onEnd);
-        window.addEventListener('touchcancel', onEnd);
-
-        // 追踪监听器
-        this.trackListener('touchmove', onMove as EventListener, { passive: false });
-        this.trackListener('touchend', onEnd);
-        this.trackListener('touchcancel', onEnd);
-      },
-      cleanup: removeListeners
-    };
+    return createTrackedTouchResizeHandler(options, {
+      track: (type, handler, listenerOptions) => this.trackListener(type, handler, listenerOptions),
+      remove: (type, handler) => this.removeTrackedWindowListener(type, handler),
+    });
   }
 
   // ========== 私有方法 ==========
