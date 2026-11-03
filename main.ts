@@ -8,6 +8,20 @@ import { ensureBrowserNetworkSuspensionTracking } from './src/utils/browser-netw
 import { applyStartupVersionAction, decideStartupVersionAction } from './src/utils/startup-version-policy';
 import { forceClearCacheImpl, type ForceClearCacheDeps } from './src/utils/force-clear-cache-impl';
 import { isGojsOverviewOriginRectNoise, extractErrorStack as extractAnyErrorStack } from './src/utils/gojs-overview-noise';
+
+const authCallbackTelemetryBlocked = (() => {
+  const authority = Object.getOwnPropertyDescriptor(
+    globalThis,
+    '__NANOFLOW_AUTH_CANONICAL_STORAGE__',
+  )?.value as { captureAndScrubAuthCallback: () => { blocked: boolean } } | undefined;
+  const callbackPath = window.location.pathname.replace(/\/+$/, '') === '/auth/callback'
+    || window.location.hash.startsWith('#/auth/callback');
+  try {
+    return authority?.captureAndScrubAuthCallback().blocked ?? callbackPath;
+  } catch {
+    return callbackPath;
+  }
+})();
 // ============= 【P0 启动优化 2026-03-26】受控 dynamic import + head modulepreload =============
 // 关键模块改回 dynamic import，以缩小 main 静态闭包并通过 perf-startup-guard。
 // 配套保障：
@@ -290,7 +304,7 @@ registerForceClearCacheTool();
 log('Build: ' + BUILD_ID);
 log('🚀 main.ts 开始执行');
 log('Angular 版本: ' + VERSION.full);
-log('当前 URL: ' + window.location.href);
+if (!authCallbackTelemetryBlocked) log('当前 URL: ' + window.location.href);
 log('User Agent: ' + navigator.userAgent.substring(0, 80) + '...');
 
 // 检查 Zone.js 是否已加载

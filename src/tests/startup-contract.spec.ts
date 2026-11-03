@@ -229,6 +229,26 @@ describe('startup launch contract', () => {
     expect(mainSource).toContain('network IO suspended');
   });
 
+  it('captures and scrubs auth callbacks before full-href telemetry or bootstrap', () => {
+    const mainSource = fs.readFileSync(path.join(process.cwd(), 'main.ts'), 'utf8');
+    const authoritySource = fs.readFileSync(
+      path.join(process.cwd(), 'public', 'assets', 'auth-canonical-storage-bootstrap-v1.js'),
+      'utf8',
+    );
+    const captureIndex = mainSource.indexOf('captureAndScrubAuthCallback()');
+    const hrefLogIndex = mainSource.indexOf("log('当前 URL: ' + window.location.href)");
+    const bootstrapIndex = mainSource.indexOf('startApplication();');
+
+    expect(captureIndex).toBeGreaterThan(-1);
+    expect(captureIndex).toBeLessThan(hrefLogIndex);
+    expect(captureIndex).toBeLessThan(bootstrapIndex);
+    expect(mainSource).toContain('authCallbackTelemetryBlocked');
+    expect(mainSource).toContain("window.location.hash.startsWith('#/auth/callback')");
+    expect(authoritySource).toContain("'/#/auth/callback'");
+    expect(authoritySource).toContain('Object.freeze');
+    expect(authoritySource).toContain('history.replaceState');
+  });
+
   it('legacy sw-composed compatibility entry should keep the retirement shim but not the old desktop runtime', () => {
     const composedSwPath = path.join(process.cwd(), 'public', 'sw-composed.js');
     const composedSwSource = fs.readFileSync(composedSwPath, 'utf8');

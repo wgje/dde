@@ -16,6 +16,7 @@
           "/index.html",
           "/launch.html",
           "/manifest.webmanifest",
+          "/assets/auth-canonical-storage-bootstrap-v1.js",
           "/*.css",
           "/main*.js",
           "/polyfills*.js"
