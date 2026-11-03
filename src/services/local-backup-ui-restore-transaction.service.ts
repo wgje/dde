@@ -1,6 +1,7 @@
 import { Injectable, inject } from '@angular/core';
 
 import type { BackupData } from '../../supabase/functions/_shared/backup-utils';
+import { ActionQueueOwnerStorageService } from './action-queue-owner-storage.service';
 import type {
   QueuedAction,
   QueueBackupPersonalRestoreIdentityV2,
@@ -90,6 +91,7 @@ export interface LocalBackupUiRestoreTransactionDependencies {
     input: Parameters<typeof createQueueBackupPersonalRestoreIdentity>[0],
   ): Promise<QueueBackupPersonalRestoreIdentityV2>;
   queueBackup: LocalBackupUiRestoreQueueBackupPort;
+  refreshQueueMirrorForOwnerAfterRestore(ownerUserId: string, queue: QueuedAction[]): boolean;
 }
 
 export interface TakeoverExpiredLocalBackupUiRestoreTransactionDependencies {
@@ -103,6 +105,7 @@ export interface TakeoverExpiredLocalBackupUiRestoreTransactionDependencies {
     marker: LocalBackupUiRestoreMarker,
   ): LocalBackupUiRestoreMarkerHeartbeat;
   queueBackup: LocalBackupUiRestoreQueueBackupPort;
+  refreshQueueMirrorForOwnerAfterRestore(ownerUserId: string, queue: QueuedAction[]): boolean;
 }
 
 @Injectable({ providedIn: 'root' })
@@ -110,6 +113,7 @@ export class LocalBackupUiRestoreTransactionService {
   private readonly preImage = inject(LocalBackupUiRestorePreImageService);
   private readonly blackBoxRestore = inject(LocalBackupUiBlackBoxRestoreService);
   private readonly queueBackup = inject(QueueBackupService);
+  private readonly actionQueueOwnerStorage = inject(ActionQueueOwnerStorageService);
 
   prepare(
     input: PrepareLocalBackupUiRestoreTransactionInput,
@@ -126,6 +130,9 @@ export class LocalBackupUiRestoreTransactionService {
       createRestoreToken: createRestoreIdentityValue,
       createQueueBackupIdentity: createQueueBackupPersonalRestoreIdentity,
       queueBackup: this.queueBackup,
+      refreshQueueMirrorForOwnerAfterRestore: (ownerUserId, queue) => (
+        this.actionQueueOwnerStorage.refreshQueueMirrorForOwnerAfterRestore(ownerUserId, queue)
+      ),
     });
   }
 
@@ -140,6 +147,9 @@ export class LocalBackupUiRestoreTransactionService {
       ),
       startMarkerHeartbeat: startLocalBackupUiRestoreMarkerHeartbeat,
       queueBackup: this.queueBackup,
+      refreshQueueMirrorForOwnerAfterRestore: (ownerUserId, queue) => (
+        this.actionQueueOwnerStorage.refreshQueueMirrorForOwnerAfterRestore(ownerUserId, queue)
+      ),
     });
   }
 }
@@ -196,6 +206,7 @@ export async function prepareLocalBackupUiRestoreTransaction(
       markerHeartbeat,
       dependencies.startMarkerHeartbeat,
       dependencies.queueBackup,
+      dependencies.refreshQueueMirrorForOwnerAfterRestore,
       input.restoredActionQueueItems.length,
     );
     await quiescence.runMutationAsync('action-queue', () => (
@@ -249,6 +260,7 @@ export async function takeoverExpiredLocalBackupUiRestoreTransaction(
     markerHeartbeat,
     dependencies.startMarkerHeartbeat,
     dependencies.queueBackup,
+    dependencies.refreshQueueMirrorForOwnerAfterRestore,
     0,
   );
 }
@@ -342,6 +354,7 @@ function createPreparedHandle(
   initialHeartbeat: LocalBackupUiRestoreMarkerHeartbeat,
   startMarkerHeartbeat: LocalBackupUiRestoreTransactionDependencies['startMarkerHeartbeat'],
   queueBackup: LocalBackupUiRestoreQueueBackupPort,
+  refreshQueueMirrorForOwnerAfterRestore: LocalBackupUiRestoreTransactionDependencies['refreshQueueMirrorForOwnerAfterRestore'],
   restoredActionCount: number,
 ): PreparedLocalBackupUiRestoreTransaction {
   const state: PreparedRestoreHandleState = {
@@ -350,7 +363,14 @@ function createPreparedHandle(
     markerHeartbeat: initialHeartbeat,
   };
   const verifyOwnership = (): Promise<boolean> => verifyPreparedOwnership(state, quiescence);
-  const terminalContext = { state, quiescence, journal, queueBackup, verifyOwnership };
+  const terminalContext = {
+    state,
+    quiescence,
+    journal,
+    queueBackup,
+    refreshQueueMirrorForOwnerAfterRestore,
+    verifyOwnership,
+  };
   const abortBeforeMutation = (): Promise<void> => abortLocalBackupUiRestoreTerminal(terminalContext);
   const actionQueueRestore = createActionQueueParticipant(
     state,

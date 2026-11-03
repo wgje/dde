@@ -2,7 +2,7 @@
 title: 备份与恢复
 status: canonical
 audience: user, operator
-last_verified: 2026-11-03
+last_verified: 2026-11-04
 category: data-sync-safety
 source_paths:
   - src/services/export.service.ts
@@ -404,6 +404,8 @@ ActionQueue 中可执行的 pending 项会在恢复前检查 `id` 和 UUID `oper
 - `已恢复 X 条冲突副本`
 
 这不是装饰性文案，而是你恢复后第一轮验收的依据。
+
+本地增强备份恢复完成前，应用会核对当前账号的待同步操作和失败记录是否已从本地持久化状态读回。若核对未完成，页面不会显示恢复成功；刷新后先检查待同步数量，再继续编辑或恢复其他备份。
 
 ## 云端恢复和本地恢复怎么选
 

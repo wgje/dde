@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { deleteDataSafetyRestoreMarkerJournalDatabaseForTests } from './data-safety-restore-marker-journal';
 import type { QueueBackupPersonalRestoreIdentityV2 } from './action-queue.types';
+import { ActionQueueOwnerStorageService } from './action-queue-owner-storage.service';
 import {
   createLocalBackupUiRestoreJournal,
   getLocalBackupUiRestoreSentinelStorageKey,
@@ -31,7 +32,10 @@ import {
   LocalBackupUiRestoreTransactionService,
 } from './local-backup-ui-restore-transaction.service';
 import { QueueBackupService } from './queue-backup.service';
-import { createQueueBackupPersonalRestoreIdentity } from './queue-backup-personal-restore-transition.helpers';
+import {
+  createQueueBackupPersonalRestoreIdentity,
+  digestQueueBackupPersonalRestoreActions,
+} from './queue-backup-personal-restore-transition.helpers';
 
 const OWNER_USER_ID = 'startup-recovery-owner';
 const RESTORE_RUN_ID = '22222222-2222-4222-8222-222222222222';
@@ -40,6 +44,10 @@ const RESTORE_TOKEN = '33333333-3333-4333-8333-333333333333';
 const STARTED_AT = new Date('2026-01-01T00:00:00.000Z');
 let actionQueueIdentity: QueueBackupPersonalRestoreIdentityV2;
 let queueBackup: ReturnType<typeof createQueueBackupFake>;
+let emptyQueueResultDigest: string;
+const queueMirror = {
+  refreshQueueMirrorForOwnerAfterRestore: vi.fn(() => true),
+};
 
 describe('LocalBackupUiRestoreStartupRecoveryService', () => {
   let service: LocalBackupUiRestoreStartupRecoveryService;
@@ -58,6 +66,8 @@ describe('LocalBackupUiRestoreStartupRecoveryService', () => {
       sourceDigest: SOURCE_DIGEST,
       token: RESTORE_TOKEN,
     });
+    emptyQueueResultDigest = await digestQueueBackupPersonalRestoreActions('result', []);
+    queueMirror.refreshQueueMirrorForOwnerAfterRestore.mockReset().mockReturnValue(true);
     queueBackup = createQueueBackupFake(() => actionQueueIdentity);
     mockStageService = {
       createRecoveryOperations: vi.fn(() => makeRecoveryOperations()),
@@ -69,6 +79,7 @@ describe('LocalBackupUiRestoreStartupRecoveryService', () => {
         LocalBackupUiRestoreTransactionService,
         { provide: LocalBackupUiRestorePreImageService, useValue: { capture: vi.fn() } },
         { provide: LocalBackupUiRestoreStageService, useValue: mockStageService },
+        { provide: ActionQueueOwnerStorageService, useValue: queueMirror },
         { provide: QueueBackupService, useValue: queueBackup },
       ],
     });
@@ -121,6 +132,35 @@ describe('LocalBackupUiRestoreStartupRecoveryService', () => {
     )).toBeNull();
     expect(() => quiescence.runSync(OWNER_USER_ID, 'action-queue', () => undefined))
       .not.toThrow();
+  });
+
+  it('blocks an orphan QueueBackup transition before clearing expired pre-marker evidence', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
+    vi.setSystemTime(STARTED_AT);
+    const quiescence = new LocalBackupUiRestoreWriterQuiescenceService({
+      leaseMs: 1_000,
+      pollIntervalMs: 1,
+    });
+    const handle = await quiescence.prepare(OWNER_USER_ID);
+    const quiescenceMarker = handle.marker();
+    vi.clearAllTimers();
+    vi.setSystemTime(new Date(Date.parse(quiescenceMarker.leaseExpiresAt) + 1));
+    queueBackup.readUnclaimedPersonalRestoreTransitionState.mockResolvedValueOnce('active');
+    const putSpy = vi.spyOn(IDBObjectStore.prototype, 'put');
+    const deleteSpy = vi.spyOn(IDBObjectStore.prototype, 'delete');
+
+    await expect(service.recover(OWNER_USER_ID))
+      .resolves.toEqual({ status: 'blocked', reason: 'invalid-evidence' });
+
+    expect(queueBackup.readUnclaimedPersonalRestoreTransitionState).toHaveBeenCalledWith(
+      OWNER_USER_ID,
+      OWNER_USER_ID,
+    );
+    expect(putSpy).not.toHaveBeenCalled();
+    expect(deleteSpy).not.toHaveBeenCalled();
+    await expect(quiescence.readStartupRecoveryEvidence(OWNER_USER_ID)).resolves.toEqual(quiescenceMarker);
+    expect(localStorage.getItem(getLocalBackupUiRestoreQuiescenceSentinelStorageKey(OWNER_USER_ID)))
+      .not.toBeNull();
   });
 
   it('blocks absent QueueBackup identity before taking over a mutated marker', async () => {
@@ -506,6 +546,35 @@ describe('LocalBackupUiRestoreStartupRecoveryService', () => {
       .resolves.toBeNull();
   });
 
+  it('retains completed evidence when queue mirror finalization fails and retries it after interruption', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
+    vi.setSystemTime(STARTED_AT);
+    const evidence = await seedEvidence({
+      state: 'completed',
+      phase: 'finalizing',
+      completedStages: [...LOCAL_BACKUP_UI_RESTORE_STAGES],
+    }, 'completed');
+    vi.setSystemTime(new Date(Date.parse(evidence.quiescenceMarker.leaseExpiresAt) + 1));
+    queueMirror.refreshQueueMirrorForOwnerAfterRestore.mockReturnValueOnce(false);
+
+    await expect(service.recover(OWNER_USER_ID))
+      .resolves.toEqual({ status: 'blocked', reason: 'invalid-evidence' });
+
+    const retainedMarker = await evidence.journal.read();
+    const retainedQuiescence = await evidence.quiescence.readStartupRecoveryEvidence(OWNER_USER_ID);
+    expect(retainedMarker).toEqual(expect.objectContaining({ state: 'completed', phase: 'finalizing' }));
+    expect(retainedQuiescence?.state).toBe('finalizing-completed');
+    expect(queueMirror.refreshQueueMirrorForOwnerAfterRestore).toHaveBeenCalledOnce();
+    vi.setSystemTime(new Date(Date.parse(retainedQuiescence!.leaseExpiresAt) + 1));
+
+    await expect(service.recover(OWNER_USER_ID)).resolves.toEqual({ status: 'recovered' });
+
+    expect(queueMirror.refreshQueueMirrorForOwnerAfterRestore).toHaveBeenCalledTimes(2);
+    await expect(evidence.journal.read()).resolves.toBeNull();
+    await expect(evidence.quiescence.readStartupRecoveryEvidence(OWNER_USER_ID)).resolves.toBeNull();
+    expect(mockStageService.createRecoveryOperations).not.toHaveBeenCalled();
+  });
+
   it.each([
     ['active', {}, undefined, 0],
     ['createdAt-mutated', { createdAt: '2026-01-02T00:00:00.000Z' }, undefined, 2_000],
@@ -779,7 +848,7 @@ function createQueueBackupFake(
   let state: 'absent' | 'active' | 'terminal' = 'absent';
   let terminalReceipt: Record<string, unknown> | null = null;
   const terminalize = (outcome: 'finalized' | 'rolled-back' | 'abandoned-before-prepare') => {
-    terminalReceipt = makeQueueBackupTerminalReceipt(identity(), outcome);
+    terminalReceipt = makeQueueBackupTerminalReceipt(identity(), outcome, emptyQueueResultDigest);
     state = 'terminal';
     return terminalReceipt;
   };
@@ -805,6 +874,9 @@ function createQueueBackupFake(
       }
       return { status: 'terminal', receipt: terminalReceipt as never } as const;
     }),
+    readUnclaimedPersonalRestoreTransitionState: vi.fn(async () => (
+      state === 'active' ? 'active' as const : 'absent' as const
+    )),
     applyPersonalBackupRestoreTransitionV2: vi.fn(async command => {
       if (command.kind === 'prepare') {
         state = 'active';
@@ -823,12 +895,18 @@ function createQueueBackupFake(
     readPersonalRestoreProviderEvidence: vi.fn(async () => terminalReceipt
       ? makeQueueBackupProviderEvidence(identity(), terminalReceipt)
       : { status: 'REJECTED', reason: 'AUTH_UNAVAILABLE' } as const),
+    restoreQueueSnapshot: vi.fn(async () => ({
+      recordFound: true,
+      actions: [],
+      savedAt: '2026-01-01T00:00:00.000Z',
+    })),
   };
 }
 
 function makeQueueBackupTerminalReceipt(
   identity: QueueBackupPersonalRestoreIdentityV2,
   outcome: 'finalized' | 'rolled-back' | 'abandoned-before-prepare',
+  resultDigest: string,
 ): Record<string, unknown> {
   return {
     kind: 'queue-backup-personal-restore-receipt',
@@ -837,7 +915,7 @@ function makeQueueBackupTerminalReceipt(
     id: identity.receiptId,
     outcome,
     recordPresent: false,
-    resultDigest: `sha256:${'c'.repeat(64)}`,
+    resultDigest,
     completedAt: '2026-07-27T00:00:00.000Z',
   };
 }

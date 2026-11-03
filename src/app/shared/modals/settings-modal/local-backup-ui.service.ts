@@ -6,7 +6,14 @@ import { LOCAL_BACKUP_CONFIG } from '../../../../config/local-backup.config';
 import type { Project } from '../../../../models';
 import type { ExportData } from '../../../../services/export.service';
 import type { BackupData } from '../../../../../supabase/functions/_shared/backup-utils';
-import { extractBackupActionQueueActionsForRestore } from '../../../../services/action-queue-restore.helpers';
+import {
+  extractBackupActionQueueActionsForRestore,
+  haveSameQueuedActionRestoreSnapshots,
+} from '../../../../services/action-queue-restore.helpers';
+import { ActionQueueService } from '../../../../services/action-queue.service';
+import type { QueuedAction } from '../../../../services/action-queue.types';
+import { LOCAL_QUEUE_CONFIG } from '../../../../services/action-queue-storage.helpers';
+import { QueueBackupService } from '../../../../services/queue-backup.service';
 import {
   countRestorableAttachmentUploadsFromBackup,
   type DataSafetyMetadataRestoreCounts,
@@ -61,6 +68,7 @@ interface PendingRestoreContext extends RestoreRunContext {
 }
 
 class RestoreContextChangedError extends Error {}
+class ActionQueueRestoreReadbackError extends Error {}
 
 /**
  * 本地备份 UI 服务
@@ -79,6 +87,8 @@ export class LocalBackupUIService {
   private readonly importService = inject(ImportService);
   private readonly logger = inject(LoggerService);
   private readonly authService = inject(AuthService);
+  private readonly actionQueue = inject(ActionQueueService);
+  private readonly queueBackup = inject(QueueBackupService);
   private readonly metadataRestore = inject(BackupDataSafetyMetadataRestoreService);
   private readonly disasterBackup = inject(DisasterBackupService);
   private readonly restoreTransaction = inject(LocalBackupUiRestoreTransactionService);
@@ -319,6 +329,10 @@ export class LocalBackupUIService {
       runStarted = true;
       const result = await transaction.run(operations);
       if (!this.isRestoreContextCurrent(context)) return;
+      if (result.status === 'completed') {
+        await this.reloadAndVerifyActionQueue(context);
+        if (!this.isRestoreContextCurrent(context)) return;
+      }
       this.completeRestoreResult(context, result);
     } catch (error: unknown) {
       if (prepared && !runStarted && transaction) {
@@ -334,7 +348,9 @@ export class LocalBackupUIService {
       if (error instanceof RestoreContextChangedError
         || !this.isRestoreContextCurrent(context)) return;
       this.logger.error('从本地备份恢复失败', error instanceof Error ? error.message : String(error));
-      this.restoreError.set('恢复过程中发生错误');
+      this.restoreError.set(error instanceof ActionQueueRestoreReadbackError
+        ? '恢复数据已写入，但队列内存与持久化读回不一致。请刷新页面后继续操作。'
+        : '恢复过程中发生错误');
       this.restoreStep.set('error');
     } finally {
       this.isRestoringFromBackup.set(false);
@@ -512,6 +528,62 @@ export class LocalBackupUIService {
     if (!this.ensureRestoreContextCurrent(context)) return;
     this.restoreResultMsg.set(this.buildRestoreSuccessMessage(importedCount, restoreCounts));
     this.restoreStep.set('done');
+  }
+
+  private async reloadAndVerifyActionQueue(context: PendingRestoreContext): Promise<void> {
+    try {
+      this.requireRestoreContextCurrent(context);
+      this.actionQueue.clearCurrentView();
+      const [queueSnapshot, deadLetters] = await Promise.all([
+        this.queueBackup.restoreQueueSnapshot(context.ownerUserId),
+        this.queueBackup.restoreDeadLetters(context.ownerUserId),
+      ]);
+      this.requireRestoreContextCurrent(context);
+      if (!queueSnapshot) {
+        throw new ActionQueueRestoreReadbackError('V2 queue snapshot could not be read');
+      }
+
+      const durableQueue = queueSnapshot.recordFound ? queueSnapshot.actions : [];
+      const mirrorQueue = readOwnerQueueSnapshot(context.ownerUserId);
+      if (!mirrorQueue || !haveSameQueuedActionRestoreSnapshots(mirrorQueue as QueuedAction[], durableQueue)) {
+        throw new ActionQueueRestoreReadbackError('owner-scoped queue mirror did not match its V2 record');
+      }
+
+      await this.actionQueue.reloadFromStorageForCurrentOwner();
+      this.requireRestoreContextCurrent(context);
+      if (this.actionQueue.getCurrentOwnerStorageLoadState() !== 'loaded') {
+        throw new ActionQueueRestoreReadbackError('owner storage reload did not reach loaded state');
+      }
+
+      const memoryQueue = this.actionQueue.pendingActions();
+      const queueMatches = queueSnapshot.recordFound
+        ? haveSameQueuedActionRestoreSnapshots(memoryQueue, durableQueue)
+        : memoryQueue.length === 0
+          && readOwnerQueueSnapshot(context.ownerUserId)?.length === 0;
+      if (!queueMatches) {
+        throw new ActionQueueRestoreReadbackError('pending queue did not match its V2 record');
+      }
+
+      const expectedDeadLetters = deadLetters ?? readOwnerDeadLetterSnapshot(context.ownerUserId);
+      if (!expectedDeadLetters
+        || stableSerialize(this.actionQueue.deadLetterQueue()) !== stableSerialize(expectedDeadLetters)) {
+        throw new ActionQueueRestoreReadbackError('dead-letter queue did not match durable storage');
+      }
+    } catch (error) {
+      if (error instanceof RestoreContextChangedError) throw error;
+      if (this.isRestoreContextCurrent(context)) {
+        try {
+          if (this.actionQueue.getCurrentOwnerStorageLoadState() !== 'unknown') {
+            this.actionQueue.clearCurrentView();
+          }
+        } catch (clearError) {
+          this.logger.error('ActionQueue read-back failure could not freeze the current owner view',
+            clearError instanceof Error ? clearError.message : String(clearError));
+        }
+      }
+      if (error instanceof ActionQueueRestoreReadbackError) throw error;
+      throw new ActionQueueRestoreReadbackError('owner ActionQueue reload failed');
+    }
   }
 
   private completeRestoreResult(
@@ -785,4 +857,39 @@ function readMetadataCounts(value: unknown): DataSafetyMetadataRestoreCounts {
 
 function formatRestoreError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function readOwnerDeadLetterSnapshot(ownerUserId: string): unknown[] | null {
+  if (typeof localStorage === 'undefined') return null;
+  const raw = localStorage.getItem(`${LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY}.${ownerUserId}`);
+  if (raw === null) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function readOwnerQueueSnapshot(ownerUserId: string): unknown[] | null {
+  if (typeof localStorage === 'undefined') return null;
+  const raw = localStorage.getItem(`${LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY}.${ownerUserId}`);
+  if (raw === null) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function stableSerialize(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableSerialize).join(',')}]`;
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record).sort().map(key => (
+      `${JSON.stringify(key)}:${stableSerialize(record[key])}`
+    )).join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'undefined';
 }

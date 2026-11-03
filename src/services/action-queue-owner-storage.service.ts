@@ -187,6 +187,31 @@ export class ActionQueueOwnerStorageService {
     }
   }
 
+  refreshQueueMirrorForOwnerAfterRestore(
+    ownerUserId: string,
+    queue: QueuedAction[],
+  ): boolean {
+    if (ownerUserId !== this.getCurrentOwnerUserId() || typeof localStorage === 'undefined') return false;
+    try {
+      const normalizedQueue = normalizeQueueForOutbox(queue);
+      writeOwnerScopedLocalStorageValue(
+        LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY,
+        ownerUserId,
+        normalizedQueue,
+        (baseKey, scopedOwnerUserId) => this.getScopedStorageKey(baseKey, scopedOwnerUserId),
+      );
+      const storageKey = this.getScopedStorageKey(LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY, ownerUserId);
+      return localStorage.getItem(storageKey) === JSON.stringify(normalizedQueue);
+    } catch (error) {
+      try {
+        this.logger.warn('恢复后刷新 owner-scoped 队列镜像失败', { ownerUserId, error });
+      } catch {
+        // Logging is best-effort; the restore journal owns recovery.
+      }
+      return false;
+    }
+  }
+
   async persistQueueMutationForOwner(
     ownerUserId: string,
     updater: (queue: QueuedAction[]) => QueuedAction[],

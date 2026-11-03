@@ -1,5 +1,6 @@
 import { createSyncOperationId } from '../utils/sync-operation-id';
 import type {
+  QueuedAction,
   QueueBackupPersonalRestoreIdentityV2,
   QueueBackupPersonalRestoreTerminalReceiptV2,
 } from './action-queue.types';
@@ -15,6 +16,7 @@ import {
 import type { PreparedLocalBackupUiRestoreWriterQuiescence } from './local-backup-ui-restore-writer-quiescence.service';
 import type { QueueBackupRestoreProviderResult } from './queue-backup-restore-provider.helpers';
 import type { QueueBackupService } from './queue-backup.service';
+import { digestQueueBackupPersonalRestoreActions } from './queue-backup-personal-restore-transition.helpers';
 
 const QUIESCENCE_SENTINEL_PREFIX = 'nanoflow.local-backup-ui-restore-quiescence';
 const ACTIVE_WRITER_PREFIX = 'nanoflow.local-backup-ui-writer-active';
@@ -57,7 +59,8 @@ export type LocalBackupUiRestoreQueueBackupPort = Pick<QueueBackupService,
   'applyPersonalBackupRestoreTransitionV2'
   | 'readPersonalRestoreIdentityState'
   | 'abandonPersonalRestoreBeforePrepare'
-  | 'readPersonalRestoreProviderEvidence'>;
+  | 'readPersonalRestoreProviderEvidence'
+  | 'restoreQueueSnapshot'>;
 
 export interface LocalBackupUiRestoreTerminalState {
   closed: boolean;
@@ -69,6 +72,7 @@ export interface LocalBackupUiRestoreTerminalContext {
   quiescence: PreparedLocalBackupUiRestoreWriterQuiescence;
   journal: LocalBackupUiRestoreJournal;
   queueBackup: LocalBackupUiRestoreQueueBackupPort;
+  refreshQueueMirrorForOwnerAfterRestore(ownerUserId: string, queue: QueuedAction[]): boolean;
   verifyOwnership(): Promise<boolean>;
 }
 
@@ -141,6 +145,32 @@ export async function runWithLocalBackupUiRestoreWriterAuthorizationAsync<T>(
   assertOwner(ownerUserId);
   const sentinel = readQuiescenceSentinel(ownerUserId);
   if (!sentinel || sentinel.runId !== restoreRunId || sentinel.state !== 'quiesced') {
+    throw new LocalBackupUiRestoreWriterPausedError(ownerUserId);
+  }
+  const key = preparedAuthorizationKey(ownerUserId, restoreRunId, source);
+  if (preparedWriterAuthorizations.has(key)) {
+    throw new Error('local backup UI restore writer authorization is already active');
+  }
+  preparedWriterAuthorizations.add(key);
+  try {
+    return await write();
+  } finally {
+    preparedWriterAuthorizations.delete(key);
+  }
+}
+
+export async function runWithLocalBackupUiRestoreFinalizationWriterAuthorizationAsync<T>(
+  ownerUserId: string,
+  restoreRunId: string,
+  source: LocalBackupUiRestoreWriterSource,
+  write: () => Promise<T>,
+): Promise<T> {
+  assertOwner(ownerUserId);
+  const sentinel = readQuiescenceSentinel(ownerUserId);
+  if (source !== 'action-queue'
+    || !sentinel
+    || sentinel.runId !== restoreRunId
+    || sentinel.state !== 'finalizing-completed') {
     throw new LocalBackupUiRestoreWriterPausedError(ownerUserId);
   }
   const key = preparedAuthorizationKey(ownerUserId, restoreRunId, source);
@@ -505,25 +535,45 @@ export async function finalizeLocalBackupUiRestoreTerminal(
 ): Promise<void> {
   try {
     if (!await context.verifyOwnership()) throw new LocalBackupUiRestoreOwnershipLostError();
-    await context.quiescence.prepareFinalization(outcome);
     if (!await context.state.markerHeartbeat.verifyOwnership()) {
       throw new LocalBackupUiRestoreOwnershipLostError();
     }
     const marker = context.state.markerHeartbeat.marker();
+    await context.quiescence.prepareFinalization(outcome);
+    await context.quiescence.drainWriters();
+    if (!await context.verifyOwnership()) throw new LocalBackupUiRestoreOwnershipLostError();
     const terminal = await settleAndVerifyLocalBackupUiRestoreQueueBackup(
       marker.actionQueueRestoreIdentity,
       marker.ownerUserId,
       context.queueBackup,
       outcome === 'completed' ? 'finalized' : 'rolled-back',
     );
-    await context.state.markerHeartbeat.stop();
+    if (outcome === 'completed') {
+      const snapshot = await context.queueBackup.restoreQueueSnapshot(marker.ownerUserId);
+      if (!snapshot?.recordFound
+        || await digestQueueBackupPersonalRestoreActions('result', snapshot.actions) !== terminal.resultDigest) {
+        throw new Error('local backup UI restore finalized queue snapshot did not match its terminal receipt');
+      }
+      const mirrorRefreshed = await context.quiescence.runFinalizationMutation(
+        'action-queue',
+        async () => context.refreshQueueMirrorForOwnerAfterRestore(marker.ownerUserId, snapshot.actions),
+      );
+      if (!mirrorRefreshed) {
+        throw new Error('local backup UI restore owner queue mirror read-back failed');
+      }
+    }
     await verifyQueueBackupTerminalReadback(
       marker.actionQueueRestoreIdentity,
       marker.ownerUserId,
       context.queueBackup,
       terminal,
     );
-    if (!await context.journal.clear(marker)) {
+    if (!await context.state.markerHeartbeat.verifyOwnership()) {
+      throw new LocalBackupUiRestoreOwnershipLostError();
+    }
+    await context.state.markerHeartbeat.stop();
+    const finalMarker = context.state.markerHeartbeat.marker();
+    if (!await context.journal.clear(finalMarker)) {
       throw new LocalBackupUiRestoreOwnershipLostError('restore marker final clear failed');
     }
     if (await context.journal.read() !== null) {

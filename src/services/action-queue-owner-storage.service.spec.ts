@@ -102,6 +102,21 @@ describe('ActionQueueOwnerStorageService', () => {
     expect(localStorage.length).toBe(0);
   });
 
+  it('refreshes only the current owner queue mirror from a restored snapshot', () => {
+    const staleAction = createQueuedAction('stale-mirror-action');
+    const restoredAction = createQueuedAction('restored-mirror-action');
+    restoredAction.operationId = '88888888-8888-4888-8888-888888888888';
+    const storageKey = `${LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY}.user-a`;
+    localStorage.setItem(storageKey, JSON.stringify([staleAction]));
+
+    expect(service.refreshQueueMirrorForOwnerAfterRestore('user-a', [restoredAction])).toBe(true);
+    expect(JSON.parse(localStorage.getItem(storageKey) ?? 'null')).toEqual([restoredAction]);
+    expect(service.refreshQueueMirrorForOwnerAfterRestore('user-b', [staleAction])).toBe(false);
+    expect(JSON.parse(localStorage.getItem(storageKey) ?? 'null')).toEqual([restoredAction]);
+    expect(queueBackupService.backupQueue).not.toHaveBeenCalled();
+    expect(queueBackupService.restoreQueueSnapshot).not.toHaveBeenCalled();
+  });
+
   it('leaves legacy queue and dead-letter storage untouched while staging', async () => {
     const legacyAction = createQueuedAction('legacy-staged-action');
     const legacyDeadLetter = createDeadLetter('legacy-staged-dead-letter');

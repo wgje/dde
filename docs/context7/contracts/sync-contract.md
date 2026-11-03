@@ -2,12 +2,14 @@
 title: Sync Contract
 status: canonical
 audience: ai-agent, maintainer
-last_verified: 2026-06-09
+last_verified: 2026-11-04
 source_paths:
   - src/config/sync.config.ts
   - src/app/core/services/sync/
   - src/app/core/state/store-persistence.service.ts
   - src/services/conflict-*.ts
+  - src/services/local-backup-ui-restore-*.ts
+  - src/app/shared/modals/settings-modal/local-backup-ui.service.ts
 ---
 
 # Sync Contract
@@ -112,6 +114,12 @@ RetryQueue behavior:
 - preserves enough payload for replay or recovery
 - handles capacity using durable-first strategy
 - exposes terminal or rejected states when replay cannot proceed
+
+## Local Backup Restore Contract
+
+The settings restore is an owner-scoped transaction across local persistence layers. It must keep writers quiescent while stages run, preserve queue `operationId` values, and compensate in reverse stage order when a stage fails.
+
+Terminal finalization verifies the QueueBackup result digest against a durable queue snapshot, then updates and reads back the current owner's local queue mirror while the restore journal and quiescence evidence remain. If this fails, the completed/finalizing marker is retained so startup recovery can retry after matching owner, journal, queue, and quiescence evidence expires. After finalization, the settings flow reloads ActionQueue and compares in-memory pending and dead-letter queues with durable read-back before reporting success; unknown or mismatched recovery evidence fails closed and remains available for diagnosis.
 
 ## Sync Change Checklist
 

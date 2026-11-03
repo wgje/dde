@@ -12,6 +12,7 @@ import {
 import {
   beginLocalBackupUiRestoreWriter,
   runLocalBackupUiRestoreWriterGuardedSync,
+  runWithLocalBackupUiRestoreFinalizationWriterAuthorizationAsync,
 } from './local-backup-ui-restore-writer-quiescence-tracker';
 import {
   LOCAL_BACKUP_UI_RESTORE_MARKER_SCHEMA_VERSION,
@@ -136,6 +137,69 @@ describe('LocalBackupUiRestoreWriterQuiescenceService', () => {
       .toThrow(LocalBackupUiRestoreWriterPausedError);
     await handle.releaseFinalized();
     expect(() => service.runSync(OWNER_USER_ID, 'action-queue', () => undefined)).not.toThrow();
+  });
+
+  it('freezes new stage writers and drains an active writer before terminal work proceeds', async () => {
+    const service = new LocalBackupUiRestoreWriterQuiescenceService({ pollIntervalMs: 1 });
+    const handle = await service.prepare(OWNER_USER_ID);
+    let markStarted!: () => void;
+    let releaseWrite!: () => void;
+    const started = new Promise<void>(resolve => { markStarted = resolve; });
+    const held = new Promise<void>(resolve => { releaseWrite = resolve; });
+    let writes = 0;
+
+    const writer = handle.runMutationAsync('project-state', async () => {
+      markStarted();
+      await held;
+      service.guardSync(OWNER_USER_ID, 'project-state', () => { writes += 1; });
+    });
+    try {
+      await started;
+      await handle.prepareFinalization('completed');
+      await expect(service.runAsync(OWNER_USER_ID, 'retry-queue', async () => undefined))
+        .rejects.toBeInstanceOf(LocalBackupUiRestoreWriterPausedError);
+
+      let drained = false;
+      const draining = handle.drainWriters().then(() => { drained = true; });
+      await new Promise(resolve => setTimeout(resolve, 5));
+      expect(drained).toBe(false);
+
+      releaseWrite();
+      await expect(writer).resolves.toBeUndefined();
+      await expect(draining).resolves.toBeUndefined();
+      expect(writes).toBe(1);
+      await handle.releaseFinalized();
+    } finally {
+      releaseWrite();
+      await writer.catch(() => undefined);
+    }
+  });
+
+  it('allows finalization writes only for ActionQueue in finalizing-completed state', async () => {
+    const service = new LocalBackupUiRestoreWriterQuiescenceService({ pollIntervalMs: 1 });
+    const handle = await service.prepare(OWNER_USER_ID);
+    const write = vi.fn(async () => undefined);
+
+    expect(() => handle.runFinalizationMutation('action-queue', write)).toThrow();
+    await handle.prepareFinalization('rolled-back');
+    expect(() => handle.runFinalizationMutation('action-queue', write)).toThrow();
+    await handle.releaseFinalized();
+
+    const completed = await service.prepare(OWNER_USER_ID);
+    try {
+      await completed.prepareFinalization('completed');
+      expect(() => completed.runFinalizationMutation('retry-queue', write)).toThrow();
+      await expect(runWithLocalBackupUiRestoreFinalizationWriterAuthorizationAsync(
+        OWNER_USER_ID,
+        completed.marker().runId,
+        'retry-queue',
+        write,
+      )).rejects.toBeInstanceOf(LocalBackupUiRestoreWriterPausedError);
+      await expect(completed.runFinalizationMutation('action-queue', write)).resolves.toBeUndefined();
+      expect(write).toHaveBeenCalledOnce();
+    } finally {
+      await completed.releaseFinalized();
+    }
   });
 
   it.each(['abortBeforeMutation', 'releaseFinalized'] as const)(
@@ -290,6 +354,8 @@ describe('LocalBackupUiRestoreWriterQuiescenceService', () => {
       const marker = handle.marker();
 
       await handle.deferForStartupRecovery();
+      expect(() => handle.runMutationAsync('project-state', async () => undefined))
+        .toThrow(/not accepting stage mutations/);
       expect(() => service.runSync(OWNER_USER_ID, 'action-queue', () => undefined))
         .toThrow(LocalBackupUiRestoreWriterPausedError);
       vi.setSystemTime(new Date(Date.parse(marker.leaseExpiresAt) + 1));
@@ -370,6 +436,43 @@ describe('LocalBackupUiRestoreWriterQuiescenceService', () => {
 
     await expect(service.recoverExpiredPreMarkerQuiescence(OWNER_USER_ID)).resolves.toEqual({ status: 'blocked', reason: 'invalid-evidence' });
     expect(localStorage.getItem(sentinelKey)).toBe(replacement);
+  });
+
+  it('closes stage writes when the owned quiescence marker is replaced during finalization', async () => {
+    const service = new LocalBackupUiRestoreWriterQuiescenceService({ pollIntervalMs: 1 });
+    const handle = await service.prepare(OWNER_USER_ID);
+    const marker = handle.marker();
+    const quiescenceKey = `local-backup-ui-restore-quiescence:${OWNER_USER_ID}`;
+    const originalGet = IDBObjectStore.prototype.get;
+    let replaced = false;
+    const spy = vi.spyOn(IDBObjectStore.prototype, 'get').mockImplementation(function (
+      this: IDBObjectStore,
+      key: IDBValidKey | IDBKeyRange,
+    ) {
+      if (key === quiescenceKey && !replaced) {
+        replaced = true;
+        this.put({
+          key: quiescenceKey,
+          markerKind: 'local-backup-ui-restore-quiescence',
+          ownerUserId: OWNER_USER_ID,
+          marker: { ...marker, runId: `${marker.runId}-replacement` },
+        });
+      }
+      return originalGet.call(this, key);
+    });
+
+    try {
+      await expect(handle.prepareFinalization('completed')).rejects.toThrow(/ownership lost/);
+      expect(replaced).toBe(true);
+      expect(() => handle.runMutationAsync('project-state', async () => undefined))
+        .toThrow(/not accepting stage mutations/);
+      expect(localStorage.getItem(
+        getLocalBackupUiRestoreQuiescenceSentinelStorageKey(OWNER_USER_ID),
+      )).toContain(marker.runId);
+    } finally {
+      spy.mockRestore();
+      await handle.deferForStartupRecovery();
+    }
   });
 
   it('retains quiescence when a main marker appears at the transactional recheck', async () => {

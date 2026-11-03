@@ -17,7 +17,8 @@ import { NetworkAwarenessService } from './network-awareness.service';
 import { DeadLetterItem, OutboxSyncState, QueuedAction } from './action-queue.types';
 import { ActionQueueOwnerStorageService } from './action-queue-owner-storage.service';
 import type { QueueBackupStrictUpdateResult } from './queue-backup.service';
-import { runLocalBackupUiRestoreWriterContinuationSync, trackLocalBackupUiRestoreWriterPromise } from './local-backup-ui-restore-writer-quiescence-tracker';
+import { trackLocalBackupUiRestoreWriterPromise } from './local-backup-ui-restore-writer-quiescence-tracker';
+import { localBackupUiRestoreWriterQuiescence } from './local-backup-ui-restore-writer-quiescence.service';
 import { ActionQueueRestoreBarrierController, type ActionQueueRestoreBarrierRelease, type OwnerStorageRestoreOutcome } from './action-queue-restore-barrier.controller';
 import type { ActionQueueOwnerStorageRuntime } from './action-queue-owner-storage.types';
 import {
@@ -643,7 +644,7 @@ export class ActionQueueStorageService {
       save();
       return;
     }
-    return runLocalBackupUiRestoreWriterContinuationSync(
+    return localBackupUiRestoreWriterQuiescence.runSync(
       this.getCurrentOwnerUserId(), 'action-queue', save,
     );
   }
@@ -683,7 +684,7 @@ export class ActionQueueStorageService {
     };
     return typeof localStorage === 'undefined'
       ? save()
-      : runLocalBackupUiRestoreWriterContinuationSync(
+      : localBackupUiRestoreWriterQuiescence.runSync(
           this.getCurrentOwnerUserId(), 'action-queue', save,
         );
   }

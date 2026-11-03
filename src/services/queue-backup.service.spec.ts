@@ -16,6 +16,7 @@ import {
 import type { PreferencePayload, QueuedAction } from './action-queue.types';
 import { registerQueueBackupPersonalRestoreWriterSpecs } from './queue-backup-personal-restore-writer.spec-helpers';
 import { registerQueueBackupRestoreProviderSpecs } from './queue-backup-restore-provider.spec-helpers';
+import { createQueueBackupPersonalRestoreIdentity } from './queue-backup-personal-restore-transition.helpers';
 
 const DB_NAME = 'nanoflow-queue-backup';
 const STORE_NAME = 'queue-backup';
@@ -302,6 +303,40 @@ describe('QueueBackupService', () => {
       actions: [],
       savedAt: expect.any(String),
     });
+  });
+
+  it('reads unclaimed owner restore transitions without creating or mutating queue evidence', async () => {
+    await expect(service.readUnclaimedPersonalRestoreTransitionState('user-1', 'user-1'))
+      .resolves.toBe('absent');
+
+    const ownerUserId = 'user-1';
+    const action = makeAction('orphan-restore-transition');
+    const identity = await createQueueBackupPersonalRestoreIdentity({
+      ownerUserId,
+      restoreRunId: '11111111-1111-4111-8111-111111111111',
+      participant: 'action-queue',
+      sourceDigest: `sha256:${'a'.repeat(64)}`,
+      token: '22222222-2222-4222-8222-222222222222',
+    });
+    await service.backupQueue([action], ownerUserId);
+    await expect(service.applyPersonalBackupRestoreTransitionV2({
+      kind: 'prepare',
+      identity,
+      expectedActions: [action],
+      restoredActions: [],
+    }, ownerUserId)).resolves.toMatchObject({ status: 'prepared' });
+
+    const putSpy = vi.spyOn(IDBObjectStore.prototype, 'put');
+    const deleteSpy = vi.spyOn(IDBObjectStore.prototype, 'delete');
+    await expect(service.readUnclaimedPersonalRestoreTransitionState(ownerUserId, ownerUserId))
+      .resolves.toBe('active');
+    expect(putSpy).not.toHaveBeenCalled();
+    expect(deleteSpy).not.toHaveBeenCalled();
+  });
+
+  it('returns unknown when the authenticated owner does not match the queue owner', async () => {
+    await expect(service.readUnclaimedPersonalRestoreTransitionState('user-1', 'user-2'))
+      .resolves.toBe('unknown');
   });
 
   it('atomically updates an owner queue without dropping concurrent writes', async () => {

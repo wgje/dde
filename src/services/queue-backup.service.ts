@@ -111,6 +111,11 @@ export type QueueBackupStrictUpdateResult =
   }
   | { status: 'storage-failed' };
 
+export type QueueBackupUnclaimedRestoreTransitionState =
+  | 'absent'
+  | 'active'
+  | 'unknown';
+
 type QueueBackupMutationIntent = 'normal' | 'explicit-full-wipe';
 
 /**
@@ -287,6 +292,32 @@ export class QueueBackupService {
     } catch {
       return { status: 'unknown', reason: 'storage-unavailable' };
     } finally { db?.close(); }
+  }
+
+  async readUnclaimedPersonalRestoreTransitionState(
+    ownerUserId: string,
+    authenticatedOwnerUserId: string | null,
+  ): Promise<QueueBackupUnclaimedRestoreTransitionState> {
+    if (!authenticatedOwnerUserId || authenticatedOwnerUserId !== ownerUserId) return 'unknown';
+    if (typeof indexedDB === 'undefined') return 'unknown';
+
+    let db: IDBDatabase | null | undefined;
+    try {
+      db = await this.openQueueBackupRestoreProviderDb();
+      if (!db) return 'absent';
+
+      const recordId = this.getQueueBackupRecordId(ownerUserId);
+      const [value] = await this.readQueueBackupStoreValues(db, [recordId]);
+      if (value === undefined) return 'absent';
+      if (!this.isQueueBackupRecordForOwner(value, recordId, ownerUserId)) return 'unknown';
+      return Object.prototype.hasOwnProperty.call(value, 'personalRestoreTransition')
+        ? 'active'
+        : 'absent';
+    } catch {
+      return 'unknown';
+    } finally {
+      db?.close();
+    }
   }
 
   async readPersonalRestoreProviderEvidence(

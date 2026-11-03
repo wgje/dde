@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createMockDestroyRef } from '../test-setup.mocks';
 import { deleteDataSafetyRestoreMarkerJournalDatabaseForTests } from './data-safety-restore-marker-journal';
 import {
+  getLocalBackupUiRestoreQuiescenceSentinelStorageKey,
   LocalBackupUiRestoreWriterPausedError,
   localBackupUiRestoreWriterQuiescence,
 } from './local-backup-ui-restore-writer-quiescence.service';
@@ -321,6 +322,60 @@ describe('ActionQueue restore writer quiescence', () => {
     expect(() => service.discardActions(() => true)).toThrow(LocalBackupUiRestoreWriterPausedError);
     expect(service.pendingActions()).toEqual([queuedAction]);
     await handle.abortBeforeMutation();
+  });
+
+  it('blocks beforeunload queue mirror saves once restore quiescence starts', async () => {
+    await service.reloadFromStorageForCurrentOwner();
+    service.pendingActions.set([createQueuedAction('before-unload')]);
+    service.queueSize.set(1);
+    service.storage.deadLetterQueue.set([createDeadLetter('before-unload')]);
+    service.storage.deadLetterSize.set(1);
+
+    const ownerStorage = (service.storage as unknown as { ownerStorage: {
+      saveCurrentQueueToStorage(): void;
+      saveCurrentDeadLettersToStorage(): boolean;
+    } }).ownerStorage;
+    const saveQueue = vi.spyOn(ownerStorage, 'saveCurrentQueueToStorage');
+    const saveDeadLetters = vi.spyOn(ownerStorage, 'saveCurrentDeadLettersToStorage');
+
+    let releaseWriter!: () => void;
+    let markWriterStarted!: () => void;
+    const writerStarted = new Promise<void>(resolve => {
+      markWriterStarted = resolve;
+    });
+    const activeWriter = localBackupUiRestoreWriterQuiescence.runAsync(
+      'test-user',
+      'action-queue',
+      async () => {
+        markWriterStarted();
+        await new Promise<void>(resolve => {
+          releaseWriter = resolve;
+        });
+      },
+    );
+    await writerStarted;
+
+    const preparing = localBackupUiRestoreWriterQuiescence.prepare('test-user');
+    try {
+      await vi.waitFor(() => {
+        const raw = localStorage.getItem(
+          getLocalBackupUiRestoreQuiescenceSentinelStorageKey('test-user'),
+        );
+        expect(raw).toContain('"state":"pausing"');
+      });
+
+      expect(() => service.storage.saveQueueToStorage())
+        .toThrow(LocalBackupUiRestoreWriterPausedError);
+      expect(() => service.storage.saveDeadLetterToStorage())
+        .toThrow(LocalBackupUiRestoreWriterPausedError);
+      expect(saveQueue).not.toHaveBeenCalled();
+      expect(saveDeadLetters).not.toHaveBeenCalled();
+    } finally {
+      releaseWriter();
+      await activeWriter;
+      const handle = await preparing;
+      await handle.abortBeforeMutation();
+    }
   });
 
   it('keeps prepare pending until an asynchronous owner queue restore finishes', async () => {

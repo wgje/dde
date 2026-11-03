@@ -23,6 +23,8 @@ import { DisasterBackupService } from '../../../services/disaster-backup.service
 import { BackupDataSafetyMetadataRestoreService } from '../../../services/backup-data-safety-metadata-restore.service';
 import { LocalBackupUiRestoreStageService } from '../../../services/local-backup-ui-restore-stage.service';
 import { LocalBackupUiRestoreTransactionService } from '../../../services/local-backup-ui-restore-transaction.service';
+import { ActionQueueService } from '../../../services/action-queue.service';
+import { QueueBackupService } from '../../../services/queue-backup.service';
 import { SessionRuntimeResetRegistry } from '../../../services/session-runtime-reset.service';
 import {
   registerSettingsModalSiyuanOwnerGenerationSpecs,
@@ -149,6 +151,19 @@ describe('SettingsModalComponent', () => {
     prepare: vi.fn(),
   };
 
+  const mockActionQueueService = {
+    pendingActions: signal([]),
+    deadLetterQueue: signal([]),
+    reloadFromStorageForCurrentOwner: vi.fn().mockResolvedValue(undefined),
+    getCurrentOwnerStorageLoadState: vi.fn(() => 'loaded'),
+    clearCurrentView: vi.fn(),
+  };
+
+  const mockQueueBackupService = {
+    restoreQueueSnapshot: vi.fn().mockResolvedValue({ recordFound: true, actions: [], savedAt: null }),
+    restoreDeadLetters: vi.fn().mockResolvedValue([]),
+  };
+
   const mockExportService = {
     isExporting: signal(false),
     exportAndDownload: vi.fn(),
@@ -248,6 +263,8 @@ describe('SettingsModalComponent', () => {
         { provide: BackupDataSafetyMetadataRestoreService, useValue: mockMetadataRestoreService },
         { provide: LocalBackupUiRestoreStageService, useValue: mockLocalBackupUiRestoreStageService },
         { provide: LocalBackupUiRestoreTransactionService, useValue: mockLocalBackupUiRestoreTransactionService },
+        { provide: ActionQueueService, useValue: mockActionQueueService },
+        { provide: QueueBackupService, useValue: mockQueueBackupService },
         { provide: ThemeService, useValue: mockThemeService },
         { provide: DockEngineService, useValue: mockDockEngine },
         { provide: FocusPreferenceService, useValue: mockFocusPreferenceService },

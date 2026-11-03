@@ -5,6 +5,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LoggerService } from './logger.service';
 import { DisasterBackupService } from './disaster-backup.service';
 import { AuthService } from './auth.service';
+import type { DeadLetterItem, QueuedAction } from './action-queue.types';
+import { ActionQueueOwnerStorageService } from './action-queue-owner-storage.service';
+import { QueueBackupService } from './queue-backup.service';
+import { ToastService } from './toast.service';
 import { ThemeService } from './theme.service';
 import { UiStateService } from './ui-state.service';
 import { PreferenceService } from './preference.service';
@@ -66,6 +70,16 @@ function createLocalBackupService(entries: Record<string, unknown>[] = []): Disa
     { provide: ExternalSourceLinkService, useValue: { ensureLoaded: vi.fn().mockResolvedValue(undefined), activeLinksForTask: vi.fn(() => []) } },
     { provide: ExternalSourceCacheService, useValue: { loadPendingLinks: vi.fn().mockResolvedValue([]) } },
   ] }).get(DisasterBackupService);
+}
+
+function createActionQueueOwnerStorageService(): ActionQueueOwnerStorageService {
+  return Injector.create({ providers: [
+    { provide: ActionQueueOwnerStorageService, useClass: ActionQueueOwnerStorageService },
+    { provide: AuthService, useValue: { currentUserId: vi.fn(() => 'user-1') } },
+    { provide: QueueBackupService, useValue: { backupQueue: vi.fn() } },
+    { provide: LoggerService, useValue: { category: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }) } },
+    { provide: ToastService, useValue: { info: vi.fn(), error: vi.fn(), warning: vi.fn() } },
+  ] }).get(ActionQueueOwnerStorageService);
 }
 
 describe('DisasterBackupService', () => {
@@ -252,6 +266,63 @@ describe('DisasterBackupService', () => {
       replayLog: expect.any(Array),
       replayPlan: expect.any(Object),
     }));
+  });
+
+  it('buildLocalBlob preserves ActionQueue replay identity and dead letters', async () => {
+    const actionQueue: QueuedAction[] = [{
+      id: '88888888-8888-4888-8888-888888888888',
+      operationId: '99999999-9999-4999-8999-999999999999',
+      type: 'update',
+      entityType: 'task',
+      entityId: '77777777-7777-4777-8777-777777777777',
+      payload: {
+        task: {
+          id: '77777777-7777-4777-8777-777777777777',
+          title: 'Restored task',
+          content: 'preserve for replay',
+          stage: 1,
+          parentId: null,
+          order: 0,
+          rank: 500,
+          status: 'active',
+          x: 0,
+          y: 0,
+          createdDate: '2026-06-18T00:00:00.000Z',
+          displayId: '1',
+        },
+        projectId: 'project-1',
+      },
+      timestamp: 1,
+      retryCount: 0,
+    }];
+    const deadLetters: DeadLetterItem[] = [{
+      action: actionQueue[0],
+      failedAt: '2026-06-18T00:00:00.000Z',
+      reason: 'sync failure',
+    }];
+    const ownerStorage = createActionQueueOwnerStorageService();
+    expect(ownerStorage.refreshQueueMirrorForOwnerAfterRestore('user-1', actionQueue)).toBe(true);
+    localStorage.setItem('nanoflow.dead-letter-queue.user-1', JSON.stringify(deadLetters));
+
+    const { payload, blob } = await createLocalBackupService().buildLocalBlob([createProject()], {
+      autoBackupEnabled: false,
+      autoBackupIntervalMs: 900000,
+    });
+    const serialized = JSON.parse(await blob.text()) as {
+      localState?: { actionQueue?: unknown; deadLetters?: unknown[] };
+    };
+    const exportedActions = payload.localState?.actionQueue;
+
+    expect(Array.isArray(exportedActions)).toBe(true);
+    if (!Array.isArray(exportedActions)) throw new Error('exported ActionQueue was not an array');
+    expect(exportedActions).toHaveLength(1);
+    expect(exportedActions[0]).toMatchObject({
+      id: '88888888-8888-4888-8888-888888888888',
+      operationId: '99999999-9999-4999-8999-999999999999',
+    });
+    expect(payload.localState?.deadLetters).toEqual(deadLetters);
+    expect(serialized.localState?.actionQueue).toEqual(payload.localState?.actionQueue);
+    expect(serialized.localState?.deadLetters).toEqual(deadLetters);
   });
 
   it('exports canonical durable Black Box rows without hydration or IndexedDB writes', async () => {

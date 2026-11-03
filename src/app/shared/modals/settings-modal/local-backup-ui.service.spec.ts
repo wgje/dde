@@ -7,6 +7,8 @@ import { ImportService } from '../../../../services/import.service';
 import { LoggerService } from '../../../../services/logger.service';
 import { AttachmentUploadOutboxService } from '../../../../services/attachment-upload-outbox.service';
 import { QueueBackupService } from '../../../../services/queue-backup.service';
+import { ActionQueueService } from '../../../../services/action-queue.service';
+import type { DeadLetterItem, QueuedAction } from '../../../../services/action-queue.types';
 import { AuthService } from '../../../../services/auth.service';
 import { RetryQueueService } from '../../../core/services/sync/retry-queue.service';
 import { ActionQueueStorageService } from '../../../../services/action-queue-storage.service';
@@ -51,6 +53,23 @@ describe('LocalBackupUIService', () => {
 
   const queueBackupMock = {
     updateQueue: vi.fn(),
+    restoreQueueSnapshot: vi.fn(),
+    restoreDeadLetters: vi.fn(),
+  };
+
+  const pendingActions = signal<QueuedAction[]>([]);
+  const deadLetterQueue = signal<DeadLetterItem[]>([]);
+  let ownerStorageLoadState: 'loaded' | 'unknown' = 'loaded';
+  const actionQueueMock = {
+    pendingActions,
+    deadLetterQueue,
+    reloadFromStorageForCurrentOwner: vi.fn(),
+    getCurrentOwnerStorageLoadState: vi.fn(() => ownerStorageLoadState),
+    clearCurrentView: vi.fn(() => {
+      ownerStorageLoadState = 'unknown';
+      pendingActions.set([]);
+      deadLetterQueue.set([]);
+    }),
   };
 
   const authMock = { currentUserId: vi.fn(), captureAuthIdentityFence: vi.fn() };
@@ -90,6 +109,9 @@ describe('LocalBackupUIService', () => {
     vi.stubGlobal('alert', alertMock);
     autoBackupEnabled.set(false);
     isAuthorized.set(false);
+    pendingActions.set([]);
+    deadLetterQueue.set([]);
+    ownerStorageLoadState = 'loaded';
     authMock.currentUserId.mockReturnValue('user-1');
     authMock.captureAuthIdentityFence.mockReturnValue('auth-fence-a');
     retryQueueMock.restoreFromBackupItems.mockResolvedValue(0);
@@ -118,6 +140,15 @@ describe('LocalBackupUIService', () => {
     queueBackupMock.updateQueue.mockImplementation(async (_ownerUserId, updater) =>
       updater([], { recordFound: false })
     );
+    queueBackupMock.restoreQueueSnapshot.mockResolvedValue({
+      recordFound: true,
+      actions: [],
+      savedAt: null,
+    });
+    queueBackupMock.restoreDeadLetters.mockResolvedValue([]);
+    actionQueueMock.reloadFromStorageForCurrentOwner.mockImplementation(async () => {
+      ownerStorageLoadState = 'loaded';
+    });
     preparedRestoreRun.mockResolvedValue({
       status: 'completed',
       stageResults: { projects: 1 },
@@ -138,6 +169,7 @@ describe('LocalBackupUIService', () => {
         { provide: ImportService, useValue: importServiceMock },
         { provide: AttachmentUploadOutboxService, useValue: attachmentUploadOutboxMock },
         { provide: QueueBackupService, useValue: queueBackupMock },
+        { provide: ActionQueueService, useValue: actionQueueMock },
         { provide: AuthService, useValue: authMock },
         { provide: RetryQueueService, useValue: retryQueueMock },
         { provide: ActionQueueStorageService, useValue: actionQueueStorageMock },

@@ -44,13 +44,23 @@ export class LocalBackupUiRestoreStartupRecoveryService {
       const journal = createLocalBackupUiRestoreJournal(ownerUserId);
       const marker = await journal.read();
       if (!marker) {
+        const queueTransition = await this.queueBackup.readUnclaimedPersonalRestoreTransitionState(
+          ownerUserId,
+          ownerUserId,
+        );
+        if (queueTransition !== 'absent') return blocked('invalid-evidence');
+
         const preMarker = await localBackupUiRestoreWriterQuiescence
           .recoverExpiredPreMarkerQuiescence(ownerUserId);
-        if (preMarker.status === 'recovered') return { status: 'recovered' };
+        if (preMarker.status === 'blocked') return blocked(preMarker.reason);
         if (preMarker.status === 'finalization') {
-          return await recoverExpiredOrphanedFinalizationEvidence(preMarker.evidence);
+          const result = await recoverExpiredOrphanedFinalizationEvidence(preMarker.evidence);
+          if (result.status === 'blocked') return result;
         }
-        return preMarker.status === 'blocked' ? blocked(preMarker.reason) : { status: 'none' };
+        const queueTransitionAfterRecovery = await this.queueBackup
+          .readUnclaimedPersonalRestoreTransitionState(ownerUserId, ownerUserId);
+        if (queueTransitionAfterRecovery !== 'absent') return blocked('invalid-evidence');
+        return preMarker.status === 'none' ? { status: 'none' } : { status: 'recovered' };
       }
       if (!await this.hasCompatibleQueueState(marker, ownerUserId)) return blocked('invalid-evidence');
       const quiescence = await localBackupUiRestoreWriterQuiescence

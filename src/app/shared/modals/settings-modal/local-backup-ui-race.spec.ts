@@ -1,6 +1,9 @@
 import { TestBed } from '@angular/core/testing';
+import { signal } from '@angular/core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ActionQueueStorageService } from '../../../../services/action-queue-storage.service';
+import { ActionQueueService } from '../../../../services/action-queue.service';
+import type { DeadLetterItem, QueuedAction } from '../../../../services/action-queue.types';
 import { AttachmentUploadOutboxService } from '../../../../services/attachment-upload-outbox.service';
 import { AuthService } from '../../../../services/auth.service';
 import { ConflictStorageService } from '../../../../services/conflict-storage.service';
@@ -39,7 +42,25 @@ describe('LocalBackupUIService restore race boundaries', () => {
     executeImport: vi.fn(),
   };
   const attachmentOutbox = { savePendingUpload: vi.fn() };
-  const queueBackup = { updateQueue: vi.fn() };
+  const queueBackup = {
+    updateQueue: vi.fn(),
+    restoreQueueSnapshot: vi.fn(),
+    restoreDeadLetters: vi.fn(),
+  };
+  const pendingActions = signal<QueuedAction[]>([]);
+  const deadLetterQueue = signal<DeadLetterItem[]>([]);
+  let ownerStorageLoadState: 'loaded' | 'unknown' = 'loaded';
+  const actionQueue = {
+    pendingActions,
+    deadLetterQueue,
+    reloadFromStorageForCurrentOwner: vi.fn(),
+    getCurrentOwnerStorageLoadState: vi.fn(() => ownerStorageLoadState),
+    clearCurrentView: vi.fn(() => {
+      ownerStorageLoadState = 'unknown';
+      pendingActions.set([]);
+      deadLetterQueue.set([]);
+    }),
+  };
   const auth = { currentUserId: vi.fn(), captureAuthIdentityFence: vi.fn() };
   const retryQueue = { restoreFromBackupItems: vi.fn() };
   const actionQueueStorage = { restoreDeadLettersFromBackupItems: vi.fn() };
@@ -58,11 +79,25 @@ describe('LocalBackupUIService restore race boundaries', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     auth.currentUserId.mockReturnValue('user-1');
+    pendingActions.set([]);
+    deadLetterQueue.set([]);
+    ownerStorageLoadState = 'loaded';
+    pendingActions.set([]);
+    deadLetterQueue.set([]);
     auth.captureAuthIdentityFence.mockReturnValue('auth-fence-a');
     importService.executeImport.mockResolvedValue({ success: true, importedCount: 1 });
     queueBackup.updateQueue.mockImplementation(async (_ownerUserId, updater) =>
       updater([], { recordFound: false })
     );
+    queueBackup.restoreQueueSnapshot.mockResolvedValue({
+      recordFound: true,
+      actions: [],
+      savedAt: null,
+    });
+    queueBackup.restoreDeadLetters.mockResolvedValue([]);
+    actionQueue.reloadFromStorageForCurrentOwner.mockImplementation(async () => {
+      ownerStorageLoadState = 'loaded';
+    });
     retryQueue.restoreFromBackupItems.mockResolvedValue(0);
     actionQueueStorage.restoreDeadLettersFromBackupItems.mockReturnValue(0);
     conflictStorage.saveConflict.mockResolvedValue(true);
@@ -102,6 +137,7 @@ describe('LocalBackupUIService restore race boundaries', () => {
         { provide: ImportService, useValue: importService },
         { provide: AttachmentUploadOutboxService, useValue: attachmentOutbox },
         { provide: QueueBackupService, useValue: queueBackup },
+        { provide: ActionQueueService, useValue: actionQueue },
         { provide: AuthService, useValue: auth },
         { provide: RetryQueueService, useValue: retryQueue },
         { provide: ActionQueueStorageService, useValue: actionQueueStorage },

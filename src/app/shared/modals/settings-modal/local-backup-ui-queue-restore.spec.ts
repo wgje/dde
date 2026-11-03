@@ -6,10 +6,13 @@ import { LocalBackupService } from '../../../../services/local-backup.service';
 import { ImportService } from '../../../../services/import.service';
 import { LoggerService } from '../../../../services/logger.service';
 import { AttachmentUploadOutboxService } from '../../../../services/attachment-upload-outbox.service';
+import { ActionQueueService } from '../../../../services/action-queue.service';
+import type { DeadLetterItem, QueuedAction } from '../../../../services/action-queue.types';
 import { QueueBackupService } from '../../../../services/queue-backup.service';
 import { AuthService } from '../../../../services/auth.service';
 import { RetryQueueService } from '../../../core/services/sync/retry-queue.service';
 import { ActionQueueStorageService } from '../../../../services/action-queue-storage.service';
+import { LOCAL_QUEUE_CONFIG } from '../../../../services/action-queue-storage.helpers';
 import { ConflictStorageService } from '../../../../services/conflict-storage.service';
 import { BackupDataSafetyMetadataRestoreService } from '../../../../services/backup-data-safety-metadata-restore.service';
 import { DisasterBackupService } from '../../../../services/disaster-backup.service';
@@ -49,6 +52,23 @@ describe('LocalBackupUIService queue restore', () => {
 
   const queueBackupMock = {
     updateQueue: vi.fn(),
+    restoreQueueSnapshot: vi.fn(),
+    restoreDeadLetters: vi.fn(),
+  };
+
+  const pendingActions = signal<QueuedAction[]>([]);
+  const deadLetterQueue = signal<DeadLetterItem[]>([]);
+  let ownerStorageLoadState: 'loaded' | 'unknown' = 'loaded';
+  const actionQueueMock = {
+    pendingActions,
+    deadLetterQueue,
+    reloadFromStorageForCurrentOwner: vi.fn(),
+    getCurrentOwnerStorageLoadState: vi.fn(() => ownerStorageLoadState),
+    clearCurrentView: vi.fn(() => {
+      ownerStorageLoadState = 'unknown';
+      pendingActions.set([]);
+      deadLetterQueue.set([]);
+    }),
   };
 
   const authMock = {
@@ -85,6 +105,9 @@ describe('LocalBackupUIService queue restore', () => {
     vi.clearAllMocks();
     autoBackupEnabled.set(false);
     isAuthorized.set(false);
+    pendingActions.set([]);
+    deadLetterQueue.set([]);
+    ownerStorageLoadState = 'loaded';
     authMock.currentUserId.mockReturnValue('user-1');
     authMock.captureAuthIdentityFence.mockReturnValue('auth-fence-a');
     retryQueueMock.restoreFromBackupItems.mockResolvedValue(0);
@@ -113,6 +136,15 @@ describe('LocalBackupUIService queue restore', () => {
     queueBackupMock.updateQueue.mockImplementation(async (_ownerUserId, updater) =>
       updater([], { recordFound: false })
     );
+    queueBackupMock.restoreQueueSnapshot.mockResolvedValue({
+      recordFound: true,
+      actions: [],
+      savedAt: null,
+    });
+    queueBackupMock.restoreDeadLetters.mockResolvedValue([]);
+    actionQueueMock.reloadFromStorageForCurrentOwner.mockImplementation(async () => {
+      ownerStorageLoadState = 'loaded';
+    });
     preparedRestoreRun.mockResolvedValue({ status: 'completed', stageResults: { projects: 1 } });
     restoreTransactionMock.prepare.mockResolvedValue({
       verifyOwnership: vi.fn().mockResolvedValue(true),
@@ -129,6 +161,7 @@ describe('LocalBackupUIService queue restore', () => {
         { provide: ImportService, useValue: importServiceMock },
         { provide: AttachmentUploadOutboxService, useValue: attachmentUploadOutboxMock },
         { provide: QueueBackupService, useValue: queueBackupMock },
+        { provide: ActionQueueService, useValue: actionQueueMock },
         { provide: AuthService, useValue: authMock },
         { provide: RetryQueueService, useValue: retryQueueMock },
         { provide: ActionQueueStorageService, useValue: actionQueueStorageMock },
@@ -145,6 +178,7 @@ describe('LocalBackupUIService queue restore', () => {
   afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+    localStorage.clear();
   });
 
   it('routes pending action queue through the prepared restore stage', async () => {
@@ -168,14 +202,38 @@ describe('LocalBackupUIService queue restore', () => {
         connections: [],
       }],
     };
-    const existingAction = {
+    const existingAction: QueuedAction = {
       id: '66666666-6666-4666-8666-666666666666',
       operationId: '77777777-7777-4777-8777-777777777777',
       type: 'update',
       entityType: 'task',
       entityId: 'task-current',
-      payload: { task: { id: 'task-current', title: 'Current' }, projectId: 'project-1' },
+      payload: {
+        task: {
+          id: 'task-current', title: 'Current', content: '', stage: 1, parentId: null,
+          order: 0, rank: 500, status: 'active', x: 0, y: 0,
+          createdDate: '2026-06-18T00:00:00.000Z', displayId: '1',
+        },
+        projectId: 'project-1',
+      },
       timestamp: 1,
+      retryCount: 0,
+    };
+    const restoredAction: QueuedAction = {
+      id: '88888888-8888-4888-8888-888888888888',
+      operationId: '99999999-9999-4999-8999-999999999999',
+      type: 'update',
+      entityType: 'task',
+      entityId: 'task-restored',
+      payload: {
+        task: {
+          id: 'task-restored', title: 'Restored', content: '', stage: 1, parentId: null,
+          order: 0, rank: 500, status: 'active', x: 0, y: 0,
+          createdDate: '2026-06-18T00:00:00.000Z', displayId: '2',
+        },
+        projectId: 'project-1',
+      },
+      timestamp: 2,
       retryCount: 0,
     };
     const backupData = {
@@ -185,18 +243,23 @@ describe('LocalBackupUIService queue restore', () => {
       connections: [],
       localState: {
         dataSafety: { ownerUserId: 'user-1' },
-        actionQueue: [{
-          id: '88888888-8888-4888-8888-888888888888',
-          operationId: '99999999-9999-4999-8999-999999999999',
-          type: 'update',
-          entityType: 'task',
-          entityId: 'task-restored',
-          payload: { task: { id: 'task-restored', title: 'Restored' }, projectId: 'project-1' },
-          timestamp: 2,
-          retryCount: 0,
-        }],
+        actionQueue: [restoredAction],
       },
     } as unknown as BackupData;
+    const restoredQueue = [existingAction, restoredAction];
+    queueBackupMock.restoreQueueSnapshot.mockImplementationOnce(async () => {
+      expect(actionQueueMock.clearCurrentView).toHaveBeenCalledOnce();
+      expect(pendingActions()).toEqual([]);
+      return {
+        recordFound: true,
+        actions: restoredQueue,
+        savedAt: '2026-06-18T00:00:00.000Z',
+      };
+    });
+    actionQueueMock.reloadFromStorageForCurrentOwner.mockImplementationOnce(async () => {
+      pendingActions.set(restoredQueue);
+      ownerStorageLoadState = 'loaded';
+    });
     queueBackupMock.updateQueue.mockImplementation(async (_ownerUserId, updater) =>
       updater([existingAction], { recordFound: true })
     );
@@ -206,10 +269,17 @@ describe('LocalBackupUIService queue restore', () => {
     importServiceMock.generatePreview.mockResolvedValue({
       projects: [{ taskCount: 0, connectionCount: 0 }],
     });
-    preparedRestoreRun.mockResolvedValueOnce({
-      status: 'completed',
-      stageResults: { projects: 1, 'action-queue': 1 },
+    preparedRestoreRun.mockImplementationOnce(async () => {
+      localStorage.setItem(
+        `${LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY}.user-1`,
+        JSON.stringify(restoredQueue),
+      );
+      return { status: 'completed', stageResults: { projects: 1, 'action-queue': 1 } };
     });
+    localStorage.setItem(
+      `${LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY}.user-1`,
+      JSON.stringify([existingAction]),
+    );
     const service = TestBed.inject(LocalBackupUIService);
 
     await service.handleRestoreFromLocalBackup();
@@ -228,8 +298,82 @@ describe('LocalBackupUIService queue restore', () => {
       })],
     }));
     expect(queueBackupMock.updateQueue).not.toHaveBeenCalled();
+    expect(actionQueueMock.reloadFromStorageForCurrentOwner).toHaveBeenCalledOnce();
+    expect(JSON.parse(localStorage.getItem(`${LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY}.user-1`) ?? 'null'))
+      .toEqual(restoredQueue);
     expect(importServiceMock.executeImport).not.toHaveBeenCalled();
     expect(service.restoreResultMsg()).toBe('恢复成功！已导入 1 个项目，已恢复 1 个待同步操作');
+  });
+
+  it('does not report success when the reloaded in-memory queue differs from the durable V2 record', async () => {
+    const exportData: ExportData = {
+      metadata: {
+        exportedAt: '2026-06-18T00:00:00.000Z',
+        version: '2.0.0',
+        appVersion: 'backup-restore',
+        projectCount: 0,
+        taskCount: 0,
+        connectionCount: 0,
+        attachmentCount: 0,
+        checksum: '',
+        exportType: 'full',
+      },
+      projects: [],
+    };
+    const action: QueuedAction = {
+      id: '88888888-8888-4888-8888-888888888888',
+      operationId: '99999999-9999-4999-8999-999999999999',
+      type: 'update',
+      entityType: 'task',
+      entityId: 'task-restored',
+      payload: {
+        task: {
+          id: 'task-restored', title: 'Restored', content: '', stage: 1, parentId: null,
+          order: 0, rank: 500, status: 'active', x: 0, y: 0,
+          createdDate: '2026-06-18T00:00:00.000Z', displayId: '1',
+        },
+        projectId: 'project-1',
+      },
+      timestamp: 2,
+      retryCount: 0,
+    };
+    const backupData = {
+      payloadVersion: '2.0.0',
+      projects: [],
+      tasks: [],
+      connections: [],
+      localState: { dataSafety: { ownerUserId: 'user-1' }, actionQueue: [action] },
+    } as unknown as BackupData;
+    queueBackupMock.restoreQueueSnapshot.mockResolvedValueOnce({
+      recordFound: true,
+      actions: [action],
+      savedAt: '2026-06-18T00:00:00.000Z',
+    });
+    localStorage.setItem(
+      `${LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY}.user-1`,
+      JSON.stringify([action]),
+    );
+    actionQueueMock.reloadFromStorageForCurrentOwner.mockImplementationOnce(async () => {
+      ownerStorageLoadState = 'loaded';
+    });
+    localBackupServiceMock.listBackupFiles.mockResolvedValue([{ name: 'backup.json', timestamp: 1, size: 1024 }]);
+    localBackupServiceMock.readBackupFile.mockResolvedValue(new File([JSON.stringify(backupData)], 'backup.json', { type: 'application/json' }));
+    importServiceMock.validateFile.mockResolvedValue({ valid: true, data: exportData });
+    importServiceMock.generatePreview.mockResolvedValue({ projects: [] });
+    preparedRestoreRun.mockResolvedValueOnce({ status: 'completed', stageResults: { projects: 0, 'action-queue': 1 } });
+    const service = TestBed.inject(LocalBackupUIService);
+
+    await service.handleRestoreFromLocalBackup();
+    service.selectRestoreFile(0);
+    await service.loadRestorePreview([]);
+    await service.confirmRestore([]);
+
+    expect(actionQueueMock.reloadFromStorageForCurrentOwner).toHaveBeenCalledOnce();
+    expect(service.restoreStep()).toBe('error');
+    expect(service.restoreResultMsg()).toBe('');
+    expect(service.restoreError()).toContain('内存与持久化读回不一致');
+    expect(actionQueueMock.clearCurrentView).toHaveBeenCalledTimes(2);
+    expect(actionQueueMock.getCurrentOwnerStorageLoadState()).toBe('unknown');
   });
 
   it('rejects an ActionQueue operationId that would be remapped before preparing the transaction', async () => {
@@ -402,6 +546,11 @@ describe('LocalBackupUIService queue restore', () => {
     preparedRestoreRun.mockResolvedValueOnce({
       status: 'completed',
       stageResults: { projects: 1, 'dead-letters': 1 },
+    });
+    queueBackupMock.restoreDeadLetters.mockResolvedValueOnce([deadLetter as DeadLetterItem]);
+    actionQueueMock.reloadFromStorageForCurrentOwner.mockImplementationOnce(async () => {
+      deadLetterQueue.set([deadLetter as DeadLetterItem]);
+      ownerStorageLoadState = 'loaded';
     });
     localBackupServiceMock.listBackupFiles.mockResolvedValue([{ name: 'backup.json', timestamp: 1, size: 1024 }]);
     localBackupServiceMock.readBackupFile.mockResolvedValue(new File([JSON.stringify(backupData)], 'backup.json', { type: 'application/json' }));

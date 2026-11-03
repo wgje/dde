@@ -2,7 +2,7 @@
 title: 项目、设置与回收站
 status: canonical
 audience: user
-last_verified: 2026-07-15
+last_verified: 2026-11-04
 category: use-nanoflow
 source_paths:
   - src/app/shared/modals/new-project-modal.component.ts
@@ -209,6 +209,8 @@ JSON 不包含原始附件二进制文件。完整的恢复原则见 [备份与�
 本地增强备份依赖浏览器能力和目录权限；设置中没有该区域时，不要假定它已在后台运行。它是 JSON/附件备份和云同步的补充，而不是替代品。
 
 从备份恢复时，设置页会先锁定当前账号并验证文件校验和与 ActionQueue 恢复身份。可以执行的队列项必须保留原有 `id` 和 UUID 格式的 `operationId`；校验失败、恢复日志不一致或补偿失败时，应用会保留日志和诊断证据，等待启动恢复，不会静默清理记录。
+
+恢复完成前还会核对当前账号的待同步操作和失败记录是否已从本地持久化状态读回。只有核对通过，页面才会显示恢复成功；若页面提示恢复未完成，先刷新并检查待同步数量，不要重复导入同一份备份。
 
 ## 回收站、归档和永久删除的区别
 
