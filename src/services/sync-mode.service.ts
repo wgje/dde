@@ -18,6 +18,7 @@ import { Injectable, inject, signal, computed, DestroyRef } from '@angular/core'
 import { LoggerService } from './logger.service';
 import { APP_LIFECYCLE_CONFIG } from '../config/app-lifecycle.config';
 import { CONFIG_OPERATION_DELAY } from '../config/timeout.config';
+import { SessionRuntimeResetRegistry } from './session-runtime-reset.service';
 
 /**
  * 同步模式枚举
@@ -81,7 +82,9 @@ export class SyncModeService {
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('SyncMode');
   private readonly destroyRef = inject(DestroyRef);
+  private readonly sessionRuntimeReset = inject(SessionRuntimeResetRegistry);
   private lifecycleClosed = false;
+  private unregisterSessionRuntimeReset: (() => void) | null = null;
 
   /** 旧配置迁移的延迟保存定时器；必须早于 config 初始化，因为 loadConfig() 会创建它 */
   private configMigrationSaveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -94,6 +97,7 @@ export class SyncModeService {
 
   /** 自动同步是否仍在执行，避免 interval tick 重入同一条同步链路 */
   private autoSyncInFlight = false;
+  private syncRunToken = 0;
 
   /** 首次自动同步启动延迟定时器 */
   private startupDelayTimer: ReturnType<typeof setTimeout> | null = null;
@@ -137,10 +141,16 @@ export class SyncModeService {
   readonly currentConfig = computed(() => this.config());
 
   constructor() {
+    this.unregisterSessionRuntimeReset = this.sessionRuntimeReset.register(
+      'SyncModeService',
+      () => this.resetSessionRuntime(),
+    );
     this.registerVisibilityListener();
 
     this.destroyRef.onDestroy(() => {
       this.lifecycleClosed = true;
+      this.unregisterSessionRuntimeReset?.();
+      this.unregisterSessionRuntimeReset = null;
       this.stopAutoSync();
       this.clearPendingConfigMigrationSave();
       this.teardownLifecycleListeners();
@@ -253,16 +263,16 @@ export class SyncModeService {
     }
 
     this.infoManualSyncSafely('手动触发同步', { direction, mode: this.config().mode });
-    if (this.autoSyncInFlight) {
+    const runToken = this.beginSyncRun();
+    if (runToken === null) {
       this.debugManualSyncSafely('同步仍在执行，跳过本次触发', { direction });
       return;
     }
 
-    this.autoSyncInFlight = true;
     try {
       await this.syncCallback(direction);
     } finally {
-      this.autoSyncInFlight = false;
+      this.finishSyncRun(runToken);
     }
   }
 
@@ -374,14 +384,14 @@ export class SyncModeService {
         return;
       }
 
-      if (this.autoSyncInFlight) {
+      const runToken = this.beginSyncRun();
+      if (runToken === null) {
         this.debugAutoSyncSafely('自动同步仍在执行，跳过本次触发', {
           intervalSeconds: intervalMs / 1000
         });
         return;
       }
 
-      this.autoSyncInFlight = true;
       syncCount++;
       const syncStartTime = Date.now();
       this.debugAutoSyncSafely('自动同步触发', {
@@ -401,7 +411,7 @@ export class SyncModeService {
           error: e
         });
       } finally {
-        this.autoSyncInFlight = false;
+        this.finishSyncRun(runToken);
       }
     }, intervalMs);
     this.autoSyncTimer = autoSyncTimer;
@@ -450,7 +460,11 @@ export class SyncModeService {
 
   private debugAutoSyncSafely(message: string, data?: unknown): void {
     try {
-      this.logger.debug(message, data);
+      if (data === undefined) {
+        this.logger.debug(message);
+      } else {
+        this.logger.debug(message, data);
+      }
     } catch {
       // Auto-sync observability failures must not interrupt interval state.
     }
@@ -461,6 +475,31 @@ export class SyncModeService {
       this.logger.error(message, data);
     } catch {
       // Auto-sync error reporting failures must not keep in-flight stuck.
+    }
+  }
+
+  private beginSyncRun(): number | null {
+    if (this.autoSyncInFlight) return null;
+    this.autoSyncInFlight = true;
+    return ++this.syncRunToken;
+  }
+
+  private finishSyncRun(runToken: number): void {
+    if (runToken === this.syncRunToken) {
+      this.autoSyncInFlight = false;
+    }
+  }
+
+  private invalidateSyncRun(): void {
+    this.syncRunToken += 1;
+    this.autoSyncInFlight = false;
+  }
+
+  private resetSessionRuntime(): void {
+    this.stopAutoSync();
+    this.autoSyncBlockedUntil = 0;
+    if (!this.lifecycleClosed && this.config().mode === 'automatic') {
+      this.startAutoSync();
     }
   }
 
@@ -626,23 +665,49 @@ export class SyncModeService {
    * 停止自动同步定时器
    */
   private stopAutoSync(): void {
-    if (this.startupDelayTimer !== null) {
-      clearTimeout(this.startupDelayTimer);
-      this.startupDelayTimer = null;
+    this.invalidateSyncRun();
+    const startupDelayTimer = this.startupDelayTimer;
+    this.startupDelayTimer = null;
+    if (startupDelayTimer !== null) {
+      this.clearTimeoutSafely(startupDelayTimer, 'startup-delay');
     }
 
-    if (this.autoSyncTimer !== null) {
-      clearInterval(this.autoSyncTimer);
-      this.autoSyncTimer = null;
-      this.logger.debug('自动同步已停止');
+    const autoSyncTimer = this.autoSyncTimer;
+    this.autoSyncTimer = null;
+    if (autoSyncTimer !== null) {
+      this.clearIntervalSafely(autoSyncTimer, 'auto-sync');
+      this.debugAutoSyncSafely('自动同步已停止');
     }
   }
 
   private clearPendingConfigMigrationSave(): void {
-    if (this.configMigrationSaveTimer === null) return;
-
-    clearTimeout(this.configMigrationSaveTimer);
+    const configMigrationSaveTimer = this.configMigrationSaveTimer;
     this.configMigrationSaveTimer = null;
+    if (configMigrationSaveTimer === null) return;
+
+    this.clearTimeoutSafely(configMigrationSaveTimer, 'config-migration-save');
+  }
+
+  private clearTimeoutSafely(
+    timer: ReturnType<typeof setTimeout>,
+    source: string,
+  ): void {
+    try {
+      clearTimeout(timer);
+    } catch (error) {
+      this.debugAutoSyncSafely('同步 timeout 清理失败，继续释放本地状态', { source, error });
+    }
+  }
+
+  private clearIntervalSafely(
+    timer: ReturnType<typeof setInterval>,
+    source: string,
+  ): void {
+    try {
+      clearInterval(timer);
+    } catch (error) {
+      this.debugAutoSyncSafely('同步 interval 清理失败，继续释放本地状态', { source, error });
+    }
   }
 
   /**
