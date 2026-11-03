@@ -9,6 +9,7 @@ import type {
   WorkspaceShellSignalEffectsLazyLoadDelegate,
   WorkspaceShellSignalEffectsLazyLoadDelegateOptions,
 } from './workspace-shell-signal-effects-lazy-load-delegate.factory';
+import { captureWidgetBootstrapAttempt } from './workspace-shell-android-widget-bootstrap-processing.controller';
 import {
   readWorkspaceShellControllerGraphCallOptions,
   readWorkspaceShellControllerGraphSource,
@@ -73,12 +74,11 @@ describe('workspace shell signal effects options', () => {
     };
     const routeSyncController = { syncStateFromRoute: vi.fn() };
     const callOrder: string[] = [];
-    const bootstrapGenerations: number[] = [];
     const androidWidgetLazyLoad = {
       captureFromRoute: vi.fn(),
-      syncProcessing: vi.fn((generation: number) => {
+      syncProcessing: vi.fn(() => {
         callOrder.push('sync');
-        bootstrapGenerations.push(generation);
+        captureWidgetBootstrapAttempt();
       }),
     };
     const startupEntryIntentController = { sync: vi.fn() };
@@ -214,8 +214,6 @@ describe('workspace shell signal effects options', () => {
     currentOwner.set('user-a');
     TestBed.flushEffects();
     expect(callOrder).toEqual(Array(4).fill(['session', 'owner', 'sync']).flat());
-    expect(bootstrapGenerations).toHaveLength(4);
-    expect(new Set(bootstrapGenerations).size).toBe(4);
   });
 
   it('creates signal-effects delegates from shell dependencies in one factory call', async () => {

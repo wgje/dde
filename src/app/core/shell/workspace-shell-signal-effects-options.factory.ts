@@ -105,10 +105,10 @@ function createAndroidWidgetEffectBridge(
   return {
     captureFromRoute: routeUrl => delegate.captureFromRoute(routeUrl),
     syncProcessing: () => {
-      startWidgetBootstrapAttempt(generation => {
+      startWidgetBootstrapAttempt(() => {
         options.authService.sessionInitialized();
         options.userSession.currentUserId();
-        delegate.syncProcessing(generation);
+        delegate.syncProcessing();
       });
     },
   };

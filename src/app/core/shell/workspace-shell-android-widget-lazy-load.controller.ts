@@ -126,8 +126,8 @@ export class WorkspaceShellAndroidWidgetLazyLoadController {
     }
   }
 
-  syncProcessing(generation = currentWidgetBootstrapAttempt()): void {
-    this.processing.sync(generation);
+  syncProcessing(): void {
+    this.processing.sync();
   }
 
   complete(

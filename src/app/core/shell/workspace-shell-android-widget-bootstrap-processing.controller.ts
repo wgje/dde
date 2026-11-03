@@ -3,10 +3,22 @@ import { AUTH_CONFIG } from '../../../config/auth.config';
 import type { AndroidWidgetBootstrapPreparation } from './workspace-shell-android-widget-bootstrap-storage.controller';
 
 let latestWidgetBootstrapAttempt = 0;
+const pendingWidgetBootstrapAttempts: number[] = [];
 
-export function startWidgetBootstrapAttempt(action: (generation: number) => void): void {
+export function startWidgetBootstrapAttempt(action: () => void): void {
   const generation = ++latestWidgetBootstrapAttempt;
-  action(generation);
+  pendingWidgetBootstrapAttempts.push(generation);
+  try {
+    action();
+  } catch (error) {
+    const index = pendingWidgetBootstrapAttempts.indexOf(generation);
+    if (index >= 0) pendingWidgetBootstrapAttempts.splice(index, 1);
+    throw error;
+  }
+}
+
+export function captureWidgetBootstrapAttempt(): number {
+  return pendingWidgetBootstrapAttempts.shift() ?? currentWidgetBootstrapAttempt();
 }
 
 export function currentWidgetBootstrapAttempt(): number {
@@ -37,7 +49,8 @@ export interface WorkspaceShellAndroidWidgetBootstrapProcessingControllerOptions
 export class WorkspaceShellAndroidWidgetBootstrapProcessingController {
   constructor(private readonly options: WorkspaceShellAndroidWidgetBootstrapProcessingControllerOptions) {}
 
-  sync(generation = currentWidgetBootstrapAttempt()): void {
+  sync(): void {
+    const generation = captureWidgetBootstrapAttempt();
     const bootstrapRequest = this.options.pendingBootstrap();
     const currentUserId = this.options.currentUserId();
     if (

@@ -12,6 +12,7 @@ import type {
 import type { WorkspaceShellMountStateController } from './workspace-shell-mount-state.controller';
 import type { WorkspaceShellRouteSyncController } from './workspace-shell-route-sync.controller';
 import {
+  captureWidgetBootstrapAttempt,
   isWidgetBootstrapAttemptCurrent,
 } from './workspace-shell-android-widget-bootstrap-processing.controller';
 import { createWorkspaceShellSignalEffectsSurface } from './workspace-shell-signal-effects-surface.factory';
@@ -149,11 +150,10 @@ describe('workspace shell signal effects surface', () => {
       startupEntryControllers: {
         androidWidgetLazyLoad: {
           captureFromRoute: vi.fn(),
-          syncProcessing: vi.fn((generation: number) => {
-            deferredBootstrapAttempts.push(() => {
-              if (isWidgetBootstrapAttemptCurrent(generation)) completeBootstrap();
-            });
-          }),
+          syncProcessing: vi.fn(() => deferredBootstrapAttempts.push(() => {
+            const generation = captureWidgetBootstrapAttempt();
+            if (isWidgetBootstrapAttemptCurrent(generation)) completeBootstrap();
+          })),
         },
         startupEntryIntentController: { sync: vi.fn() },
       },

@@ -131,9 +131,9 @@ describe('WorkspaceShellAndroidWidgetBootstrapProcessingController', () => {
     });
     const deferred: Array<() => void> = [];
 
-    startWidgetBootstrapAttempt(generation => deferred.push(() => controller.sync(generation)));
-    startWidgetBootstrapAttempt(generation => deferred.push(() => controller.sync(generation)));
-    startWidgetBootstrapAttempt(generation => deferred.push(() => controller.sync(generation)));
+    startWidgetBootstrapAttempt(() => deferred.push(() => controller.sync()));
+    startWidgetBootstrapAttempt(() => deferred.push(() => controller.sync()));
+    startWidgetBootstrapAttempt(() => deferred.push(() => controller.sync()));
 
     deferred[0]();
     deferred[1]();
