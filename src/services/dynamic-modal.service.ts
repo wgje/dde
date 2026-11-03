@@ -30,9 +30,12 @@ import {
   computed,
   Injector,
   DestroyRef,
-  InjectionToken
+  InjectionToken,
+  afterNextRender,
+  type AfterRenderRef,
 } from '@angular/core';
 import { DOCUMENT } from '@angular/common';
+import { ConfigurableFocusTrapFactory, type ConfigurableFocusTrap } from '@angular/cdk/a11y';
 // Subscription 类型已移除，使用 { unsubscribe(): void } 鸭子类型兼容 EventEmitter 和 output()
 
 /** 模态框配置接口 */
@@ -76,9 +79,15 @@ interface ModalStackItem {
   escapeListener?: (e: KeyboardEvent) => void;
   /** 订阅清理数组（兼容 RxJS Subscription 和 Angular OutputRefSubscription） */
   subscriptions: ModalSubscription[];
+  focusTrap: ConfigurableFocusTrap;
+  focusRenderRef: AfterRenderRef | null;
+  focusGeneration: number;
+  contentWrapper: HTMLElement;
+  opener: HTMLElement | null;
 }
 
 type ModalSubscription = { unsubscribe(): void };
+type ModalCleanup = () => void;
 type SubscribableOutput<T = unknown> = {
   subscribe?: (fn: (value: T) => void) => ModalSubscription;
 };
@@ -116,6 +125,7 @@ export class DynamicModalService {
   private injector = inject(EnvironmentInjector);
   private document = inject(DOCUMENT);
   private destroyRef = inject(DestroyRef);
+  private focusTrapFactory = inject(ConfigurableFocusTrapFactory);
 
   /** 模态框栈 */
   private modalStack = signal<ModalStackItem[]>([]);
@@ -128,11 +138,18 @@ export class DynamicModalService {
 
   /** 模态框 ID 计数器 */
   private idCounter = 0;
+  private stackSettlementGeneration = 0;
+  private settlementModalIds: string[] = [];
+  private closeAllFocusSettlementTokens: symbol[] = [];
+  private focusSettlementDepth = 0;
+  private isDestroyed = false;
 
   constructor() {
     // 清理：服务销毁时关闭所有模态框
     this.destroyRef.onDestroy(() => {
-      this.closeAll();
+      if (this.isDestroyed) return;
+      this.isDestroyed = true;
+      this.closeAllItems(false);
     });
   }
 
@@ -152,26 +169,48 @@ export class DynamicModalService {
     component: Type<C>,
     config: ModalConfig<D> = {}
   ): ModalRef<R> {
+    if (this.isDestroyed) {
+      throw new Error('DynamicModalService is destroyed');
+    }
+    const opener = this.captureConnectedOpener();
     const mergedConfig = this.mergeConfig(config);
     const modalId = `modal-${++this.idCounter}`;
     const { resultPromise, resolvePromise } = this.createResultPromise<R>();
-    const shell = this.createModalShell(modalId, mergedConfig);
+    const rollback: ModalCleanup[] = [];
     const closeModal = (result?: R) => {
       this.closeById(modalId, result);
     };
-
     const modalRefToken = this.createModalRefToken(closeModal, resultPromise);
-    const componentRef = this.createModalComponent(component, shell.contentWrapper, config.data, modalRefToken);
-    modalRefToken.componentRef = componentRef as ComponentRef<unknown>;
-    this.applyComponentInputs(componentRef, config.inputs);
-    const subscriptions = this.subscribeComponentOutputs(componentRef, config.outputs, closeModal);
-    this.appRef.attachView(componentRef.hostView);
-
-    const escapeListener = this.registerEscapeListener(mergedConfig, modalId, closeModal);
-    this.addToStack(modalId, componentRef, shell, mergedConfig, resolvePromise, escapeListener, subscriptions);
-    this.focusFirstElementOnNextFrame(shell.contentWrapper);
-
-    return modalRefToken;
+    try {
+      const shell = this.createModalShell(modalId, mergedConfig, rollback);
+      const componentRef = this.createModalComponent(component, shell.contentWrapper, config.data, modalRefToken);
+      rollback.push(() => componentRef.destroy());
+      modalRefToken.componentRef = componentRef as ComponentRef<unknown>;
+      this.applyComponentInputs(componentRef, config.inputs);
+      const subscriptions: ModalSubscription[] = [];
+      this.addSubscriptionRollback(rollback, subscriptions);
+      this.subscribeComponentOutputs(componentRef, config.outputs, closeModal, modalId, subscriptions);
+      rollback.push(() => this.appRef.detachView(componentRef.hostView));
+      this.appRef.attachView(componentRef.hostView);
+      const escapeListener = this.registerEscapeListener(mergedConfig, modalId, closeModal, rollback);
+      const focusTrap = this.focusTrapFactory.create(shell.contentWrapper);
+      rollback.push(() => focusTrap.destroy());
+      const item = this.addToStack(
+        modalId, componentRef, shell, mergedConfig, resolvePromise, escapeListener,
+        subscriptions, focusTrap, opener, rollback,
+      );
+      rollback.push(() => {
+        item.focusGeneration += 1;
+        item.focusRenderRef?.destroy();
+        item.focusRenderRef = null;
+      });
+      this.scheduleInitialFocus(item);
+      rollback.length = 0;
+      return modalRefToken;
+    } catch (error) {
+      this.runModalSettlement(modalId, () => this.rollbackModalOpen(rollback));
+      throw error;
+    }
   }
 
   private mergeConfig<D>(config: ModalConfig<D>): ResolvedModalConfig<D> {
@@ -192,9 +231,10 @@ export class DynamicModalService {
     return { resolvePromise, resultPromise };
   }
 
-  private createModalShell<D>(modalId: string, config: ResolvedModalConfig<D>): ModalShell {
+  private createModalShell<D>(modalId: string, config: ResolvedModalConfig<D>, rollback: ModalCleanup[]): ModalShell {
     const container = this.getOrCreateContainer(config.containerSelector);
     const containerElement = this.createModalContainer(modalId, config.zIndex);
+    rollback.push(() => containerElement.remove());
     const backdropElement = this.createBackdropElement(modalId, config);
     const contentWrapper = this.createContentWrapper();
 
@@ -237,7 +277,9 @@ export class DynamicModalService {
 
     if (config.closeOnBackdropClick) {
       backdropElement.addEventListener('click', () => {
-        this.closeById(modalId);
+        if (this.isTopModal(modalId)) {
+          this.closeById(modalId);
+        }
       });
     }
     return backdropElement;
@@ -250,6 +292,7 @@ export class DynamicModalService {
       position: relative;
       z-index: 1;
     `;
+    contentWrapper.tabIndex = -1;
     return contentWrapper;
   }
 
@@ -296,18 +339,19 @@ export class DynamicModalService {
     componentRef: ComponentRef<C>,
     outputs: ModalConfig['outputs'] | undefined,
     closeModal: (result?: R) => void,
-  ): ModalSubscription[] {
-    const subscriptions: ModalSubscription[] = [];
-    this.subscribeConfiguredOutputs(componentRef, outputs, closeModal, subscriptions);
+    modalId: string,
+    subscriptions: ModalSubscription[],
+  ): void {
+    this.subscribeConfiguredOutputs(componentRef, outputs, closeModal, modalId, subscriptions);
     this.subscribeDefaultResultOutput(componentRef, outputs, 'close', closeModal, subscriptions);
     this.subscribeDefaultResultOutput(componentRef, outputs, 'confirm', closeModal, subscriptions);
-    return subscriptions;
   }
 
   private subscribeConfiguredOutputs<C, R>(
     componentRef: ComponentRef<C>,
     outputs: ModalConfig['outputs'] | undefined,
     closeModal: (result?: R) => void,
+    modalId: string,
     subscriptions: ModalSubscription[],
   ): void {
     if (!outputs) {
@@ -323,8 +367,8 @@ export class DynamicModalService {
 
       const subscription = eventName === 'close'
         ? output.subscribe((value: unknown) => {
-          handler(value);
           closeModal(value as R);
+          this.runModalCleanupStep(() => this.runModalSettlement(modalId, () => handler(value)));
         })
         : output.subscribe(handler);
       subscriptions.push(subscription);
@@ -355,6 +399,7 @@ export class DynamicModalService {
     config: ResolvedModalConfig,
     modalId: string,
     closeModal: (result?: R) => void,
+    rollback: ModalCleanup[],
   ): ((e: KeyboardEvent) => void) | undefined {
     if (!config.closeOnEscape) {
       return undefined;
@@ -365,11 +410,11 @@ export class DynamicModalService {
         return;
       }
 
-      const stack = this.modalStack();
-      if (stack.length > 0 && stack[stack.length - 1].id === modalId) {
+      if (this.isTopModal(modalId)) {
         closeModal();
       }
     };
+    rollback.push(() => this.document.removeEventListener('keydown', escapeListener));
     this.document.addEventListener('keydown', escapeListener);
     return escapeListener;
   }
@@ -382,8 +427,23 @@ export class DynamicModalService {
     resolvePromise: (result: R) => void,
     escapeListener: ((e: KeyboardEvent) => void) | undefined,
     subscriptions: ModalSubscription[],
-  ): void {
-    this.modalStack.update(stack => [...stack, {
+    focusTrap: ConfigurableFocusTrap,
+    opener: HTMLElement | null,
+    rollback: ModalCleanup[],
+  ): ModalStackItem {
+    const previousTop = this.getTopModal();
+    const previousTopEnabled = previousTop?.focusTrap.enabled;
+    if (previousTop) {
+      rollback.push(() => {
+        if (this.isTopModal(previousTop.id)) this.setModalParticipation(previousTop, previousTopEnabled ?? true);
+      });
+    }
+    rollback.push(() => { focusTrap.enabled = false; });
+    if (previousTop) {
+      this.setModalParticipation(previousTop, false);
+    }
+    focusTrap.enabled = true;
+    const item: ModalStackItem = {
       id: modalId,
       componentRef,
       backdropElement: shell.backdropElement,
@@ -391,38 +451,106 @@ export class DynamicModalService {
       resolve: resolvePromise as (result: unknown) => void,
       config,
       escapeListener,
-      subscriptions
-    }]);
+      subscriptions,
+      focusTrap,
+      focusRenderRef: null,
+      focusGeneration: 0,
+      contentWrapper: shell.contentWrapper,
+      opener,
+    };
+    rollback.push(() => {
+      this.modalStack.update(stack => stack.filter(entry => entry.id !== modalId));
+    });
+    this.modalStack.update(stack => [...stack, item]);
+    this.stackSettlementGeneration += 1;
+    return item;
   }
 
-  private focusFirstElementOnNextFrame(contentWrapper: HTMLElement): void {
-    requestAnimationFrame(() => {
-      const focusable = contentWrapper.querySelector<HTMLElement>(
-        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
-      );
-      focusable?.focus();
+  private scheduleInitialFocus(item: ModalStackItem): void {
+    const generation = ++item.focusGeneration;
+    item.focusRenderRef = afterNextRender({
+      write: () => {
+        if (generation !== item.focusGeneration) return;
+        item.focusRenderRef = null;
+        this.focusModal(item);
+      },
+    }, { injector: this.injector });
+  }
+
+  private focusModal(item: ModalStackItem): void {
+    if (this.isDestroyed || !this.isTopModal(item.id)) return;
+    const focused = item.focusTrap.focusInitialElement({ preventScroll: true });
+    if (!focused && !this.isDestroyed && this.isTopModal(item.id)) {
+      item.contentWrapper.focus({ preventScroll: true });
+    }
+  }
+
+  private reacquireSurvivingTop(item: ModalStackItem): void {
+    item.focusGeneration += 1;
+    const focusRenderRef = item.focusRenderRef;
+    item.focusRenderRef = null;
+    if (focusRenderRef) {
+      this.runModalCleanupStep(() => focusRenderRef.destroy());
+    }
+    this.runModalCleanupStep(() => {
+      this.setModalParticipation(item, true);
+      this.focusModal(item);
     });
+  }
+
+  private setModalParticipation(item: ModalStackItem, active: boolean): void {
+    item.focusTrap.enabled = active;
+    item.containerElement.inert = !active;
+    if (active) item.containerElement.removeAttribute('aria-hidden');
+    else item.containerElement.setAttribute('aria-hidden', 'true');
   }
 
   /**
    * 通过 ID 关闭模态框
    */
-  private closeById(modalId: string, result?: unknown): void {
+  private closeById(modalId: string, result?: unknown, restoreFocus = true): void {
     const stack = this.modalStack();
     const index = stack.findIndex(item => item.id === modalId);
 
     if (index === -1) return;
 
     const item = stack[index];
-
-    // 先从栈中移除并结算结果，避免组件销毁钩子再次 close 时重入同一项。
-    this.modalStack.update(s => s.filter(m => m.id !== modalId));
-    item.resolve(result);
-
-    this.cleanupModalItem(item);
+    const ownsFocusSettlement = this.focusSettlementDepth++ === 0;
+    try {
+      // 先移除所有权，后续任一回调重入时都只能观察到已结算状态。
+      this.modalStack.update(s => s.filter(m => m.id !== modalId));
+      this.stackSettlementGeneration += 1;
+      this.runModalSettlement(modalId, () => {
+        this.runModalCleanupStep(() => item.resolve(result));
+        this.cleanupModalItem(item);
+        if (!ownsFocusSettlement) return;
+        const nextTop = this.getTopModal();
+        if (nextTop) {
+          if (!nextTop.containerElement.inert && nextTop.focusTrap.enabled) return;
+          if (restoreFocus && this.closeAllFocusSettlementTokens.length === 0) {
+            this.reacquireSurvivingTop(nextTop);
+          } else {
+            this.runModalCleanupStep(() => this.setModalParticipation(nextTop, true));
+          }
+          return;
+        }
+        if (restoreFocus && this.closeAllFocusSettlementTokens.length === 0) {
+          this.restoreConnectedFocus(item.opener);
+        }
+      });
+    } finally {
+      this.focusSettlementDepth -= 1;
+    }
   }
 
   private cleanupModalItem(item: ModalStackItem): void {
+    item.focusGeneration += 1;
+    const focusRenderRef = item.focusRenderRef;
+    item.focusRenderRef = null;
+    if (focusRenderRef) {
+      this.runModalCleanupStep(() => focusRenderRef.destroy());
+    }
+    this.runModalCleanupStep(() => item.focusTrap.destroy());
     for (const sub of item.subscriptions) {
       this.runModalCleanupStep(() => sub.unsubscribe());
     }
@@ -452,10 +580,39 @@ export class DynamicModalService {
     }
   }
 
+  private rollbackModalOpen(rollback: ModalCleanup[]): void {
+    for (let i = rollback.length - 1; i >= 0; i--) {
+      this.runModalCleanupStep(rollback[i]);
+    }
+  }
+
+  private addSubscriptionRollback(rollback: ModalCleanup[], subscriptions: ModalSubscription[]): void {
+    rollback.push(() => {
+      for (let i = subscriptions.length - 1; i >= 0; i--) {
+        this.runModalCleanupStep(() => subscriptions[i].unsubscribe());
+      }
+    });
+  }
+
+  private runModalSettlement(modalId: string, settlement: () => void): void {
+    this.settlementModalIds.push(modalId);
+    try {
+      settlement();
+    } finally {
+      this.settlementModalIds.pop();
+    }
+  }
+
   /**
    * 关闭栈顶模态框
    */
   close<R = unknown>(result?: R): void {
+    if (this.isDestroyed) return;
+    const settlingModalId = this.settlementModalIds[this.settlementModalIds.length - 1];
+    if (settlingModalId) {
+      this.closeById(settlingModalId, result);
+      return;
+    }
     const stack = this.modalStack();
     if (stack.length === 0) return;
 
@@ -467,11 +624,51 @@ export class DynamicModalService {
    * 关闭所有模态框
    */
   closeAll(): void {
-    const stack = this.modalStack();
-    // 从栈顶开始关闭，确保正确的销毁顺序
-    for (let i = stack.length - 1; i >= 0; i--) {
-      this.closeById(stack[i].id);
+    if (this.isDestroyed) return;
+    this.closeAllItems(true);
+  }
+
+  private closeAllItems(restoreFocus: boolean): void {
+    const token = Symbol('close-all-focus-settlement');
+    const ownsFocusSettlement = this.closeAllFocusSettlementTokens.length === 0;
+    this.closeAllFocusSettlementTokens.push(token);
+    try {
+      const stack = this.modalStack();
+      const outerOpener = stack[0]?.opener ?? null;
+      const expectedSettlementGeneration = this.stackSettlementGeneration + stack.length;
+      for (let i = stack.length - 1; i >= 0; i--) {
+        this.closeById(stack[i].id, undefined, false);
+      }
+      if (
+        ownsFocusSettlement
+        && restoreFocus
+        && this.modalStack().length === 0
+        && this.stackSettlementGeneration === expectedSettlementGeneration
+      ) {
+        this.restoreConnectedFocus(outerOpener);
+      }
+    } finally {
+      this.closeAllFocusSettlementTokens.pop();
     }
+  }
+
+  private captureConnectedOpener(): HTMLElement | null {
+    const activeElement = this.document.activeElement;
+    return activeElement instanceof HTMLElement && activeElement.isConnected ? activeElement : null;
+  }
+
+  private restoreConnectedFocus(target: HTMLElement | null): void {
+    if (!target?.isConnected) return;
+    this.runModalCleanupStep(() => target.focus({ preventScroll: true }));
+  }
+
+  private getTopModal(): ModalStackItem | null {
+    const stack = this.modalStack();
+    return stack[stack.length - 1] ?? null;
+  }
+
+  private isTopModal(modalId: string): boolean {
+    return this.getTopModal()?.id === modalId;
   }
 
   /**
