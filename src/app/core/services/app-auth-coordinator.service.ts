@@ -72,11 +72,10 @@ export class AppAuthCoordinatorService {
   private readonly projectDataServiceLazy = createAppAuthLazyServiceSlot<ProjectDataService>();
   private readonly signOutController = new AppAuthSignOutController({
     currentUserId: () => this.auth.currentUserId(),
+    captureAuthIdentityFence: () => this.auth.captureAuthIdentityFence(),
     isAuthConfigured: () => this.auth.isConfigured,
     revokeWidgetBindings: () => this.widgetBinding.revokeAllBindings(),
-    signOutRemoteSession: async () => {
-      await this.auth.signOut();
-    },
+    signOutRemoteSession: () => this.auth.signOut(),
     notifyLocalLogoutServices: () => this.notifyLocalServicesForSignOut(),
     setCurrentUser: (userId, options) => this.userSession.setCurrentUser(userId, options),
     clearAllLocalData: userId => this.userSession.clearAllLocalData(userId),

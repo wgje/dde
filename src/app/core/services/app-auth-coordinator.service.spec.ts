@@ -63,6 +63,7 @@ export function setup(options?: {
   injectorGet?: (token: unknown) => unknown;
 }) {
   const userId = signal<string | null>(null);
+  let authIdentityGeneration = 0;
   const projects = signal<Array<{ id: string; syncSource?: 'local-only' | 'synced' }>>([]);
   const activeProjectId = signal<string | null>(null);
   const eventBus = new EventBusService();
@@ -97,8 +98,13 @@ export function setup(options?: {
   const authMock = {
     isConfigured: true,
     currentUserId: userId,
+    captureAuthIdentityFence: () => `${authIdentityGeneration}:${userId() ?? ''}`,
     sessionEmail: vi.fn(() => null),
-    signOut: vi.fn().mockResolvedValue(undefined),
+    signOut: vi.fn().mockImplementation(async () => {
+      authIdentityGeneration += 1;
+      userId.set(null);
+      return true;
+    }),
     signIn: vi.fn(),
     signUp: vi.fn(),
     checkSession: vi.fn(),
@@ -334,9 +340,6 @@ describe('signOut resilience', () => {
   it('应在本地 userSession teardown 前先完成 Supabase 远端登出', async () => {
     const { service, userSessionMock, authMock, userId, widgetBindingMock } = setup();
     userId.set('user-1');
-    authMock.signOut.mockImplementation(async () => {
-      userId.set(null);
-    });
 
     await expect(service.signOut()).resolves.toBe(true);
 

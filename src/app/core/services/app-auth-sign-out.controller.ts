@@ -11,7 +11,7 @@ export interface AppAuthSignOutControllerOptions {
   currentUserId: () => string | null;
   isAuthConfigured: () => boolean;
   revokeWidgetBindings: () => Promise<Result<unknown, OperationError>>;
-  signOutRemoteSession: () => Promise<void>;
+  signOutRemoteSession: () => Promise<boolean>;
   notifyLocalLogoutServices: () => Promise<void>;
   setCurrentUser: (
     userId: string | null,
@@ -25,22 +25,52 @@ export interface AppAuthSignOutControllerOptions {
   showWarning: (title: string, message: string) => void;
 }
 
+interface AppAuthSignOutControllerInternalOptions extends AppAuthSignOutControllerOptions {
+  captureAuthIdentityFence?: () => string | null;
+}
+
+interface AppAuthSignOutFlight {
+  ownerFence: string | null;
+  ownerUserId: string | null;
+  cleanupFence: string | null;
+  promise: Promise<boolean>;
+}
+
 export class AppAuthSignOutController {
-  constructor(private readonly options: AppAuthSignOutControllerOptions) {}
+  private flight: AppAuthSignOutFlight | null = null;
+  constructor(private readonly options: AppAuthSignOutControllerInternalOptions) {}
 
-  async signOut(): Promise<boolean> {
-    const currentUserId = this.options.currentUserId();
+  signOut(): Promise<boolean> {
+    if (this.flight) return this.flight.promise;
+    const flight = {} as AppAuthSignOutFlight;
+    const ownerUserId = this.options.currentUserId();
+    flight.ownerUserId = ownerUserId;
+    flight.ownerFence = this.captureAuthIdentityFence();
+    flight.cleanupFence = null;
+    this.flight = flight;
+    flight.promise = this.runSignOut(flight)
+      .finally(() => {
+        if (this.flight === flight) this.flight = null;
+      });
+    return flight.promise;
+  }
 
-    if (!await this.revokeWidgetBindingsIfNeeded(currentUserId)) {
+  private async runSignOut(flight: AppAuthSignOutFlight): Promise<boolean> {
+    if (!this.isOwnerCurrent(flight)) return false;
+    if (!await this.revokeWidgetBindingsIfNeeded(flight.ownerUserId)) {
       return false;
     }
+    if (!this.isOwnerCurrent(flight)) return false;
 
-    if (!await this.signOutRemoteSession()) {
-      return false;
-    }
+    if (!await this.signOutRemoteSession()) return false;
+    if (!this.isRemoteResultCurrent(flight)) return false;
+    flight.cleanupFence = this.captureAuthIdentityFence();
 
     await this.notifyLocalLogoutServices();
-    const localCleanupFailed = await this.clearLocalUserData(currentUserId);
+    if (!this.isCleanupCurrent(flight)) return false;
+    const localCleanupFailed = await this.clearLocalUserData(flight);
+    if (!this.isCleanupCurrent(flight)) return false;
+
     this.options.resetAuthFormState();
     this.warnIfLocalCleanupFailed(localCleanupFailed);
     return true;
@@ -74,8 +104,7 @@ export class AppAuthSignOutController {
     }
 
     try {
-      await this.options.signOutRemoteSession();
-      return true;
+      return await this.options.signOutRemoteSession();
     } catch (error) {
       const notice = getSupabaseSignOutFailureNotice();
       this.options.logError(notice.logMessage, error);
@@ -92,10 +121,16 @@ export class AppAuthSignOutController {
     }
   }
 
-  private async clearLocalUserData(currentUserId: string | null): Promise<boolean> {
+  private async clearLocalUserData(flight: AppAuthSignOutFlight): Promise<boolean> {
+    if (!this.isCleanupCurrent(flight)) return false;
+
     try {
       await this.options.setCurrentUser(null, { skipPersistentReload: true });
-      await this.options.clearAllLocalData(currentUserId ?? undefined);
+      const currentUserId = this.options.currentUserId();
+      if (currentUserId !== null && currentUserId !== flight.ownerUserId) return false;
+      flight.cleanupFence = this.captureAuthIdentityFence();
+      if (!this.isCleanupCurrent(flight)) return false;
+      await this.options.clearAllLocalData(flight.ownerUserId ?? undefined);
       return false;
     } catch (error) {
       const notice = getLocalCleanupFailureNotice();
@@ -111,5 +146,35 @@ export class AppAuthSignOutController {
 
     const notice = getLocalCleanupFailureNotice();
     this.options.showWarning(notice.toastTitle, notice.toastMessage);
+  }
+
+  private captureAuthIdentityFence(): string | null {
+    return this.options.captureAuthIdentityFence?.() ?? null;
+  }
+
+  private isCurrentFlight(flight: AppAuthSignOutFlight): boolean {
+    return this.flight === flight;
+  }
+
+  private isOwnerCurrent(flight: AppAuthSignOutFlight): boolean {
+    return this.isCurrentFlight(flight)
+      && flight.ownerFence !== null
+      && this.options.currentUserId() === flight.ownerUserId
+      && this.captureAuthIdentityFence() === flight.ownerFence;
+  }
+
+  private isRemoteResultCurrent(flight: AppAuthSignOutFlight): boolean {
+    if (!this.isCurrentFlight(flight)) return false;
+    if (!this.options.isAuthConfigured()) return true;
+    return this.options.currentUserId() === null
+      && flight.ownerFence !== null
+      && this.captureAuthIdentityFence() !== flight.ownerFence;
+  }
+
+  private isCleanupCurrent(flight: AppAuthSignOutFlight): boolean {
+    if (!this.isCurrentFlight(flight) || flight.cleanupFence === null) return false;
+    const currentUserId = this.options.currentUserId();
+    return (currentUserId === null || currentUserId === flight.ownerUserId)
+      && this.captureAuthIdentityFence() === flight.cleanupFence;
   }
 }
