@@ -127,6 +127,7 @@ export class EventDrivenSyncPulseService {
 
   destroy(): void {
     this.pulseGeneration += 1;
+    this.pulsePromise = null;
     this.lastPulseAt = 0;
     this.teardownListeners();
   }

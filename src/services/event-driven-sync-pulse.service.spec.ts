@@ -11,6 +11,10 @@ import { SessionManagerService } from '../app/core/services/sync/session-manager
 import { STARTUP_PERF_CONFIG } from '../config/startup-performance.config';
 import { FEATURE_FLAGS } from '../config/feature-flags.config';
 import { APP_LIFECYCLE_CONFIG } from '../config/app-lifecycle.config';
+import {
+  clearPulseEventListeners,
+  registerPulseEventListener,
+} from './event-driven-sync-pulse-listener.spec-helpers';
 
 describe('EventDrivenSyncPulseService', () => {
   let service: EventDrivenSyncPulseService;
@@ -122,6 +126,7 @@ describe('EventDrivenSyncPulseService', () => {
   });
 
   afterEach(() => {
+    clearPulseEventListeners();
     destroyEventDrivenSyncPulseService();
     if (typeof vi.clearAllTimers === 'function') {
       vi.clearAllTimers();
@@ -226,33 +231,35 @@ describe('EventDrivenSyncPulseService', () => {
     const listener = (event: Event) => {
       pulseEvents.push((event as CustomEvent<{ status?: string; reason?: string; skipReason?: string }>).detail);
     };
-    window.addEventListener('nanoflow:sync-pulse', listener);
+    const cleanupPulseEventListener = registerPulseEventListener(listener);
 
-    const firstPulse = service.triggerNow('manual');
-    let mergedResult: Awaited<ReturnType<EventDrivenSyncPulseService['triggerNow']>> | undefined;
-    void service.triggerNow('online').then((result) => {
-      mergedResult = result;
-    });
-    await Promise.resolve();
+    try {
+      const firstPulse = service.triggerNow('manual');
+      let mergedResult: Awaited<ReturnType<EventDrivenSyncPulseService['triggerNow']>> | undefined;
+      void service.triggerNow('online').then((result) => {
+        mergedResult = result;
+      });
+      await Promise.resolve();
 
-    expect(mergedResult).toEqual({ status: 'skipped', skipReason: 'in-flight' });
-    resolvePull!();
-    await expect(firstPulse).resolves.toEqual({ status: 'success' });
-    window.removeEventListener('nanoflow:sync-pulse', listener);
-
-    expect(recoverAfterResume).toHaveBeenCalledTimes(1);
-    expect(pulseEvents).toEqual([
-      expect.objectContaining({ status: 'triggered', reason: 'manual' }),
-      expect.objectContaining({ status: 'skipped', reason: 'online', skipReason: 'in-flight' }),
-      expect.objectContaining({ status: 'success', reason: 'manual' }),
-    ]);
-    expect(addBreadcrumb).toHaveBeenCalledWith(expect.objectContaining({
-      message: 'sync.pulse.skipped.in-flight',
-      data: expect.objectContaining({
-        reason: 'online',
-        skipReason: 'in-flight',
-      }),
-    }));
+      expect(mergedResult).toEqual({ status: 'skipped', skipReason: 'in-flight' });
+      resolvePull!();
+      await expect(firstPulse).resolves.toEqual({ status: 'success' });
+      expect(recoverAfterResume).toHaveBeenCalledTimes(1);
+      expect(pulseEvents).toEqual([
+        expect.objectContaining({ status: 'triggered', reason: 'manual' }),
+        expect.objectContaining({ status: 'skipped', reason: 'online', skipReason: 'in-flight' }),
+        expect.objectContaining({ status: 'success', reason: 'manual' }),
+      ]);
+      expect(addBreadcrumb).toHaveBeenCalledWith(expect.objectContaining({
+        message: 'sync.pulse.skipped.in-flight',
+        data: expect.objectContaining({
+          reason: 'online',
+          skipReason: 'in-flight',
+        }),
+      }));
+    } finally {
+      cleanupPulseEventListener();
+    }
   });
 
   it('breadcrumb 记录失败不应阻断同步脉冲执行', async () => {
@@ -696,25 +703,57 @@ describe('EventDrivenSyncPulseService', () => {
     expect(recoverAfterResume).not.toHaveBeenCalled();
   });
 
-  it('destroy 期间仍有在途 pulse 时不应并发启动第二次恢复', async () => {
-    let resolveRecovery: (() => void) | null = null;
-    recoverAfterResume.mockImplementationOnce(() => new Promise<void>((resolve) => {
-      resolveRecovery = resolve;
-    }));
+  it('destroy 后重新 initialize 时应让新代际 pulse 立即运行且不受旧 promise 晚到 settle 污染', async () => {
+    let resolveLegacyRecovery: (() => void) | null = null;
+    let resolveCurrentRecovery: (() => void) | null = null;
+    recoverAfterResume
+      .mockImplementationOnce(() => new Promise<void>((resolve) => {
+        resolveLegacyRecovery = resolve;
+      }))
+      .mockImplementationOnce(() => new Promise<void>((resolve) => {
+        resolveCurrentRecovery = resolve;
+      }));
 
-    const firstPulse = service.triggerNow('manual');
-    await Promise.resolve();
+    const pulseEvents: Array<{ status?: string; reason?: string; skipReason?: string }> = [];
+    const listener = (event: Event) => {
+      pulseEvents.push((event as CustomEvent<{ status?: string; reason?: string; skipReason?: string }>).detail);
+    };
+    const cleanupPulseEventListener = registerPulseEventListener(listener);
 
-    service.destroy();
-    const secondPulse = service.triggerNow('online');
-    await Promise.resolve();
+    try {
+      service.initialize();
+      const legacyPulse = service.triggerNow('manual');
+      await Promise.resolve();
 
-    expect(recoverAfterResume).toHaveBeenCalledTimes(1);
-    await expect(secondPulse).resolves.toEqual({ status: 'skipped', skipReason: 'in-flight' });
+      service.destroy();
+      service.initialize();
 
-    const resolveRecoveryFn = resolveRecovery as (() => void) | null;
-    resolveRecoveryFn?.();
-    await expect(firstPulse).resolves.toEqual({ status: 'skipped', skipReason: 'disabled' });
+      const currentPulse = service.triggerNow('online');
+      await Promise.resolve();
+
+      expect(recoverAfterResume).toHaveBeenCalledTimes(2);
+
+      const resolveLegacyRecoveryFn = resolveLegacyRecovery as (() => void) | null;
+      resolveLegacyRecoveryFn?.();
+      await expect(legacyPulse).resolves.toEqual({ status: 'skipped', skipReason: 'disabled' });
+
+      await expect(service.triggerNow('focus')).resolves.toEqual({ status: 'skipped', skipReason: 'in-flight' });
+      expect(recoverAfterResume).toHaveBeenCalledTimes(2);
+
+      const resolveCurrentRecoveryFn = resolveCurrentRecovery as (() => void) | null;
+      resolveCurrentRecoveryFn?.();
+      await expect(currentPulse).resolves.toEqual({ status: 'success' });
+
+      expect(pulseEvents).toEqual([
+        expect.objectContaining({ status: 'triggered', reason: 'manual' }),
+        expect.objectContaining({ status: 'triggered', reason: 'online' }),
+        expect.objectContaining({ status: 'skipped', reason: 'focus', skipReason: 'in-flight' }),
+        expect.objectContaining({ status: 'success', reason: 'online' }),
+      ]);
+      expect(pulseEvents).not.toContainEqual(expect.objectContaining({ status: 'success', reason: 'manual' }));
+    } finally {
+      cleanupPulseEventListener();
+    }
   });
 
   it('destroy 后应丢弃在途 pulse 的迟到成功副作用', async () => {
@@ -727,23 +766,25 @@ describe('EventDrivenSyncPulseService', () => {
     const listener = (event: Event) => {
       pulseEvents.push((event as CustomEvent<{ status?: string; reason?: string }>).detail);
     };
-    window.addEventListener('nanoflow:sync-pulse', listener);
+    const cleanupPulseEventListener = registerPulseEventListener(listener);
 
-    const pulsePromise = service.triggerNow('manual');
-    await Promise.resolve();
-    service.destroy();
-    const resolveRecoveryFn = resolveRecovery as (() => void) | null;
-    resolveRecoveryFn?.();
-    await pulsePromise;
-    await Promise.resolve();
+    try {
+      const pulsePromise = service.triggerNow('manual');
+      await Promise.resolve();
+      service.destroy();
+      const resolveRecoveryFn = resolveRecovery as (() => void) | null;
+      resolveRecoveryFn?.();
+      await pulsePromise;
+      await Promise.resolve();
 
-    window.removeEventListener('nanoflow:sync-pulse', listener);
-
-    expect(pulseEvents).toEqual([
-      expect.objectContaining({ status: 'triggered', reason: 'manual' }),
-    ]);
-    expect(addBreadcrumb).not.toHaveBeenCalledWith(expect.objectContaining({
-      message: 'sync.pulse.success',
-    }));
+      expect(pulseEvents).toEqual([
+        expect.objectContaining({ status: 'triggered', reason: 'manual' }),
+      ]);
+      expect(addBreadcrumb).not.toHaveBeenCalledWith(expect.objectContaining({
+        message: 'sync.pulse.success',
+      }));
+    } finally {
+      cleanupPulseEventListener();
+    }
   });
 });

@@ -1,5 +1,7 @@
 import type { SyncPulseReason } from '../../../services/sync-pulse-engine.service';
 import type { WorkspaceShellFocusEntrySyncPulseResult } from './workspace-shell-focus-entry-sync-pulse.controller';
+import { WorkspaceShellSyncPulseReadinessController } from './workspace-shell-sync-pulse-readiness.controller';
+import { WorkspaceShellSyncPulseTriggerController } from './workspace-shell-sync-pulse-trigger.controller';
 
 export interface WorkspaceShellSyncPulseLifecycleControllerOptions {
   isDestroyed: () => boolean;
@@ -23,55 +25,44 @@ export interface WorkspaceShellSyncPulseLifecycleControllerOptions {
   warn: (message: string, error: unknown) => void;
 }
 
-interface PendingSyncPulseTrigger {
-  promise: Promise<WorkspaceShellFocusEntrySyncPulseResult | null>;
-  resolve: (result: WorkspaceShellFocusEntrySyncPulseResult | null) => void;
-}
-
 export class WorkspaceShellSyncPulseLifecycleController {
-  private readonly pendingTriggers = new Map<SyncPulseReason, PendingSyncPulseTrigger>();
-  private generation = 0;
+  private readonly readiness: WorkspaceShellSyncPulseReadinessController;
+  private readonly triggerController: WorkspaceShellSyncPulseTriggerController;
   private initialized = false;
   private cleanupCompleted = false;
 
-  constructor(private readonly options: WorkspaceShellSyncPulseLifecycleControllerOptions) {}
-
-  isReady(): boolean {
-    return this.evaluateReadiness(() => {
-      if (this.options.isDestroyed()) {
-        return false;
-      }
-
-      if (!this.options.isEventDrivenSyncPulseEnabled()) {
-        return false;
-      }
-
-      if (!this.options.currentUserId() || !this.options.coreDataLoaded()) {
-        return false;
-      }
-
-      if (!this.options.isOnline()) {
-        return false;
-      }
-
-      if (this.options.isResuming() || this.options.isRecoveryCompensationInFlight()) {
-        return false;
-      }
-
-      if (this.options.isRecoveryTicketDedupEnabled() && this.options.currentRecoveryTicket()) {
-        return false;
-      }
-
-      if (this.options.isTieredStartupHydrationEnabled() && !this.options.isP2Ready()) {
-        return false;
-      }
-
-      return true;
+  constructor(private readonly options: WorkspaceShellSyncPulseLifecycleControllerOptions) {
+    this.readiness = new WorkspaceShellSyncPulseReadinessController({
+      isDestroyed: options.isDestroyed,
+      isEventDrivenSyncPulseEnabled: options.isEventDrivenSyncPulseEnabled,
+      currentUserId: options.currentUserId,
+      coreDataLoaded: options.coreDataLoaded,
+      isOnline: options.isOnline,
+      isResuming: options.isResuming,
+      isRecoveryCompensationInFlight: options.isRecoveryCompensationInFlight,
+      isRecoveryTicketDedupEnabled: options.isRecoveryTicketDedupEnabled,
+      currentRecoveryTicket: options.currentRecoveryTicket,
+      isTieredStartupHydrationEnabled: options.isTieredStartupHydrationEnabled,
+      isP2Ready: options.isP2Ready,
+      focusModeIntentActivated: options.focusModeIntentActivated,
+      warn: options.warn,
+    });
+    this.triggerController = new WorkspaceShellSyncPulseTriggerController({
+      isReady: () => this.readiness.isReady(),
+      trigger: options.trigger,
+      onTriggerStarted: () => {
+        this.cleanupCompleted = false;
+      },
+      warn: options.warn,
     });
   }
 
+  isReady(): boolean {
+    return this.readiness.isReady();
+  }
+
   syncEffect(): void {
-    if (!this.isReadyForEffect()) {
+    if (!this.readiness.isReadyForEffect()) {
       this.destroy();
       return;
     }
@@ -92,10 +83,7 @@ export class WorkspaceShellSyncPulseLifecycleController {
   }
 
   dispatchFocusEntrySyncPulseIfReady(): void {
-    const shouldDispatch = this.evaluateReadiness(() =>
-      this.options.focusModeIntentActivated() && this.isReady(),
-    );
-    if (!shouldDispatch) {
+    if (!this.readiness.shouldDispatchFocusEntrySyncPulse()) {
       return;
     }
 
@@ -107,56 +95,7 @@ export class WorkspaceShellSyncPulseLifecycleController {
   }
 
   async trigger(reason: SyncPulseReason): Promise<WorkspaceShellFocusEntrySyncPulseResult | null> {
-    if (!this.isReady()) {
-      return null;
-    }
-
-    const pendingTrigger = this.pendingTriggers.get(reason);
-    if (pendingTrigger) {
-      return pendingTrigger.promise;
-    }
-
-    const triggerGeneration = this.generation;
-    let resolveTrigger!: (result: WorkspaceShellFocusEntrySyncPulseResult | null) => void;
-    const pendingTriggerRecord: PendingSyncPulseTrigger = {
-      promise: new Promise(resolve => {
-        resolveTrigger = resolve;
-      }),
-      resolve: result => resolveTrigger(result),
-    };
-    this.cleanupCompleted = false;
-    this.pendingTriggers.set(reason, pendingTriggerRecord);
-
-    let baseTriggerPromise: Promise<WorkspaceShellFocusEntrySyncPulseResult | null>;
-    try {
-      baseTriggerPromise = Promise.resolve(this.options.trigger(reason));
-    } catch (error) {
-      this.warn('同步脉冲服务触发失败，跳过本次脉冲', error);
-      baseTriggerPromise = Promise.resolve(null);
-    }
-
-    void baseTriggerPromise
-      .catch(error => {
-        if (triggerGeneration !== this.generation || !this.isReady()) {
-          return null;
-        }
-
-        this.warn('同步脉冲服务触发失败，跳过本次脉冲', error);
-        return null;
-      })
-      .then(result => {
-        const settledResult = triggerGeneration === this.generation && this.isReady()
-          ? result
-          : null;
-        pendingTriggerRecord.resolve(settledResult);
-      })
-      .finally(() => {
-        if (this.pendingTriggers.get(reason) === pendingTriggerRecord) {
-          this.pendingTriggers.delete(reason);
-        }
-      });
-
-    return pendingTriggerRecord.promise;
+    return this.triggerController.trigger(reason);
   }
 
   initialize(): boolean {
@@ -184,16 +123,16 @@ export class WorkspaceShellSyncPulseLifecycleController {
   }
 
   destroy(): void {
-    if (this.cleanupCompleted && !this.initialized && this.pendingTriggers.size === 0) {
+    if (
+      this.cleanupCompleted
+      && !this.initialized
+      && !this.triggerController.hasPendingTriggers()
+    ) {
       return;
     }
 
-    this.generation += 1;
+    this.triggerController.reset();
     this.initialized = false;
-    for (const pendingTrigger of this.pendingTriggers.values()) {
-      pendingTrigger.resolve(null);
-    }
-    this.pendingTriggers.clear();
     try {
       this.options.clearFocusEntrySyncPulseRetry();
     } catch (error) {
@@ -216,31 +155,4 @@ export class WorkspaceShellSyncPulseLifecycleController {
     }
   }
 
-  private evaluateReadiness(check: () => boolean): boolean {
-    try {
-      return check();
-    } catch (error) {
-      this.warn('同步脉冲状态检查失败，已跳过本次脉冲', error);
-      return false;
-    }
-  }
-
-  private isReadyForEffect(): boolean {
-    return this.evaluateReadiness(() => {
-      if (!this.options.isEventDrivenSyncPulseEnabled()) {
-        return false;
-      }
-
-      const userId = this.options.currentUserId();
-      if (!userId || !this.options.coreDataLoaded()) {
-        return false;
-      }
-
-      if (this.options.isTieredStartupHydrationEnabled() && !this.options.isP2Ready()) {
-        return false;
-      }
-
-      return true;
-    });
-  }
 }
