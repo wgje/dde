@@ -1,7 +1,6 @@
 /** SimpleSyncService 门面只做同步编排；新增业务分支应下切到 sync 子服务。 */
 
 import { Injectable, inject, computed, DestroyRef, Injector } from '@angular/core';
-import { SessionRuntimeResetRegistry } from '../../../services/session-runtime-reset.service';
 import { SupabaseClientService } from '../../../services/supabase-client.service';
 import { LoggerService } from '../../../services/logger.service';
 import { ToastService } from '../../../services/toast.service';
@@ -36,10 +35,7 @@ import { nowISO } from '../../../utils/date';
 import type { Result, OperationError } from '../../../utils/result';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { SentryLazyLoaderService } from '../../../services/sentry-lazy-loader.service';
-import {
-  ProjectSaveFlightCoordinatorService,
-  type ProjectSaveResult,
-} from './sync/project-save-flight-coordinator.service';
+import { ProjectSaveFlightCoordinatorService, type ProjectSaveResult } from './sync/project-save-flight-coordinator.service';
 import {
   SyncResumeCoordinatorService,
   type ResumeRecoverOptions,
@@ -66,7 +62,13 @@ import {
   optionalTail,
   taskDeleteOperationTail,
 } from './simple-sync-delegate-tail.helpers';
+import {
+  executeSimpleSyncWithRetryResult,
+  type SimpleSyncExecutionResult,
+} from './simple-sync-execution.helpers';
+import { normalizeSimpleSyncProjectExecutionResult } from './simple-sync-project-execution.helpers';
 import { SimpleSyncRuntimeController } from './simple-sync-runtime.controller';
+import { SessionRuntimeResetRegistry } from '../../../services/session-runtime-reset.service';
 
 export type { ProjectSyncCursor, ProjectSyncCursorEntityType } from '../state/persistence';
 export type { ProjectDeltaDrift } from './sync/project-sync-cursor.service';
@@ -84,9 +86,9 @@ export class SimpleSyncService {
   private readonly clockSync = inject(ClockSyncService);
   private readonly eventBus = inject(EventBusService);
   private readonly destroyRef = inject(DestroyRef);
+  private readonly changeTracker = inject(ChangeTrackerService);
   private readonly sessionRuntimeReset = inject(SessionRuntimeResetRegistry);
   private unregisterSessionRuntimeReset: (() => void) | null = null;
-  private readonly changeTracker = inject(ChangeTrackerService);
 
   // 子服务注入
   private readonly tombstoneService = inject(TombstoneService);
@@ -153,6 +155,8 @@ export class SimpleSyncService {
     state: this.state,
     pushTask: (task, projectId, skipTombstoneCheck, fromRetryQueue, sourceUserId, treatTombstoneAsPermanent, writeIntent, operationId) =>
       this.pushTask(task, projectId, skipTombstoneCheck, fromRetryQueue, sourceUserId, treatTombstoneAsPermanent, writeIntent, operationId),
+    reconcileTaskPushUnknownOutcome: (task, projectId) =>
+      this.taskSyncOps.reconcileTaskPushUnknownOutcome(task, projectId),
     deleteTask: (taskId, projectId, sourceUserId, fromRetryQueue, baseUpdatedAt, operationId) =>
       this.deleteTask(taskId, projectId, sourceUserId, fromRetryQueue, baseUpdatedAt, operationId),
     pushConnection: (connection, projectId, skipTombstoneCheck, skipTaskExistenceCheck, fromRetryQueue, sourceUserId, operationId) =>
@@ -326,8 +330,15 @@ export class SimpleSyncService {
     taskIds: string[],
     tombstoneTimestamps?: Record<string, string | number | null | undefined>,
     baseUpdatedAtMap?: Record<string, string | null | undefined>,
+    operationId?: string,
   ): Promise<number> {
-    return this.taskSyncOps.softDeleteTasksBatch(projectId, taskIds, tombstoneTimestamps, baseUpdatedAtMap);
+    return this.taskSyncOps.softDeleteTasksBatch(
+      projectId,
+      taskIds,
+      tombstoneTimestamps,
+      baseUpdatedAtMap,
+      operationId,
+    );
   }
 
   async purgeTasksFromCloud(projectId: string, taskIds: string[], sourceUserId?: string): Promise<boolean> {
@@ -410,21 +421,20 @@ export class SimpleSyncService {
     sourceUserId?: string,
     writeIntent?: TaskWriteIntent,
     operationId?: string,
-  ): Promise<{ success: boolean; retryEnqueued?: boolean }> {
-    const success = await this.pushTask(
-      task,
-      projectId,
-      skipTombstoneCheck,
-      fromRetryQueue,
-      sourceUserId,
-      false,
-      writeIntent,
-      ...optionalTail(operationId),
+  ): Promise<SimpleSyncExecutionResult> {
+    return executeSimpleSyncWithRetryResult(
+      () => this.pushTask(
+        task,
+        projectId,
+        skipTombstoneCheck,
+        fromRetryQueue,
+        sourceUserId,
+        false,
+        writeIntent,
+        ...optionalTail(operationId),
+      ),
+      () => this.retryEnqueue.hasRetryQueueEntity('task', task.id),
     );
-    return {
-      success,
-      retryEnqueued: !success && this.retryEnqueue.hasRetryQueueEntity('task', task.id),
-    };
   }
 
   private async pushConnectionWithResult(
@@ -436,37 +446,31 @@ export class SimpleSyncService {
     sourceUserId?: string,
     operationId?: string,
     requireSyncRpc = false,
-  ): Promise<{ success: boolean; retryEnqueued?: boolean }> {
-    if (requireSyncRpc) {
-      const success = await this.pushConnection(
-        connection,
-        projectId,
-        skipTombstoneCheck,
-        skipTaskExistenceCheck,
-        fromRetryQueue,
-        sourceUserId,
-        operationId,
-        true,
-      );
-      return {
-        success,
-        retryEnqueued: !success && this.retryEnqueue.hasRetryQueueEntity('connection', connection.id),
-      };
-    }
-
-    const success = await this.pushConnection(
-      connection,
-      projectId,
-      skipTombstoneCheck,
-      skipTaskExistenceCheck,
-      fromRetryQueue,
-      sourceUserId,
-      ...optionalTail(operationId),
+  ): Promise<SimpleSyncExecutionResult> {
+    const execute = requireSyncRpc
+      ? () => this.pushConnection(
+          connection,
+          projectId,
+          skipTombstoneCheck,
+          skipTaskExistenceCheck,
+          fromRetryQueue,
+          sourceUserId,
+          operationId,
+          true,
+        )
+      : () => this.pushConnection(
+          connection,
+          projectId,
+          skipTombstoneCheck,
+          skipTaskExistenceCheck,
+          fromRetryQueue,
+          sourceUserId,
+          ...optionalTail(operationId),
+        );
+    return executeSimpleSyncWithRetryResult(
+      execute,
+      () => this.retryEnqueue.hasRetryQueueEntity('connection', connection.id),
     );
-    return {
-      success,
-      retryEnqueued: !success && this.retryEnqueue.hasRetryQueueEntity('connection', connection.id),
-    };
   }
 
   private async purgeTasksFromCloudWithResult(
@@ -683,9 +687,8 @@ export class SimpleSyncService {
     userId: string,
     taskIdsToDelete?: string[],
     taskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap,
-  ): Promise<{ success: boolean; conflict?: boolean; remoteData?: Project; newVersion?: number; validationWarnings?: string[]; projectPushed?: boolean; failedTaskIds?: string[]; failedConnectionIds?: string[]; retryEnqueued?: string[]; failureReason?: string; terminal?: boolean; partialRetryHandoff?: boolean }> {
-    const result = await this.saveProjectToCloud(project, userId, taskIdsToDelete, taskDeleteBaseUpdatedAtMap);
-    return { ...result, newVersion: result.newVersion ?? project.version };
+  ): Promise<ProjectSaveResult> {
+    return normalizeSimpleSyncProjectExecutionResult(await this.saveProjectToCloud(project, userId, taskIdsToDelete, taskDeleteBaseUpdatedAtMap), project.version);
   }
 
   async loadFullProjectOptimized(projectId: string, expectedUserId?: string): Promise<Project | null> { return this.projectDataService.loadFullProjectOptimized(projectId, expectedUserId); }

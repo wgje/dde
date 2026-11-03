@@ -46,6 +46,7 @@ describe('SimpleSyncRuntimeController', () => {
       add: vi.fn().mockReturnValue(true),
       startLoop: vi.fn(),
       stopLoop: vi.fn(),
+      processQueue: vi.fn().mockResolvedValue(undefined),
       setOperationHandler: vi.fn(),
       hasSuccessfulDrainFlag: vi.fn().mockReturnValue(false),
       clearSuccessfulDrainFlag: vi.fn(),
@@ -156,36 +157,6 @@ describe('SimpleSyncRuntimeController', () => {
     expect(deps.connectivityRecovery.cancelScheduledRecovery).toHaveBeenCalledTimes(1);
   });
 
-  it('停止后已捕获的 online/offline 回调不应继续修改同步状态', () => {
-    const listeners: {
-      online?: EventListenerOrEventListenerObject;
-      offline?: EventListenerOrEventListenerObject;
-    } = {};
-    const removeListener = window.removeEventListener.bind(window);
-    vi.spyOn(window, 'removeEventListener').mockImplementation((type, listener, options) => {
-      if (type === 'online') listeners.online = listener;
-      if (type === 'offline') listeners.offline = listener;
-      removeListener(type, listener, options);
-    });
-
-    controller.startRuntime();
-    controller.stopRuntime();
-    vi.mocked(deps.syncStateService.setOnline).mockClear();
-
-    const onlineListener = listeners.online;
-    const offlineListener = listeners.offline;
-    if (typeof onlineListener === 'function') onlineListener(new Event('online'));
-    else onlineListener?.handleEvent(new Event('online'));
-    if (typeof offlineListener === 'function') offlineListener(new Event('offline'));
-    else offlineListener?.handleEvent(new Event('offline'));
-
-    expect(deps.syncStateService.setOnline).not.toHaveBeenCalled();
-    expect(deps.syncStateService.setOfflineMode).not.toHaveBeenCalled();
-    expect(deps.connectivityRecovery.cancelScheduledRecovery).not.toHaveBeenCalled();
-    expect(deps.connectivityRecovery.restoreRemoteConnectivity).not.toHaveBeenCalled();
-    expect(deps.realtimePollingService.suspendTransport).not.toHaveBeenCalled();
-  });
-
   it('stopRuntime 后迟到的 Supabase connectivity 回调不应再改写同步状态或恢复链', () => {
     type ConnectivityCallback = (change: { offline: boolean; source: 'request' | 'realtime' }) => void;
     let connectivityCallback: ConnectivityCallback | null = null;
@@ -233,35 +204,103 @@ describe('SimpleSyncRuntimeController', () => {
     expect(deps.realtimePollingService.resetRealtimeCircuit).toHaveBeenCalledTimes(1);
   });
 
+  it('同页 session restore 应重启已停掉的 retry loop 并继续派发在线 pending queue', async () => {
+    vi.useFakeTimers();
+    const sessionRestored$ = deps.eventBus.onSessionRestored$ as unknown as Subject<void>;
+    const retryQueue = deps.retryQueueService;
+    let pendingCount = 1;
+    let retryTimer: ReturnType<typeof setInterval> | null = null;
+
+    Object.defineProperty(retryQueue, 'length', {
+      configurable: true,
+      get: () => pendingCount,
+    });
+    vi.mocked(retryQueue.startLoop).mockImplementation((intervalMs = 5000) => {
+      if (retryTimer !== null) {
+        clearInterval(retryTimer);
+      }
+      retryTimer = setInterval(() => {
+        if (deps.state().isOnline && !deps.supabase.isOfflineMode() && retryQueue.length > 0) {
+          void retryQueue.processQueue();
+        }
+      }, intervalMs);
+    });
+    vi.mocked(retryQueue.stopLoop).mockImplementation(() => {
+      if (retryTimer !== null) {
+        clearInterval(retryTimer);
+        retryTimer = null;
+      }
+    });
+
+    try {
+      controller.setupSyncStateListeners();
+      controller.startRuntime();
+      retryQueue.stopLoop();
+      vi.mocked(retryQueue.startLoop).mockClear();
+      vi.mocked(retryQueue.processQueue).mockClear();
+
+      sessionRestored$.next();
+
+      expect(retryQueue.startLoop).toHaveBeenCalledOnce();
+      expect(retryQueue.startLoop).toHaveBeenCalledWith(5000);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(retryQueue.processQueue).toHaveBeenCalledTimes(2);
+
+      sessionRestored$.next();
+      expect(retryQueue.startLoop).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(retryQueue.processQueue).toHaveBeenCalledTimes(3);
+
+      pendingCount = 0;
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(retryQueue.processQueue).toHaveBeenCalledTimes(3);
+
+      pendingCount = 1;
+      vi.mocked(deps.state).mockReturnValue({ isOnline: false } as ReturnType<typeof deps.state>);
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(retryQueue.processQueue).toHaveBeenCalledTimes(3);
+    } finally {
+      controller.stopRuntime();
+      vi.useRealTimers();
+    }
+  });
+
   it('stopRuntime 清理网络监听失败时仍应停止重试循环和 realtime runtime', () => {
     const cleanupError = new Error('remove listener failed');
-    const originalRemoveEventListener = window.removeEventListener.bind(window);
-    vi.spyOn(window, 'removeEventListener').mockImplementationOnce((...args: Parameters<typeof window.removeEventListener>) => {
-      originalRemoveEventListener(...args);
+    const removeEventListenerSpy = vi.spyOn(window, 'removeEventListener').mockImplementation(() => {
       throw cleanupError;
     });
 
     controller.startRuntime();
+    try {
+      expect(() => controller.stopRuntime()).not.toThrow();
 
-    expect(() => controller.stopRuntime()).not.toThrow();
+      expect(deps.connectivityRecovery.stopRuntime).toHaveBeenCalledTimes(1);
+      expect(deps.retryQueueService.stopLoop).toHaveBeenCalledTimes(1);
+      expect(deps.realtimePollingService.teardownRuntime).toHaveBeenCalledTimes(1);
+      expect(deps.logger.warn).toHaveBeenCalledWith(
+        '同步运行时网络监听清理失败，已继续停止其他运行时资源',
+        cleanupError,
+      );
 
-    expect(deps.connectivityRecovery.stopRuntime).toHaveBeenCalledTimes(1);
-    expect(deps.retryQueueService.stopLoop).toHaveBeenCalledTimes(1);
-    expect(deps.realtimePollingService.teardownRuntime).toHaveBeenCalledTimes(1);
-    expect(deps.logger.warn).toHaveBeenCalledWith(
-      '同步运行时网络监听清理失败，已继续停止其他运行时资源',
-      cleanupError,
-    );
+      vi.mocked(deps.syncStateService.setOnline).mockClear();
+      vi.mocked(deps.syncStateService.setOfflineMode).mockClear();
+      vi.mocked(deps.connectivityRecovery.cancelScheduledRecovery).mockClear();
+      vi.mocked(deps.connectivityRecovery.restoreRemoteConnectivity).mockClear();
+      vi.mocked(deps.realtimePollingService.suspendTransport).mockClear();
+      window.dispatchEvent(new Event('online'));
+      window.dispatchEvent(new Event('offline'));
 
-    vi.mocked(deps.syncStateService.setOnline).mockClear();
-    vi.mocked(deps.connectivityRecovery.cancelScheduledRecovery).mockClear();
-    window.dispatchEvent(new Event('online'));
-    window.dispatchEvent(new Event('offline'));
-
-    expect(deps.syncStateService.setOnline).not.toHaveBeenCalledWith(true);
-    expect(deps.syncStateService.setOnline).not.toHaveBeenCalledWith(false);
-    expect(deps.connectivityRecovery.cancelScheduledRecovery).not.toHaveBeenCalled();
-    expect(deps.connectivityRecovery.restoreRemoteConnectivity).not.toHaveBeenCalled();
+      expect(deps.syncStateService.setOnline).not.toHaveBeenCalled();
+      expect(deps.syncStateService.setOfflineMode).not.toHaveBeenCalled();
+      expect(deps.connectivityRecovery.cancelScheduledRecovery).not.toHaveBeenCalled();
+      expect(deps.connectivityRecovery.restoreRemoteConnectivity).not.toHaveBeenCalled();
+      expect(deps.realtimePollingService.suspendTransport).not.toHaveBeenCalled();
+    } finally {
+      removeEventListenerSpy.mockRestore();
+      controller.startRuntime();
+      controller.stopRuntime();
+    }
   });
 
   it('rolls back partial runtime startup after initialization fails so startup can be retried', () => {

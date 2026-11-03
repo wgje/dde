@@ -734,18 +734,49 @@ describe('SimpleSyncService', () => {
     expect(mockRealtimePolling.teardownRuntime).toHaveBeenCalledOnce();
   });
 
-  it('listProjectHeadsSince 应向探针传递固定上限水位', async () => {
-    const listProjectHeadsSince = vi.fn().mockResolvedValue(null);
-    Reflect.set(service, 'projectDataService', { listProjectHeadsSince });
+  it('BatchSync 任务回调应保持成功短路与失败重试结果映射', async () => {
+    const task = createMockTask({ id: 'task-execution-result' });
+    const batchSync = testInjector.get(BatchSyncService) as unknown as {
+      setCallbacks: ReturnType<typeof vi.fn>;
+    };
+    const callbacks = batchSync.setCallbacks.mock.calls[0]?.[0] as Parameters<BatchSyncService['setCallbacks']>[0];
+    const pushTask = vi.spyOn(service, 'pushTask');
+    const hasRetryQueueEntity = vi.spyOn(
+      testInjector.get(RetryQueueEnqueueService),
+      'hasRetryQueueEntity',
+    );
 
-    await expect(service.listProjectHeadsSince(
-      '2026-02-15T08:00:00.000Z',
-      '2026-02-15T08:20:00.000Z',
-    )).resolves.toBeNull();
+    pushTask.mockResolvedValueOnce(true);
+    await expect(callbacks.pushTask(task, 'project-1')).resolves.toEqual({
+      success: true,
+      retryEnqueued: false,
+    });
+    expect(hasRetryQueueEntity).not.toHaveBeenCalled();
 
-    expect(listProjectHeadsSince).toHaveBeenCalledWith(
-      '2026-02-15T08:00:00.000Z',
-      '2026-02-15T08:20:00.000Z',
+    pushTask.mockResolvedValueOnce(false);
+    hasRetryQueueEntity.mockReturnValueOnce(true);
+    await expect(callbacks.pushTask(task, 'project-1')).resolves.toEqual({
+      success: false,
+      retryEnqueued: true,
+    });
+    expect(hasRetryQueueEntity).toHaveBeenCalledOnce();
+    expect(hasRetryQueueEntity).toHaveBeenCalledWith('task', task.id);
+  });
+
+  it('softDeleteTasksBatch 应向任务同步子服务透传 operationId', async () => {
+    const operationId = '00000000-0000-4000-8000-000000000444';
+    const softDeleteTasksBatch = vi.fn().mockResolvedValue(1);
+    Reflect.set(service, 'taskSyncOps', { softDeleteTasksBatch });
+
+    await expect(service.softDeleteTasksBatch('project-1', ['task-1'], undefined, undefined, operationId))
+      .resolves.toBe(1);
+
+    expect(softDeleteTasksBatch).toHaveBeenCalledWith(
+      'project-1',
+      ['task-1'],
+      undefined,
+      undefined,
+      operationId,
     );
   });
 

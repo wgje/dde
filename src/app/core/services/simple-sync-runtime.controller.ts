@@ -15,7 +15,9 @@ import type {
   ConnectivityRecoveryService,
   RealtimePollingService,
   RetryOperationHandler,
+  RetryQueueItem,
   RetryQueueService,
+  RetryQueueUnknownOutcomeReconcileResult,
   SyncStateService,
   TaskDeleteBaseUpdatedAtMap,
 } from './sync';
@@ -44,6 +46,11 @@ export interface SimpleSyncRuntimeControllerDeps {
     writeIntent?: TaskWriteIntent,
     operationId?: string,
   ) => Promise<boolean>;
+  /** unknown-outcome（timeout/abort）task upsert 重放前对账；服务端已含本次写则结算不重放。 */
+  reconcileTaskPushUnknownOutcome: (
+    task: Task,
+    projectId: string,
+  ) => Promise<RetryQueueUnknownOutcomeReconcileResult>;
   deleteTask: (
     taskId: string,
     projectId: string,
@@ -127,6 +134,7 @@ export class SimpleSyncRuntimeController {
       if (!this.runtimeStarted) {
         return;
       }
+      this.deps.retryQueueService.startLoop(5000);
       this.deps.resetSessionExpired();
       void this.deps.realtimePollingService.resetRealtimeCircuit('session-restored');
     });
@@ -153,6 +161,7 @@ export class SimpleSyncRuntimeController {
     const retryHandler: RetryOperationHandler = {
       pushTask: (task, pid, sourceUserId, writeIntent, operationId) =>
         this.deps.pushTask(task, pid, false, true, sourceUserId, false, writeIntent, operationId),
+      reconcileUnknownOutcome: (item) => this.reconcileUnknownOutcomeRetryItem(item),
       deleteTask: (tid, pid, sourceUserId, fromRetryQueue, baseUpdatedAt, operationId) =>
         this.deps.deleteTask(tid, pid, sourceUserId, fromRetryQueue ?? true, baseUpdatedAt, operationId),
       pushProject: (project, sourceUserId, taskIdsToDelete, taskDeleteBaseUpdatedAtMap, operationId) =>
@@ -263,6 +272,20 @@ export class SimpleSyncRuntimeController {
     this.teardownNetworkListeners();
     this.deps.retryQueueService.stopLoop();
     this.deps.realtimePollingService.teardownRuntime();
+  }
+
+  /**
+   * unknown-outcome 重放前对账入口：当前仅 task upsert 具备 REST 层 updated_at 对账实现；
+   * 其余实体（project/connection/blackbox）返回 `replay`，由 sync RPC 的 operationId
+   * payload-digest replay guard 保证重放幂等（保持既有语义不变）。
+   */
+  private async reconcileUnknownOutcomeRetryItem(
+    item: RetryQueueItem,
+  ): Promise<RetryQueueUnknownOutcomeReconcileResult> {
+    if (item.type !== 'task' || item.operation !== 'upsert' || !item.projectId) {
+      return 'replay';
+    }
+    return await this.deps.reconcileTaskPushUnknownOutcome(item.data as Task, item.projectId);
   }
 
   private async handleProjectRetry(

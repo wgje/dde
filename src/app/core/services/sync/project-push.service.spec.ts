@@ -11,7 +11,6 @@ import { SyncRpcClientService } from '../../../../services/sync-rpc-client.servi
 import { ToastService } from '../../../../services/toast.service';
 import { ProjectDataService } from './project-data.service';
 import { ProjectPushRpcResultHandlerService } from './project-push-rpc-result-handler.service';
-import { ProjectPushDirectPersistenceController } from './project-push-direct-persistence.controller';
 import { ProjectPushService } from './project-push.service';
 import type { DurableRetryHandler } from './project-push.types';
 import { SessionManagerService } from './session-manager.service';
@@ -45,7 +44,7 @@ function createSupabaseClient(userId: string): SupabaseClient {
 }
 
 describe('ProjectPushService', () => {
-  it('pushProjectWithResult 缺少 operationId 时应先 durable retry 而不是 direct upsert', async () => {
+  it('pushProjectWithResult 缺少 operationId 时应先 durable retry 且不调用 RPC', async () => {
     const loggerCategory = {
       info: vi.fn(),
       warn: vi.fn(),
@@ -54,9 +53,6 @@ describe('ProjectPushService', () => {
     };
     const durableRetryHandler = vi.fn<DurableRetryHandler>().mockResolvedValue(true);
     const rpcResultHandler = { handle: vi.fn() };
-    const directPushSpy = vi
-      .spyOn(ProjectPushDirectPersistenceController.prototype, 'pushProject')
-      .mockResolvedValue(true);
     const syncState = {
       sessionExpired: false,
       lastSyncTime: '2026-06-29T00:00:00.000Z',
@@ -143,7 +139,6 @@ describe('ProjectPushService', () => {
       retryEnqueued: true,
       failureReason: 'project sync queued for retry',
     });
-    expect(directPushSpy).not.toHaveBeenCalled();
     expect(rpcResultHandler.handle).not.toHaveBeenCalled();
     expect(durableRetryHandler).toHaveBeenCalledWith(
       'project',
@@ -156,7 +151,6 @@ describe('ProjectPushService', () => {
       undefined,
       expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i),
     );
-    directPushSpy.mockRestore();
   });
 
   it('pushProjectWithResult 遇到已拒绝的 sync RPC client 且已有 operationId 时应入 durable retry', async () => {

@@ -11,6 +11,7 @@ import type { Project } from './simple-sync.service.spec-context';
 import { registerSimpleSyncCoreRpcCursorSpecs } from './simple-sync-core-rpc-cursor.spec-helpers';
 import { registerSimpleSyncCoreRpcInitializationSpecs } from './simple-sync-core-rpc-initialization.spec-helpers';
 import { DataSafetyAuditPersistence } from '../../../services/data-safety-audit-persistence';
+import { isRetryDeferredError } from '../../../utils/retry-deferred-error';
 
 export interface SimpleSyncCoreRpcSpecContext {
   service(): any;
@@ -196,6 +197,29 @@ export function registerSimpleSyncCoreRpcSpecs(context: SimpleSyncCoreRpcSpecCon
         );
       });
 
+      it('RetryQueue 回放 project upsert 遇到 sync RPC 不可用时应受控延后且禁止 projects table upsert', async () => {
+        const project = createMockProject({
+          id: 'project-rpc-unavailable-retry-deferred',
+          updatedAt: '2026-07-15T05:00:00.000Z',
+        });
+        const operationId = '00000000-0000-4000-8000-000000000406';
+        mockSyncRpcClient.isFeatureEnabled.mockReturnValue(false);
+        mockSyncRpcClient.checkProtocol.mockResolvedValueOnce(null);
+
+        await expect(service.pushProject(
+          project,
+          true,
+          'test-user-id',
+          undefined,
+          undefined,
+          operationId,
+        )).rejects.toSatisfy(isRetryDeferredError);
+
+        expect(mockSyncRpcClient.upsertProject).not.toHaveBeenCalled();
+        expect(mockClient.from).not.toHaveBeenCalledWith('projects');
+        expect(mockRetryQueueService.addDurably).not.toHaveBeenCalled();
+      });
+
       it('pushProject sync RPC 成功后应持久化最近写入解释和 replay entry', async () => {
         const operationId = 'op-project-rpc-audit';
         const serverUpdatedAt = '2026-06-16T02:00:05.000Z';
@@ -270,171 +294,6 @@ export function registerSimpleSyncCoreRpcSpecs(context: SimpleSyncCoreRpcSpecCon
           baseUpdatedAt: '2026-04-30T05:30:00.000Z',
         }));
         expect(mockClient.from).not.toHaveBeenCalledWith('projects');
-      });
-
-      it('pushProject 直接 upsert 成功后应把服务端 canonical updated_at 写回本地项目', async () => {
-        const operationId = 'op-project-direct-canonical';
-        const serverUpdatedAt = '2026-04-30T06:15:00.000Z';
-        mockSyncRpcClient.isFeatureEnabled.mockReturnValue(false);
-        const projectsQueryMock = {
-          select: vi.fn(() => ({
-            eq: vi.fn(() => ({
-              eq: vi.fn(() => ({
-                maybeSingle: vi.fn(async () => ({ data: null, error: null })),
-              })),
-            })),
-          })),
-          insert: vi.fn((payload: Record<string, unknown>) => ({
-            select: vi.fn(() => ({
-              maybeSingle: vi.fn(async () => ({
-                data: { updated_at: serverUpdatedAt },
-                error: null,
-                payload,
-              })),
-            })),
-          })),
-          update: vi.fn(),
-        };
-        mockClient.from = vi.fn().mockImplementation((table: string) => {
-          if (table === 'projects') return projectsQueryMock;
-          return {};
-        });
-        const project = createMockProject({
-          id: 'project-direct-canonical',
-          updatedAt: '2026-04-30T05:00:00.000Z',
-        });
-        mockProjectStore.getProject.mockReturnValueOnce(project);
-
-        const result = await service.pushProject(project, true, 'test-user-id', undefined, undefined, operationId);
-
-        expect(result).toBe(true);
-        expect(project.updatedAt).toBe(serverUpdatedAt);
-        expect(mockProjectStore.setProject).toHaveBeenCalledWith(expect.objectContaining({
-          id: 'project-direct-canonical',
-          updatedAt: serverUpdatedAt,
-        }));
-        const payload = projectsQueryMock.insert.mock.calls[0]?.[0] as Record<string, unknown>;
-        expect(payload['updated_at']).toBeUndefined();
-      });
-
-      it('pushProject 直接 upsert 前若远端项目更新更晚则应抛出版本冲突并阻止覆盖', async () => {
-        const operationId = 'op-project-direct-conflict';
-        mockSyncRpcClient.isFeatureEnabled.mockReturnValue(false);
-        const projectsQueryMock = {
-          select: vi.fn(() => ({
-            eq: vi.fn(() => ({
-              eq: vi.fn(() => ({
-                maybeSingle: vi.fn(async () => ({
-                  data: {
-                    id: 'project-direct-conflict',
-                    updated_at: '2026-04-30T06:45:00.000Z',
-                    deleted_at: null,
-                  },
-                  error: null,
-                })),
-              })),
-            })),
-          })),
-          upsert: vi.fn(),
-          insert: vi.fn(),
-          update: vi.fn(),
-        };
-        mockClient.from = vi.fn().mockImplementation((table: string) => {
-          if (table === 'projects') return projectsQueryMock;
-          return {};
-        });
-        const project = createMockProject({
-          id: 'project-direct-conflict',
-          updatedAt: '2026-04-30T05:00:00.000Z',
-        });
-
-        await expect(service.pushProject(project, true, 'test-user-id', undefined, undefined, operationId))
-          .rejects.toBeInstanceOf(PermanentFailureError);
-
-        expect(projectsQueryMock.insert).not.toHaveBeenCalled();
-        expect(projectsQueryMock.update).not.toHaveBeenCalled();
-        expect(mockRetryQueueService.addDurably).not.toHaveBeenCalled();
-      });
-
-      it('pushProject 直接写入在 preflight 后发生并发更新时应抛出版本冲突', async () => {
-        const operationId = 'op-project-direct-cas-miss';
-        mockSyncRpcClient.isFeatureEnabled.mockReturnValue(false);
-        const projectsQueryMock = {
-          select: vi.fn(() => ({
-            eq: vi.fn(() => ({
-              eq: vi.fn(() => ({
-                maybeSingle: vi.fn(async () => ({
-                  data: {
-                    id: 'project-direct-cas-miss',
-                    updated_at: '2026-04-30T06:15:00.000Z',
-                    deleted_at: null,
-                  },
-                  error: null,
-                })),
-              })),
-            })),
-          })),
-          update: vi.fn(() => ({
-            eq: vi.fn(() => ({
-              eq: vi.fn(() => ({
-                eq: vi.fn(() => ({
-                  select: vi.fn(() => ({
-                    maybeSingle: vi.fn(async () => ({ data: null, error: null })),
-                  })),
-                })),
-              })),
-            })),
-          })),
-          insert: vi.fn(),
-        };
-        mockClient.from = vi.fn().mockImplementation((table: string) => {
-          if (table === 'projects') return projectsQueryMock;
-          return {};
-        });
-        const project = createMockProject({
-          id: 'project-direct-cas-miss',
-          updatedAt: '2026-04-30T06:15:00.000Z',
-        });
-
-        await expect(service.pushProject(project, true, 'test-user-id', undefined, undefined, operationId))
-          .rejects.toBeInstanceOf(PermanentFailureError);
-
-        expect(projectsQueryMock.insert).not.toHaveBeenCalled();
-        expect(mockRetryQueueService.addDurably).not.toHaveBeenCalled();
-      });
-
-      it('pushProject 直接 insert 在写回未返回行时应抛出版本冲突，避免 406 冒泡', async () => {
-        const operationId = 'op-project-direct-insert-empty';
-        mockSyncRpcClient.isFeatureEnabled.mockReturnValue(false);
-        const projectsQueryMock = {
-          select: vi.fn(() => ({
-            eq: vi.fn(() => ({
-              eq: vi.fn(() => ({
-                maybeSingle: vi.fn(async () => ({ data: null, error: null })),
-              })),
-            })),
-          })),
-          insert: vi.fn(() => ({
-            select: vi.fn(() => ({
-              maybeSingle: vi.fn(async () => ({ data: null, error: null })),
-            })),
-          })),
-          update: vi.fn(),
-        };
-        mockClient.from = vi.fn().mockImplementation((table: string) => {
-          if (table === 'projects') return projectsQueryMock;
-          return {};
-        });
-        const project = createMockProject({
-          id: 'project-direct-insert-empty',
-          updatedAt: '2026-04-30T05:00:00.000Z',
-        });
-
-        await expect(service.pushProject(project, true, 'test-user-id', undefined, undefined, operationId))
-          .rejects.toBeInstanceOf(PermanentFailureError);
-
-        expect(projectsQueryMock.insert).toHaveBeenCalled();
-        expect(mockRetryQueueService.addDurably).not.toHaveBeenCalled();
       });
 
       it('pushProject 命中 remote-newer 时应抛出版本冲突而不是写入 RetryQueue', async () => {

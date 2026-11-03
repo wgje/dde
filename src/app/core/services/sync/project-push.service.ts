@@ -1,7 +1,7 @@
 /**
  * ProjectPushService
  *
- * 从 SimpleSyncService「下切」出的「项目推送」链路（sync RPC + 直连兜底 + 会话刷新重试）。
+ * 从 SimpleSyncService「下切」出的「项目推送」链路（sync RPC + 耐久重试 + 会话刷新重试）。
  *
  * 职责单一：
  * - pushProject 全链路：单飞外的项目 upsert（CAS / sync RPC）+ 冲突判定 + 重试入队
@@ -36,13 +36,13 @@ import {
   type EnhancedError,
 } from '../../../../utils/supabase-error';
 import { PermanentFailureError, isPermanentFailureError } from '../../../../utils/permanent-failure-error';
+import { createRetryDeferredError, isRetryDeferredError } from '../../../../utils/retry-deferred-error';
 import { createSyncOperationId } from '../../../../utils/sync-operation-id';
 import { REQUEST_THROTTLE_CONFIG } from '../../../../config/sync.config';
 import {
   createProjectRpcTerminalError as buildProjectRpcTerminalError,
   createProjectPersistenceTerminalError as buildProjectPersistenceTerminalError,
 } from './sync-project-errors';
-import { ProjectPushDirectPersistenceController } from './project-push-direct-persistence.controller';
 import {
   createProjectPushRetryContext,
 } from './project-push-retry-context';
@@ -74,11 +74,6 @@ export class ProjectPushService {
   private readonly syncRpcClient = inject(SyncRpcClientService, { optional: true });
   private readonly projectStore = inject(ProjectStore, { optional: true });
   private readonly rpcResultHandler = inject(ProjectPushRpcResultHandlerService);
-  private readonly directPersistence = new ProjectPushDirectPersistenceController({
-    clockSync: this.clockSync,
-    normalizeLocalProjectUpdatedAt: (project, serverUpdatedAt) =>
-      this.normalizeLocalProjectUpdatedAt(project, serverUpdatedAt),
-  });
 
   /** 由 SimpleSyncService 构造期注入（避免循环 DI）。 */
   getSupabaseClientHandler: GetSupabaseClientHandler | null = null;
@@ -268,7 +263,6 @@ export class ProjectPushService {
       }
 
       return await this.doProjectPush(
-        client,
         project,
         sourceUserId ?? sessionUserId,
         fromRetryQueue,
@@ -303,6 +297,9 @@ export class ProjectPushService {
     retryContext: ProjectPushRetryContext,
     executeProjectPush: ProjectPushExecutor,
   ): Promise<ProjectPushStatus> {
+    if (isRetryDeferredError(error)) {
+      throw error;
+    }
     if (isPermanentFailureError(error)) {
       throw error;
     }
@@ -358,6 +355,9 @@ export class ProjectPushService {
     project: Project,
     retryContext: ProjectPushRetryContext,
   ): Promise<ProjectPushStatus> {
+    if (isRetryDeferredError(retryError)) {
+      throw retryError;
+    }
     if (isPermanentFailureError(retryError)) {
       throw retryError;
     }
@@ -639,7 +639,6 @@ export class ProjectPushService {
    * 执行项目 upsert 操作（内部方法，由 pushProjectWithStatus 调用）
    */
   private async doProjectPush(
-    client: SupabaseClient,
     project: Project,
     userId: string,
     fromRetryQueue = false,
@@ -673,12 +672,14 @@ export class ProjectPushService {
       );
     }
 
-    if (!fromRetryQueue) {
-      await enqueueRetry?.();
-      return false;
+    if (fromRetryQueue) {
+      throw createRetryDeferredError(
+        'Project sync RPC is unavailable; keeping the original RetryQueue item.',
+      );
     }
 
-    return await this.pushProjectViaDirectUpsert(client, project, userId);
+    await enqueueRetry?.();
+    return false;
   }
 
   private async pushProjectViaSyncRpc(
@@ -716,11 +717,4 @@ export class ProjectPushService {
     );
   }
 
-  private async pushProjectViaDirectUpsert(
-    client: SupabaseClient,
-    project: Project,
-    userId: string,
-  ): Promise<boolean> {
-    return await this.directPersistence.pushProject(client, project, userId);
-  }
 }

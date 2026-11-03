@@ -23,6 +23,7 @@ export { RetryQueueService } from './retry-queue.service';
 export type {
   RetryQueueItem,
   RetryQueueLastFailure,
+  RetryQueueUnknownOutcomeReconcileResult,
   RetryableEntityType,
   RetryableOperation,
   RetryOperationHandler,
