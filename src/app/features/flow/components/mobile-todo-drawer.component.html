@@ -86,6 +86,7 @@
                 (contextmenu)="onContextMenu($event)"
                 (click)="onTaskClick(task)"
                 class="unassigned-chip w-full px-2 py-1.5 bg-white/60 dark:bg-stone-800/80 border border-stone-200/50 dark:border-stone-600/50 rounded-md text-[11px] font-medium hover:border-teal-300 dark:hover:border-teal-600 hover:text-teal-700 dark:hover:text-teal-300 cursor-grab active:cursor-grabbing shadow-sm transition-all active:scale-95 text-stone-600 dark:text-stone-300 select-none flex items-center gap-2"
+                [attr.data-unassigned-task-id]="task.id"
                 [class.bg-teal-100]="draggingTaskId() === task.id"
                 [class.dark:bg-teal-800]="draggingTaskId() === task.id"
                 [class.border-teal-400]="draggingTaskId() === task.id">

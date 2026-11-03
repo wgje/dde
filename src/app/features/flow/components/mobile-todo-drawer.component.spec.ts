@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
 import {
   Injector,
   NgZone,
@@ -53,6 +56,29 @@ const createTouchEndEvent = (clientX: number, clientY: number): TouchEvent => ({
   stopPropagation: vi.fn(),
 } as unknown as TouchEvent);
 
+function createProjectStateHarness(tasks: Task[] = []) {
+  const unassignedTasks = signal(tasks);
+  let projectId = 'project-A';
+  let generation = 0;
+  const service = {
+    unfinishedItems: signal<Task[]>([]),
+    unassignedTasks,
+    activeProjectId: vi.fn(() => projectId),
+    captureActiveProjectOwner: vi.fn(() => ({ projectId, generation })),
+    isActiveProjectOwnerCurrent: vi.fn((owner: { projectId: string; generation: number }) =>
+      owner.projectId === projectId && owner.generation === generation),
+  };
+
+  return {
+    service,
+    unassignedTasks,
+    switchProject(nextProjectId: string) {
+      projectId = nextProjectId;
+      generation += 1;
+    },
+  };
+}
+
 const mockChangeDetectionScheduler: ChangeDetectionScheduler = {
   notify: vi.fn(),
   runningTick: false,
@@ -74,16 +100,14 @@ const mockNgZone: Pick<NgZone, 'run' | 'runOutsideAngular'> = {
 describe('MobileTodoDrawerComponent', () => {
   let component: MobileTodoDrawerComponent | null = null;
 
-  function createComponent(): MobileTodoDrawerComponent {
+  function createComponent(
+    projectState = createProjectStateHarness().service,
+  ): MobileTodoDrawerComponent {
     const injector = Injector.create({
       providers: [
         {
           provide: ProjectStateService,
-          useValue: {
-            unfinishedItems: signal([]),
-            unassignedTasks: signal([]),
-            activeProjectId: vi.fn(() => 'project-1'),
-          },
+          useValue: projectState,
         },
         {
           provide: SyncCoordinatorService,
@@ -111,6 +135,15 @@ describe('MobileTodoDrawerComponent', () => {
 
   beforeEach(() => {
     vi.useFakeTimers();
+  });
+
+  it('移动端待分配卡片模板应暴露稳定任务身份供 drop 落点解析', () => {
+    const template = readFileSync(
+      join(process.cwd(), 'src/app/features/flow/components/mobile-todo-drawer.component.html'),
+      'utf8',
+    );
+
+    expect(template).toContain('[attr.data-unassigned-task-id]="task.id"');
   });
 
   afterEach(() => {
@@ -252,5 +285,108 @@ describe('MobileTodoDrawerComponent', () => {
 
     expect(emitSpy).toHaveBeenCalledTimes(1);
     expect(emitSpy).toHaveBeenCalledWith('right');
+  });
+
+  it('当前 owner 的 tap 应保持 touchend 同步且 taskClick 延迟发布', async () => {
+    const task = createTask('task-1');
+    const harness = createProjectStateHarness([task]);
+    component = createComponent(harness.service);
+    const order: string[] = [];
+    vi.spyOn(component.taskTouchEnd, 'emit').mockImplementation(() => order.push('touchend'));
+    vi.spyOn(component.taskClick, 'emit').mockImplementation(() => order.push('click'));
+
+    component.onTouchStart(createTouchStartEvent(20, 20), task);
+    component.onTouchEnd(createTouchEndEvent(20, 20), task);
+
+    expect(order).toEqual(['touchend']);
+    await Promise.resolve();
+    expect(order).toEqual(['touchend', 'click']);
+  });
+
+  it('taskTouchEnd 同步切换项目时应退休待发布 tap', async () => {
+    const task = createTask('task-1');
+    const harness = createProjectStateHarness([task]);
+    component = createComponent(harness.service);
+    const clickSpy = vi.spyOn(component.taskClick, 'emit');
+    vi.spyOn(component.taskTouchEnd, 'emit').mockImplementation(() => harness.switchProject('project-B'));
+
+    component.onTouchStart(createTouchStartEvent(20, 20), task);
+    component.onTouchEnd(createTouchEndEvent(20, 20), task);
+    await Promise.resolve();
+
+    expect(clickSpy).not.toHaveBeenCalled();
+  });
+
+  it('A→B 与延迟原生 click 都不应发布旧 tap', async () => {
+    const task = createTask('task-1');
+    const harness = createProjectStateHarness([task]);
+    component = createComponent(harness.service);
+    const clickSpy = vi.spyOn(component.taskClick, 'emit');
+
+    component.onTouchStart(createTouchStartEvent(20, 20), task);
+    component.onTouchEnd(createTouchEndEvent(20, 20), task);
+    harness.switchProject('project-B');
+    await Promise.resolve();
+    component.onTaskClick(task);
+
+    expect(clickSpy).not.toHaveBeenCalled();
+  });
+
+  it('A→B→A 不应因 projectId 再次相同而恢复旧 tap', async () => {
+    const task = createTask('task-1');
+    const harness = createProjectStateHarness([task]);
+    component = createComponent(harness.service);
+    const clickSpy = vi.spyOn(component.taskClick, 'emit');
+
+    component.onTouchStart(createTouchStartEvent(20, 20), task);
+    component.onTouchEnd(createTouchEndEvent(20, 20), task);
+    harness.switchProject('project-B');
+    harness.switchProject('project-A');
+    await Promise.resolve();
+
+    expect(clickSpy).not.toHaveBeenCalled();
+  });
+
+  it('同 id replacement 不应满足 touchstart 对象身份', async () => {
+    const task = createTask('task-1');
+    const replacement = createTask('task-1');
+    const harness = createProjectStateHarness([task]);
+    component = createComponent(harness.service);
+    const clickSpy = vi.spyOn(component.taskClick, 'emit');
+
+    component.onTouchStart(createTouchStartEvent(20, 20), task);
+    component.onTouchEnd(createTouchEndEvent(20, 20), task);
+    harness.unassignedTasks.set([replacement]);
+    await Promise.resolve();
+
+    expect(clickSpy).not.toHaveBeenCalled();
+  });
+
+  it('touchend task 不是 touchstart 对象时不应发布 tap', async () => {
+    const task = createTask('task-1');
+    const replacement = createTask('task-1');
+    const harness = createProjectStateHarness([task]);
+    component = createComponent(harness.service);
+    const clickSpy = vi.spyOn(component.taskClick, 'emit');
+
+    component.onTouchStart(createTouchStartEvent(20, 20), task);
+    component.onTouchEnd(createTouchEndEvent(20, 20), replacement);
+    await Promise.resolve();
+
+    expect(clickSpy).not.toHaveBeenCalled();
+  });
+
+  it('microtask 前进入拖拽时不应发布 tap', async () => {
+    const task = createTask('task-1');
+    const harness = createProjectStateHarness([task]);
+    component = createComponent(harness.service);
+    const clickSpy = vi.spyOn(component.taskClick, 'emit');
+
+    component.onTouchStart(createTouchStartEvent(20, 20), task);
+    component.onTouchEnd(createTouchEndEvent(20, 20), task);
+    (component as unknown as { draggingTaskId: () => string | null }).draggingTaskId = () => task.id;
+    await Promise.resolve();
+
+    expect(clickSpy).not.toHaveBeenCalled();
   });
 });

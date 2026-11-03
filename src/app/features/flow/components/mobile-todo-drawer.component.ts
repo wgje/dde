@@ -7,7 +7,7 @@
 
 import { Component, ChangeDetectionStrategy, computed, inject, signal, input, output, effect, OnDestroy, NgZone, viewChild, ElementRef } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { ProjectStateService } from '../../../../services/project-state.service';
+import { ProjectStateService, type ActiveProjectOwner } from '../../../../services/project-state.service';
 import { SyncCoordinatorService } from '../../../../services/sync-coordinator.service';
 import { Task } from '../../../../models';
 import { UI_CONFIG } from '../../../../config/ui.config';
@@ -117,6 +117,7 @@ export class MobileTodoDrawerComponent implements OnDestroy {
   private awaitingParentDragActivation = false;
   private unassignedTouchSession: {
     task: Task;
+    owner: ActiveProjectOwner;
     startX: number;
     startY: number;
     startedAt: number;
@@ -351,14 +352,12 @@ export class MobileTodoDrawerComponent implements OnDestroy {
     this.taskDrop.emit({ event });
   }
 
-  // 触摸事件
-  // 注意：chip 的 touch 事件不再 stopPropagation，让 slot 的 swipe 监听有机会同步追踪。
-  // 是否切断 swipe 由 `suppressSwipeForCurrentTouch` 决定，且只在长按确认进入拖拽后才置位
-  // （见构造函数里 draggingTaskId 的 effect），从而保留「在 chip 区域横向滑动切换视图」的能力。
+  // chip touch 事件继续冒泡给 slot；只有确认长按拖拽后才抑制 swipe。
   onTouchStart(event: TouchEvent, task: Task): void {
     const touch = event.touches[0];
     this.unassignedTouchSession = {
       task,
+      owner: this.projectState.captureActiveProjectOwner(),
       startX: touch?.clientX ?? 0,
       startY: touch?.clientY ?? 0,
       startedAt: performance.now(),
@@ -384,13 +383,10 @@ export class MobileTodoDrawerComponent implements OnDestroy {
   }
 
   onTouchEnd(event: TouchEvent, task: Task): void {
+    const touchSession = this.unassignedTouchSession;
     const changedTouch = event.changedTouches[0] ?? null;
-    const shouldEmitTap = this.shouldEmitTouchTap(task, changedTouch);
-    // 在 chip 上直接检测横向滑动：
-    // 原先依赖事件冒泡到外层 slot 的 onSwipeTouchEnd，但 chip 设置 touch-action:none
-    // 且 onTouchStart 调用了 preventDefault，部分 Android 浏览器会把此条 touch 标记为
-    // "已被处理"，导致 bubble 到 slot 时 swipeState 已经不一致（或根本未被 startTracking）。
-    // 直接基于 unassignedTouchSession 在 chip 层本地判断，避免这一路径依赖。
+    const shouldEmitTap = this.shouldEmitTouchTap(changedTouch);
+    // chip 本地识别 swipe，避免 Android 已处理 touch 不再冒泡时丢失切页。
     const swipeDirection = this.shouldEmitTouchSwipe(changedTouch);
     this.captureDraggedTaskClickGuard();
     this.taskTouchEnd.emit({ event });
@@ -401,8 +397,14 @@ export class MobileTodoDrawerComponent implements OnDestroy {
         this.emitSwipeToSwitch(swipeDirection);
         return;
       }
-      if (shouldEmitTap && !this.draggingTaskId()) {
-        this.lastSyntheticTouchTapGuard = { taskId: task.id, at: performance.now() };
+      if (!shouldEmitTap || !touchSession) return;
+      this.lastSyntheticTouchTapGuard = { taskId: touchSession.task.id, at: performance.now() };
+      if (
+        touchSession.task === task
+        && this.projectState.isActiveProjectOwnerCurrent(touchSession.owner)
+        && this.projectState.unassignedTasks().includes(touchSession.task)
+        && !this.draggingTaskId()
+      ) {
         this.taskClick.emit(task);
       }
     });
@@ -675,9 +677,9 @@ export class MobileTodoDrawerComponent implements OnDestroy {
     scrollHost.scrollTop = session.scrollTop - deltaY;
   }
 
-  private shouldEmitTouchTap(task: Task, touch: Touch | null): boolean {
+  private shouldEmitTouchTap(touch: Touch | null): boolean {
     const session = this.unassignedTouchSession;
-    if (!session || session.task.id !== task.id || session.scrolled || this.draggingTaskId()) {
+    if (!session || session.scrolled || this.draggingTaskId()) {
       return false;
     }
 
