@@ -13,7 +13,7 @@
  * 为什么抽离：AGENTS.md §12 单文件 ≤ 800 行硬线；ProjectDataService 长期越界，
  * 这些纯工具自洽且零依赖服务态，适合先行下切。
  */
-import { Project } from '../../../../models';
+export { normalizeOfflineSnapshotProject } from '../../../../services/project-data-projection.helpers';
 
 export function isBatchRpcMissingError(error: {
   code?: string;
@@ -61,23 +61,4 @@ export function getSnapshotByteSize(raw: string): number {
   } catch {
     return raw.length;
   }
-}
-
-export function normalizeOfflineSnapshotProject(project: Project): Project {
-  const allTasks = project.tasks || [];
-  const activeTaskIds = new Set(
-    allTasks
-      .filter(task => !task.deletedAt)
-      .map(task => task.id)
-  );
-
-  return {
-    ...project,
-    // 软删除任务仍属于回收站保留窗口，离线快照恢复不能把它们误当作已永久销毁。
-    tasks: allTasks,
-    // 主视图只恢复活跃任务之间的连接，避免 deleted task 在图上重新挂回可见边。
-    connections: (project.connections || []).filter(connection =>
-      activeTaskIds.has(connection.source) && activeTaskIds.has(connection.target)
-    ),
-  };
 }

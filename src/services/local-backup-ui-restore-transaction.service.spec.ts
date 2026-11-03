@@ -710,7 +710,8 @@ function makeQuiescence(order: string[]): PreparedLocalBackupUiRestoreWriterQuie
       order.push('quiescence.verify');
       return true;
     }),
-    runMutation: vi.fn(async (_source, write) => await write()),
+    runMutation: vi.fn((_source, write) => write()),
+    runMutationAsync: vi.fn(async (_source, write) => await write()),
     drainWriters: vi.fn(async () => undefined),
     prepareFinalization: vi.fn(async outcome => {
       order.push(`quiescence.finalize:${outcome}`);

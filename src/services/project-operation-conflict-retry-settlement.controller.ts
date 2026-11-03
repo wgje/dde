@@ -236,8 +236,8 @@ export interface ProjectConflictHandoffSettlementDeps {
   isFenceCurrent: (input: ProjectConflictRetrySettlementInput) => boolean;
   getCurrentProjects: () => Project[];
   getPendingProjectActions: (projectId: string) => QueuedAction[];
-  persistProjects: (projects: Project[]) => Promise<void>;
-  publishProjects: (projects: Project[]) => void;
+  persistProjects: (projects: Project[], ownerUserId: string) => Promise<void>;
+  publishProjects: (projects: Project[], ownerUserId: string) => void;
   reserveConflictLocalHandoff: ProjectConflictRetrySettlementOptions['reserveConflictLocalHandoff'];
   transitionActionLocalHandoff: ProjectConflictRetrySettlementOptions['transitionActionLocalHandoff'];
   verifyConflictReservation: ProjectConflictRetrySettlementOptions['verifyConflictReservation'];
@@ -275,13 +275,13 @@ export function createProjectConflictHandoffSettlement(
       advanceConflictLocalHandoff: deps.advanceConflictLocalHandoff,
       persistOwnerSnapshot: async () => {
         try {
-          await deps.persistProjects(buildProjects());
+          await deps.persistProjects(buildProjects(), input.ownerUserId);
           return true;
         } catch {
           return false;
         }
       },
-      publishResolvedProject: () => deps.publishProjects(buildProjects()),
+      publishResolvedProject: () => deps.publishProjects(buildProjects(), input.ownerUserId),
       clearCompletedConflict: async () => (await deps.clearCompletedConflict(input)).status === 'committed',
       removeCompletedAction: deps.removeCompletedAction,
       now: deps.now,
@@ -304,8 +304,9 @@ export interface ActionQueueProjectConflictHandoffDeps {
   isFenceCurrent: (input: ActionQueueProjectConflictHandoffInput) => boolean;
   getCurrentProjects: () => Project[];
   getPendingProjectActions: (projectId: string) => QueuedAction[];
-  persistProjects: (projects: Project[]) => Promise<void>;
-  publishProjects: (projects: Project[]) => void;
+  persistProjects: (projects: Project[], ownerUserId: string) => Promise<void>;
+  publishProjects: (projects: Project[], ownerUserId: string) => void;
+  runProjectStateMutation: <T>(ownerUserId: string, write: () => Promise<T>) => Promise<T>;
   reserveConflictLocalHandoff: ProjectConflictRetrySettlementOptions['reserveConflictLocalHandoff'];
   transitionActionLocalHandoff: ProjectConflictRetrySettlementOptions['transitionActionLocalHandoff'];
   verifyConflictReservation: ProjectConflictRetrySettlementOptions['verifyConflictReservation'];
@@ -367,19 +368,22 @@ export function createActionQueueProjectConflictHandoffSettlement(
       advanceConflictLocalHandoff: deps.advanceConflictLocalHandoff,
       persistOwnerSnapshot: async () => {
         try {
-          await deps.persistProjects(buildProjects());
+          await deps.persistProjects(buildProjects(), settlementInput.ownerUserId);
           return true;
         } catch {
           return false;
         }
       },
-      publishResolvedProject: () => deps.publishProjects(buildProjects()),
+      publishResolvedProject: () => deps.publishProjects(buildProjects(), settlementInput.ownerUserId),
       clearCompletedConflict: async () =>
         (await deps.clearCompletedConflict(identity)).status === 'committed',
       removeCompletedAction: deps.removeCompletedAction,
       now: deps.now,
     });
-    return controller.settle(settlementInput);
+    return deps.runProjectStateMutation(
+      settlementInput.ownerUserId,
+      () => controller.settle(settlementInput),
+    );
   };
 }
 

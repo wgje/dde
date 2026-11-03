@@ -4,6 +4,8 @@ import { SCAN_STATUS } from '../config/virus-scan.config';
 import type { Attachment, Project } from '../models';
 import { createDerivedSyncOperationId } from '../utils/sync-operation-id';
 import type { PendingAttachmentUploadRecord } from './attachment-upload-outbox.service';
+import { getLocalBackupUiRestoreQuiescenceSentinelStorageKey } from './local-backup-ui-restore-writer-quiescence-tracker';
+import { LocalBackupUiRestoreWriterQuiescenceService } from './local-backup-ui-restore-writer-quiescence.service';
 import {
   createAttachmentProcessorHarness,
   createDeferredAttachmentProcessorHarness,
@@ -607,6 +609,50 @@ describe('ActionQueueAttachmentProcessorsService', () => {
     expect(removePendingUpload).not.toHaveBeenCalled();
     expect(currentTask()?.attachments ?? []).toEqual([]);
   });
+  it('恢复准备会等待附件恢复的快照和 ProjectState 提交完整结束', async () => {
+    let releaseSnapshot!: () => void;
+    const snapshotWrite = new Promise<void>(resolve => {
+      releaseSnapshot = resolve;
+    });
+    const ownerUserId = 'user-1';
+    const sentinelKey = getLocalBackupUiRestoreQuiescenceSentinelStorageKey(ownerUserId);
+    localStorage.removeItem(sentinelKey);
+    const quiescenceService = new LocalBackupUiRestoreWriterQuiescenceService({ pollIntervalMs: 1 });
+    const harness = createAttachmentProcessorHarness({
+      taskAttachments: [],
+      saveOfflineSnapshotAndWaitImpl: async () => await snapshotWrite,
+    });
+    let restorePrepared = false;
+    let prepared: Awaited<ReturnType<typeof quiescenceService.prepare>> | null = null;
+    let processing: Promise<unknown> | null = null;
+    let preparing: ReturnType<typeof quiescenceService.prepare> | null = null;
+
+    try {
+      processing = harness.processor(harness.action);
+      await vi.waitFor(() => expect(harness.saveOfflineSnapshotAndWait).toHaveBeenCalledOnce());
+
+      preparing = quiescenceService.prepare(ownerUserId).then(handle => {
+        restorePrepared = true;
+        return handle;
+      });
+      await vi.waitFor(() => expect(localStorage.getItem(sentinelKey)).not.toBeNull());
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      expect(restorePrepared).toBe(false);
+      expect(harness.updateProjects).not.toHaveBeenCalled();
+
+      releaseSnapshot();
+      await processing;
+      expect(harness.updateProjects).toHaveBeenCalledOnce();
+      prepared = await preparing;
+      expect(restorePrepared).toBe(true);
+    } finally {
+      releaseSnapshot();
+      await processing?.catch(() => undefined);
+      if (preparing && !prepared) prepared = await preparing.catch(() => null);
+      await prepared?.abortBeforeMutation();
+    }
+  }, 10000);
   it('fails closed when restored metadata cannot be read back after durable persistence', async () => {
     const {
       action,

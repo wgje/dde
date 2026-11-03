@@ -21,12 +21,14 @@ import { OptimisticStateService } from './optimistic-state.service';
 import { LayoutService } from './layout.service';
 import { ToastService } from './toast.service';
 import { WriteGuardService } from './write-guard.service';
+import { AuthService } from './auth.service';
 import { ProjectOperationConflictService } from './project-operation-conflict.service';
 import { Project } from '../models';
 import { type ConflictResolutionPlan } from './conflict-resolution.types';
 import { AUTH_CONFIG } from '../config/auth.config';
 import { EnqueueParams } from './action-queue.types';
 import { blockProjectMutation } from './project-operation-write-guard.helpers';
+import { localBackupUiRestoreWriterQuiescence } from './local-backup-ui-restore-writer-quiescence.service';
 
 interface ProjectOperationSessionContext {
   sessionGeneration: number;
@@ -46,6 +48,7 @@ export class ProjectOperationService {
   private readonly layoutService = inject(LayoutService);
   private readonly toastService = inject(ToastService);
   private readonly writeGuard = inject(WriteGuardService);
+  private readonly authService = inject(AuthService);
   private readonly projectConflict = inject(ProjectOperationConflictService);
 
   private captureSessionContext(): ProjectOperationSessionContext {
@@ -86,37 +89,60 @@ export class ProjectOperationService {
     return this.projectState.getProjectsWithCurrentData();
   }
 
-  private async commitProjectUpdateDurably(
+  private runProjectStateMutation<T>(
+    sessionContext: ProjectOperationSessionContext,
+    mutation: () => Promise<T>,
+  ): Promise<T> {
+    const ownerUserId = sessionContext.userId ?? AUTH_CONFIG.LOCAL_MODE_USER_ID;
+    const authenticatedOwnerUserId = this.authService.currentUserId()
+      ?? this.authService.peekPersistedSessionIdentity?.()?.userId
+      ?? AUTH_CONFIG.LOCAL_MODE_USER_ID;
+    if (ownerUserId !== authenticatedOwnerUserId) {
+      throw new Error('project operation owner does not match the authenticated owner');
+    }
+    return localBackupUiRestoreWriterQuiescence.runAsync(
+      ownerUserId,
+      'project-state',
+      mutation,
+    );
+  }
+
+  private commitProjectUpdateDurably(
     snapshotId: string,
     project: Project,
     queueErrorMessage: string,
     sessionContext: ProjectOperationSessionContext,
     updateProjects?: (projects: Project[]) => Project[],
   ): Promise<{ success: boolean; error?: string }> {
-    if (!this.isSessionContextCurrent(sessionContext)) {
-      return this.discardStaleProjectOperation(snapshotId);
-    }
+    return this.runProjectStateMutation(sessionContext, async () => {
+      if (!this.isSessionContextCurrent(sessionContext)) {
+        return this.discardStaleProjectOperation(snapshotId);
+      }
 
-    const nextProjects = updateProjects?.(this.currentProjects());
-    const failure = await this.prepareProjectUpdateCommit(
-      snapshotId,
-      project,
-      queueErrorMessage,
-      sessionContext,
-      nextProjects,
-    );
-    if (failure) {
-      return failure;
-    }
+      const nextProjects = updateProjects?.(this.currentProjects());
+      const failure = await this.prepareProjectUpdateCommit(
+        snapshotId,
+        project,
+        queueErrorMessage,
+        sessionContext,
+        nextProjects,
+      );
+      if (failure) {
+        return failure;
+      }
 
-    if (!this.isSessionContextCurrent(sessionContext)) {
-      return this.discardStaleProjectOperation(snapshotId);
-    }
-    if (updateProjects) {
-      this.projectState.updateProjects(updateProjects);
-    }
-    this.finalizeDurableLocalProjectMutation(snapshotId);
-    return { success: true };
+      if (!this.isSessionContextCurrent(sessionContext)) {
+        return this.discardStaleProjectOperation(snapshotId);
+      }
+      if (updateProjects) {
+        this.projectState.updateProjectsForOwner(
+          sessionContext.userId ?? AUTH_CONFIG.LOCAL_MODE_USER_ID,
+          updateProjects,
+        );
+      }
+      this.finalizeDurableLocalProjectMutation(snapshotId, sessionContext.userId);
+      return { success: true };
+    });
   }
 
   private async prepareProjectUpdateCommit(
@@ -149,7 +175,10 @@ export class ProjectOperationService {
     if (!actionId) {
       this.optimisticState.rollbackSnapshot(snapshotId, false);
       this.toastService.error('本地保存失败', `${queueErrorMessage}，请释放浏览器存储空间后重试`);
-      this.projectData.saveOfflineSnapshot(this.currentProjects());
+      this.projectData.saveOfflineSnapshot(
+        this.currentProjects(),
+        userId ?? AUTH_CONFIG.LOCAL_MODE_USER_ID,
+      );
       return { success: false, error: queueErrorMessage };
     }
 
@@ -199,7 +228,10 @@ export class ProjectOperationService {
     }
 
     try {
-      await this.projectData.saveOfflineSnapshotAndWait(nextProjects);
+      await this.projectData.saveOfflineSnapshotAndWait(
+        nextProjects,
+        sessionContext.userId ?? AUTH_CONFIG.LOCAL_MODE_USER_ID,
+      );
       if (!this.isSessionContextCurrent(sessionContext)) {
         return this.discardStaleProjectOperation(snapshotId);
       }
@@ -232,11 +264,14 @@ export class ProjectOperationService {
     }
   }
 
-  private finalizeDurableLocalProjectMutation(snapshotId: string): void {
+  private finalizeDurableLocalProjectMutation(snapshotId: string, ownerUserId: string | null): void {
     this.optimisticState.commitSnapshot(snapshotId);
     this.syncCoordinator.markLocalChanges('structure');
     this.syncCoordinator.schedulePersist();
-    this.projectData.saveOfflineSnapshot(this.currentProjects());
+    this.projectData.saveOfflineSnapshot(
+      this.currentProjects(),
+      ownerUserId ?? AUTH_CONFIG.LOCAL_MODE_USER_ID,
+    );
   }
 
   // ========== 项目 CRUD 操作 ==========
@@ -254,6 +289,13 @@ export class ProjectOperationService {
     if (blocked) return blocked;
 
     const sessionContext = this.captureSessionContext();
+    return this.runProjectStateMutation(sessionContext, () => this.addProjectUnderWriter(project, sessionContext));
+  }
+
+  private async addProjectUnderWriter(
+    project: Project,
+    sessionContext: ProjectOperationSessionContext,
+  ): Promise<{ success: boolean; error?: string }> {
     const balanced = this.layoutService.rebalance(project);
     const userId = sessionContext.userId;
     const isCloudBackedUser = !!userId && userId !== AUTH_CONFIG.LOCAL_MODE_USER_ID;
@@ -296,9 +338,15 @@ export class ProjectOperationService {
     if (!this.isSessionContextCurrent(sessionContext)) {
       return this.discardStaleProjectOperation(snapshot.id);
     }
-    this.projectState.updateProjects(addProjectUpdater);
-    this.projectState.setActiveProjectId(localProject.id);
-    this.finalizeDurableLocalProjectMutation(snapshot.id);
+    this.projectState.updateProjectsForOwner(
+      sessionContext.userId ?? AUTH_CONFIG.LOCAL_MODE_USER_ID,
+      addProjectUpdater,
+    );
+    this.projectState.setActiveProjectIdForOwner(
+      sessionContext.userId ?? AUTH_CONFIG.LOCAL_MODE_USER_ID,
+      localProject.id,
+    );
+    this.finalizeDurableLocalProjectMutation(snapshot.id, sessionContext.userId);
     return { success: true };
   }
 
@@ -313,6 +361,17 @@ export class ProjectOperationService {
     if (blocked) return blocked;
 
     const sessionContext = this.captureSessionContext();
+    return this.runProjectStateMutation(
+      sessionContext,
+      () => this.deleteProjectUnderWriter(projectId, options, sessionContext),
+    );
+  }
+
+  private async deleteProjectUnderWriter(
+    projectId: string,
+    options: { canPublishUi?: () => boolean },
+    sessionContext: ProjectOperationSessionContext,
+  ): Promise<{ success: boolean; error?: string }> {
     const userId = sessionContext.userId;
     const isCloudBackedUser = !!userId && userId !== AUTH_CONFIG.LOCAL_MODE_USER_ID;
     const deleteQueueAction = this.buildDeleteQueueAction(projectId, userId);
@@ -334,7 +393,10 @@ export class ProjectOperationService {
           this.optimisticState.rollbackSnapshot(snapshot.id, false);
           this.toastService.error('本地保存失败', '离线删除队列未能写入，请释放浏览器存储空间后重试');
         }
-        this.projectData.saveOfflineSnapshot(this.currentProjects());
+        this.projectData.saveOfflineSnapshot(
+          this.currentProjects(),
+          userId ?? AUTH_CONFIG.LOCAL_MODE_USER_ID,
+        );
         return { success: false, error: '离线删除队列未能写入' };
       }
     }
@@ -352,13 +414,19 @@ export class ProjectOperationService {
     if (!this.isSessionContextCurrent(sessionContext)) {
       return this.discardStaleProjectOperation(snapshot.id);
     }
-    this.projectState.updateProjects(deleteProjectUpdater);
+    this.projectState.updateProjectsForOwner(
+      sessionContext.userId ?? AUTH_CONFIG.LOCAL_MODE_USER_ID,
+      deleteProjectUpdater,
+    );
 
     if (this.projectState.activeProjectId() === projectId) {
-      this.projectState.setActiveProjectId(deleteProjectUpdater(this.currentProjects())[0]?.id ?? null);
+      this.projectState.setActiveProjectIdForOwner(
+        sessionContext.userId ?? AUTH_CONFIG.LOCAL_MODE_USER_ID,
+        deleteProjectUpdater(this.currentProjects())[0]?.id ?? null,
+      );
     }
 
-    this.finalizeDurableLocalProjectMutation(snapshot.id);
+    this.finalizeDurableLocalProjectMutation(snapshot.id, sessionContext.userId);
     return { success: true };
   }
 
@@ -446,15 +514,21 @@ export class ProjectOperationService {
     const localProject = this.buildLocalProjectForUser(project, isCloudBackedUser);
 
     if (!isCloudBackedUser || !userId) {
-      return this.persistImportedLocalProject(snapshot.id, localProject, sessionContext);
+      return this.runProjectStateMutation(
+        sessionContext,
+        () => this.persistImportedLocalProject(snapshot.id, localProject, sessionContext),
+      );
     }
 
-    return this.persistImportedCloudProject(
-      snapshot.id,
-      localProject,
-      !!existingProject,
-      userId,
+    return this.runProjectStateMutation(
       sessionContext,
+      () => this.persistImportedCloudProject(
+        snapshot.id,
+        localProject,
+        !!existingProject,
+        userId,
+        sessionContext,
+      ),
     );
   }
 
@@ -475,8 +549,11 @@ export class ProjectOperationService {
     if (!this.isSessionContextCurrent(sessionContext)) {
       return this.discardStaleProjectOperation(snapshotId);
     }
-    this.projectState.updateProjects(upsertProjectUpdater);
-    this.finalizeDurableLocalProjectMutation(snapshotId);
+    this.projectState.updateProjectsForOwner(
+      sessionContext.userId ?? AUTH_CONFIG.LOCAL_MODE_USER_ID,
+      upsertProjectUpdater,
+    );
+    this.finalizeDurableLocalProjectMutation(snapshotId, sessionContext.userId);
     return { success: true };
   }
 
@@ -504,7 +581,7 @@ export class ProjectOperationService {
     if (!actionId) {
       this.optimisticState.rollbackSnapshot(snapshotId, false);
       this.toastService.error('本地保存失败', '离线导入队列未能写入，请释放浏览器存储空间后重试');
-      this.projectData.saveOfflineSnapshot(this.currentProjects());
+      this.projectData.saveOfflineSnapshot(this.currentProjects(), userId);
       return { success: false, error: '离线导入队列未能写入' };
     }
     const snapshotFailure = await this.persistProjectSnapshotBeforeCommit(
@@ -520,13 +597,16 @@ export class ProjectOperationService {
     if (!this.isSessionContextCurrent(sessionContext)) {
       return this.discardStaleProjectOperation(snapshotId);
     }
-    this.upsertLocalProject(localProject);
-    this.finalizeDurableLocalProjectMutation(snapshotId);
+    this.upsertLocalProject(localProject, sessionContext.userId ?? AUTH_CONFIG.LOCAL_MODE_USER_ID);
+    this.finalizeDurableLocalProjectMutation(snapshotId, sessionContext.userId);
     return { success: true };
   }
 
-  private upsertLocalProject(localProject: Project): void {
-    this.projectState.updateProjects(projects => this.upsertProjectList(projects, localProject));
+  private upsertLocalProject(localProject: Project, ownerUserId: string): void {
+    this.projectState.updateProjectsForOwner(
+      ownerUserId,
+      projects => this.upsertProjectList(projects, localProject),
+    );
   }
 
   private upsertProjectList(projects: Project[], localProject: Project): Project[] {

@@ -58,6 +58,7 @@ import {
 import { ProjectStateService } from './project-state.service';
 import { ToastService } from './toast.service';
 import { UserSessionService } from './user-session.service';
+import { localBackupUiRestoreWriterQuiescence } from './local-backup-ui-restore-writer-quiescence.service';
 import {
   ActionQueueProjectConflictHandoffRecoveryController,
   createActionQueueProjectConflictHandoffSettlement,
@@ -85,8 +86,10 @@ export class ActionQueueProjectProcessorsService implements OnDestroy {
     isFenceCurrent: input => this.isProjectHandoffFenceCurrent(input),
     getCurrentProjects: () => this.projectState.getProjectsWithCurrentData(),
     getPendingProjectActions: projectId => this.actionQueue.getPendingActionsForProject(projectId),
-    persistProjects: projects => this.projectData.saveOfflineSnapshotAndWait(projects),
-    publishProjects: projects => this.projectState.updateProjects(() => projects),
+    persistProjects: (projects, ownerUserId) => this.projectData.saveOfflineSnapshotAndWait(projects, ownerUserId),
+    publishProjects: (projects, ownerUserId) => this.projectState.updateProjects(() => projects, ownerUserId),
+    runProjectStateMutation: (ownerUserId, write) =>
+      localBackupUiRestoreWriterQuiescence.runAsync(ownerUserId, 'project-state', write),
     reserveConflictLocalHandoff: input => this.conflictStorage.reserveProjectConflictLocalHandoff(input),
     transitionActionLocalHandoff: input => this.actionQueue.transitionLocalHandoffStrictlyForOwner(input),
     verifyConflictReservation: input => this.conflictStorage.verifyProjectConflictLocalHandoffReservation(input),

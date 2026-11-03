@@ -6,7 +6,7 @@ import type { BackupData } from '../../supabase/functions/_shared/backup-utils';
 import type { ExportData } from './export.service';
 import { ProjectStateService } from './project-state.service';
 import { ProjectDataService, RetryQueueService } from '../core-bridge';
-import { normalizeOfflineSnapshotProject } from '../app/core/services/sync/project-data-projection';
+import { normalizeOfflineSnapshotProject } from './project-data-projection.helpers';
 import {
   ExternalSourceCacheService,
 } from '../app/core/external-sources/external-source-cache.service';
@@ -259,20 +259,29 @@ export class LocalBackupUiRestoreStageService {
     );
     const nextLinks = mergeExternalSourceLinks(preImage.externalSourceLinks, plan.externalSourceLinks);
     const nextPendingLinks = mergePendingLinks(preImage.externalSourcePendingLinks, plan.externalSourceLinks);
-    const importedCount = await context.runWriterMutation('external-source', async () => {
+    const restoreOwnerUserId = context.marker().ownerUserId;
+    if (restoreOwnerUserId !== input.ownerUserId) {
+      throw new Error('local backup UI restore project owner mismatch');
+    }
+    await context.checkpoint();
+    const importedCount = await context.runWriterMutationAsync('project-state', async () => {
+      this.projectState.replaceProjectsForRestore(restoreOwnerUserId, nextProjects);
       await context.checkpoint();
-      this.projectState.updateProjects(() => nextProjects);
-      await context.checkpoint();
+      return plan.importedCount;
+    });
+    await context.runWriterMutationAsync('offline-snapshot', async () => {
       await this.projectData.saveOfflineSnapshotAndWait(nextProjects, input.ownerUserId);
+      await context.checkpoint();
+    });
+    await context.runWriterMutationAsync('external-source', async () => {
       await context.checkpoint();
       await this.externalSourceCache.saveLinks(nextLinks, input.ownerUserId);
       await context.checkpoint();
       await this.externalSourceCache.replacePendingLinksForOwner(nextPendingLinks, input.ownerUserId);
       await context.checkpoint();
-      return plan.importedCount;
     });
     await this.applyProjectLocalState(input, context);
-    await context.runWriterMutation('black-box', () => this.blackBoxRestore.apply(blackBox, context.checkpoint));
+    await context.runWriterMutationAsync('black-box', () => this.blackBoxRestore.apply(blackBox, context.checkpoint));
     return {
       result: importedCount,
       verify: actual => verifyProjectsReadback(
@@ -297,21 +306,21 @@ export class LocalBackupUiRestoreStageService {
       input.ownerUserId,
       input.backup.localState,
     );
-    await context.runWriterMutation('dock-snapshot', async () => {
+    await context.runWriterMutationAsync('dock-snapshot', async () => {
       await restoreDockSnapshotRestoreSnapshot(
         input.ownerUserId,
         nextLocalState.dockSnapshotRestoreSnapshot,
         context.checkpoint,
       );
     });
-    await context.runWriterMutation('launch-snapshot', async () => {
+    await context.runWriterMutationAsync('launch-snapshot', async () => {
       await restoreLaunchSnapshotRestoreSnapshot(
         input.ownerUserId,
         nextLocalState.launchSnapshotRestoreSnapshot,
         context.checkpoint,
       );
     });
-    await context.runWriterMutation('parked-task-cache', async () => {
+    await context.runWriterMutationAsync('parked-task-cache', async () => {
       await restoreParkedTaskCacheRestoreSnapshot(
         input.ownerUserId,
         nextLocalState.parkedTaskCacheRestoreSnapshot,
@@ -374,16 +383,25 @@ export class LocalBackupUiRestoreStageService {
     blackBox: LocalBackupUiBlackBoxRestoreSnapshot,
     context: LocalBackupUiRestoreStageOperationContext,
   ): Promise<void> {
-    await context.runWriterMutation('black-box', () => this.blackBoxRestore.rollback(blackBox, context.checkpoint));
+    await context.runWriterMutationAsync('black-box', () => this.blackBoxRestore.rollback(blackBox, context.checkpoint));
+    if (context.marker().ownerUserId !== ownerUserId) {
+      throw new Error('local backup UI restore rollback owner mismatch');
+    }
     const restoredProjects = restoreTouchedProjects(
       this.projectState.getProjectsWithCurrentData(),
       snapshot,
     );
-    await context.runWriterMutation('external-source', async () => {
+    await context.checkpoint();
+    await context.runWriterMutationAsync('project-state', async () => {
+      this.projectState.replaceProjectsForRestore(ownerUserId, restoredProjects);
       await context.checkpoint();
-      this.projectState.updateProjects(() => restoredProjects);
-      await context.checkpoint();
+    });
+    await context.runWriterMutationAsync('offline-snapshot', async () => {
       await restoreOfflineProjectRestoreSnapshot(ownerUserId, snapshot.offlineSnapshot, context.checkpoint);
+      await context.checkpoint();
+    });
+    await context.runWriterMutationAsync('external-source', async () => {
+      await context.checkpoint();
       await this.externalSourceCache.saveLinks(snapshot.externalSourceLinks, ownerUserId);
       await context.checkpoint();
       await this.externalSourceCache.replacePendingLinksForOwner(
@@ -392,13 +410,13 @@ export class LocalBackupUiRestoreStageService {
       );
       await context.checkpoint();
     });
-    await context.runWriterMutation('dock-snapshot', async () => {
+    await context.runWriterMutationAsync('dock-snapshot', async () => {
       await restoreDockSnapshotRestoreSnapshot(ownerUserId, snapshot.dockSnapshot, context.checkpoint);
     });
-    await context.runWriterMutation('launch-snapshot', async () => {
+    await context.runWriterMutationAsync('launch-snapshot', async () => {
       await restoreLaunchSnapshotRestoreSnapshot(ownerUserId, snapshot.launchSnapshot, context.checkpoint);
     });
-    await context.runWriterMutation('parked-task-cache', async () => {
+    await context.runWriterMutationAsync('parked-task-cache', async () => {
       await restoreParkedTaskCacheRestoreSnapshot(
         ownerUserId,
         snapshot.parkedTaskCache,
@@ -419,7 +437,7 @@ export class LocalBackupUiRestoreStageService {
     );
     const result = await restoreAttachmentUploadOutboxFromBackup(backup, this.attachmentOutbox, {
       checkpoint: context.checkpoint,
-      runWrite: write => context.runWriterMutation('attachment-outbox', write),
+      runWrite: write => context.runWriterMutationAsync('attachment-outbox', write),
     });
     return { result, expected };
   }
@@ -462,14 +480,14 @@ export class LocalBackupUiRestoreStageService {
     });
     await context.checkpoint();
     for (const upload of current) {
-      await context.runWriterMutation('attachment-outbox', () => (
+      await context.runWriterMutationAsync('attachment-outbox', () => (
         this.attachmentOutbox.removePendingUpload(upload, { restoreWriterContinuation: true })
       ));
       await context.checkpoint();
     }
     await restoreAttachmentUploadOutboxItems(snapshot, this.attachmentOutbox, {
       checkpoint: context.checkpoint,
-      runWrite: write => context.runWriterMutation('attachment-outbox', write),
+      runWrite: write => context.runWriterMutationAsync('attachment-outbox', write),
     });
   }
 
@@ -480,7 +498,7 @@ export class LocalBackupUiRestoreStageService {
   ): Promise<LocalBackupUiRestoreStageApplyResult> {
     const expectedActions = extractBackupActionQueueActions(input.backup.localState?.actionQueue);
     const preImageActions = preImage.indexedDb?.actions ?? [];
-    const result = await context.runWriterMutation('action-queue', async () => {
+    const result = await context.runWriterMutationAsync('action-queue', async () => {
       await context.checkpoint();
       const restoredCount = await input.actionQueueRestore.confirmPrepared();
       await context.checkpoint();
@@ -514,7 +532,7 @@ export class LocalBackupUiRestoreStageService {
     participant: LocalBackupUiRestoreActionQueueParticipant,
     context: LocalBackupUiRestoreStageOperationContext,
   ): Promise<void> {
-    return context.runWriterMutation('action-queue', async () => {
+    return context.runWriterMutationAsync('action-queue', async () => {
       await context.checkpoint();
       await participant.rollback();
       await context.checkpoint();
@@ -536,7 +554,7 @@ export class LocalBackupUiRestoreStageService {
         maxRetries: this.retryQueue.MAX_RETRIES,
       },
     );
-    const result = await context.runWriterMutation('retry-queue', () => (
+    const result = await context.runWriterMutationAsync('retry-queue', () => (
       this.retryQueue.restoreFromBackupItems(currentlyRestorableItems, ownerUserId, {
         validationNow,
         terminalEvidence: 'forbid',
@@ -579,7 +597,7 @@ export class LocalBackupUiRestoreStageService {
     snapshot: LocalBackupUiRestoreRetryQueuePreImage,
     context: LocalBackupUiRestoreStageOperationContext,
   ): Promise<void> {
-    return context.runWriterMutation('retry-queue', () => restoreRetryQueueRestoreSnapshot(
+    return context.runWriterMutationAsync('retry-queue', () => restoreRetryQueueRestoreSnapshot(
       ownerUserId,
       {
         retryQueueIndexedDbItems: snapshot.indexedDb,
@@ -601,7 +619,7 @@ export class LocalBackupUiRestoreStageService {
       input.backup,
       input.ownerUserId,
     );
-    const result = await context.runWriterMutation('action-queue', async () => {
+    const result = await context.runWriterMutationAsync('action-queue', async () => {
       await context.checkpoint();
       const count = restoreDeadLettersFromBackup(
         input.backup,
@@ -634,7 +652,7 @@ export class LocalBackupUiRestoreStageService {
     snapshot: LocalBackupUiRestoreDeadLetterPreImage,
     context: LocalBackupUiRestoreStageOperationContext,
   ): Promise<void> {
-    return context.runWriterMutation('action-queue', () => restoreDeadLetterRestoreSnapshot(
+    return context.runWriterMutationAsync('action-queue', () => restoreDeadLetterRestoreSnapshot(
       ownerUserId,
       {
         deadLetterBackupRecord: snapshot.indexedDb,
@@ -658,7 +676,7 @@ export class LocalBackupUiRestoreStageService {
       this.conflictStorage,
       {
         checkpoint: context.checkpoint,
-        runWrite: write => context.runWriterMutation('conflicts', write),
+        runWrite: write => context.runWriterMutationAsync('conflicts', write),
       },
     );
     return { result, expected };
@@ -678,7 +696,7 @@ export class LocalBackupUiRestoreStageService {
     snapshot: LocalBackupUiRestoreStageSnapshots['conflicts'],
     context: LocalBackupUiRestoreStageOperationContext,
   ): Promise<void> {
-    return context.runWriterMutation('conflicts', () => (
+    return context.runWriterMutationAsync('conflicts', () => (
       restoreConflictRestoreStateSnapshot(ownerUserId, snapshot, context.checkpoint)
     ));
   }
@@ -1114,7 +1132,11 @@ function guardOperationContext(
   return {
     marker: context.marker,
     checkpoint,
-    runWriterMutation: (source, write) => context.runWriterMutation(source, async () => {
+    runWriterMutation: (source, write) => {
+      input.verifyRunContext?.();
+      return context.runWriterMutation(source, write);
+    },
+    runWriterMutationAsync: (source, write) => context.runWriterMutationAsync(source, async () => {
       await checkpoint();
       return await write();
     }),

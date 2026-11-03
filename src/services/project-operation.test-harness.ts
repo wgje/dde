@@ -42,7 +42,9 @@ export interface ProjectOperationServiceSpecContext {
     projects: Mock<() => Project[]>;
     getProjectsWithCurrentData: Mock<() => Project[]>;
     updateProjects: UpdateProjectsMock;
+    updateProjectsForOwner: Mock<(ownerUserId: string, updater: ProjectUpdater) => void>;
     setActiveProjectId: Mock<(projectId: string | null) => void>;
+    setActiveProjectIdForOwner: Mock<(ownerUserId: string, projectId: string | null) => void>;
     activeProjectId: Mock<() => string | null>;
     getProject: Mock<(projectId: string) => Project | undefined>;
     getProjectWithCurrentData: Mock<(projectId: string) => Project | undefined>;
@@ -174,7 +176,13 @@ function createProjectStateMock(): ProjectStateMock {
     projects: vi.fn((): Project[] => []),
     getProjectsWithCurrentData: vi.fn((): Project[] => mockProjectState.projects()),
     updateProjects: vi.fn<(updater: ProjectUpdater) => void>(),
+    updateProjectsForOwner: vi.fn<(ownerUserId: string, updater: ProjectUpdater) => void>((_owner, updater) => {
+      mockProjectState.updateProjects(updater);
+    }),
     setActiveProjectId: vi.fn<(projectId: string | null) => void>(),
+    setActiveProjectIdForOwner: vi.fn<(ownerUserId: string, projectId: string | null) => void>((_owner, projectId) => {
+      mockProjectState.setActiveProjectId(projectId);
+    }),
     activeProjectId: vi.fn((): string | null => null),
     getProject: vi.fn((_projectId: string): Project | undefined => undefined),
     getProjectWithCurrentData: vi.fn((projectId: string): Project | undefined =>

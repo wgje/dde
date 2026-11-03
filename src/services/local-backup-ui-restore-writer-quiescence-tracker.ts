@@ -29,6 +29,9 @@ export type LocalBackupUiRestoreWriterSource =
   | 'attachment-outbox'
   | 'conflicts'
   | 'retry-queue'
+  | 'project-state'
+  | 'offline-snapshot'
+  | 'sync-persist'
   | 'external-source'
   | 'dock-snapshot'
   | 'launch-snapshot'
@@ -127,6 +130,43 @@ export function runWithLocalBackupUiRestoreWriterAuthorization<T>(
   } finally {
     preparedWriterAuthorizations.delete(key);
   }
+}
+
+export async function runWithLocalBackupUiRestoreWriterAuthorizationAsync<T>(
+  ownerUserId: string,
+  restoreRunId: string,
+  source: LocalBackupUiRestoreWriterSource,
+  write: () => Promise<T>,
+): Promise<T> {
+  assertOwner(ownerUserId);
+  const sentinel = readQuiescenceSentinel(ownerUserId);
+  if (!sentinel || sentinel.runId !== restoreRunId || sentinel.state !== 'quiesced') {
+    throw new LocalBackupUiRestoreWriterPausedError(ownerUserId);
+  }
+  const key = preparedAuthorizationKey(ownerUserId, restoreRunId, source);
+  if (preparedWriterAuthorizations.has(key)) {
+    throw new Error('local backup UI restore writer authorization is already active');
+  }
+  preparedWriterAuthorizations.add(key);
+  try {
+    return await write();
+  } finally {
+    preparedWriterAuthorizations.delete(key);
+  }
+}
+
+export function runLocalBackupUiRestoreWriterGuardedSync<T>(
+  ownerUserId: string,
+  source: LocalBackupUiRestoreWriterSource,
+  write: () => T,
+): T {
+  assertOwner(ownerUserId);
+  const sentinel = readQuiescenceSentinel(ownerUserId);
+  if (sentinel?.state === 'pausing' && hasLocalActiveWriter(ownerUserId, source)) {
+    return write();
+  }
+  assertWriterMayContinue(ownerUserId, source, false);
+  return write();
 }
 
 class LocalBackupUiRestoreWriterLease {
@@ -649,6 +689,9 @@ function isWriterSource(value: unknown): value is LocalBackupUiRestoreWriterSour
     || value === 'attachment-outbox'
     || value === 'conflicts'
     || value === 'retry-queue'
+    || value === 'project-state'
+    || value === 'offline-snapshot'
+    || value === 'sync-persist'
     || value === 'external-source'
     || value === 'dock-snapshot'
     || value === 'launch-snapshot'

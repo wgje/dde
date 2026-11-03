@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Project } from '../models';
+import { getLocalBackupUiRestoreQuiescenceSentinelStorageKey } from './local-backup-ui-restore-writer-quiescence-tracker';
+import { LocalBackupUiRestoreWriterQuiescenceService } from './local-backup-ui-restore-writer-quiescence.service';
 import {
   createConnection,
   createProject,
@@ -239,6 +241,60 @@ export function registerTaskRecordTrackingDurableSpecs(
         }),
       );
     });
+
+    it('restore preparation waits for a local-only snapshot through the ProjectState commit', async () => {
+      const ownerUserId = 'test-user';
+      const sentinelKey = getLocalBackupUiRestoreQuiescenceSentinelStorageKey(ownerUserId);
+      localStorage.removeItem(sentinelKey);
+      const quiescenceService = new LocalBackupUiRestoreWriterQuiescenceService({ pollIntervalMs: 1 });
+      let releaseSnapshot: () => void = () => undefined;
+      const snapshotWrite = new Promise<void>(resolve => {
+        releaseSnapshot = resolve;
+      });
+      const project = createProject({
+        syncSource: 'local-only',
+        tasks: [createTask({ id: 'task-restore-writer', title: 'Before' })],
+      });
+      context.mockProjectState().activeProject.mockReturnValue(project);
+      context.mockSyncCoordinator().saveOfflineSnapshotAndWait.mockReturnValueOnce(snapshotWrite);
+      let restorePrepared = false;
+      let prepared: Awaited<ReturnType<typeof quiescenceService.prepare>> | null = null;
+      let completion: Promise<boolean> | null = null;
+      let preparing: ReturnType<typeof quiescenceService.prepare> | null = null;
+
+      try {
+        completion = context.service().recordAndUpdateDurably(currentProject => ({
+          ...currentProject,
+          tasks: currentProject.tasks.map(task => task.id === 'task-restore-writer'
+            ? { ...task, title: 'After' }
+            : task),
+        }));
+        await vi.waitFor(() => expect(
+          context.mockSyncCoordinator().saveOfflineSnapshotAndWait,
+        ).toHaveBeenCalledOnce());
+
+        preparing = quiescenceService.prepare(ownerUserId).then(handle => {
+          restorePrepared = true;
+          return handle;
+        });
+        await vi.waitFor(() => expect(localStorage.getItem(sentinelKey)).not.toBeNull());
+        await new Promise(resolve => setTimeout(resolve, 10));
+
+        expect(restorePrepared).toBe(false);
+        expect(context.mockProjectState().updateProjects).not.toHaveBeenCalled();
+
+        releaseSnapshot();
+        await expect(completion).resolves.toBe(true);
+        expect(context.mockProjectState().updateProjects).toHaveBeenCalledOnce();
+        prepared = await preparing;
+        expect(restorePrepared).toBe(true);
+      } finally {
+        releaseSnapshot();
+        await completion?.catch(() => false);
+        if (preparing && !prepared) prepared = await preparing.catch(() => null);
+        await prepared?.abortBeforeMutation();
+      }
+    }, 10000);
 
     it('keeps stale durable failure classification but suppresses its project A toast in B', async () => {
       const queueWrite = createDeferred<string>();

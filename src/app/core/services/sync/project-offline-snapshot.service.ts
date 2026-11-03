@@ -3,6 +3,11 @@ import { Injectable, inject } from '@angular/core';
 import { AuthService } from '../../../../services/auth.service';
 import { DataSafetyWriteAuditService } from '../../../../services/data-safety-write-audit.service';
 import { LoggerService } from '../../../../services/logger.service';
+import {
+  getLocalBackupUiRestoreQuiescenceSentinelStorageKey,
+  LocalBackupUiRestoreWriterPausedError,
+} from '../../../../services/local-backup-ui-restore-writer-quiescence-tracker';
+import { localBackupUiRestoreWriterQuiescence } from '../../../../services/local-backup-ui-restore-writer-quiescence.service';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 import { StartupPlaceholderStateService } from '../../../../services/startup-placeholder-state.service';
 import { AUTH_CONFIG } from '../../../../config/auth.config';
@@ -43,7 +48,22 @@ type StartupSnapshotCandidate = {
   snapshot: ParsedOfflineSnapshotEnvelope;
 };
 
+interface PreparedOfflineSnapshotWrite {
+  ownerUserId: string;
+  payload: string;
+  savedAt: string;
+  requestId: number;
+}
+
+interface DeferredOfflineSnapshotWrite {
+  snapshot: PreparedOfflineSnapshotWrite;
+  quiescenceStartedAt: number | null;
+  retryDelayMs: number;
+}
+
 const OFFLINE_SNAPSHOT_DB_OPEN_TIMEOUT_MS = 5000;
+const OFFLINE_SNAPSHOT_RETRY_DELAY_MS = 100;
+const OFFLINE_SNAPSHOT_RETRY_MAX_DELAY_MS = 30_000;
 
 @Injectable({ providedIn: 'root' })
 export class ProjectOfflineSnapshotService {
@@ -56,13 +76,36 @@ export class ProjectOfflineSnapshotService {
   private readonly OFFLINE_CACHE_KEY = CACHE_CONFIG.OFFLINE_CACHE_KEY;
   private readonly CACHE_VERSION = CACHE_CONFIG.CACHE_VERSION;
   private readonly LEGACY_OFFLINE_SNAPSHOT_RECORD_ID = 'offline-snapshot';
+  private readonly deferredOfflineSnapshotWrites = new Map<string, DeferredOfflineSnapshotWrite>();
+  private readonly deferredOfflineSnapshotRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private offlineSnapshotRequestId = 0;
 
   saveOfflineSnapshot(projects: Project[], ownerUserId?: string | null): void {
-    void this.persistOfflineSnapshot(projects, ownerUserId, { requireIndexedDB: false });
+    if (this.startupPlaceholderState?.isHintOnlyActive()) {
+      this.logger.debug('跳过 hint-only 启动占位快照持久化，等待 owner 确认后再写入真实离线快照');
+      return;
+    }
+
+    let snapshot: PreparedOfflineSnapshotWrite;
+    try {
+      snapshot = this.prepareOfflineSnapshot(projects, ownerUserId);
+    } catch (error) {
+      this.logger.warn('离线快照准备失败', error);
+      return;
+    }
+
+    void this.persistPreparedOfflineSnapshot(snapshot, { requireIndexedDB: false })
+      .catch(error => this.handleFireAndForgetSnapshotFailure(snapshot, error));
   }
 
   async saveOfflineSnapshotAndWait(projects: Project[], ownerUserId?: string | null): Promise<void> {
-    await this.persistOfflineSnapshot(projects, ownerUserId, { requireIndexedDB: true });
+    if (this.startupPlaceholderState?.isHintOnlyActive()) {
+      this.logger.debug('跳过 hint-only 启动占位快照持久化，等待 owner 确认后再写入真实离线快照');
+      return;
+    }
+
+    const snapshot = this.prepareOfflineSnapshot(projects, ownerUserId);
+    await this.persistPreparedOfflineSnapshot(snapshot, { requireIndexedDB: true });
   }
 
   loadOfflineSnapshot(options?: OfflineSnapshotLoadOptions): Project[] | null {
@@ -141,16 +184,10 @@ export class ProjectOfflineSnapshotService {
     });
   }
 
-  private async persistOfflineSnapshot(
+  private prepareOfflineSnapshot(
     projects: Project[],
     ownerUserId?: string | null,
-    options: { requireIndexedDB: boolean } = { requireIndexedDB: false },
-  ): Promise<void> {
-    if (this.startupPlaceholderState?.isHintOnlyActive()) {
-      this.logger.debug('跳过 hint-only 启动占位快照持久化，等待 owner 确认后再写入真实离线快照');
-      return;
-    }
-
+  ): PreparedOfflineSnapshotWrite {
     const cleanedProjects = projects.map(project => normalizeOfflineSnapshotProjectPure(project));
     const snapshotOwnerUserId = ownerUserId
       ?? this.authService?.currentUserId()
@@ -174,11 +211,38 @@ export class ProjectOfflineSnapshotService {
       });
     }
 
-    const localStorageSaved = this.saveSnapshotToLocalStorage(payload, snapshotOwnerUserId);
+    return {
+      ownerUserId: snapshotOwnerUserId,
+      payload,
+      savedAt,
+      requestId: ++this.offlineSnapshotRequestId,
+    };
+  }
+
+  private async persistPreparedOfflineSnapshot(
+    snapshot: PreparedOfflineSnapshotWrite,
+    options: { requireIndexedDB: boolean },
+  ): Promise<void> {
+    await localBackupUiRestoreWriterQuiescence.runAsync(
+      snapshot.ownerUserId,
+      'offline-snapshot',
+      async () => {
+        await this.persistPreparedOfflineSnapshotUnlocked(snapshot, options);
+      },
+    );
+  }
+
+  private async persistPreparedOfflineSnapshotUnlocked(
+    snapshot: PreparedOfflineSnapshotWrite,
+    options: { requireIndexedDB: boolean },
+  ): Promise<void> {
+    const { ownerUserId, payload, savedAt } = snapshot;
+
+    const localStorageSaved = this.saveSnapshotToLocalStorage(payload, ownerUserId);
     let indexedDbSaved = false;
 
     try {
-      await this.saveSnapshotToIDB(payload, snapshotOwnerUserId);
+      await this.saveSnapshotToIDB(payload, ownerUserId);
       indexedDbSaved = true;
     } catch (error) {
       this.logger.warn('离线快照保存失败（IndexedDB）', error);
@@ -188,11 +252,133 @@ export class ProjectOfflineSnapshotService {
     }
 
     if (localStorageSaved || indexedDbSaved) {
-      this.recordOfflineSnapshotWriteAudit(snapshotOwnerUserId, savedAt, {
+      this.recordOfflineSnapshotWriteAudit(ownerUserId, savedAt, {
         localStorage: localStorageSaved ? 'saved' : 'failed',
         indexedDB: indexedDbSaved ? 'saved' : 'failed',
       });
     }
+  }
+
+  private handleFireAndForgetSnapshotFailure(
+    snapshot: PreparedOfflineSnapshotWrite,
+    error: unknown,
+  ): void {
+    if (error instanceof LocalBackupUiRestoreWriterPausedError
+      || isWriterLeaseStorageFailure(error)
+      || this.readQuiescenceSentinel(snapshot.ownerUserId).present) {
+      this.deferOfflineSnapshotWrite(snapshot);
+      return;
+    }
+    this.logger.warn('离线快照保存失败', error);
+  }
+
+  private deferOfflineSnapshotWrite(snapshot: PreparedOfflineSnapshotWrite): void {
+    const ownerUserId = snapshot.ownerUserId;
+    const current = this.deferredOfflineSnapshotWrites.get(ownerUserId);
+    if (current && current.snapshot.requestId > snapshot.requestId) return;
+
+    this.deferredOfflineSnapshotWrites.set(ownerUserId, {
+      snapshot,
+      quiescenceStartedAt: this.readQuiescenceSentinel(ownerUserId).startedAt,
+      retryDelayMs: OFFLINE_SNAPSHOT_RETRY_DELAY_MS,
+    });
+    this.scheduleDeferredOfflineSnapshotRetry(ownerUserId, OFFLINE_SNAPSHOT_RETRY_DELAY_MS);
+  }
+
+  private scheduleDeferredOfflineSnapshotRetry(ownerUserId: string, delayMs: number): void {
+    if (this.deferredOfflineSnapshotRetryTimers.has(ownerUserId)) return;
+    const timer = setTimeout(() => {
+      this.deferredOfflineSnapshotRetryTimers.delete(ownerUserId);
+      void this.retryDeferredOfflineSnapshot(ownerUserId);
+    }, delayMs);
+    this.deferredOfflineSnapshotRetryTimers.set(ownerUserId, timer);
+  }
+
+  private async retryDeferredOfflineSnapshot(ownerUserId: string): Promise<void> {
+    const pending = this.deferredOfflineSnapshotWrites.get(ownerUserId);
+    if (!pending) return;
+
+    if (this.readQuiescenceSentinel(ownerUserId).present) {
+      this.scheduleDeferredOfflineSnapshotRetry(ownerUserId, pending.retryDelayMs);
+      return;
+    }
+
+    if (pending.quiescenceStartedAt !== null
+      && await this.hasSnapshotPersistedSince(ownerUserId, pending.quiescenceStartedAt)) {
+      if (this.deferredOfflineSnapshotWrites.get(ownerUserId) === pending) {
+        this.deferredOfflineSnapshotWrites.delete(ownerUserId);
+      }
+      this.logger.debug('跳过已被恢复事务较新快照覆盖的延迟离线快照');
+      return;
+    }
+
+    try {
+      await this.persistPreparedOfflineSnapshot(pending.snapshot, { requireIndexedDB: false });
+      if (this.deferredOfflineSnapshotWrites.get(ownerUserId) === pending) {
+        this.deferredOfflineSnapshotWrites.delete(ownerUserId);
+      }
+    } catch (error) {
+      if (error instanceof LocalBackupUiRestoreWriterPausedError) {
+        const quiescence = this.readQuiescenceSentinel(ownerUserId);
+        const retryDelayMs = OFFLINE_SNAPSHOT_RETRY_DELAY_MS;
+        this.deferredOfflineSnapshotWrites.set(ownerUserId, {
+          ...pending,
+          quiescenceStartedAt: quiescence.startedAt ?? pending.quiescenceStartedAt,
+          retryDelayMs,
+        });
+        this.scheduleDeferredOfflineSnapshotRetry(ownerUserId, retryDelayMs);
+        return;
+      }
+
+      this.logger.warn('延迟离线快照保存失败，将保留请求并稍后重试', error);
+      const retryDelayMs = Math.min(
+        Math.max(pending.retryDelayMs * 2, OFFLINE_SNAPSHOT_RETRY_DELAY_MS),
+        OFFLINE_SNAPSHOT_RETRY_MAX_DELAY_MS,
+      );
+      this.deferredOfflineSnapshotWrites.set(ownerUserId, { ...pending, retryDelayMs });
+      this.scheduleDeferredOfflineSnapshotRetry(ownerUserId, retryDelayMs);
+    }
+  }
+
+  private readQuiescenceSentinel(ownerUserId: string): { present: boolean; startedAt: number | null } {
+    if (typeof localStorage === 'undefined') return { present: true, startedAt: null };
+    let raw: string | null;
+    try {
+      raw = localStorage.getItem(getLocalBackupUiRestoreQuiescenceSentinelStorageKey(ownerUserId));
+    } catch {
+      return { present: true, startedAt: null };
+    }
+    if (raw === null) return { present: false, startedAt: null };
+    try {
+      const value = JSON.parse(raw) as unknown;
+      if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        return { present: true, startedAt: null };
+      }
+      const record = value as Record<string, unknown>;
+      if (record['ownerUserId'] !== ownerUserId || typeof record['createdAt'] !== 'string') {
+        return { present: true, startedAt: null };
+      }
+      const startedAt = Date.parse(record['createdAt']);
+      return { present: true, startedAt: Number.isFinite(startedAt) ? startedAt : null };
+    } catch {
+      return { present: true, startedAt: null };
+    }
+  }
+
+  private async hasSnapshotPersistedSince(ownerUserId: string, timestamp: number): Promise<boolean> {
+    const options: OfflineSnapshotLoadOptions = { allowOwnerHint: false, ownerUserId };
+    const idbPromise = this.loadSnapshotFromIDB(options).catch(() => null);
+    const localStoragePayload = this.loadSnapshotFromLocalStorageRaw(options);
+    const payloads = await Promise.all([idbPromise, Promise.resolve(localStoragePayload)]);
+    return payloads.some(payload => {
+      if (payload === null) return false;
+      const snapshot = this.parseSnapshotEnvelope(payload);
+      if (!snapshot || snapshot.savedAt === null) return false;
+      const snapshotOwner = snapshot.ownerUserId ?? (
+        ownerUserId === AUTH_CONFIG.LOCAL_MODE_USER_ID ? AUTH_CONFIG.LOCAL_MODE_USER_ID : null
+      );
+      return snapshotOwner === ownerUserId && Date.parse(snapshot.savedAt) >= timestamp;
+    });
   }
 
   private recordOfflineSnapshotWriteAudit(
@@ -715,4 +901,12 @@ export class ProjectOfflineSnapshotService {
       }
     });
   }
+}
+
+function isWriterLeaseStorageFailure(error: unknown): boolean {
+  if (typeof DOMException !== 'undefined' && error instanceof DOMException) {
+    return error.name === 'QuotaExceededError' || error.name === 'SecurityError';
+  }
+  return error instanceof Error
+    && error.message === 'local backup UI restore writer tracking requires localStorage';
 }

@@ -143,6 +143,7 @@ describe('ProjectOperationConflictRetrySettlementController', () => {
       getPendingProjectActions: () => [],
       persistProjects: async () => { leaseCurrent = false; },
       publishProjects: publish,
+      runProjectStateMutation: (_ownerUserId, write) => write(),
       reserveConflictLocalHandoff: vi.fn(async () => ({
         status: 'committed' as const, reservationId,
       })),

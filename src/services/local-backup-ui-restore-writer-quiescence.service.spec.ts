@@ -9,7 +9,10 @@ import {
   LocalBackupUiRestoreWriterQuiescenceService,
   getLocalBackupUiRestoreQuiescenceSentinelStorageKey,
 } from './local-backup-ui-restore-writer-quiescence.service';
-import { beginLocalBackupUiRestoreWriter } from './local-backup-ui-restore-writer-quiescence-tracker';
+import {
+  beginLocalBackupUiRestoreWriter,
+  runLocalBackupUiRestoreWriterGuardedSync,
+} from './local-backup-ui-restore-writer-quiescence-tracker';
 import {
   LOCAL_BACKUP_UI_RESTORE_MARKER_SCHEMA_VERSION,
   type LocalBackupUiRestoreMarker,
@@ -79,12 +82,47 @@ describe('LocalBackupUiRestoreWriterQuiescenceService', () => {
     const handle = await service.prepare(OWNER_USER_ID);
     const write = vi.fn(async () => 'restored');
 
-    await expect(handle.runMutation('retry-queue', write)).resolves.toBe('restored');
+    await expect(handle.runMutationAsync('retry-queue', write)).resolves.toBe('restored');
     await expect(handle.drainWriters()).resolves.toBeUndefined();
     expect(write).toHaveBeenCalledOnce();
     await expect(service.runAsync(OWNER_USER_ID, 'retry-queue', async () => 'foreign'))
       .rejects.toBeInstanceOf(LocalBackupUiRestoreWriterPausedError);
     await handle.abortBeforeMutation();
+  });
+
+  it('keeps async stage authorization active across await and removes it after settlement', async () => {
+    const service = new LocalBackupUiRestoreWriterQuiescenceService({ pollIntervalMs: 1 });
+    const handle = await service.prepare(OWNER_USER_ID);
+    let markStarted!: () => void;
+    let releaseWrite!: () => void;
+    const started = new Promise<void>(resolve => { markStarted = resolve; });
+    const held = new Promise<void>(resolve => { releaseWrite = resolve; });
+    let writes = 0;
+
+    const mutation = handle.runMutationAsync('project-state', async () => {
+      markStarted();
+      await held;
+      runLocalBackupUiRestoreWriterGuardedSync(OWNER_USER_ID, 'project-state', () => {
+        writes += 1;
+      });
+    });
+
+    try {
+      await started;
+      releaseWrite();
+      await expect(mutation).resolves.toBeUndefined();
+      expect(writes).toBe(1);
+      expect(() => runLocalBackupUiRestoreWriterGuardedSync(
+        OWNER_USER_ID,
+        'project-state',
+        () => { writes += 1; },
+      )).toThrow(LocalBackupUiRestoreWriterPausedError);
+      expect(writes).toBe(1);
+    } finally {
+      releaseWrite();
+      await mutation.catch(() => undefined);
+      await handle.abortBeforeMutation();
+    }
   });
 
   it('keeps writers frozen until finalization evidence and journal cleanup are complete', async () => {

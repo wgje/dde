@@ -210,7 +210,7 @@ describe('LocalBackupUIService restore race boundaries', () => {
     const stageApply = vi.fn(async (context: LocalBackupUiRestoreStageOperationContext) => {
       stageEntered.resolve(undefined);
       await continueStage.promise;
-      return await context.runWriterMutation('external-source', durableMutation);
+      return await context.runWriterMutationAsync('external-source', durableMutation);
     });
     restoreStages.createOperations.mockImplementation(input => (
       createLocalBackupUiRestoreStageOperations(input, {
@@ -219,7 +219,7 @@ describe('LocalBackupUIService restore race boundaries', () => {
           apply: stageApply,
           read: vi.fn(async () => ({})),
           restore: vi.fn(async (_snapshot, context) => {
-            await context.runWriterMutation('external-source', rollbackMutation);
+            await context.runWriterMutationAsync('external-source', rollbackMutation);
           }),
         } } as never,
       })
@@ -230,6 +230,7 @@ describe('LocalBackupUIService restore race boundaries', () => {
       verifyOwnership: vi.fn(async () => true),
       transition: vi.fn(async update => (marker = update(marker))),
       runWriterMutation: (_source, write) => write(),
+      runWriterMutationAsync: (_source, write) => write(),
       drainWriters: vi.fn(async () => undefined),
       abortBeforeMutation: vi.fn(async () => undefined),
       finalize: vi.fn(async () => undefined),

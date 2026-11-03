@@ -5,6 +5,8 @@ import { createDeferred, createProject, getLastProjectUpdater, replayProjectUpda
 import type { ProjectOperationConflictResolutionSpecContext } from './project-operation-conflict-resolution.spec-context';
 import { registerProjectOperationConflictResolutionStaleCleanupSpecs } from './project-operation-conflict-resolution-stale-cleanup.spec-helpers';
 import { isSyncOperationId } from '../utils/sync-operation-id';
+import { getLocalBackupUiRestoreQuiescenceSentinelStorageKey } from './local-backup-ui-restore-writer-quiescence-tracker';
+import { LocalBackupUiRestoreWriterQuiescenceService } from './local-backup-ui-restore-writer-quiescence.service';
 type UpdateProjectsMock = Parameters<typeof replayProjectUpdates>[0];
 export type { ProjectOperationConflictResolutionSpecContext } from './project-operation-conflict-resolution.spec-context';
 export function registerProjectOperationConflictResolutionSpecs(
@@ -68,6 +70,10 @@ export function registerProjectOperationConflictResolutionSpecs(
     });
     it('本地模式冲突解决应先等待离线快照持久化再提交 UI', async () => {
       const snapshotWrite = createDeferred<void>();
+      const ownerUserId = AUTH_CONFIG.LOCAL_MODE_USER_ID;
+      const sentinelKey = getLocalBackupUiRestoreQuiescenceSentinelStorageKey(ownerUserId);
+      localStorage.removeItem(sentinelKey);
+      const quiescenceService = new LocalBackupUiRestoreWriterQuiescenceService({ pollIntervalMs: 1 });
       const localProject = createProject({ id: 'proj-local-conflict', name: 'Local Conflict', syncSource: 'local-only' });
       const resolvedProject = createProject({ id: 'proj-local-conflict', name: 'Resolved Local Conflict', syncSource: 'local-only' });
       mockConflictStorage.getConflict.mockResolvedValue({
@@ -80,22 +86,44 @@ export function registerProjectOperationConflictResolutionSpecs(
         value: resolvedProject,
       });
       mockSyncCoordinator.core.saveOfflineSnapshotAndWait?.mockReturnValueOnce(snapshotWrite.promise);
-      const resultPromise = service.resolveConflict('proj-local-conflict', 'local');
-      await vi.waitFor(() => {
-        expect(mockSyncCoordinator.core.saveOfflineSnapshotAndWait).toHaveBeenCalledWith([
-          expect.objectContaining({
-            id: 'proj-local-conflict',
-            name: 'Resolved Local Conflict',
-            pendingSync: false,
-          }),
-        ], AUTH_CONFIG.LOCAL_MODE_USER_ID);
-      });
-      expect(mockProjectState.updateProjects).not.toHaveBeenCalled();
-      expect(mockConflictStorage.deleteConflict).not.toHaveBeenCalled();
-      snapshotWrite.resolve();
-      await expect(resultPromise).resolves.toBe(true);
-      expect(mockProjectState.updateProjects).toHaveBeenCalledOnce();
-      expect(mockConflictStorage.deleteConflict).toHaveBeenCalledWith('proj-local-conflict', AUTH_CONFIG.LOCAL_MODE_USER_ID);
+      let resultPromise: Promise<boolean> | null = null;
+      let preparing: ReturnType<typeof quiescenceService.prepare> | null = null;
+      let prepared: Awaited<ReturnType<typeof quiescenceService.prepare>> | null = null;
+      let restorePrepared = false;
+      try {
+        resultPromise = service.resolveConflict('proj-local-conflict', 'local');
+        await vi.waitFor(() => {
+          expect(mockSyncCoordinator.core.saveOfflineSnapshotAndWait).toHaveBeenCalledWith([
+            expect.objectContaining({
+              id: 'proj-local-conflict',
+              name: 'Resolved Local Conflict',
+              pendingSync: false,
+            }),
+          ], ownerUserId);
+        });
+        expect(mockProjectState.updateProjects).not.toHaveBeenCalled();
+        expect(mockConflictStorage.deleteConflict).not.toHaveBeenCalled();
+
+        preparing = quiescenceService.prepare(ownerUserId).then(handle => {
+          restorePrepared = true;
+          return handle;
+        });
+        await vi.waitFor(() => expect(localStorage.getItem(sentinelKey)).not.toBeNull());
+        await new Promise(resolve => setTimeout(resolve, 10));
+        expect(restorePrepared).toBe(false);
+
+        snapshotWrite.resolve();
+        await expect(resultPromise).resolves.toBe(true);
+        expect(mockProjectState.updateProjects).toHaveBeenCalledOnce();
+        expect(mockConflictStorage.deleteConflict).toHaveBeenCalledWith('proj-local-conflict', ownerUserId);
+        prepared = await preparing;
+        expect(restorePrepared).toBe(true);
+      } finally {
+        snapshotWrite.resolve();
+        await resultPromise?.catch(() => false);
+        if (preparing && !prepared) prepared = await preparing.catch(() => null);
+        await prepared?.abortBeforeMutation();
+      }
     });
     it('resolveConflict 选择本地版本时应向离线快照终态持久化全量 tasks 和 connections', async () => {
       const projectId = 'proj-authoritative-local';

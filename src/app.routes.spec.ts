@@ -139,6 +139,20 @@ describe('app.routes lazy guard wrappers', () => {
     expect(projectExistsGuardMock).toHaveBeenCalledTimes(1);
   });
 
+  it('blocks project hydration while startup recovery holds the restore fence', async () => {
+    projectExistsGuardMock.mockResolvedValueOnce(true);
+    restoreFenceRun.mockResolvedValueOnce({
+      status: 'HOLD', ownerUserId: 'owner-a', reason: 'RECOVERY_BLOCKED',
+    });
+
+    const result = await TestBed.runInInjectionContext(() =>
+      projectExistsGuardLazy({} as never, { url: '/projects/project-1' } as never)
+    );
+
+    expect(result).toBe(false);
+    expect(projectExistsGuardMock).not.toHaveBeenCalled();
+  });
+
   it('unsavedChangesGuardLazy 应通过 inject 调用类守卫并返回结果', async () => {
     canDeactivateMock.mockResolvedValueOnce(true);
 

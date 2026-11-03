@@ -158,7 +158,7 @@ export function registerProjectOperationCurrentDataSpecs(
         pendingSync: true,
         syncSource: 'synced',
       }),
-    ]);
+    ], expect.any(String));
     expect(mockSyncCoordinator.core.saveOfflineSnapshot).toHaveBeenCalledWith([
       expect.objectContaining({
         id: renamedCurrentProject.id,
@@ -168,7 +168,7 @@ export function registerProjectOperationCurrentDataSpecs(
         pendingSync: true,
         syncSource: 'synced',
       }),
-    ]);
+    ], expect.any(String));
   });
 
   it.each([
@@ -246,7 +246,7 @@ export function registerProjectOperationCurrentDataSpecs(
         pendingSync: true,
         syncSource: 'synced',
       }),
-    ]);
+    ], expect.any(String));
     expect(mockSyncCoordinator.core.saveOfflineSnapshot).toHaveBeenCalledWith([
       expect.objectContaining({
         id: expectedProject.id,
@@ -255,7 +255,7 @@ export function registerProjectOperationCurrentDataSpecs(
         pendingSync: true,
         syncSource: 'synced',
       }),
-    ]);
+    ], expect.any(String));
   });
 
   it('认证用户新增项目时应从 current data 而非 metadata shell 生成快照与 finalize payload', async () => {
@@ -294,7 +294,7 @@ export function registerProjectOperationCurrentDataSpecs(
         pendingSync: true,
         syncSource: 'synced',
       }),
-    ]);
+    ], expect.any(String));
     expect(mockSyncCoordinator.core.saveOfflineSnapshot).toHaveBeenCalledWith([
       expect.objectContaining({
         id: retainedProject.id,
@@ -306,7 +306,7 @@ export function registerProjectOperationCurrentDataSpecs(
         pendingSync: true,
         syncSource: 'synced',
       }),
-    ]);
+    ], expect.any(String));
   });
 
   it('认证用户删除项目时应从 current data 保留 remaining project，并使用 current baseUpdatedAt', async () => {
@@ -354,14 +354,14 @@ export function registerProjectOperationCurrentDataSpecs(
         tasks: retainedProject.tasks,
         connections: retainedProject.connections,
       }),
-    ]);
+    ], expect.any(String));
     expect(mockSyncCoordinator.core.saveOfflineSnapshot).toHaveBeenCalledWith([
       expect.objectContaining({
         id: retainedProject.id,
         tasks: retainedProject.tasks,
         connections: retainedProject.connections,
       }),
-    ]);
+    ], expect.any(String));
   });
 
   it.each([
@@ -443,7 +443,7 @@ export function registerProjectOperationCurrentDataSpecs(
         pendingSync: true,
         syncSource: 'synced',
       }),
-    ]);
+    ], expect.any(String));
     expect(mockSyncCoordinator.core.saveOfflineSnapshot).toHaveBeenCalledWith([
       expect.objectContaining({
         id: retainedProject.id,
@@ -457,7 +457,7 @@ export function registerProjectOperationCurrentDataSpecs(
         pendingSync: true,
         syncSource: 'synced',
       }),
-    ]);
+    ], expect.any(String));
   });
 
   it('本地模式导入项目时应从 current data 而非 metadata shell 生成 snapshot 与 finalize payload', async () => {
@@ -500,7 +500,7 @@ export function registerProjectOperationCurrentDataSpecs(
         syncSource: 'local-only',
         pendingSync: false,
       }),
-    ]);
+    ], expect.any(String));
     expect(mockSyncCoordinator.core.saveOfflineSnapshot).toHaveBeenCalledWith([
       expect.objectContaining({
         id: retainedProject.id,
@@ -514,7 +514,7 @@ export function registerProjectOperationCurrentDataSpecs(
         syncSource: 'local-only',
         pendingSync: false,
       }),
-    ]);
+    ], expect.any(String));
   });
 
   it('认证用户导入项目队列写入失败时应按 current data 回写离线快照，而不是 shell 列表', async () => {
@@ -551,6 +551,6 @@ export function registerProjectOperationCurrentDataSpecs(
         tasks: existingProject.tasks,
         connections: existingProject.connections,
       }),
-    ]);
+    ], expect.any(String));
   });
 }

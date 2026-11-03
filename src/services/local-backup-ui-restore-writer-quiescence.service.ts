@@ -8,8 +8,10 @@ import {
   beginLocalBackupUiRestoreWriter,
   getLocalBackupUiRestoreQuiescenceSentinelStorageKey,
   readActiveLocalBackupUiRestoreWriters,
+  runLocalBackupUiRestoreWriterGuardedSync,
   runLocalBackupUiRestoreWriterContinuationSync,
   runWithLocalBackupUiRestoreWriterAuthorization,
+  runWithLocalBackupUiRestoreWriterAuthorizationAsync,
   trackLocalBackupUiRestoreWriterPromise,
   type LocalBackupUiRestoreWriterSource,
 } from './local-backup-ui-restore-writer-quiescence-tracker';
@@ -45,7 +47,8 @@ export type LocalBackupUiRestoreQuiescenceFinalOutcome = 'completed' | 'rolled-b
 export interface PreparedLocalBackupUiRestoreWriterQuiescence {
   marker(): LocalBackupUiRestoreQuiescenceMarker;
   verifyOwnership(): Promise<boolean>;
-  runMutation<T>(source: LocalBackupUiRestoreWriterSource, write: () => Promise<T>): Promise<T>;
+  runMutation<T>(source: LocalBackupUiRestoreWriterSource, write: () => T): T;
+  runMutationAsync<T>(source: LocalBackupUiRestoreWriterSource, write: () => Promise<T>): Promise<T>;
   drainWriters(): Promise<void>;
   prepareFinalization(outcome: LocalBackupUiRestoreQuiescenceFinalOutcome): Promise<void>;
   releaseFinalized(): Promise<void>;
@@ -90,6 +93,14 @@ export class LocalBackupUiRestoreWriterQuiescenceService {
     }
   }
 
+  guardSync<T>(
+    ownerUserId: string,
+    source: LocalBackupUiRestoreWriterSource,
+    write: () => T,
+  ): T {
+    return runLocalBackupUiRestoreWriterGuardedSync(ownerUserId, source, write);
+  }
+
   async runAsync<T>(
     ownerUserId: string,
     source: LocalBackupUiRestoreWriterSource,
@@ -119,7 +130,8 @@ export class LocalBackupUiRestoreWriterQuiescenceService {
     const lease: LocalBackupUiRestoreQuiescenceLease = new LocalBackupUiRestoreQuiescenceLease(
       marker,
       this.leaseMs,
-      source => this.runAsync(ownerUserId, source.source, source.write),
+      (source, write) => this.runSync(ownerUserId, source, write),
+      (source, write) => this.runAsync(ownerUserId, source, write),
       (): Promise<void> => this.waitForActiveWriters(
         ownerUserId,
         (): boolean => lease.hasOwnershipLost(),
@@ -209,7 +221,8 @@ export class LocalBackupUiRestoreWriterQuiescenceService {
     const lease: LocalBackupUiRestoreQuiescenceLease = new LocalBackupUiRestoreQuiescenceLease(
       adoptedMarker,
       this.leaseMs,
-      source => this.runAsync(expected.ownerUserId, source.source, source.write),
+      (source, write) => this.runSync(expected.ownerUserId, source, write),
+      (source, write) => this.runAsync(expected.ownerUserId, source, write),
       (): Promise<void> => this.waitForActiveWriters(
         expected.ownerUserId,
         (): boolean => lease.hasOwnershipLost(),
@@ -239,7 +252,8 @@ export class LocalBackupUiRestoreWriterQuiescenceService {
     const lease: LocalBackupUiRestoreQuiescenceLease = new LocalBackupUiRestoreQuiescenceLease(
       reclaimedMarker,
       this.leaseMs,
-      source => this.runAsync(expected.ownerUserId, source.source, source.write),
+      (source, write) => this.runSync(expected.ownerUserId, source, write),
+      (source, write) => this.runAsync(expected.ownerUserId, source, write),
       (): Promise<void> => this.waitForActiveWriters(
         expected.ownerUserId,
         (): boolean => lease.hasOwnershipLost(),
@@ -277,10 +291,14 @@ class LocalBackupUiRestoreQuiescenceLease {
   constructor(
     marker: LocalBackupUiRestoreQuiescenceMarker,
     leaseMs: number,
-    private readonly runAuthorizedWriter: <T>(input: {
-      source: LocalBackupUiRestoreWriterSource;
-      write: () => Promise<T>;
-    }) => Promise<T>,
+    private readonly runAuthorizedWriter: <T>(
+      source: LocalBackupUiRestoreWriterSource,
+      write: () => T,
+    ) => T,
+    private readonly runAuthorizedWriterAsync: <T>(
+      source: LocalBackupUiRestoreWriterSource,
+      write: () => Promise<T>,
+    ) => Promise<T>,
     private readonly drain: () => Promise<void>,
   ) {
     this.markerValue = marker;
@@ -318,6 +336,7 @@ class LocalBackupUiRestoreQuiescenceLease {
       marker: () => ({ ...this.markerValue }),
       verifyOwnership: () => this.verifyOwnership(),
       runMutation: (source, write) => this.runMutation(source, write),
+      runMutationAsync: (source, write) => this.runMutationAsync(source, write),
       drainWriters: () => this.drainWriters(),
       prepareFinalization: outcome => this.prepareFinalization(outcome),
       releaseFinalized: () => this.releaseFinalized(),
@@ -337,8 +356,8 @@ class LocalBackupUiRestoreQuiescenceLease {
 
   private runMutation<T>(
     source: LocalBackupUiRestoreWriterSource,
-    write: () => Promise<T>,
-  ): Promise<T> {
+    write: () => T,
+  ): T {
     if (this.markerValue.state !== 'quiesced') {
       throw new Error('local backup UI restore is not accepting stage mutations');
     }
@@ -346,7 +365,22 @@ class LocalBackupUiRestoreQuiescenceLease {
       this.markerValue.ownerUserId,
       this.markerValue.runId,
       source,
-      () => this.runAuthorizedWriter({ source, write }),
+      () => this.runAuthorizedWriter(source, write),
+    );
+  }
+
+  private runMutationAsync<T>(
+    source: LocalBackupUiRestoreWriterSource,
+    write: () => Promise<T>,
+  ): Promise<T> {
+    if (this.markerValue.state !== 'quiesced') {
+      throw new Error('local backup UI restore is not accepting stage mutations');
+    }
+    return runWithLocalBackupUiRestoreWriterAuthorizationAsync(
+      this.markerValue.ownerUserId,
+      this.markerValue.runId,
+      source,
+      () => this.runAuthorizedWriterAsync(source, write),
     );
   }
 

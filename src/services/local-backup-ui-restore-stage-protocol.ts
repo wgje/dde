@@ -40,6 +40,10 @@ export interface LocalBackupUiRestoreProtocolRuntime {
   ): Promise<LocalBackupUiRestoreMarker>;
   runWriterMutation<T>(
     source: LocalBackupUiRestoreWriterSource,
+    write: () => T,
+  ): T;
+  runWriterMutationAsync<T>(
+    source: LocalBackupUiRestoreWriterSource,
     write: () => Promise<T>,
   ): Promise<T>;
   drainWriters(): Promise<void>;
@@ -51,6 +55,10 @@ export interface LocalBackupUiRestoreStageOperationContext {
   marker(): LocalBackupUiRestoreMarker;
   checkpoint(): Promise<void>;
   runWriterMutation<T>(
+    source: LocalBackupUiRestoreWriterSource,
+    write: () => T,
+  ): T;
+  runWriterMutationAsync<T>(
     source: LocalBackupUiRestoreWriterSource,
     write: () => Promise<T>,
   ): Promise<T>;
@@ -153,6 +161,7 @@ function createOperationContext(
     marker: () => runtime.marker(),
     checkpoint: () => checkpoint(runtime),
     runWriterMutation: (source, write) => runtime.runWriterMutation(source, write),
+    runWriterMutationAsync: (source, write) => runtime.runWriterMutationAsync(source, write),
   };
 }
 

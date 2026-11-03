@@ -29,6 +29,7 @@ import {
   type SessionRuntimeResetReason,
 } from './session-runtime-reset.service';
 import { ProjectDataService, TombstoneService } from '../core-bridge';
+import { localBackupUiRestoreWriterQuiescence } from './local-backup-ui-restore-writer-quiescence.service';
 
 const LOCAL_ATTACHMENT_URL_PREFIX = 'nanoflow-local-attachment://';
 
@@ -516,17 +517,38 @@ export class ActionQueueAttachmentProcessorsService implements OnDestroy {
     payload: AttachmentUploadPayload,
     fence: AttachmentReplayFence,
   ): Promise<Task | null> {
+    const ownerUserId = this.resolvePayloadOwnerUserId(payload);
+    return localBackupUiRestoreWriterQuiescence.runAsync(
+      ownerUserId,
+      'project-state',
+      () => this.restoreMissingTaskAttachmentMetadataUnderWriter(
+        operationId,
+        task,
+        payload,
+        fence,
+        ownerUserId,
+      ),
+    );
+  }
+
+  private async restoreMissingTaskAttachmentMetadataUnderWriter(
+    operationId: string,
+    task: Task,
+    payload: AttachmentUploadPayload,
+    fence: AttachmentReplayFence,
+    ownerUserId: string,
+  ): Promise<Task | null> {
     const restoredProjects = this.buildRestoredAttachmentProjects(operationId, task, payload);
     if (!restoredProjects) return null;
     const persisted = await this.persistRestoredAttachmentProjects(
       restoredProjects,
       payload,
-      this.resolvePayloadOwnerUserId(payload),
+      ownerUserId,
     );
     if (!persisted) return null;
     if (!fence.isCurrent()) return null;
 
-    this.projectState.updateProjects(() => restoredProjects);
+    this.projectState.updateProjects(() => restoredProjects, ownerUserId);
     return this.readBackRestoredTaskAttachment(payload);
   }
 

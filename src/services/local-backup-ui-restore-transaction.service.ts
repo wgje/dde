@@ -198,7 +198,7 @@ export async function prepareLocalBackupUiRestoreTransaction(
       dependencies.queueBackup,
       input.restoredActionQueueItems.length,
     );
-    await quiescence.runMutation('action-queue', () => (
+    await quiescence.runMutationAsync('action-queue', () => (
       prepareActionQueueRestore(input, preImage, queueIdentity, dependencies)
     ));
     return preparedHandle;
@@ -363,6 +363,7 @@ function createPreparedHandle(
     verifyOwnership,
     transition: update => transitionPreparedMarker(state, journal, startMarkerHeartbeat, update),
     runWriterMutation: (source, write) => quiescence.runMutation(source, write),
+    runWriterMutationAsync: (source, write) => quiescence.runMutationAsync(source, write),
     drainWriters: () => quiescence.drainWriters(),
     abortBeforeMutation,
     finalize: outcome => finalizeLocalBackupUiRestoreTerminal(terminalContext, outcome),

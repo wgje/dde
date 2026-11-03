@@ -264,7 +264,8 @@ function createContext(
       order.push(`transition:${marker.state}:${marker.phase}:${marker.completedStages.at(-1) ?? ''}`);
       return marker;
     }),
-    runWriterMutation: vi.fn(async (_source, write) => await write()),
+    runWriterMutation: vi.fn((_source, write) => write()),
+    runWriterMutationAsync: vi.fn(async (_source, write) => await write()),
     drainWriters: vi.fn(async () => {
       order.push('drain');
     }),

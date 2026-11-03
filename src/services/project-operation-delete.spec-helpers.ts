@@ -208,7 +208,7 @@ export function registerProjectOperationDeleteSpecs(
 
       expect(mockSyncCoordinator.core.saveOfflineSnapshotAndWait).toHaveBeenCalledWith([
         expect.objectContaining({ id: 'proj-local-stays' }),
-      ]);
+      ], expect.any(String));
       expect(mockProjectState.updateProjects).not.toHaveBeenCalled();
       expect(mockProjectState.setActiveProjectId).not.toHaveBeenCalled();
       expect(mockOptimisticState.commitSnapshot).not.toHaveBeenCalled();

@@ -6,16 +6,24 @@ import {
   expect,
   getOfflineSnapshotStorageKey,
   it,
+  ProjectDataService,
+  ProjectOfflineSnapshotService,
   readOfflineSnapshotFromIdb,
   vi,
   writeOfflineSnapshotToIdb,
 } from './project-data.service.spec-context';
 import {
+  createProjectDataOfflineSnapshotInjector,
   createProjectDataOfflineSnapshotService,
   createStartupOfflineSnapshotProjectDataService,
 } from './project-data-offline-snapshot.spec-harness';
 import { registerProjectDataOfflineSnapshotLoadSpecs } from './project-data-offline-snapshot-load.spec-helpers';
 import { DataSafetyAuditPersistence } from '../../../../services/data-safety-audit-persistence';
+import {
+  getLocalBackupUiRestoreQuiescenceSentinelStorageKey,
+  readActiveLocalBackupUiRestoreWriters,
+} from '../../../../services/local-backup-ui-restore-writer-quiescence-tracker';
+import { localBackupUiRestoreWriterQuiescence } from '../../../../services/local-backup-ui-restore-writer-quiescence.service';
 
 type SnapshotSaveOutcome =
   | { status: 'resolved' }
@@ -65,6 +73,17 @@ function expectNoDataSafetyAudit(ownerUserId: string): void {
   const audit = readDataSafetyAudit(ownerUserId);
   expect(audit.replayLog).toHaveLength(0);
   expect(audit.lastWriteExplain).toBeNull();
+}
+
+function mockOfflineSnapshotStorageQuota(ownerUserId: string) {
+  const snapshotStorageKey = getOfflineSnapshotStorageKey(ownerUserId);
+  const originalSetItem = localStorage.setItem.bind(localStorage);
+  return vi.spyOn(localStorage, 'setItem').mockImplementation((key, value) => {
+    if (key === snapshotStorageKey) {
+      throw new DOMException('localStorage unavailable', 'QuotaExceededError');
+    }
+    originalSetItem(key, value);
+  });
 }
 
 export function registerProjectDataOfflineSnapshotSpecs(): void {
@@ -350,6 +369,211 @@ export function registerProjectDataOfflineSnapshotSpecs(): void {
         expect(snapshot.ownerUserId).toBe('confirmed-owner');
       }, 10000);
 
+      it('离线快照 writer 在 IndexedDB settle 前保持活动，prepare 会等待它完成', async () => {
+        const ownerUserId = `snapshot-fence-${Date.now()}-${Math.random()}`;
+        await clearOfflineSnapshotIdb(ownerUserId);
+        localStorage.removeItem(getOfflineSnapshotStorageKey(ownerUserId));
+        localStorage.removeItem(getLocalBackupUiRestoreQuiescenceSentinelStorageKey(ownerUserId));
+
+        const injector = createProjectDataOfflineSnapshotInjector({
+          authService: { currentUserId: vi.fn(() => ownerUserId) },
+        });
+        const service = injector.get(ProjectDataService);
+        const snapshotService = injector.get(ProjectOfflineSnapshotService) as unknown as {
+          saveSnapshotToIDB(payload: string, owner: string): Promise<void>;
+        };
+        let releaseIdbWrite = (): void => undefined;
+        let markIdbWriteStarted = (): void => undefined;
+        const idbWriteStarted = new Promise<void>(resolve => {
+          markIdbWriteStarted = resolve;
+        });
+        const heldIdbWrite = new Promise<void>(resolve => {
+          releaseIdbWrite = resolve;
+        });
+        const saveSpy = vi.spyOn(snapshotService, 'saveSnapshotToIDB').mockImplementation(async () => {
+          markIdbWriteStarted();
+          await heldIdbWrite;
+        });
+
+        let prepareResolved = false;
+        const save = service.saveOfflineSnapshotAndWait(createSnapshotProject('held-snapshot'), ownerUserId);
+        const prepare = localBackupUiRestoreWriterQuiescence.prepare(ownerUserId).then(handle => {
+          prepareResolved = true;
+          return handle;
+        });
+
+        try {
+          await idbWriteStarted;
+          expect(readActiveLocalBackupUiRestoreWriters(ownerUserId)).toEqual(
+            expect.arrayContaining([expect.objectContaining({ source: 'offline-snapshot' })]),
+          );
+          await new Promise(resolve => setTimeout(resolve, 30));
+          expect(prepareResolved).toBe(false);
+
+          releaseIdbWrite();
+          await save;
+          await prepare;
+          expect(prepareResolved).toBe(true);
+        } finally {
+          releaseIdbWrite();
+          await save.catch(() => undefined);
+          const prepared = await prepare.catch(() => null);
+          saveSpy.mockRestore();
+          if (prepared) await prepared.abortBeforeMutation();
+          else localStorage.removeItem(getLocalBackupUiRestoreQuiescenceSentinelStorageKey(ownerUserId));
+        }
+      }, 10000);
+
+      it('saveOfflineSnapshot retains a paused request and retries after quiescence clears', async () => {
+        const ownerUserId = `snapshot-resume-${Date.now()}-${Math.random()}`;
+        await clearOfflineSnapshotIdb(ownerUserId);
+        localStorage.removeItem(getOfflineSnapshotStorageKey(ownerUserId));
+        localStorage.removeItem(getLocalBackupUiRestoreQuiescenceSentinelStorageKey(ownerUserId));
+        const service = createProjectDataOfflineSnapshotService({
+          authService: { currentUserId: vi.fn(() => ownerUserId) },
+        });
+        const prepared = await localBackupUiRestoreWriterQuiescence.prepare(ownerUserId);
+
+        try {
+          service.saveOfflineSnapshot(createSnapshotProject('deferred-snapshot'), ownerUserId);
+          await new Promise(resolve => setTimeout(resolve, 20));
+          expect(localStorage.getItem(getOfflineSnapshotStorageKey(ownerUserId))).toBeNull();
+          expect(await readOfflineSnapshotFromIdb(ownerUserId)).toBeNull();
+
+          await prepared.abortBeforeMutation();
+          const deadline = Date.now() + 3000;
+          let payload: string | null = null;
+          while (Date.now() < deadline && payload === null) {
+            payload = await readOfflineSnapshotFromIdb(ownerUserId);
+            if (payload === null) await new Promise(resolve => setTimeout(resolve, 20));
+          }
+          expect(payload).not.toBeNull();
+          expect(JSON.parse(payload ?? '{}')).toEqual(expect.objectContaining({
+            ownerUserId,
+            projects: expect.arrayContaining([expect.objectContaining({ id: 'deferred-snapshot' })]),
+          }));
+        } finally {
+          if (localStorage.getItem(getLocalBackupUiRestoreQuiescenceSentinelStorageKey(ownerUserId)) !== null) {
+            await prepared.abortBeforeMutation();
+          }
+        }
+      }, 10000);
+
+      it('does not replay a paused pre-restore snapshot over a newer restore snapshot', async () => {
+        const ownerUserId = `snapshot-superseded-${Date.now()}-${Math.random()}`;
+        await clearOfflineSnapshotIdb(ownerUserId);
+        localStorage.removeItem(getOfflineSnapshotStorageKey(ownerUserId));
+        localStorage.removeItem(getLocalBackupUiRestoreQuiescenceSentinelStorageKey(ownerUserId));
+        const service = createProjectDataOfflineSnapshotService({
+          authService: { currentUserId: vi.fn(() => ownerUserId) },
+        });
+        const prepared = await localBackupUiRestoreWriterQuiescence.prepare(ownerUserId);
+
+        try {
+          service.saveOfflineSnapshot(createSnapshotProject('stale-snapshot'), ownerUserId);
+          await new Promise(resolve => setTimeout(resolve, 20));
+          await prepared.runMutationAsync('offline-snapshot', () => service.saveOfflineSnapshotAndWait(
+            createSnapshotProject('restored-snapshot'),
+            ownerUserId,
+          ));
+          await prepared.prepareFinalization('completed');
+          await prepared.releaseFinalized();
+
+          await new Promise(resolve => setTimeout(resolve, 180));
+          const payload = await readOfflineSnapshotFromIdb(ownerUserId);
+          expect(payload).not.toBeNull();
+          expect(JSON.parse(payload ?? '{}')).toEqual(expect.objectContaining({
+            ownerUserId,
+            projects: expect.arrayContaining([expect.objectContaining({ id: 'restored-snapshot' })]),
+          }));
+          expect(JSON.parse(payload ?? '{}')).not.toEqual(expect.objectContaining({
+            projects: expect.arrayContaining([expect.objectContaining({ id: 'stale-snapshot' })]),
+          }));
+        } finally {
+          if (localStorage.getItem(getLocalBackupUiRestoreQuiescenceSentinelStorageKey(ownerUserId)) !== null) {
+            await prepared.abortBeforeMutation();
+          }
+        }
+      }, 10000);
+
+      it('saveOfflineSnapshotAndWait uses IndexedDB when only the snapshot storage key is over quota', async () => {
+        const ownerUserId = `snapshot-quota-${Date.now()}-${Math.random()}`;
+        await clearOfflineSnapshotIdb(ownerUserId);
+        localStorage.removeItem(getOfflineSnapshotStorageKey(ownerUserId));
+        const localStorageSetItemSpy = mockOfflineSnapshotStorageQuota(ownerUserId);
+        const service = createProjectDataOfflineSnapshotService({
+          authService: { currentUserId: vi.fn(() => ownerUserId) },
+        });
+
+        try {
+          await service.saveOfflineSnapshotAndWait(createSnapshotProject('idb-quota-fallback'), ownerUserId);
+
+          expect(localStorage.getItem(getOfflineSnapshotStorageKey(ownerUserId))).toBeNull();
+          const payload = await readOfflineSnapshotFromIdb(ownerUserId);
+          expect(payload).not.toBeNull();
+          expect(JSON.parse(payload ?? '{}')).toEqual(expect.objectContaining({
+            ownerUserId,
+            projects: expect.arrayContaining([expect.objectContaining({ id: 'idb-quota-fallback' })]),
+          }));
+          expect(readDataSafetyAudit(ownerUserId).lastWriteExplain?.rpcResult).toEqual(
+            expect.objectContaining({
+              raw: expect.objectContaining({
+                settlement: { localStorage: 'failed', indexedDB: 'saved' },
+              }),
+            }),
+          );
+        } finally {
+          localStorageSetItemSpy.mockRestore();
+          localStorage.removeItem(getOfflineSnapshotStorageKey(ownerUserId));
+          await clearOfflineSnapshotIdb(ownerUserId);
+        }
+      }, 10000);
+
+      it('saveOfflineSnapshot retains a request after writer lease quota failure and retries it', async () => {
+        const ownerUserId = `snapshot-lease-retry-${Date.now()}-${Math.random()}`;
+        const storageKey = getOfflineSnapshotStorageKey(ownerUserId);
+        await clearOfflineSnapshotIdb(ownerUserId);
+        localStorage.removeItem(storageKey);
+        localStorage.removeItem(getLocalBackupUiRestoreQuiescenceSentinelStorageKey(ownerUserId));
+        const originalSetItem = localStorage.setItem.bind(localStorage);
+        let failNextWrite = true;
+        const localStorageSetItemSpy = vi.spyOn(localStorage, 'setItem').mockImplementation((key, value) => {
+          if (failNextWrite) {
+            failNextWrite = false;
+            throw new DOMException('localStorage unavailable', 'QuotaExceededError');
+          }
+          originalSetItem(key, value);
+        });
+        const service = createProjectDataOfflineSnapshotService({
+          authService: { currentUserId: vi.fn(() => ownerUserId) },
+        });
+
+        try {
+          service.saveOfflineSnapshot(createSnapshotProject('lease-retry-snapshot'), ownerUserId);
+          await new Promise(resolve => setTimeout(resolve, 0));
+          expect(localStorage.getItem(storageKey)).toBeNull();
+          expect(await readOfflineSnapshotFromIdb(ownerUserId)).toBeNull();
+
+          localStorageSetItemSpy.mockRestore();
+          const deadline = Date.now() + 3000;
+          let payload: string | null = null;
+          while (Date.now() < deadline && payload === null) {
+            payload = await readOfflineSnapshotFromIdb(ownerUserId);
+            if (payload === null) await new Promise(resolve => setTimeout(resolve, 20));
+          }
+          expect(payload).not.toBeNull();
+          expect(JSON.parse(payload ?? '{}')).toEqual(expect.objectContaining({
+            ownerUserId,
+            projects: expect.arrayContaining([expect.objectContaining({ id: 'lease-retry-snapshot' })]),
+          }));
+        } finally {
+          localStorageSetItemSpy.mockRestore();
+          localStorage.removeItem(storageKey);
+          localStorage.removeItem(getLocalBackupUiRestoreQuiescenceSentinelStorageKey(ownerUserId));
+          await clearOfflineSnapshotIdb(ownerUserId);
+        }
+      }, 10000);
+
       it('saveOfflineSnapshotAndWait 成功替换 authoritative snapshot 时应记录 DataSafetyWriteAudit', async () => {
         localStorage.removeItem(getOfflineSnapshotStorageKey('audit-owner'));
         await clearOfflineSnapshotIdb('audit-owner');
@@ -519,9 +743,7 @@ export function registerProjectDataOfflineSnapshotSpecs(): void {
       }, 10000);
 
       it('saveOfflineSnapshotAndWait 在 IndexedDB transaction abort 且 localStorage 失败时应拒绝提交', async () => {
-        const localStorageSetItemSpy = vi.spyOn(localStorage, 'setItem').mockImplementation(() => {
-          throw new DOMException('localStorage unavailable', 'QuotaExceededError');
-        });
+        const localStorageSetItemSpy = mockOfflineSnapshotStorageQuota('user-1');
         const consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
         const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
         const close = vi.fn();
@@ -576,9 +798,7 @@ export function registerProjectDataOfflineSnapshotSpecs(): void {
       }, 10000);
 
       it('saveOfflineSnapshotAndWait 在 IndexedDB open blocked 且 localStorage 失败时应拒绝提交', async () => {
-        const localStorageSetItemSpy = vi.spyOn(localStorage, 'setItem').mockImplementation(() => {
-          throw new DOMException('localStorage unavailable', 'QuotaExceededError');
-        });
+        const localStorageSetItemSpy = mockOfflineSnapshotStorageQuota('user-1');
         const consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
         const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
         const request: FakeOpenRequest = {
@@ -617,9 +837,7 @@ export function registerProjectDataOfflineSnapshotSpecs(): void {
 
       it('saveOfflineSnapshotAndWait 在 IndexedDB open 无事件且 localStorage 失败时应超时拒绝', async () => {
         vi.useFakeTimers();
-        const localStorageSetItemSpy = vi.spyOn(localStorage, 'setItem').mockImplementation(() => {
-          throw new DOMException('localStorage unavailable', 'QuotaExceededError');
-        });
+        const localStorageSetItemSpy = mockOfflineSnapshotStorageQuota('user-1');
         const request: FakeOpenRequest = {
           result: {} as IDBDatabase,
           error: null,

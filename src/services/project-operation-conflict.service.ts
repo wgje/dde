@@ -17,6 +17,7 @@ import { ChangeTrackerService } from './change-tracker.service';
 import { ProjectConflictCaptureService } from './project-conflict-capture.service';
 import { ProjectConflictDirectSyncService } from './project-conflict-direct-sync.service';
 import { createProjectConflictHandoffSettlement } from './project-operation-conflict-retry-settlement.controller';
+import { localBackupUiRestoreWriterQuiescence } from './local-backup-ui-restore-writer-quiescence.service';
 import { Project } from '../models';
 import {
   captureConflictFingerprint,
@@ -76,8 +77,11 @@ export class ProjectOperationConflictService {
       && this.userSession.isSessionContextCurrent(input.sessionGeneration, input.ownerUserId),
     getCurrentProjects: () => this.projectState.getProjectsWithCurrentData(),
     getPendingProjectActions: projectId => this.actionQueue.getPendingActionsForProject(projectId),
-    persistProjects: projects => this.projectData.saveOfflineSnapshotAndWait(projects),
-    publishProjects: projects => this.projectState.updateProjects(() => projects),
+    persistProjects: (projects, ownerUserId) => this.projectData.saveOfflineSnapshotAndWait(projects, ownerUserId),
+    publishProjects: (projects, ownerUserId) => this.projectState.updateProjects(
+      () => projects,
+      ownerUserId,
+    ),
     reserveConflictLocalHandoff: input => this.conflictStorage.reserveProjectConflictLocalHandoff(input),
     transitionActionLocalHandoff: input => this.actionQueue.transitionLocalHandoffStrictlyForOwner(input),
     verifyConflictReservation: input => this.conflictStorage.verifyProjectConflictLocalHandoffReservation(input),
@@ -352,7 +356,20 @@ export class ProjectOperationConflictService {
     );
   }
 
-  private async finalizeResolvedConflict(
+  private finalizeResolvedConflict(
+    options: ResolveConflictInternalOptions,
+    context: ConflictResolutionContext,
+    resolvedProject: Project,
+  ): Promise<boolean> {
+    const ownerUserId = context.sessionContext.ownerUserId ?? AUTH_CONFIG.LOCAL_MODE_USER_ID;
+    return localBackupUiRestoreWriterQuiescence.runAsync(
+      ownerUserId,
+      'project-state',
+      () => this.finalizeResolvedConflictUnderWriter(options, context, resolvedProject),
+    );
+  }
+
+  private async finalizeResolvedConflictUnderWriter(
     options: ResolveConflictInternalOptions,
     context: ConflictResolutionContext,
     resolvedProject: Project,
@@ -541,8 +558,11 @@ export class ProjectOperationConflictService {
           ? mergeResolvedProjectState(current, project, options)
           : current
       );
-    });
-    this.projectData.saveOfflineSnapshot(this.projectState.getProjectsWithCurrentData());
+    }, ownerUserId ?? AUTH_CONFIG.LOCAL_MODE_USER_ID);
+    this.projectData.saveOfflineSnapshot(
+      this.projectState.getProjectsWithCurrentData(),
+      ownerUserId ?? AUTH_CONFIG.LOCAL_MODE_USER_ID,
+    );
     if (this.projectState.activeProjectId() === projectId) {
       this.undoService.clearHistory(projectId);
     }
@@ -561,8 +581,11 @@ export class ProjectOperationConflictService {
       current.id === projectId
         ? settleProjectSyncState(current, options)
         : current
-    ));
-    this.projectData.saveOfflineSnapshot(this.projectState.getProjectsWithCurrentData());
+    ), ownerUserId ?? AUTH_CONFIG.LOCAL_MODE_USER_ID);
+    this.projectData.saveOfflineSnapshot(
+      this.projectState.getProjectsWithCurrentData(),
+      ownerUserId ?? AUTH_CONFIG.LOCAL_MODE_USER_ID,
+    );
     this.discardStaleProjectMutations(projectId, ownerUserId, preservedActionId);
     this.changeTracker.clearProjectFieldLocks(projectId);
     if (options.clearProjectChanges !== false) {
@@ -574,12 +597,13 @@ export class ProjectOperationConflictService {
     projectId: string,
     options: { pendingSync: boolean; version?: number },
   ): void {
+    const ownerUserId = this.auth.currentUserId() ?? AUTH_CONFIG.LOCAL_MODE_USER_ID;
     this.projectState.updateProjects(projects => projects.map(current =>
       current.id === projectId
         ? settleProjectSyncState(current, options)
         : current
-    ));
-    this.projectData.saveOfflineSnapshot(this.projectState.getProjectsWithCurrentData());
+    ), ownerUserId);
+    this.projectData.saveOfflineSnapshot(this.projectState.getProjectsWithCurrentData(), ownerUserId);
   }
 
   doesCurrentProjectMatchSnapshot(projectId: string, snapshot: Project): boolean {

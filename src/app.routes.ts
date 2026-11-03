@@ -65,26 +65,30 @@ export const requireAuthGuardLazy: CanActivateFn = async (route, state) => {
 export const preActionQueueRestoreFenceGuardLazy: CanActivateFn = async () => {
   const injector = inject(Injector);
   try {
-    const [fenceModule, authModule, authConfigModule] = await Promise.all([
-      loadRestoreFenceModule(),
-      import('./services/auth.service'),
-      import('./config/auth.config'),
-    ]);
-    const auth = injector.get(authModule.AuthService);
-    const ownerUserId = auth.currentUserId() ?? authConfigModule.AUTH_CONFIG.LOCAL_MODE_USER_ID;
-    const identityFence = auth.captureAuthIdentityFence();
-    await injector.get(fenceModule.LocalBackupUiRestorePreActionQueueFenceService).run({
-      ownerUserId,
-      isCurrent: () => (
-        (auth.currentUserId() ?? authConfigModule.AUTH_CONFIG.LOCAL_MODE_USER_ID) === ownerUserId
-        && auth.captureAuthIdentityFence() === identityFence
-      ),
-    });
+    await runRestoreFence(injector);
   } catch {
     // ActionQueue's sole activation path repeats the fail-closed fence before storage load.
   }
   return true;
 };
+
+async function runRestoreFence(injector: Injector) {
+  const [fenceModule, authModule, authConfigModule] = await Promise.all([
+    loadRestoreFenceModule(),
+    import('./services/auth.service'),
+    import('./config/auth.config'),
+  ]);
+  const auth = injector.get(authModule.AuthService);
+  const ownerUserId = auth.currentUserId() ?? authConfigModule.AUTH_CONFIG.LOCAL_MODE_USER_ID;
+  const identityFence = auth.captureAuthIdentityFence();
+  return await injector.get(fenceModule.LocalBackupUiRestorePreActionQueueFenceService).run({
+    ownerUserId,
+    isCurrent: () => (
+      (auth.currentUserId() ?? authConfigModule.AUTH_CONFIG.LOCAL_MODE_USER_ID) === ownerUserId
+      && auth.captureAuthIdentityFence() === identityFence
+    ),
+  });
+}
 
 export const requireAuthThenRestoreFenceGuardLazy: CanActivateFn = async (route, state) => {
   const injector = inject(Injector);
@@ -109,6 +113,9 @@ export const projectExistsGuardLazy: CanActivateFn = async (route, state) => {
   // 关键：在 await 之前捕获注入上下文，否则 async 恢复后 inject() 会抛 NG0203
   const injector = inject(Injector);
   try {
+    const restoreFence = await runRestoreFence(injector);
+    if (restoreFence.status !== 'CLEAR') return false;
+
     const module = await loadProjectGuardModule();
     const result = runInInjectionContext(injector, () => module.projectExistsGuard(route, state));
     if (isObservable(result)) {
@@ -116,8 +123,8 @@ export const projectExistsGuardLazy: CanActivateFn = async (route, state) => {
     }
     return result;
   } catch {
-    // 懒加载失败时放行，避免阻断路由导致应用卡死
-    return true;
+    // Project data must not hydrate until the restore fence can be verified.
+    return false;
   }
 };
 

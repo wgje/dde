@@ -1,7 +1,9 @@
-import { expect, it, type Mock } from 'vitest';
+import { expect, it, vi, type Mock } from 'vitest';
 
 import type { Attachment, Project, Task } from '../models';
 import type { TaskOperationAdapterService } from './task-operation-adapter.service';
+import { getLocalBackupUiRestoreQuiescenceSentinelStorageKey } from './local-backup-ui-restore-writer-quiescence-tracker';
+import { LocalBackupUiRestoreWriterQuiescenceService } from './local-backup-ui-restore-writer-quiescence.service';
 
 export interface TaskOperationAdapterProjectAttachmentSpecContext {
   service(): TaskOperationAdapterService;
@@ -227,6 +229,73 @@ export function registerTaskOperationAdapterProjectAttachmentSpecs(
     expect(context.mockSyncCoordinatorService().markLocalChanges).not.toHaveBeenCalled();
     expect(context.mockSyncCoordinatorService().schedulePersist).not.toHaveBeenCalled();
   });
+
+  it('restore preparation waits for the local attachment snapshot and state commit', async () => {
+    const ownerUserId = 'user-1';
+    const sentinelKey = getLocalBackupUiRestoreQuiescenceSentinelStorageKey(ownerUserId);
+    localStorage.removeItem(sentinelKey);
+    const quiescenceService = new LocalBackupUiRestoreWriterQuiescenceService({ pollIntervalMs: 1 });
+    let releaseSnapshot: () => void = () => undefined;
+    const snapshotWrite = new Promise<void>(resolve => {
+      releaseSnapshot = resolve;
+    });
+    const attachment: Attachment = {
+      id: 'att-restore-writer',
+      type: 'file',
+      name: 'restore-writer.txt',
+      url: 'https://example.com/restore-writer.txt',
+      mimeType: 'text/plain',
+      size: 4,
+      createdAt: '2026-06-01T00:00:00.000Z',
+    };
+    const targetTask = context.createTask({ id: 'task-restore-writer', attachments: [] });
+    context.setProjects([context.createProject({
+      id: 'project-restore-writer',
+      syncSource: 'local-only',
+      tasks: [targetTask],
+    })]);
+    context.mockSyncCoordinatorService().saveOfflineSnapshotAndWait.mockImplementationOnce(
+      () => snapshotWrite,
+    );
+    let preparedState: Awaited<ReturnType<typeof quiescenceService.prepare>> | null = null;
+    let completion: Promise<boolean> | null = null;
+    let preparing: ReturnType<typeof quiescenceService.prepare> | null = null;
+    let restorePrepared = false;
+
+    try {
+      completion = context.service().addTaskAttachmentToProject(
+        'project-restore-writer',
+        'task-restore-writer',
+        attachment,
+      );
+      await vi.waitFor(() => expect(
+        context.mockSyncCoordinatorService().saveOfflineSnapshotAndWait,
+      ).toHaveBeenCalledOnce());
+
+      preparing = quiescenceService.prepare(ownerUserId).then(handle => {
+        restorePrepared = true;
+        return handle;
+      });
+      await vi.waitFor(() => expect(localStorage.getItem(sentinelKey)).not.toBeNull());
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      expect(restorePrepared).toBe(false);
+      expect(context.getProjects()[0]?.tasks[0]?.attachments ?? []).toEqual([]);
+
+      releaseSnapshot();
+      await expect(completion).resolves.toBe(true);
+      expect(context.getProjects()[0]?.tasks[0]?.attachments).toEqual([
+        expect.objectContaining({ id: 'att-restore-writer' }),
+      ]);
+      preparedState = await preparing;
+      expect(restorePrepared).toBe(true);
+    } finally {
+      releaseSnapshot();
+      await completion?.catch(() => false);
+      if (preparing && !preparedState) preparedState = await preparing.catch(() => null);
+      await preparedState?.abortBeforeMutation();
+    }
+  }, 10000);
 
   it('project-scoped 附件写入找不到任务时应返回 false 且不触发同步', async () => {
     context.setProjects([context.createProject({ id: 'target-project', tasks: [] })]);

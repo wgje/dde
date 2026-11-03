@@ -150,10 +150,10 @@ describe('createLocalBackupUiRestoreStageOperations', () => {
     }));
     const projectState = {
       getProjectsWithCurrentData: vi.fn(() => [authoritativeProject]),
-      updateProjects: vi.fn(() => {
+      replaceProjectsForRestore: vi.fn(() => {
         throw new Error('stop after project plan capture');
       }),
-    } as unknown as Pick<ProjectStateService, 'getProjectsWithCurrentData' | 'updateProjects'>;
+    } as unknown as Pick<ProjectStateService, 'getProjectsWithCurrentData' | 'replaceProjectsForRestore'>;
     const service = makeStageService(
       undefined,
       undefined,
@@ -180,6 +180,95 @@ describe('createLocalBackupUiRestoreStageOperations', () => {
       [authoritativeProject],
       expect.any(Function),
     );
+  });
+
+  it('routes project state, offline snapshot, and external-source writes through distinct fences', async () => {
+    const projectState = {
+      getProjectsWithCurrentData: vi.fn(() => []),
+      updateProjects: vi.fn(),
+      replaceProjectsForRestore: vi.fn(),
+    } as unknown as Pick<ProjectStateService, 'getProjectsWithCurrentData' | 'replaceProjectsForRestore'>;
+    const saveOfflineSnapshotAndWait = vi.fn(async () => undefined);
+    const saveLinks = vi.fn(async () => {
+      throw new Error('stop after external writer');
+    });
+    const externalSourceCache = {
+      saveLinks,
+      replacePendingLinksForOwner: vi.fn(async () => undefined),
+    };
+    const importService = {
+      prepareLocalBackupRestorePlan: vi.fn(async () => ({
+        projects: [],
+        externalSourceLinks: [],
+        importedCount: 1,
+      })),
+    };
+    const service = makeStageService(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      projectState,
+      importService,
+      { saveOfflineSnapshotAndWait },
+      externalSourceCache,
+    );
+    const marker = makeStageMarker();
+    const operations = service.createOperations({
+      ownerUserId: OWNER_USER_ID,
+      data: {} as never,
+      backup: makeConflictBackup(),
+      existingProjects: [],
+      actionQueueRestore: makeActionQueueRestore(),
+    });
+    operations.decodePreImage(marker);
+    const context = makeContext(marker);
+
+    await expect(operations.apply('projects', context)).rejects.toThrow('stop after external writer');
+
+    expect(projectState.replaceProjectsForRestore).toHaveBeenCalledOnce();
+    expect(saveOfflineSnapshotAndWait).toHaveBeenCalledWith([], OWNER_USER_ID);
+    expect(context.runWriterMutationAsync).toHaveBeenNthCalledWith(1, 'project-state', expect.any(Function));
+    expect(context.runWriterMutationAsync).toHaveBeenNthCalledWith(2, 'offline-snapshot', expect.any(Function));
+    expect(context.runWriterMutationAsync).toHaveBeenNthCalledWith(3, 'external-source', expect.any(Function));
+  });
+
+  it('routes project rollback, offline snapshot, and external-source writes through their own fences', async () => {
+    const projectState = {
+      getProjectsWithCurrentData: vi.fn(() => []),
+      updateProjects: vi.fn(),
+      replaceProjectsForRestore: vi.fn(),
+    } as unknown as Pick<ProjectStateService, 'getProjectsWithCurrentData' | 'replaceProjectsForRestore'>;
+    const externalSourceCache = {
+      saveLinks: vi.fn(async () => undefined),
+      replacePendingLinksForOwner: vi.fn(async () => undefined),
+    };
+    const service = makeStageService(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      projectState,
+      undefined,
+      undefined,
+      externalSourceCache,
+    );
+    const marker = makeStageMarker();
+    const operations = service.createRecoveryOperations(OWNER_USER_ID, makeActionQueueRestore());
+    operations.decodePreImage(marker);
+    const context = makeContext(marker);
+
+    await operations.rollback('projects', context);
+
+    expect(projectState.replaceProjectsForRestore).toHaveBeenCalledOnce();
+    expect(context.runWriterMutationAsync).toHaveBeenCalledWith('project-state', expect.any(Function));
+    expect(context.runWriterMutationAsync).toHaveBeenCalledWith('offline-snapshot', expect.any(Function));
+    expect(context.runWriterMutationAsync).toHaveBeenCalledWith('external-source', expect.any(Function));
+    const sources = vi.mocked(context.runWriterMutationAsync).mock.calls.map(([source]) => source);
+    expect(sources.indexOf('project-state')).toBeLessThan(sources.indexOf('offline-snapshot'));
+    expect(sources.indexOf('offline-snapshot')).toBeLessThan(sources.indexOf('external-source'));
   });
 
   it('delegates the action-queue stage to the prepared QueueBackup participant only', async () => {
@@ -577,7 +666,7 @@ describe('createLocalBackupUiRestoreStageOperations', () => {
     expect(saveConflict).toHaveBeenCalledWith(expect.any(Object), {
       restoreWriterContinuation: true,
     });
-    expect(context.runWriterMutation).toHaveBeenCalledWith('conflicts', expect.any(Function));
+    expect(context.runWriterMutationAsync).toHaveBeenCalledWith('conflicts', expect.any(Function));
   });
 
   it('routes attachment outbox restore writes through the attachment writer fence', async () => {
@@ -618,7 +707,7 @@ describe('createLocalBackupUiRestoreStageOperations', () => {
       ownerUserId: OWNER_USER_ID,
       operationId: 'attachment-operation-1',
     }), { restoreWriterContinuation: true });
-    expect(context.runWriterMutation).toHaveBeenCalledWith('attachment-outbox', expect.any(Function));
+    expect(context.runWriterMutationAsync).toHaveBeenCalledWith('attachment-outbox', expect.any(Function));
   });
 
   it('reads attachment outbox pre-images without cleanup writes', async () => {
@@ -643,7 +732,7 @@ describe('createLocalBackupUiRestoreStageOperations', () => {
     await operations.verifyRolledBack('attachment-outbox', context);
 
     expect(listPendingUploads).toHaveBeenCalledWith(OWNER_USER_ID, { restoreSnapshot: true });
-    expect(context.runWriterMutation).not.toHaveBeenCalled();
+    expect(context.runWriterMutationAsync).not.toHaveBeenCalled();
   });
 
   it('rejects incomplete project ownership and mismatched conflict evidence before side effects', () => {
@@ -694,7 +783,8 @@ function makeContext(
   return {
     marker: () => marker,
     checkpoint: vi.fn(async () => undefined),
-    runWriterMutation: vi.fn(async (_source, write) => await write()),
+    runWriterMutation: vi.fn((_source, write) => write()),
+    runWriterMutationAsync: vi.fn(async (_source, write) => await write()),
   };
 }
 
@@ -763,8 +853,13 @@ function makeStageService(
     savePendingUpload: vi.fn(async () => undefined),
     removePendingUpload: vi.fn(async () => undefined),
   },
-  projectState: Pick<ProjectStateService, 'getProjectsWithCurrentData' | 'updateProjects'> = {} as never,
+  projectState: Pick<ProjectStateService, 'getProjectsWithCurrentData' | 'replaceProjectsForRestore'> = {
+    getProjectsWithCurrentData: vi.fn(() => []),
+    replaceProjectsForRestore: vi.fn(),
+  },
   importService: Pick<ImportService, 'prepareLocalBackupRestorePlan'> = {} as never,
+  projectData: Pick<ProjectDataService, 'saveOfflineSnapshotAndWait'> = {} as never,
+  externalSourceCache: Pick<ExternalSourceCacheService, 'saveLinks' | 'replacePendingLinksForOwner'> = {} as never,
 ): LocalBackupUiRestoreStageService {
   TestBed.resetTestingModule();
   TestBed.configureTestingModule({
@@ -772,8 +867,8 @@ function makeStageService(
       LocalBackupUiRestoreStageService,
       { provide: ImportService, useValue: importService },
       { provide: ProjectStateService, useValue: projectState },
-      { provide: ProjectDataService, useValue: {} },
-      { provide: ExternalSourceCacheService, useValue: {} },
+      { provide: ProjectDataService, useValue: projectData },
+      { provide: ExternalSourceCacheService, useValue: externalSourceCache },
       { provide: AttachmentUploadOutboxService, useValue: attachmentOutbox },
       { provide: QueueBackupService, useValue: queueBackup },
       { provide: RetryQueueService, useValue: retryQueue },

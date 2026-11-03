@@ -369,12 +369,16 @@ function openProjectsStageFocusModeDb(): Promise<IDBDatabase> {
 function createMutableProjectState(initialProject: Project): {
   getProjectsWithCurrentData: () => Project[];
   updateProjects: (updater: () => Project[]) => void;
+  replaceProjectsForRestore: (ownerUserId: string, projects: Project[]) => void;
 } {
   let projects = [structuredClone(initialProject)];
   return {
     getProjectsWithCurrentData: () => projects,
     updateProjects: updater => {
       projects = updater();
+    },
+    replaceProjectsForRestore: (_ownerUserId, nextProjects) => {
+      projects = nextProjects;
     },
   };
 }
@@ -404,6 +408,7 @@ function makeProjectStageService(dependencies: {
   projectState: {
     getProjectsWithCurrentData: () => Project[];
     updateProjects: (updater: () => Project[]) => void;
+    replaceProjectsForRestore: (ownerUserId: string, projects: Project[]) => void;
   };
   projectData: { saveOfflineSnapshotAndWait: ReturnType<typeof vi.fn> };
   externalSourceCache: {

@@ -1,6 +1,13 @@
 import { beforeEach, describe, expect, it, vi, success } from './sync-coordinator.service.spec-context';
 import type { Project, SyncCoordinatorService, SyncState, Task } from './sync-coordinator.service.spec-context';
 import { registerSyncCoordinatorOwnerHandoffSpecs } from './sync-coordinator-owner-handoff.spec-helpers';
+import {
+  getLocalBackupUiRestoreQuiescenceSentinelStorageKey,
+  LocalBackupUiRestoreWriterPausedError,
+} from './local-backup-ui-restore-writer-quiescence-tracker';
+import {
+  LocalBackupUiRestoreWriterQuiescenceService,
+} from './local-backup-ui-restore-writer-quiescence.service';
 
 export interface SyncCoordinatorPersistenceSpecContext {
   service(): SyncCoordinatorService;
@@ -55,6 +62,106 @@ export function registerSyncCoordinatorPersistenceSpecs(context: SyncCoordinator
   // ==================== 持久化状态管理 ====================
 
 describe('持久化状态管理', () => {
+    it('恢复准备会等待已开始的项目云端持久化完成', async () => {
+      vi.useRealTimers();
+      const ownerUserId = `sync-persist-writer-${Date.now()}`;
+      const project = createTestProject({ id: 'proj-persist-quiescence' });
+      const quiescenceService = new LocalBackupUiRestoreWriterQuiescenceService({ pollIntervalMs: 1 });
+      let resolveSave: (value: { success: boolean; newVersion: number }) => void = () => undefined;
+      let persistPromise: Promise<boolean> | null = null;
+      let preparePromise: ReturnType<typeof quiescenceService.prepare> | null = null;
+      let prepared = false;
+      let quiescence: Awaited<ReturnType<typeof quiescenceService.prepare>> | null = null;
+      let quiescenceReleased = false;
+
+      mockAuthService.currentUserId.mockReturnValue(ownerUserId);
+      mockProjectStateService.activeProject.set(project);
+      mockProjectStateService.projects.set([project]);
+      mockSyncService.saveProjectSmart.mockImplementationOnce(() => new Promise(resolve => {
+        resolveSave = resolve as (value: { success: boolean; newVersion: number }) => void;
+      }));
+
+      try {
+        service.markLocalChanges('content');
+        persistPromise = service.flushPendingPersistToCloud('restore-quiescence', { force: true });
+        await vi.waitFor(() => expect(mockSyncService.saveProjectSmart).toHaveBeenCalledTimes(1));
+        mockProjectStateService.updateProjects.mockImplementationOnce(() => {
+          throw new LocalBackupUiRestoreWriterPausedError(ownerUserId);
+        });
+
+        preparePromise = quiescenceService.prepare(ownerUserId).then(handle => {
+          prepared = true;
+          return handle;
+        });
+        const sentinelKey = getLocalBackupUiRestoreQuiescenceSentinelStorageKey(ownerUserId);
+        await vi.waitFor(() => expect(localStorage.getItem(sentinelKey)).not.toBeNull());
+        await new Promise(resolve => setTimeout(resolve, 5));
+
+        expect(prepared).toBe(false);
+
+        resolveSave({ success: true, newVersion: 2 });
+        await persistPromise;
+        expect(service.hasPendingLocalChanges()).toBe(true);
+        quiescence = await preparePromise;
+        expect(prepared).toBe(true);
+
+        await quiescence.abortBeforeMutation();
+        quiescenceReleased = true;
+        await vi.waitFor(() => expect(mockSyncService.saveProjectSmart).toHaveBeenCalledTimes(2), {
+          timeout: 5000,
+          interval: 25,
+        });
+        await vi.waitFor(() => expect(service.hasPendingLocalChanges()).toBe(false), {
+          timeout: 1000,
+          interval: 10,
+        });
+      } finally {
+        resolveSave({ success: true, newVersion: 2 });
+        if (persistPromise) await persistPromise.catch(() => undefined);
+        if (preparePromise && !quiescence) {
+          quiescence = await preparePromise.catch(() => null);
+        }
+        if (!quiescenceReleased) await quiescence?.abortBeforeMutation();
+        service.destroy();
+      }
+    }, 10000);
+
+    it('恢复栅栏暂停云端持久化时保留 dirty 状态并在释放后重试', async () => {
+      vi.useRealTimers();
+      const ownerUserId = `sync-persist-paused-${Date.now()}`;
+      const project = createTestProject({ id: 'proj-persist-paused' });
+      const quiescenceService = new LocalBackupUiRestoreWriterQuiescenceService({ pollIntervalMs: 1 });
+      mockAuthService.currentUserId.mockReturnValue(ownerUserId);
+      mockProjectStateService.activeProject.set(project);
+      mockProjectStateService.projects.set([project]);
+      mockSyncService.saveProjectSmart.mockClear();
+      mockSyncService.saveOfflineSnapshot.mockClear();
+
+      const quiescence = await quiescenceService.prepare(ownerUserId);
+      try {
+        service.markLocalChanges('content');
+        const flushed = await service.flushPendingPersistToCloud('restore-paused', { force: true });
+
+        expect(flushed).toBe(false);
+        expect(mockSyncService.saveProjectSmart).not.toHaveBeenCalled();
+        expect(mockSyncService.saveOfflineSnapshot).not.toHaveBeenCalled();
+        expect(service.hasPendingLocalChanges()).toBe(true);
+
+        await quiescence.abortBeforeMutation();
+        await vi.waitFor(() => expect(mockSyncService.saveProjectSmart).toHaveBeenCalledTimes(1), {
+          timeout: 5000,
+          interval: 25,
+        });
+        await vi.waitFor(() => expect(service.hasPendingLocalChanges()).toBe(false), {
+          timeout: 1000,
+          interval: 10,
+        });
+      } finally {
+        await quiescence.abortBeforeMutation().catch(() => undefined);
+        service.destroy();
+      }
+    }, 10000);
+
     it('initialize 应注册 TabSync data-synced 回调', () => {
       expect(mockTabSyncService.setOnDataSyncedCallback).toHaveBeenCalledTimes(1);
       expect(mockTabSyncService.setOnDataSyncedCallback).toHaveBeenCalledWith(expect.any(Function));

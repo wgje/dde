@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeEach } from 'vitest';
+import { describe, expect, it, beforeEach, vi } from 'vitest';
 import {
   createDeferred,
   createProject,
@@ -29,6 +29,8 @@ import {
   type ProjectOperationSessionRuntimeResetSpecContext,
 } from './project-operation-session-runtime-reset.spec-helpers';
 import { registerProjectOperationConflictRetryOwnerFenceSpecs } from './project-operation-conflict-retry-owner-fence.spec-helpers';
+import { getLocalBackupUiRestoreQuiescenceSentinelStorageKey } from './local-backup-ui-restore-writer-quiescence-tracker';
+import { LocalBackupUiRestoreWriterQuiescenceService } from './local-backup-ui-restore-writer-quiescence.service';
 describe('ProjectOperationService', () => {
   let service: ProjectOperationServiceSpecContext['service'];
   let projectConflict: ProjectOperationServiceSpecContext['projectConflict'];
@@ -194,6 +196,18 @@ describe('ProjectOperationService', () => {
     expect(mockSyncCoordinator.schedulePersist).toHaveBeenCalled();
   });
 
+  it('UserSession owner 与 Auth owner 不一致时拒绝开始持久化项目操作', async () => {
+    mockUserSession.currentUserId.mockReturnValue('session-owner-a');
+    mockAuth.currentUserId.mockReturnValue('authenticated-owner-b');
+
+    await expect(service.addProject(createProject({ id: 'proj-owner-mismatch' })))
+      .rejects.toThrow('project operation owner does not match the authenticated owner');
+
+    expect(mockSyncCoordinator.core.saveOfflineSnapshotAndWait).not.toHaveBeenCalled();
+    expect(mockActionQueue.enqueueDurably).not.toHaveBeenCalled();
+    expect(mockProjectState.updateProjects).not.toHaveBeenCalled();
+  });
+
   it('本地模式创建项目应先等待离线快照持久化再暴露 UI 新项目', async () => {
     const snapshotWrite = createDeferred<void>();
     mockSyncCoordinator.core.saveOfflineSnapshotAndWait.mockReturnValueOnce(snapshotWrite.promise);
@@ -206,7 +220,7 @@ describe('ProjectOperationService', () => {
         syncSource: 'local-only',
         pendingSync: false,
       }),
-    ]);
+    ], 'local-user');
     expect(mockProjectState.updateProjects).not.toHaveBeenCalled();
     expect(mockProjectState.setActiveProjectId).not.toHaveBeenCalled();
     expect(mockOptimisticState.commitSnapshot).not.toHaveBeenCalled();
@@ -222,6 +236,52 @@ describe('ProjectOperationService', () => {
     expect(mockProjectState.setActiveProjectId).toHaveBeenCalledWith('proj-local-durable-create');
     expect(mockOptimisticState.commitSnapshot).toHaveBeenCalledWith('snap-1');
   });
+
+  it('恢复准备会等待项目快照与项目状态提交作为一个操作完成', async () => {
+    const ownerUserId = `project-operation-restore-${Date.now()}`;
+    const snapshotWrite = createDeferred<void>();
+    const quiescenceService = new LocalBackupUiRestoreWriterQuiescenceService({ pollIntervalMs: 1 });
+    let prepareResolved = false;
+    let releaseRestore: Awaited<ReturnType<typeof quiescenceService.prepare>> | null = null;
+    let operationPromise: Promise<{ success: boolean; error?: string }> | null = null;
+    let preparePromise: ReturnType<typeof quiescenceService.prepare> | null = null;
+
+    mockUserSession.currentUserId.mockReturnValue(ownerUserId);
+    mockSyncCoordinator.core.saveOfflineSnapshotAndWait.mockImplementationOnce(
+      () => snapshotWrite.promise,
+    );
+
+    try {
+      operationPromise = service.addProject(createProject({ id: 'proj-restore-writer' }));
+      await vi.waitFor(() => {
+        expect(mockSyncCoordinator.core.saveOfflineSnapshotAndWait).toHaveBeenCalledOnce();
+      });
+
+      preparePromise = quiescenceService.prepare(ownerUserId).then(handle => {
+        prepareResolved = true;
+        return handle;
+      });
+      const sentinelKey = getLocalBackupUiRestoreQuiescenceSentinelStorageKey(ownerUserId);
+      await vi.waitFor(() => expect(localStorage.getItem(sentinelKey)).not.toBeNull());
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      expect(prepareResolved).toBe(false);
+      expect(mockProjectState.updateProjects).not.toHaveBeenCalled();
+
+      snapshotWrite.resolve();
+      await expect(operationPromise).resolves.toEqual({ success: true });
+      expect(mockProjectState.updateProjects).toHaveBeenCalledOnce();
+      releaseRestore = await preparePromise;
+      expect(prepareResolved).toBe(true);
+    } finally {
+      snapshotWrite.resolve();
+      await operationPromise?.catch(() => undefined);
+      if (preparePromise && !releaseRestore) {
+        releaseRestore = await preparePromise.catch(() => null);
+      }
+      await releaseRestore?.abortBeforeMutation();
+    }
+  }, 10000);
 
   it('本地模式创建项目离线快照持久化失败时不应提交 UI 或成功结果', async () => {
     mockSyncCoordinator.core.saveOfflineSnapshotAndWait.mockRejectedValueOnce(new Error('idb unavailable'));
@@ -325,7 +385,10 @@ describe('ProjectOperationService', () => {
     expect(mockActionQueue.enqueueDurably).toHaveBeenCalledOnce();
     expect(mockProjectState.updateProjects).toHaveBeenCalledOnce();
     expect(mockOptimisticState.commitSnapshot).toHaveBeenCalledWith('snap-1');
-    expect(mockSyncCoordinator.core.saveOfflineSnapshot).toHaveBeenCalledWith(mockProjectState.projects());
+    expect(mockSyncCoordinator.core.saveOfflineSnapshot).toHaveBeenCalledWith(
+      mockProjectState.projects(),
+      expect.any(String),
+    );
   });
 
   it('认证用户创建项目时应先持久化队列再暴露本地 UI 新项目', async () => {
@@ -377,7 +440,7 @@ describe('ProjectOperationService', () => {
         pendingSync: true,
         syncSource: 'synced',
       }),
-    ]);
+    ], 'user-1');
     expect(mockProjectState.updateProjects).not.toHaveBeenCalled();
     expect(mockProjectState.setActiveProjectId).not.toHaveBeenCalled();
     expect(mockOptimisticState.commitSnapshot).not.toHaveBeenCalled();
@@ -544,7 +607,7 @@ describe('ProjectOperationService', () => {
         syncSource: 'local-only',
         pendingSync: false,
       }),
-    ]);
+    ], 'local-user');
     expect(mockProjectState.updateProjects).not.toHaveBeenCalled();
     expect(mockOptimisticState.commitSnapshot).not.toHaveBeenCalled();
 
@@ -772,7 +835,7 @@ describe('ProjectOperationService', () => {
         syncSource: 'local-only',
         pendingSync: false,
       }),
-    ]);
+    ], 'local-user');
     expect(mockProjectState.updateProjects).not.toHaveBeenCalled();
     expect(mockOptimisticState.commitSnapshot).not.toHaveBeenCalled();
 

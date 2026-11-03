@@ -99,6 +99,7 @@ export function createTaskRecordTrackingSpecHarness(): TaskRecordTrackingSpecHar
   };
   let activeOwner = { projectId: 'proj-1' as string | null, generation: 1 };
   const mockProjectState = {
+    assertWriteOwner: vi.fn(),
     activeProject: vi.fn().mockReturnValue(createProject()),
     captureActiveProjectOwner: vi.fn(() => ({ ...activeOwner })),
     isActiveProjectOwnerCurrent: vi.fn((owner: typeof activeOwner) =>

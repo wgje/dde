@@ -22,6 +22,8 @@ import { ConnectionAdapterService } from './connection-adapter.service';
 import { WriteGuardService } from './write-guard.service';
 import { ActionQueueService } from './action-queue.service';
 import { AuthService } from './auth.service';
+import { AUTH_CONFIG } from '../config/auth.config';
+import { localBackupUiRestoreWriterQuiescence } from './local-backup-ui-restore-writer-quiescence.service';
 import { Task, Attachment, TaskAttentionDraftItem } from '../models';
 import { ErrorCodes, failure, Result, OperationError } from '../utils/result';
 import { blockTaskMutation, type TaskMutationBlockOptions } from './task-operation-mutation-guard.helpers';
@@ -440,6 +442,20 @@ export class TaskOperationAdapterService {
       return false;
     }
 
+    const ownerUserId = this.authService.currentUserId() ?? AUTH_CONFIG.LOCAL_MODE_USER_ID;
+    return localBackupUiRestoreWriterQuiescence.runAsync(
+      ownerUserId,
+      'project-state',
+      () => this.addTaskAttachmentToProjectUnderWriter(projectId, taskId, attachment, ownerUserId),
+    );
+  }
+
+  private async addTaskAttachmentToProjectUnderWriter(
+    projectId: string,
+    taskId: string,
+    attachment: Attachment,
+    ownerUserId: string,
+  ): Promise<boolean> {
     const currentProject = this.projectState.projects().find(project => project.id === projectId);
     const currentTask = currentProject?.tasks.find(task => task.id === taskId);
     if (!currentProject || !currentTask) {
@@ -468,7 +484,7 @@ export class TaskOperationAdapterService {
       getProjectsWithCurrentData: () => this.projectState.getProjectsWithCurrentData(),
       persistOfflineSnapshot: (projects, ownerUserId) =>
         this.syncCoordinator.saveOfflineSnapshotAndWait(projects, ownerUserId),
-      updateProjects: mutator => this.projectState.updateProjects(mutator),
+      updateProjects: mutator => this.projectState.updateProjects(mutator, ownerUserId),
       markEditing: () => this.markLocalEditing(),
       setLastUpdateType: updateType => { this.recorder.lastUpdateType = updateType; },
       trackTaskUpdate: (id, task, fields) => this.changeTracker.trackTaskUpdate(id, task, fields),

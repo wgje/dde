@@ -13,7 +13,9 @@ import { LoggerService } from './logger.service';
 import { ActionQueueService } from './action-queue.service';
 import { AuthService } from './auth.service';
 import { Project, Task, Connection } from '../models';
+import { AUTH_CONFIG } from '../config/auth.config';
 import type { EnqueueParams } from './action-queue.types';
+import { localBackupUiRestoreWriterQuiescence } from './local-backup-ui-restore-writer-quiescence.service';
 import {
   collectTaskRecordTrackingOutboxActions,
   getTaskRecordChangedFields,
@@ -287,7 +289,18 @@ export class TaskRecordTrackingService {
       ownerUserId: this.resolveRecoverableOutboxOwnerUserId(),
       generation: this.recordUpdateGeneration,
     };
-    const run = () => this.runRecordAndUpdateDurably(mutator, options, context);
+    const ownerUserId = context.ownerUserId ?? AUTH_CONFIG.LOCAL_MODE_USER_ID;
+    try {
+      this.projectState.assertWriteOwner(ownerUserId);
+    } catch (error) {
+      this.logger.warn('项目状态 owner 尚未对齐，未提交任务记录更新', { projectId: project.id, error });
+      return Promise.resolve(false);
+    }
+    const run = () => localBackupUiRestoreWriterQuiescence.runAsync(
+      ownerUserId,
+      'project-state',
+      () => this.runRecordAndUpdateDurably(mutator, options, context),
+    );
     const currentTail = this.recordUpdateTail;
     const result = currentTail ? currentTail.then(run, run) : run();
     this.recordUpdateTail = result.finally(() => {
@@ -344,7 +357,7 @@ export class TaskRecordTrackingService {
       if (!preCommit) return false;
       if (!this.isRecordUpdateContextCurrent(context)) return false;
 
-      this.commitProjectToState(targetProjectId, afterProject);
+      this.commitProjectToState(targetProjectId, afterProject, context.ownerUserId);
 
       await this.finishDurableCommit({
         afterProject,
@@ -377,10 +390,14 @@ export class TaskRecordTrackingService {
     return project;
   }
 
-  private commitProjectToState(targetProjectId: string, afterProject: Project): void {
+  private commitProjectToState(
+    targetProjectId: string,
+    afterProject: Project,
+    ownerUserId: string | null,
+  ): void {
     this.projectState.updateProjects(projects => projects.map(current =>
       current.id === targetProjectId ? afterProject : current
-    ));
+    ), ownerUserId ?? AUTH_CONFIG.LOCAL_MODE_USER_ID);
   }
 
   private recordDurableUndoAction(

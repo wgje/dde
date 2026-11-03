@@ -17,8 +17,11 @@ import {
 } from '../core-bridge';
 import { Project } from '../models';
 import { FEATURE_FLAGS } from '../config/feature-flags.config';
+import { AUTH_CONFIG } from '../config/auth.config';
 import { SYNC_CONFIG } from '../config/sync.config';
 import { SyncCoordinatorConflictService } from './sync-coordinator-conflicts.service';
+import { LocalBackupUiRestoreWriterPausedError } from './local-backup-ui-restore-writer-quiescence-tracker';
+import { localBackupUiRestoreWriterQuiescence } from './local-backup-ui-restore-writer-quiescence.service';
 import { buildSyncObservabilityContext } from './sync-coordinator-observability.helpers';
 import {
   getNonEmptyTaskDeleteBaseUpdatedAtMap,
@@ -294,10 +297,27 @@ export class SyncCoordinatorPersistService {
       }
     };
 
-    this.persistActiveProjectPromise = runPersist().finally(() => {
+    const ownerUserId = this.authService.currentUserId() || AUTH_CONFIG.LOCAL_MODE_USER_ID;
+    const trackedPersist = localBackupUiRestoreWriterQuiescence
+      .runAsync(ownerUserId, 'sync-persist', runPersist)
+      .catch(error => {
+        if (!(error instanceof LocalBackupUiRestoreWriterPausedError)) throw error;
+        this.retainPendingPersistAfterRestorePause(ownerUserId);
+      });
+    this.persistActiveProjectPromise = trackedPersist.finally(() => {
       this.persistActiveProjectPromise = null;
     });
     await this.persistActiveProjectPromise;
+  }
+
+  private retainPendingPersistAfterRestorePause(ownerUserId: string): void {
+    this.persistState.update(value => ({
+      ...value,
+      isPersisting: false,
+      hasPending: false,
+    }));
+    this.logger.debug('恢复事务期间暂停项目云端持久化，保留待同步状态', { ownerUserId });
+    this.schedulePersist();
   }
 
   clearTimers(): void {
@@ -525,6 +545,7 @@ export class SyncCoordinatorPersistService {
       }
       return await this.resolveRemotePersistResult(project, result, snapshot.now, persistVersion, authContext);
     } catch (error) {
+      if (error instanceof LocalBackupUiRestoreWriterPausedError) throw error;
       if (!this.isAuthContextCurrent(authContext, 'doPersistActiveProject:saveProjectSmart-error', project.id)) {
         return { remoteConfirmed: false, projectId: project.id };
       }
