@@ -46,6 +46,7 @@ describe('task-drag-payload', () => {
       type: 'task',
       taskId: 'task-1',
       projectId: 'project-1',
+      projectOwner: { projectId: 'project-1', generation: 7 },
       source: 'flow',
     });
 
@@ -54,6 +55,7 @@ describe('task-drag-payload', () => {
       type: 'task',
       taskId: 'task-1',
       projectId: 'project-1',
+      projectOwner: { projectId: 'project-1', generation: 7 },
       source: 'flow',
       laneHint: null,
       fromProjectId: 'project-1',
@@ -69,6 +71,7 @@ describe('task-drag-payload', () => {
       type: 'task',
       taskId: 'legacy-task',
       projectId: 'legacy-project',
+      projectOwner: null,
       source: 'dock',
       laneHint: null,
       fromProjectId: 'legacy-project',
@@ -79,10 +82,12 @@ describe('task-drag-payload', () => {
     const fromTaskId = new MockDataTransfer() as unknown as DataTransfer;
     fromTaskId.setData('text/task-id', 'task-via-taskid');
     expect(readTaskDragPayload(fromTaskId)?.taskId).toBe('task-via-taskid');
+    expect(readTaskDragPayload(fromTaskId)?.projectOwner).toBeNull();
 
     const fromPlainText = new MockDataTransfer() as unknown as DataTransfer;
     fromPlainText.setData('text/plain', 'task-via-plain');
     expect(readTaskDragPayload(fromPlainText)?.taskId).toBe('task-via-plain');
+    expect(readTaskDragPayload(fromPlainText)?.projectOwner).toBeNull();
   });
 
   it('无有效数据时返回 null', () => {
