@@ -39,7 +39,7 @@ export function applyDiagramData(
   try {
     undoManager.maxHistoryLength = 0;
     undoManager.isEnabled = true;
-    if (model.startTransaction('flow-data-update') === false) {
+    if (!model.startTransaction('flow-data-update')) {
       throw new Error('Flow data merge could not start an isolated transaction');
     }
     try {
@@ -87,14 +87,13 @@ function assertIdleMergeBoundary(diagram: go.Diagram, model: go.GraphLinksModel)
   const undoManager = model.undoManager;
   if (
     diagram.model !== model
-    || undoManager.isEnabled === true
-    || (typeof undoManager.history.count === 'number' && undoManager.history.count !== 0)
-    || undoManager.historyIndex === undefined
-    || (typeof undoManager.historyIndex === 'number' && undoManager.historyIndex !== -1)
-    || (typeof undoManager.transactionLevel === 'number' && undoManager.transactionLevel !== 0)
-    || (typeof undoManager.currentTransaction !== 'function' && undoManager.currentTransaction !== null)
-    || diagram.skipsUndoManager === true
-    || model.skipsUndoManager === true
+    || undoManager.isEnabled
+    || undoManager.history.count !== 0
+    || undoManager.historyIndex !== -1
+    || undoManager.transactionLevel !== 0
+    || undoManager.currentTransaction !== null
+    || diagram.skipsUndoManager
+    || model.skipsUndoManager
   ) {
     throw new Error('Flow data merge requires an idle, empty undo boundary');
   }

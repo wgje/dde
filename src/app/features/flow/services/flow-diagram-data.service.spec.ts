@@ -48,8 +48,7 @@ function createGraphLinksModel(): go.GraphLinksModel {
     linkToPortIdProperty: 'toPortId',
   });
   (model as unknown as { skipsUndoManager: boolean }).skipsUndoManager = false;
-  const undoManager = model.undoManager;
-  undoManager.isEnabled = false;
+  model.undoManager.isEnabled = false;
   return model;
 }
 
@@ -400,12 +399,17 @@ describe('FlowDiagramDataService', () => {
     const diagram = createDiagram(model);
     service.setDiagram(diagram);
     const mergeNodes = vi.spyOn(model, 'mergeNodeDataArray');
-    const start = vi.spyOn(model, 'startTransaction');
+    let start = (model.startTransaction = vi.fn(() => true));
     const readinessCommit = vi.spyOn((service as unknown as { viewportReadiness: { commitProjectUpdate: () => boolean } }).viewportReadiness, 'commitProjectUpdate');
-    Object.defineProperty(model.undoManager, 'historyIndex', { configurable: true, writable: true, value: undefined });
+    Object.defineProperty(model.undoManager, 'historyIndex', {
+      configurable: true,
+      writable: true,
+      value: undefined,
+    });
     expect(service.updateDiagram([rootTask], true)).toBe(false);
     expect([mergeNodes, start, readinessCommit].map(spy => spy.mock.calls.length).concat(model.nodeDataArray.length, model.linkDataArray.length)).toEqual([0, 0, 0, 0, 0]);
-    start.mockClear();
+    delete (model as unknown as Record<string, unknown>).startTransaction;
+    start = vi.spyOn(model, 'startTransaction');
     delete (model.undoManager as unknown as { historyIndex?: number }).historyIndex;
     expect(service.updateDiagram([rootTask], true)).toBe(true);
     diagram.emitLayoutCompleted();
@@ -428,6 +432,8 @@ describe('FlowDiagramDataService', () => {
     const removeLinkData = model.removeLinkData.bind(model);
     const removeLink = vi.spyOn(model, 'removeLinkData').mockImplementationOnce(data => {
       removeLinkData(data);
+      model.setDataProperty(records[0][0], 'loc', 'mutated');
+      model.setDataProperty(records[0][0], 'stage', 99);
       throw new Error('late stale-link failure');
     });
     const commit = vi.spyOn(model, 'commitTransaction');
@@ -482,7 +488,7 @@ describe('FlowDiagramDataService', () => {
 
   it('preserves existing keyed link points while refreshing route data', () => {
     const existingPoints = '0 0 40 20 80 0';
-    const model = new go.GraphLinksModel(
+    const model = new realGo.GraphLinksModel(
       [
         { key: 'root-task', stage: 1, status: 'active', parentId: null, loc: '0 0' },
         { key: 'child-task', stage: 2, status: 'active', parentId: 'root-task', loc: '150 0' },
@@ -506,6 +512,7 @@ describe('FlowDiagramDataService', () => {
         linkToPortIdProperty: 'toPortId',
       },
     );
+    (model as unknown as { skipsUndoManager: boolean }).skipsUndoManager = false;
     const diagram = {
       model,
       selection: { each: vi.fn() },
@@ -520,7 +527,7 @@ describe('FlowDiagramDataService', () => {
 
     service.setDiagram(diagram);
 
-    service.updateDiagram([rootTask, childTask], true);
+    expect(service.updateDiagram([rootTask, childTask], true)).toBe(true);
 
     const refreshedLink = model.linkDataArray.find(link => link.key === 'root-task-child-task');
     expect(refreshedLink?.points).toBe(existingPoints);
@@ -538,7 +545,7 @@ describe('FlowDiagramDataService', () => {
         { key: 'root-task-child-task', from: 'root-task', to: 'child-task', isCrossTree: false, curviness: 20 },
       ],
     });
-    const model = new go.GraphLinksModel(
+    const model = new realGo.GraphLinksModel(
       [
         { key: 'root-task', stage: 1, status: 'active', parentId: null, loc: '0 0' },
         { key: 'child-task', stage: 2, status: 'active', parentId: 'root-task', loc: '150 0' },
@@ -562,6 +569,7 @@ describe('FlowDiagramDataService', () => {
         linkToPortIdProperty: 'toPortId',
       },
     );
+    (model as unknown as { skipsUndoManager: boolean }).skipsUndoManager = false;
     const diagram = {
       model,
       selection: { each: vi.fn() },
