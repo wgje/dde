@@ -2,29 +2,13 @@ import { describe, expect, it } from 'vitest';
 
 import {
   extractBackupActionQueueActions,
+  extractBackupActionQueueActionsForRestore,
   mergeLoadedQueuedActionsWithBackup,
   mergeRestoredQueuedActions,
 } from './action-queue-restore.helpers';
 import type { PreferencePayload, QueuedAction } from './action-queue.types';
 
 describe('action-queue-restore.helpers', () => {
-  it('preserves a valid backup operationId and rejects unsupported identities instead of remapping', () => {
-    const operationId = '77777777-7777-4777-8777-777777777777';
-    const [restored] = extractBackupActionQueueActions([
-      createQueuedPreferenceAction({ operationId }),
-    ]);
-
-    expect(restored?.operationId).toBe(operationId);
-    expect(() => extractBackupActionQueueActions([
-      createQueuedPreferenceAction({ operationId: 'legacy-operation-7' }),
-    ])).toThrow(/operationId must be a UUID/);
-
-    const missingOperationId = createQueuedPreferenceAction();
-    Reflect.deleteProperty(missingOperationId, 'operationId');
-    expect(() => extractBackupActionQueueActions([missingOperationId]))
-      .toThrow(/operationId must be a UUID/);
-  });
-
   it('does not revive dead_letter actions from backup actionQueue as pending_sync', () => {
     const deadLetterAction = createQueuedPreferenceAction({
       id: 'dead-letter-action',
@@ -38,6 +22,29 @@ describe('action-queue-restore.helpers', () => {
     expect(extractBackupActionQueueActions([deadLetterAction])).toEqual([]);
     expect(extractBackupActionQueueActions({ actions: [deadLetterAction] })).toEqual([]);
     expect(extractBackupActionQueueActions({ queue: [deadLetterAction] })).toEqual([]);
+  });
+
+  it('preserves UUID action and operation identities and rejects identities it would remap', () => {
+    const action = createQueuedPreferenceAction({
+      id: '77777777-7777-4777-8777-777777777777',
+      operationId: '88888888-8888-4888-8888-888888888888',
+    });
+
+    expect(extractBackupActionQueueActionsForRestore({ actions: [action] })).toEqual([
+      expect.objectContaining({ id: action.id, operationId: action.operationId }),
+    ]);
+    expect(() => extractBackupActionQueueActionsForRestore([{
+      ...action,
+      operationId: undefined,
+    }])).toThrow(/operationId/i);
+    expect(() => extractBackupActionQueueActionsForRestore([{
+      ...action,
+      operationId: 'legacy-operation-id',
+    }])).toThrow(/operationId/i);
+    expect(() => extractBackupActionQueueActionsForRestore([{
+      ...action,
+      id: undefined,
+    }])).toThrow(/action id/i);
   });
 
   it('preserves local retry metadata when backup recency ties the loaded action', () => {

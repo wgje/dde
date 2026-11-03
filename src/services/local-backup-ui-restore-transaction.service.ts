@@ -1,12 +1,11 @@
 import { Injectable, inject } from '@angular/core';
 
-import type { Project } from '../models';
 import type { BackupData } from '../../supabase/functions/_shared/backup-utils';
 import type {
   QueuedAction,
   QueueBackupPersonalRestoreIdentityV2,
 } from './action-queue.types';
-import { extractBackupActionQueueActions } from './action-queue-restore.helpers';
+import { extractBackupActionQueueActionsForRestore } from './action-queue-restore.helpers';
 import {
   createLocalBackupUiRestoreJournal,
   startLocalBackupUiRestoreMarkerHeartbeat,
@@ -59,7 +58,6 @@ export interface PrepareLocalBackupUiRestoreTransactionInput {
   ownerUserId: string;
   source: LocalBackupUiRestoreSource;
   touchedProjectIds: readonly string[];
-  currentProjects: readonly Project[];
   retryQueueRestoreItems: readonly unknown[];
   restoredActionQueueItems: readonly QueuedAction[];
   blackBoxBackup: BackupData;
@@ -152,15 +150,13 @@ export async function prepareLocalBackupUiRestoreTransaction(
 ): Promise<PreparedLocalBackupUiRestoreTransaction> {
   const touchedProjectIds = normalizeProjectIds(input.touchedProjectIds);
   const quiescence = await dependencies.prepareQuiescence(input.ownerUserId);
-  let journal: LocalBackupUiRestoreJournal | null = null;
-  let marker: LocalBackupUiRestoreMarker | null = null;
+  let markerCreationAttempted = false;
   let markerHeartbeat: LocalBackupUiRestoreMarkerHeartbeat | null = null;
   let preparedHandle: PreparedLocalBackupUiRestoreTransaction | null = null;
   try {
     const capturedPreImage = await dependencies.capturePreImage({
       ownerUserId: input.ownerUserId,
       touchedProjectIds,
-      currentProjects: input.currentProjects,
       retryQueueRestoreItems: input.retryQueueRestoreItems,
     });
     const blackBox = await dependencies.prepareBlackBox({
@@ -173,14 +169,15 @@ export async function prepareLocalBackupUiRestoreTransaction(
       blackBox: blackBox as unknown as LocalBackupUiRestorePreImage['blackBox'],
     };
     const queueIdentity = await createPreparedQueueIdentity(input, quiescence, dependencies);
-    marker = buildPreparedMarker(
+    const marker = buildPreparedMarker(
       input,
       touchedProjectIds,
       preImage,
       quiescence,
       queueIdentity,
     );
-    journal = dependencies.createJournal(input.ownerUserId);
+    const journal = dependencies.createJournal(input.ownerUserId);
+    markerCreationAttempted = true;
     await journal.create(marker);
     const readBack = await journal.read();
     if (!readBack || JSON.stringify(readBack) !== JSON.stringify(marker)) {
@@ -206,7 +203,9 @@ export async function prepareLocalBackupUiRestoreTransaction(
     ));
     return preparedHandle;
   } catch (error) {
-    if (preparedHandle) {
+    if (!markerCreationAttempted) {
+      await quiescence.abortBeforeMutation();
+    } else if (preparedHandle) {
       try {
         await preparedHandle.abortBeforeMutation();
       } catch (cleanupError) {
@@ -215,41 +214,10 @@ export async function prepareLocalBackupUiRestoreTransaction(
           'local backup UI restore prepare cleanup failed',
         );
       }
-    } else {
-      let safeToReleaseQuiescence = journal === null || marker === null;
-      if (journal && marker) {
-        try {
-          const markerOwnershipIntact = markerHeartbeat?.hasOwnership() ?? true;
-          await markerHeartbeat?.stop();
-          safeToReleaseQuiescence = markerOwnershipIntact
-            && await clearUnmutatedPreparedMarker(journal, marker);
-        } catch {
-          safeToReleaseQuiescence = false;
-        }
-      }
-      if (safeToReleaseQuiescence) {
-        await quiescence.abortBeforeMutation();
-      } else {
-        await quiescence.deferForStartupRecovery();
-      }
+    } else if (markerHeartbeat) {
+      await markerHeartbeat.stop();
     }
     throw error;
-  }
-}
-
-async function clearUnmutatedPreparedMarker(
-  journal: LocalBackupUiRestoreJournal,
-  marker: LocalBackupUiRestoreMarker,
-): Promise<boolean> {
-  try {
-    const current = await journal.read();
-    if (!current) return true;
-    if (JSON.stringify(current) !== JSON.stringify(marker)
-      || !await journal.verifyOwnership(current)) return false;
-    if (!await journal.clear(current)) return false;
-    return await journal.read() === null;
-  } catch {
-    return false;
   }
 }
 
@@ -350,7 +318,7 @@ async function prepareActionQueueRestore(
   await dependencies.queueBackup.applyPersonalBackupRestoreTransitionV2({
     kind: 'prepare',
     identity,
-    expectedActions: extractBackupActionQueueActions(indexedDb),
+    expectedActions: extractBackupActionQueueActionsForRestore(indexedDb),
     restoredActions: [...input.restoredActionQueueItems],
   }, input.ownerUserId);
   const state = await dependencies.queueBackup.readPersonalRestoreIdentityState(

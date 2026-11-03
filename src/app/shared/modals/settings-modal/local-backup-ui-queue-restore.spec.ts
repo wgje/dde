@@ -169,8 +169,8 @@ describe('LocalBackupUIService queue restore', () => {
       }],
     };
     const existingAction = {
-      id: 'current-action',
-      operationId: 'op-current',
+      id: '66666666-6666-4666-8666-666666666666',
+      operationId: '77777777-7777-4777-8777-777777777777',
       type: 'update',
       entityType: 'task',
       entityId: 'task-current',
@@ -186,7 +186,7 @@ describe('LocalBackupUIService queue restore', () => {
       localState: {
         dataSafety: { ownerUserId: 'user-1' },
         actionQueue: [{
-          id: 'restored-action',
+          id: '88888888-8888-4888-8888-888888888888',
           operationId: '99999999-9999-4999-8999-999999999999',
           type: 'update',
           entityType: 'task',
@@ -223,13 +223,63 @@ describe('LocalBackupUIService queue restore', () => {
     }));
     expect(restoreTransactionMock.prepare).toHaveBeenCalledWith(expect.objectContaining({
       restoredActionQueueItems: [expect.objectContaining({
-        id: 'restored-action',
+        id: '88888888-8888-4888-8888-888888888888',
         operationId: '99999999-9999-4999-8999-999999999999',
       })],
     }));
     expect(queueBackupMock.updateQueue).not.toHaveBeenCalled();
     expect(importServiceMock.executeImport).not.toHaveBeenCalled();
     expect(service.restoreResultMsg()).toBe('恢复成功！已导入 1 个项目，已恢复 1 个待同步操作');
+  });
+
+  it('rejects an ActionQueue operationId that would be remapped before preparing the transaction', async () => {
+    const exportData: ExportData = {
+      metadata: {
+        exportedAt: '2026-06-18T00:00:00.000Z',
+        version: '2.0.0',
+        appVersion: 'backup-restore',
+        projectCount: 0,
+        taskCount: 0,
+        connectionCount: 0,
+        attachmentCount: 0,
+        checksum: '',
+        exportType: 'full',
+      },
+      projects: [],
+    };
+    const backupData = {
+      payloadVersion: '2.0.0',
+      projects: [],
+      tasks: [],
+      connections: [],
+      localState: {
+        dataSafety: { ownerUserId: 'user-1' },
+        actionQueue: [{
+          id: '88888888-8888-4888-8888-888888888888',
+          operationId: 'legacy-operation-id',
+          type: 'update',
+          entityType: 'task',
+          entityId: 'task-restored',
+          payload: { task: { id: 'task-restored' } },
+          timestamp: 2,
+          retryCount: 0,
+        }],
+      },
+    } as unknown as BackupData;
+    importServiceMock.validateFile.mockResolvedValue({ valid: true, data: exportData });
+    importServiceMock.generatePreview.mockResolvedValue({ projects: [] });
+    const service = TestBed.inject(LocalBackupUIService);
+
+    await service.loadRestorePreviewFromFile(
+      new File([JSON.stringify(backupData)], 'backup.json', { type: 'application/json' }),
+      [],
+    );
+    await service.confirmRestore([]);
+
+    expect(restoreTransactionMock.prepare).not.toHaveBeenCalled();
+    expect(preparedRestoreRun).not.toHaveBeenCalled();
+    expect(queueBackupMock.updateQueue).not.toHaveBeenCalled();
+    expect(service.restoreStep()).toBe('error');
   });
 
   it('routes retry queue through the prepared restore stage', async () => {
@@ -262,7 +312,7 @@ describe('LocalBackupUIService queue restore', () => {
       retryCount: 0,
       createdAt: 1,
       sourceUserId: 'user-1',
-      operationId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      operationId: 'op-retry-restored',
     };
     const backupData = {
       payloadVersion: '2.0.0',
@@ -323,7 +373,7 @@ describe('LocalBackupUIService queue restore', () => {
     const deadLetter = {
       action: {
         id: 'dead-letter-action',
-        operationId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+        operationId: 'op-dead-letter-action',
         type: 'update',
         entityType: 'task',
         entityId: 'task-dead-letter',

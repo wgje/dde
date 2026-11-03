@@ -69,6 +69,8 @@ Terminal cleanup also performs a second durable ActionQueue receipt read-back be
 
 The 2026-11-03 restore and ActionQueue integration refresh passed serially: 24 related spec files (606/606 tests), including `sync-integrity.spec.ts`; `npm run typecheck`, the focused ESLint check, and `git diff --check` passed. Dependencies were installed in the isolated verification worktree with `npm install --package-lock=false --ignore-scripts`; package metadata and lockfile were unchanged. This evidence closes only the user-facing restore transaction scope above; the remaining data-safety groups stay open.
 
+The 2026-11-03 strict ActionQueue identity and restore-prepare refresh passed serially in the isolated worktree: 18 related spec files (409/409 tests), including the settings restore race cases, user-session recovery, route fence, and startup ActionQueue fence. `npm run typecheck` passed; the focused ESLint check reported 0 errors and 4 existing complexity/length warnings; `git diff --check` passed. Dependencies were installed with `npm install --package-lock=false --ignore-scripts`, without changing package metadata or the lockfile. This closes only the user-facing restore transaction scope above; RetryQueue, export snapshot, Supabase migration, Android widget, and other data-safety groups remain open.
+
 ### 2.2 Remaining gaps
 
 Only the four gaps below remain. The user-facing restore transaction and the previously listed offline-snapshot replacement and sync-RPC-unavailable local task-deletion audit gaps are closed for the exact scopes and evidence named in section 2.1; the other data-safety groups remain open.

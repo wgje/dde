@@ -21,9 +21,9 @@ import type { Project, Task } from '../../../models';
 import type { AttachmentImportItem } from '../../../services/attachment-import.service';
 import { DisasterBackupService } from '../../../services/disaster-backup.service';
 import { BackupDataSafetyMetadataRestoreService } from '../../../services/backup-data-safety-metadata-restore.service';
-import { SessionRuntimeResetRegistry } from '../../../services/session-runtime-reset.service';
 import { LocalBackupUiRestoreStageService } from '../../../services/local-backup-ui-restore-stage.service';
 import { LocalBackupUiRestoreTransactionService } from '../../../services/local-backup-ui-restore-transaction.service';
+import { SessionRuntimeResetRegistry } from '../../../services/session-runtime-reset.service';
 import {
   registerSettingsModalSiyuanOwnerGenerationSpecs,
 } from './settings-modal-siyuan-owner-generation.spec-helpers';
@@ -141,6 +141,14 @@ describe('SettingsModalComponent', () => {
     restore: vi.fn(),
   };
 
+  const mockLocalBackupUiRestoreStageService = {
+    createOperations: vi.fn(),
+  };
+
+  const mockLocalBackupUiRestoreTransactionService = {
+    prepare: vi.fn(),
+  };
+
   const mockExportService = {
     isExporting: signal(false),
     exportAndDownload: vi.fn(),
@@ -238,11 +246,8 @@ describe('SettingsModalComponent', () => {
         { provide: LocalBackupService, useValue: mockLocalBackupService },
         { provide: DisasterBackupService, useValue: mockDisasterBackupService },
         { provide: BackupDataSafetyMetadataRestoreService, useValue: mockMetadataRestoreService },
-        {
-          provide: LocalBackupUiRestoreStageService,
-          useValue: { createOperations: vi.fn(), createRecoveryOperations: vi.fn() },
-        },
-        { provide: LocalBackupUiRestoreTransactionService, useValue: { prepare: vi.fn(), takeoverExpired: vi.fn() } },
+        { provide: LocalBackupUiRestoreStageService, useValue: mockLocalBackupUiRestoreStageService },
+        { provide: LocalBackupUiRestoreTransactionService, useValue: mockLocalBackupUiRestoreTransactionService },
         { provide: ThemeService, useValue: mockThemeService },
         { provide: DockEngineService, useValue: mockDockEngine },
         { provide: FocusPreferenceService, useValue: mockFocusPreferenceService },

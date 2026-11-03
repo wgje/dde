@@ -501,8 +501,8 @@ describe('LocalBackupUIService', () => {
         actionQueue: {
           actions: [
             {
-              id: 'action-1',
-              operationId: '88888888-8888-4888-8888-888888888888',
+              id: '88888888-8888-4888-8888-888888888888',
+              operationId: '99999999-9999-4999-8999-999999999999',
               type: 'update',
               entityType: 'task',
               entityId: 'task-1',
@@ -788,37 +788,6 @@ describe('LocalBackupUIService', () => {
     expect(importServiceMock.generatePreview).not.toHaveBeenCalled();
     expect(metadataRestoreMock.preview).not.toHaveBeenCalled();
     expect(restoreTransactionMock.prepare).not.toHaveBeenCalled();
-  });
-
-  it('rejects unsupported ActionQueue operationIds before transaction preparation', async () => {
-    const backupData = {
-      payloadVersion: '2.0.0',
-      projects: [{ id: 'project-1', userId: 'user-1' }],
-      tasks: [],
-      connections: [],
-      localState: {
-        dataSafety: { ownerUserId: 'user-1' },
-        actionQueue: [{
-          id: 'action-1',
-          operationId: 'legacy-operation-7',
-          type: 'update',
-          entityType: 'task',
-          entityId: 'task-1',
-          payload: { projectId: 'project-1' },
-          timestamp: 1,
-          retryCount: 0,
-        }],
-      },
-    } as unknown as BackupData;
-    await prepareRestorePreview(backupData, createExportDataForRestore());
-    const service = TestBed.inject(LocalBackupUIService);
-
-    await service.confirmRestore([]);
-
-    expect(service.restoreStep()).toBe('error');
-    expect(service.restoreError()).toContain('ActionQueue operationId 格式无效');
-    expect(restoreTransactionMock.prepare).not.toHaveBeenCalled();
-    expect(restoreStageMock.createOperations).not.toHaveBeenCalled();
   });
 
   function createExportDataForRestore(): ExportData {

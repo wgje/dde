@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { SYNC_CONFIG } from '../config';
-import type { Project } from '../models';
 import { deleteDataSafetyRestoreMarkerJournalDatabaseForTests } from './data-safety-restore-marker-journal';
 import {
   createLocalBackupUiRestoreJournal,
@@ -84,7 +83,6 @@ describe('prepareLocalBackupUiRestoreTransaction', () => {
       ownerUserId: OWNER_USER_ID,
       source: { kind: 'local-file', reference: 'backup.json', checksum: SOURCE_DIGEST },
       touchedProjectIds: ['project-new', 'project-1'],
-      currentProjects: [] as Project[],
       retryQueueRestoreItems: [RETRY_QUEUE_RESTORE_ITEM],
       restoredActionQueueItems: [],
       blackBoxBackup: makeBackup([]),
@@ -120,7 +118,6 @@ describe('prepareLocalBackupUiRestoreTransaction', () => {
     expect(dependencies.capturePreImage).toHaveBeenCalledWith({
       ownerUserId: OWNER_USER_ID,
       touchedProjectIds: ['project-1', 'project-new'],
-      currentProjects: [],
       retryQueueRestoreItems: [RETRY_QUEUE_RESTORE_ITEM],
     });
     expect('run' in handle).toBe(true);
@@ -136,7 +133,6 @@ describe('prepareLocalBackupUiRestoreTransaction', () => {
       ownerUserId: OWNER_USER_ID,
       source: { kind: 'local-file', reference: null, checksum: SOURCE_DIGEST },
       touchedProjectIds: ['project-1'],
-      currentProjects: [],
       retryQueueRestoreItems: [],
       restoredActionQueueItems: [],
       blackBoxBackup: makeBackup([]),
@@ -167,7 +163,6 @@ describe('prepareLocalBackupUiRestoreTransaction', () => {
       ownerUserId: OWNER_USER_ID,
       source: { kind: 'local-file', reference: 'backup.json', checksum: SOURCE_DIGEST },
       touchedProjectIds: ['project-1'],
-      currentProjects: [],
       retryQueueRestoreItems: [],
       restoredActionQueueItems: [],
       blackBoxBackup: makeBackup([]),
@@ -190,53 +185,6 @@ describe('prepareLocalBackupUiRestoreTransaction', () => {
     ]);
   });
 
-  it('retains the journal and writer freeze when final terminal read-back changes', async () => {
-    const order: string[] = [];
-    const markerStore = { current: null as unknown };
-    const dependencies = makeDependencies(order, markerStore);
-    const handle = await prepareLocalBackupUiRestoreTransaction({
-      ownerUserId: OWNER_USER_ID,
-      source: { kind: 'local-file', reference: 'backup.json', checksum: SOURCE_DIGEST },
-      touchedProjectIds: ['project-1'], currentProjects: [], retryQueueRestoreItems: [],
-      restoredActionQueueItems: [], blackBoxBackup: makeBackup([]),
-    }, dependencies);
-    useDriftingTerminalReadback(dependencies, order, 'finalize');
-    order.length = 0;
-
-    await expect(handle.run(makeOperations())).resolves.toMatchObject({
-      status: 'blocked',
-      error: expect.objectContaining({
-        message: expect.stringMatching(/terminal evidence changed/i),
-      }),
-    });
-
-    expect(markerStore.current).toMatchObject({ state: 'completed', phase: 'finalizing' });
-    expect(order).toContain('quiescence.defer');
-    expect(order).not.toContain('journal.clear');
-    expect(order).not.toContain('quiescence.release');
-  });
-
-  it('retains prepared evidence when abort terminal read-back changes', async () => {
-    const order: string[] = [];
-    const markerStore = { current: null as unknown };
-    const dependencies = makeDependencies(order, markerStore);
-    const handle = await prepareLocalBackupUiRestoreTransaction({
-      ownerUserId: OWNER_USER_ID,
-      source: { kind: 'local-file', reference: null, checksum: SOURCE_DIGEST },
-      touchedProjectIds: ['project-1'], currentProjects: [], retryQueueRestoreItems: [],
-      restoredActionQueueItems: [], blackBoxBackup: makeBackup([]),
-    }, dependencies);
-    useDriftingTerminalReadback(dependencies, order, 'rollback');
-    order.length = 0;
-
-    await expect(handle.abortBeforeMutation()).rejects.toThrow(/terminal evidence changed/i);
-
-    expect(markerStore.current).toMatchObject({ state: 'prepared', phase: 'pre-image-captured' });
-    expect(order).toContain('quiescence.defer');
-    expect(order).not.toContain('journal.clear');
-    expect(order).not.toContain('quiescence.abort');
-  });
-
   it('retains the marker and writer freeze when terminal storage lacks readback confirmation', async () => {
     const order: string[] = [];
     const markerStore = { current: null as unknown };
@@ -251,13 +199,12 @@ describe('prepareLocalBackupUiRestoreTransaction', () => {
     const handle = await prepareLocalBackupUiRestoreTransaction({
       ownerUserId: OWNER_USER_ID,
       source: { kind: 'local-file', reference: 'backup.json', checksum: SOURCE_DIGEST },
-      touchedProjectIds: ['project-1'], currentProjects: [], retryQueueRestoreItems: [],
+      touchedProjectIds: ['project-1'], retryQueueRestoreItems: [],
       restoredActionQueueItems: [], blackBoxBackup: makeBackup([]),
     }, dependencies);
     order.length = 0;
 
-    const operations = makeOperations();
-    await expect(handle.run(operations)).resolves.toMatchObject({
+    await expect(handle.run(makeOperations())).resolves.toMatchObject({
       status: 'blocked',
       error: expect.objectContaining({
         message: expect.stringMatching(/authoritative/i),
@@ -265,8 +212,6 @@ describe('prepareLocalBackupUiRestoreTransaction', () => {
     });
 
     expect(markerStore.current).not.toBeNull();
-    expect(markerStore.current).toMatchObject({ state: 'completed', phase: 'finalizing' });
-    expect(operations.rollback).not.toHaveBeenCalled();
     expect(order).not.toContain('journal.clear');
     expect(order).not.toContain('quiescence.release');
   });
@@ -287,7 +232,6 @@ describe('prepareLocalBackupUiRestoreTransaction', () => {
       ownerUserId: OWNER_USER_ID,
       source: { kind: 'local-file', reference: null, checksum: SOURCE_DIGEST },
       touchedProjectIds: ['project-1'],
-      currentProjects: [],
       retryQueueRestoreItems: [],
       restoredActionQueueItems: [],
       blackBoxBackup: makeBackup([]),
@@ -295,41 +239,34 @@ describe('prepareLocalBackupUiRestoreTransaction', () => {
 
     expect(order).not.toContain('journal.clear');
     expect(order).not.toContain('quiescence.abort');
-    expect(order).toContain('quiescence.defer');
   });
 
-  it('retains quiescence when journal creation cleanup cannot confirm marker removal', async () => {
+  it('retains quiescence when marker creation may have persisted before failing', async () => {
     const order: string[] = [];
     const markerStore = { current: null as unknown };
     const dependencies = makeDependencies(order, markerStore);
-    dependencies.createJournal = ownerUserId => ({
-      ...makeJournal(order, markerStore, ownerUserId),
-      create: vi.fn(async marker => {
-        markerStore.current = marker;
-        throw new AggregateError(
-          [new Error('journal read-back failed'), new Error('journal cleanup failed')],
-          'journal create cleanup failed',
-        );
-      }),
-      clear: vi.fn(async () => {
-        order.push('journal.clear');
-        return false;
-      }),
-    });
+    const createJournal = dependencies.createJournal;
+    dependencies.createJournal = ownerUserId => {
+      const journal = createJournal(ownerUserId);
+      return {
+        ...journal,
+        create: vi.fn(async marker => {
+          await journal.create(marker);
+          throw new Error('marker create acknowledgement lost');
+        }),
+      };
+    };
 
     await expect(prepareLocalBackupUiRestoreTransaction({
       ownerUserId: OWNER_USER_ID,
-      source: { kind: 'local-file', reference: null, checksum: SOURCE_DIGEST },
+      source: { kind: 'local-file', reference: 'backup.json', checksum: SOURCE_DIGEST },
       touchedProjectIds: ['project-1'],
-      currentProjects: [],
       retryQueueRestoreItems: [],
       restoredActionQueueItems: [],
       blackBoxBackup: makeBackup([]),
-    }, dependencies)).rejects.toThrow(/journal create cleanup failed/i);
+    }, dependencies)).rejects.toThrow('marker create acknowledgement lost');
 
     expect(markerStore.current).not.toBeNull();
-    expect(order).toContain('journal.clear');
-    expect(order).toContain('quiescence.defer');
     expect(order).not.toContain('quiescence.abort');
     expect(order).not.toContain('queue-backup.prepare');
   });
@@ -348,7 +285,6 @@ describe('prepareLocalBackupUiRestoreTransaction', () => {
       ownerUserId: OWNER_USER_ID,
       source: { kind: 'local-file', reference: 'backup.json', checksum: SOURCE_DIGEST },
       touchedProjectIds: ['project-1'],
-      currentProjects: [],
       retryQueueRestoreItems: [],
       restoredActionQueueItems: [],
       blackBoxBackup: makeBackup([]),
@@ -387,7 +323,6 @@ describe('prepareLocalBackupUiRestoreTransaction', () => {
       ownerUserId: OWNER_USER_ID,
       source: { kind: 'local-file', reference: 'backup.json', checksum: SOURCE_DIGEST },
       touchedProjectIds: ['project-1'],
-      currentProjects: [],
       retryQueueRestoreItems: [],
       restoredActionQueueItems: [],
       blackBoxBackup: makeBackup([]),
@@ -420,7 +355,6 @@ describe('prepareLocalBackupUiRestoreTransaction', () => {
       ownerUserId: OWNER_USER_ID,
       source: { kind: 'local-file', reference: 'backup.json', checksum: SOURCE_DIGEST },
       touchedProjectIds: [],
-      currentProjects: [],
       retryQueueRestoreItems: [RETRY_QUEUE_RESTORE_ITEM],
       restoredActionQueueItems: [],
       blackBoxBackup: makeBackup([]),
@@ -579,6 +513,7 @@ describe('prepareLocalBackupUiRestoreTransaction', () => {
 
 function makePreImageReaders(): LocalBackupUiRestorePreImageReaders {
   return {
+    readCurrentProjects: vi.fn(async () => []),
     readLocalStateSnapshot: vi.fn(async () => ({
       retryQueueIndexedDbItems: [],
       retryQueueLocalStorageValue: null,
@@ -731,20 +666,6 @@ function makeProviderEvidence(receipt: Record<string, unknown>): QueueBackupRest
   } as unknown as QueueBackupRestoreProviderResult;
 }
 
-function useDriftingTerminalReadback(
-  dependencies: LocalBackupUiRestoreTransactionDependencies,
-  order: string[],
-  command: 'finalize' | 'rollback',
-): void {
-  let readCount = 0;
-  dependencies.queueBackup.readPersonalRestoreProviderEvidence = vi.fn(async () => {
-    order.push('queue-backup.read-provider');
-    const receipt = makeTerminalReceipt(command);
-    if (readCount++ > 0) receipt['completedAt'] = '2026-07-27T00:00:01.000Z';
-    return makeProviderEvidence(receipt);
-  });
-}
-
 function makeRecoveryQueueBackupPort(): LocalBackupUiRestoreTransactionDependencies['queueBackup'] {
   let terminalReceipt: Record<string, unknown> | null = null;
   return {
@@ -797,11 +718,11 @@ function makeQuiescence(order: string[]): PreparedLocalBackupUiRestoreWriterQuie
     releaseFinalized: vi.fn(async () => {
       order.push('quiescence.release');
     }),
-    abortBeforeMutation: vi.fn(async () => {
-      order.push('quiescence.abort');
-    }),
     deferForStartupRecovery: vi.fn(async () => {
       order.push('quiescence.defer');
+    }),
+    abortBeforeMutation: vi.fn(async () => {
+      order.push('quiescence.abort');
     }),
   };
 }

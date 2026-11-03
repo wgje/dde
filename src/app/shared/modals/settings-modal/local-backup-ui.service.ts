@@ -6,7 +6,7 @@ import { LOCAL_BACKUP_CONFIG } from '../../../../config/local-backup.config';
 import type { Project } from '../../../../models';
 import type { ExportData } from '../../../../services/export.service';
 import type { BackupData } from '../../../../../supabase/functions/_shared/backup-utils';
-import { extractBackupActionQueueActions } from '../../../../services/action-queue-restore.helpers';
+import { extractBackupActionQueueActionsForRestore } from '../../../../services/action-queue-restore.helpers';
 import {
   countRestorableAttachmentUploadsFromBackup,
   type DataSafetyMetadataRestoreCounts,
@@ -300,9 +300,8 @@ export class LocalBackupUIService {
         ownerUserId: context.ownerUserId,
         source: context.source,
         touchedProjectIds: context.data.projects.map(project => project.id),
-        currentProjects: existingProjects,
         retryQueueRestoreItems: Array.isArray(context.rawBackupData.localState?.retryQueue) ? context.rawBackupData.localState.retryQueue : [],
-        restoredActionQueueItems: extractBackupActionQueueActions(
+        restoredActionQueueItems: extractBackupActionQueueActionsForRestore(
           context.rawBackupData.localState?.actionQueue,
         ),
         blackBoxBackup: context.rawBackupData,
@@ -334,12 +333,9 @@ export class LocalBackupUIService {
       }
       if (error instanceof RestoreContextChangedError
         || !this.isRestoreContextCurrent(context)) return;
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      this.logger.error('从本地备份恢复失败', errorMessage);
-      const userMessage = errorMessage.includes('operationId must be a UUID')
-        ? '备份中的 ActionQueue operationId 格式无效，已停止恢复以保留操作身份。'
-        : '恢复过程中发生错误';
-      this.setRestoreError(userMessage);
+      this.logger.error('从本地备份恢复失败', error instanceof Error ? error.message : String(error));
+      this.restoreError.set('恢复过程中发生错误');
+      this.restoreStep.set('error');
     } finally {
       this.isRestoringFromBackup.set(false);
       if (this.pendingRestoreContext === context) {

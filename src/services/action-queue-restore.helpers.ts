@@ -21,24 +21,32 @@ export interface RestoredQueuedActionMergeResult {
 }
 
 export function extractBackupActionQueueActions(source: unknown): QueuedAction[] {
-  if (Array.isArray(source)) {
-    return source.filter(isRestorablePendingQueuedAction).map(normalizeBackupQueuedAction);
+  return readBackupActionQueueActions(source)
+    .filter(isRestorablePendingQueuedAction)
+    .map(normalizeRestoredQueuedAction);
+}
+
+export function extractBackupActionQueueActionsForRestore(source: unknown): QueuedAction[] {
+  const candidates = readBackupActionQueueActions(source);
+  const pendingCandidates = candidates.filter(candidate => !isDeadLetterAction(candidate));
+  if (!pendingCandidates.every(isRestorableQueuedAction)) {
+    throw new Error('backup ActionQueue contains a malformed pending action');
   }
 
-  if (!source || typeof source !== 'object') {
-    return [];
-  }
-
-  const record = source as Record<string, unknown>;
-  if (Array.isArray(record['actions'])) {
-    return record['actions'].filter(isRestorablePendingQueuedAction).map(normalizeBackupQueuedAction);
-  }
-
-  if (Array.isArray(record['queue'])) {
-    return record['queue'].filter(isRestorablePendingQueuedAction).map(normalizeBackupQueuedAction);
-  }
-
-  return [];
+  return pendingCandidates.map(action => {
+    const candidate = action as QueuedAction & { id?: unknown; operationId?: unknown };
+    if (typeof candidate.id !== 'string' || candidate.id.length === 0) {
+      throw new Error('backup ActionQueue action id is missing');
+    }
+    if (!isSyncOperationId(candidate.operationId)) {
+      throw new Error('backup ActionQueue operationId is invalid');
+    }
+    const normalized = normalizeRestoredQueuedAction(action);
+    if (normalized.id !== candidate.id || normalized.operationId !== candidate.operationId) {
+      throw new Error('backup ActionQueue identity changed during restore validation');
+    }
+    return normalized;
+  });
 }
 
 export function mergeRestoredQueuedActions(
@@ -295,6 +303,21 @@ function isRestorablePendingQueuedAction(action: unknown): action is QueuedActio
   return isRestorableQueuedAction(action) && (action as { syncState?: unknown }).syncState !== 'dead_letter';
 }
 
+function isDeadLetterAction(action: unknown): boolean {
+  return !!action && typeof action === 'object' && !Array.isArray(action)
+    && (action as Record<string, unknown>)['syncState'] === 'dead_letter';
+}
+
+function readBackupActionQueueActions(source: unknown): unknown[] {
+  if (Array.isArray(source)) return source;
+  if (!source || typeof source !== 'object') return [];
+
+  const record = source as Record<string, unknown>;
+  if (Array.isArray(record['actions'])) return record['actions'];
+  if (Array.isArray(record['queue'])) return record['queue'];
+  return [];
+}
+
 function normalizeRestoredQueuedAction(action: QueuedAction): QueuedAction {
   const legacy = action as QueuedAction & {
     id?: unknown;
@@ -319,17 +342,6 @@ function normalizeRestoredQueuedAction(action: QueuedAction): QueuedAction {
     retryCount: typeof legacy.retryCount === 'number' ? legacy.retryCount : 0,
     syncState: normalizeRestoredSyncState(legacy.syncState),
   };
-}
-
-function normalizeBackupQueuedAction(action: QueuedAction): QueuedAction {
-  const candidate = action as QueuedAction & { operationId?: unknown };
-  if (!Object.prototype.hasOwnProperty.call(candidate, 'operationId')
-    || !isSyncOperationId(candidate.operationId)) {
-    throw new Error(
-      'Backup ActionQueue operationId must be a UUID; restore was blocked to preserve operation identity',
-    );
-  }
-  return normalizeRestoredQueuedAction(action);
 }
 
 function getQueuedActionRestoreIdentity(action: QueuedAction): string | null {

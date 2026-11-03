@@ -1,17 +1,9 @@
-import { TestBed } from '@angular/core/testing';
-import { signal } from '@angular/core';
 import { describe, expect, it, vi } from 'vitest';
 
 import { SYNC_CONFIG } from '../config';
-import { RetryQueueService } from '../core-bridge';
 import type { Project } from '../models';
-import { ExternalSourceCacheService } from '../app/core/external-sources/external-source-cache.service';
-import { AuthService } from './auth.service';
-import { BackupDataSafetyMetadataRestoreService } from './backup-data-safety-metadata-restore.service';
-import { ProjectStateService } from './project-state.service';
 import {
   captureLocalBackupUiRestorePreImage,
-  LocalBackupUiRestorePreImageService,
   type LocalBackupUiRestorePreImageReaders,
 } from './local-backup-ui-restore-pre-image.service';
 
@@ -114,12 +106,11 @@ describe('captureLocalBackupUiRestorePreImage', () => {
       }],
       connections: [],
     } as Project;
-    const readers = makeReaders();
+    const readers = makeReaders([project]);
 
     const preImage = await captureLocalBackupUiRestorePreImage({
       ownerUserId: OWNER_USER_ID,
       touchedProjectIds: ['project-new', 'project-1'],
-      currentProjects: [project],
       retryQueueRestoreItems: [RETRY_QUEUE_RESTORE_ITEM],
     }, readers, RETRY_QUEUE_POLICY);
 
@@ -154,6 +145,7 @@ describe('captureLocalBackupUiRestorePreImage', () => {
       },
     });
     expect(JSON.stringify(preImage.projectState)).toContain('content must survive the pre-image');
+    expect(readers.readCurrentProjects).toHaveBeenCalledWith(OWNER_USER_ID);
     expect(preImage.attachmentOutbox).toEqual([{
       ownerUserId: OWNER_USER_ID,
       operationId: 'attachment-op',
@@ -204,82 +196,6 @@ describe('captureLocalBackupUiRestorePreImage', () => {
     expect(readers.readExternalPendingLinks).toHaveBeenCalledWith(OWNER_USER_ID);
   });
 
-  it('captures authoritative project entities instead of a metadata shell supplied by the settings entry point', async () => {
-    localStorage.clear();
-    const authoritativeProject = {
-      id: 'project-authoritative',
-      name: 'Authoritative project',
-      description: '',
-      createdDate: '2026-07-27T00:00:00.000Z',
-      updatedAt: '2026-07-27T00:01:00.000Z',
-      version: 1,
-      tasks: [{
-        id: 'task-authoritative',
-        title: 'Task',
-        content: 'entity data must survive compensation',
-        stage: 1,
-        parentId: null,
-        order: 0,
-        rank: 100,
-        status: 'active',
-        displayId: 'task-authoritative',
-        x: 0,
-        y: 0,
-        createdDate: '2026-07-27T00:00:00.000Z',
-      }],
-      connections: [],
-    } as Project;
-    const settingsShell = { ...authoritativeProject, tasks: [], connections: [] } as Project;
-    const projectState = {
-      getProjectsWithCurrentData: vi.fn(() => [authoritativeProject]),
-    };
-    TestBed.configureTestingModule({
-      providers: [
-        LocalBackupUiRestorePreImageService,
-        { provide: AuthService, useValue: { currentUserId: signal(OWNER_USER_ID) } },
-        { provide: ProjectStateService, useValue: projectState },
-        { provide: BackupDataSafetyMetadataRestoreService, useValue: {
-          readCurrent: vi.fn(async () => ({
-            projectCursors: [],
-            lastSyncTime: null,
-            replayLog: [],
-            lastWriteExplain: null,
-            taskTombstones: {},
-            connectionTombstones: [],
-          })),
-        } },
-        { provide: ExternalSourceCacheService, useValue: {
-          loadLinks: vi.fn(async () => []),
-          loadPendingLinks: vi.fn(async () => []),
-        } },
-        { provide: RetryQueueService, useValue: { MAX_RETRIES: 5 } },
-      ],
-    });
-
-    try {
-      const preImage = await TestBed.inject(LocalBackupUiRestorePreImageService).capture({
-        ownerUserId: OWNER_USER_ID,
-        touchedProjectIds: [authoritativeProject.id],
-        currentProjects: [settingsShell],
-        retryQueueRestoreItems: [],
-      });
-
-      expect(projectState.getProjectsWithCurrentData).toHaveBeenCalledOnce();
-      expect(preImage.projectState).toMatchObject({
-        projects: [{
-          existed: true,
-          project: {
-            tasks: [{ content: 'entity data must survive compensation' }],
-            connections: [],
-          },
-        }],
-      });
-    } finally {
-      TestBed.resetTestingModule();
-      localStorage.clear();
-    }
-  });
-
   it('binds pending links to the transaction owner across a transient A to B to A auth change', async () => {
     const readers = makeReaders();
     let activeAuthOwner = OWNER_USER_ID;
@@ -298,7 +214,6 @@ describe('captureLocalBackupUiRestorePreImage', () => {
     const preImage = await captureLocalBackupUiRestorePreImage({
       ownerUserId: OWNER_USER_ID,
       touchedProjectIds: [],
-      currentProjects: [],
       retryQueueRestoreItems: [],
     }, readers, RETRY_QUEUE_POLICY);
 
@@ -320,7 +235,6 @@ describe('captureLocalBackupUiRestorePreImage', () => {
     await expect(captureLocalBackupUiRestorePreImage({
       ownerUserId: OWNER_USER_ID,
       touchedProjectIds: [],
-      currentProjects: [],
       retryQueueRestoreItems: [],
     }, readers, RETRY_QUEUE_POLICY)).rejects.toThrow(`pending read failed for ${OWNER_USER_ID}`);
     expect(readers.readExternalPendingLinks).toHaveBeenCalledWith(OWNER_USER_ID);
@@ -334,7 +248,6 @@ describe('captureLocalBackupUiRestorePreImage', () => {
     await expect(captureLocalBackupUiRestorePreImage({
       ownerUserId: OWNER_USER_ID,
       touchedProjectIds: ['project-1'],
-      currentProjects: [],
       retryQueueRestoreItems: [],
     }, readers, RETRY_QUEUE_POLICY)).rejects.toThrow(/JSON/i);
   });
@@ -343,7 +256,6 @@ describe('captureLocalBackupUiRestorePreImage', () => {
     await expect(captureLocalBackupUiRestorePreImage({
       ownerUserId: OWNER_USER_ID,
       touchedProjectIds: [],
-      currentProjects: [],
       retryQueueRestoreItems: [{
         ...RETRY_QUEUE_RESTORE_ITEM,
         sourceUserId: 'foreign-owner',
@@ -355,7 +267,6 @@ describe('captureLocalBackupUiRestorePreImage', () => {
     await expect(captureLocalBackupUiRestorePreImage({
       ownerUserId: OWNER_USER_ID,
       touchedProjectIds: [],
-      currentProjects: [],
       retryQueueRestoreItems: [{
         ...RETRY_QUEUE_RESTORE_ITEM,
         operationId: 'not-a-durable-operation-id',
@@ -383,7 +294,6 @@ describe('captureLocalBackupUiRestorePreImage', () => {
     const outcome = await captureLocalBackupUiRestorePreImage({
       ownerUserId: OWNER_USER_ID,
       touchedProjectIds: [],
-      currentProjects: [],
       retryQueueRestoreItems: [rejectedItem],
     }, readers, RETRY_QUEUE_POLICY).then(
       value => ({ value }),
@@ -424,7 +334,6 @@ describe('captureLocalBackupUiRestorePreImage', () => {
     await expect(captureLocalBackupUiRestorePreImage({
       ownerUserId: OWNER_USER_ID,
       touchedProjectIds: [],
-      currentProjects: [],
       retryQueueRestoreItems: [RETRY_QUEUE_RESTORE_ITEM, conflictingItem],
     }, makeReaders(), RETRY_QUEUE_POLICY)).rejects.toThrow(/retryQueue/i);
   });
@@ -459,7 +368,6 @@ describe('captureLocalBackupUiRestorePreImage', () => {
     await expect(captureLocalBackupUiRestorePreImage({
       ownerUserId: OWNER_USER_ID,
       touchedProjectIds: [],
-      currentProjects: [],
       retryQueueRestoreItems: [item, makeConflict(item)],
     }, makeReaders(), RETRY_QUEUE_POLICY)).rejects.toThrow(/retryQueue/i);
   });
@@ -483,10 +391,11 @@ function snapshotLocalStorage(): Record<string, string | null> {
   );
 }
 
-function makeReaders(): LocalBackupUiRestorePreImageReaders & {
+function makeReaders(currentProjects: Project[] = []): LocalBackupUiRestorePreImageReaders & {
   readMetadata: ReturnType<typeof vi.fn>;
 } {
   return {
+    readCurrentProjects: vi.fn(async () => currentProjects),
     readLocalStateSnapshot: vi.fn(async () => ({
       retryQueueIndexedDbItems: [{ id: 'retry-1' }],
       retryQueueLocalStorageValue: '{"version":1,"items":[]}',

@@ -6,6 +6,7 @@ import { RetryQueueService } from '../core-bridge';
 import type { Project } from '../models';
 import { ExternalSourceCacheService } from '../app/core/external-sources/external-source-cache.service';
 import { AuthService } from './auth.service';
+import { ProjectStateService } from './project-state.service';
 import {
   AttachmentUploadOutboxService,
   type PendingAttachmentUploadRecord,
@@ -18,7 +19,6 @@ import {
 } from './data-safety-indexeddb-local-state';
 import type { DataSafetyMetadataRestoreState } from './import-backup-data-safety-metadata.helpers';
 import { normalizeLocalBackupUiRestoreRetryQueueFootprint } from './local-backup-ui-restore-stage-snapshots';
-import { ProjectStateService } from './project-state.service';
 import type {
   LocalBackupUiRestoreJsonValue,
   LocalBackupUiRestorePreImage,
@@ -27,11 +27,11 @@ import type {
 export interface CaptureLocalBackupUiRestorePreImageInput {
   ownerUserId: string;
   touchedProjectIds: readonly string[];
-  currentProjects: readonly Project[];
   retryQueueRestoreItems: readonly unknown[];
 }
 
 export interface LocalBackupUiRestorePreImageReaders {
+  readCurrentProjects(ownerUserId: string): Project[] | Promise<Project[]>;
   readLocalStateSnapshot(ownerUserId: string): Promise<LocalStateRestoreSnapshot>;
   readMetadata(
     ownerUserId: string,
@@ -53,8 +53,13 @@ export class LocalBackupUiRestorePreImageService {
   private readonly retryQueue = inject(RetryQueueService);
 
   capture(input: CaptureLocalBackupUiRestorePreImageInput): Promise<LocalBackupUiRestorePreImage> {
-    const currentProjects = this.readCurrentProjects(input.ownerUserId);
-    return captureLocalBackupUiRestorePreImage({ ...input, currentProjects }, {
+    return captureLocalBackupUiRestorePreImage(input, {
+      readCurrentProjects: ownerUserId => {
+        this.assertCurrentOwner(ownerUserId);
+        const projects = this.projectState.getProjectsWithCurrentData();
+        this.assertCurrentOwner(ownerUserId);
+        return projects;
+      },
       readLocalStateSnapshot: ownerUserId => readLocalStateRestoreSnapshot(ownerUserId),
       readMetadata: (ownerUserId, touchedProjectIds) => (
         this.metadata.readCurrent(ownerUserId, touchedProjectIds)
@@ -72,13 +77,6 @@ export class LocalBackupUiRestorePreImageService {
       maxItemAgeMs: SYNC_CONFIG.MAX_RETRY_ITEM_AGE,
       maxRetries: this.retryQueue.MAX_RETRIES,
     });
-  }
-
-  private readCurrentProjects(ownerUserId: string): Project[] {
-    this.assertCurrentOwner(ownerUserId);
-    const projects = this.projectState.getProjectsWithCurrentData();
-    this.assertCurrentOwner(ownerUserId);
-    return projects;
   }
 
   private assertCurrentOwner(ownerUserId: string): void {
@@ -124,25 +122,33 @@ async function readPreImageSources(
 ): Promise<LocalBackupUiRestorePreImageSources> {
   const touchedProjectIds = normalizeTouchedProjectIds(input.touchedProjectIds);
   const touchedProjectIdSet = new Set(touchedProjectIds);
-  const currentProjects = new Map(input.currentProjects.map(project => [project.id, project]));
   const retryQueueRestoreItems = normalizeLocalBackupUiRestoreRetryQueueFootprint(
     input.retryQueueRestoreItems,
     input.ownerUserId,
     retryQueuePolicy,
   );
   const [
+    currentProjectValues,
     localState,
     metadata,
     externalSourceLinks,
     externalSourcePendingLinks,
     attachmentUploads,
   ] = await Promise.all([
+    readers.readCurrentProjects(input.ownerUserId),
     readers.readLocalStateSnapshot(input.ownerUserId),
     readers.readMetadata(input.ownerUserId, touchedProjectIdSet),
     readers.readExternalLinks(input.ownerUserId),
     readers.readExternalPendingLinks(input.ownerUserId),
     readers.readAttachmentUploads(input.ownerUserId),
   ]);
+  const currentProjects = new Map<string, Project>();
+  for (const project of currentProjectValues) {
+    if (!project.id || currentProjects.has(project.id)) {
+      throw new Error('local backup UI restore current project state is invalid');
+    }
+    currentProjects.set(project.id, project);
+  }
   return {
     touchedProjectIds,
     currentProjects,
