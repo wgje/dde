@@ -225,7 +225,7 @@ async function ensureTextReady(page: Page): Promise<void> {
 }
 
 async function ensureFlowReady(page: Page): Promise<void> {
-  const diagram = page.locator('[data-testid="flow-diagram"]').first();
+  const diagram = page.locator('[data-testid="flow-diagram"][aria-busy="false"]').first();
   const flowTab = page.locator('[data-testid="flow-view-tab"]').first();
   const flowRetry = page.getByRole('button', { name: /流程图|加载|重试|刷新页面/i }).first();
 
