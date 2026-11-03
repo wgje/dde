@@ -105,6 +105,45 @@ describe('createPwaInstallPromptInitializationScheduler', () => {
     expect(initialize).toHaveBeenCalledOnce();
   });
 
+  it('allows scheduling again when prompt initialization itself fails', () => {
+    const initialize = vi.fn()
+      .mockImplementationOnce(() => {
+        throw new Error('prompt initialization failed');
+      })
+      .mockImplementationOnce(() => undefined);
+    const idleCallbacks: IdleRequestCallback[] = [];
+    const windowRef = {
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      requestIdleCallback: vi.fn((callback: IdleRequestCallback) => {
+        idleCallbacks.push(callback);
+        return idleCallbacks.length;
+      }),
+      cancelIdleCallback: vi.fn(),
+    } as unknown as Window;
+    let idleCallbackHandle: number | null = null;
+    const scheduler = createPwaInstallPromptInitializationScheduler({
+      initialize,
+      isDestroyed: () => false,
+      getIdleCallbackHandle: () => idleCallbackHandle,
+      setIdleCallbackHandle: (handle) => {
+        idleCallbackHandle = handle;
+      },
+      windowRef,
+    });
+
+    scheduler.schedule();
+    expect(() => idleCallbacks[0]({ didTimeout: false, timeRemaining: () => 10 }))
+      .toThrow('prompt initialization failed');
+
+    scheduler.schedule();
+
+    expect(idleCallbacks).toHaveLength(2);
+    expect(() => idleCallbacks[1]({ didTimeout: false, timeRemaining: () => 10 }))
+      .not.toThrow();
+    expect(initialize).toHaveBeenCalledTimes(2);
+  });
+
   it('teardown continues cleanup when one intent listener removal fails', () => {
     const initialize = vi.fn();
     let idleCallback: IdleRequestCallback | undefined;

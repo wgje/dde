@@ -109,6 +109,7 @@ export function createPwaInstallPromptInitializationScheduler(
     typeof window === 'undefined' ? undefined : window
   );
   let initialized = false;
+  let initializing = false;
   let scheduled = false;
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -118,18 +119,23 @@ export function createPwaInstallPromptInitializationScheduler(
   };
 
   const initOnce = () => {
-    if (!scheduled || initialized || options.isDestroyed()) return;
+    if (!scheduled || initialized || initializing || options.isDestroyed()) return;
 
-    initialized = true;
     cleanup();
-    options.initialize();
+    initializing = true;
+    try {
+      options.initialize();
+      initialized = true;
+    } finally {
+      initializing = false;
+    }
   };
 
   const onFirstIntent = () => initOnce();
 
   return {
     schedule: () => {
-      if (initialized || scheduled || options.isDestroyed()) {
+      if (initialized || initializing || scheduled || options.isDestroyed()) {
         return;
       }
 
