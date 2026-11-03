@@ -19,6 +19,8 @@ export class AppLifecycleBrowserEventsCoordinator {
   private lastBackgroundDurationMs = 0;
   private triggerResume: ((reason: AppResumeReason) => void) | null = null;
   private lifecycleGeneration = 0;
+  private capturedWindow: Pick<Window, 'addEventListener' | 'removeEventListener'> | null = null;
+  private capturedDocument: Pick<Document, 'addEventListener' | 'removeEventListener'> | null = null;
   private readonly pendingResumeReasons = new Set<AppResumeReason>();
 
   private readonly visibilityHandler = () => this.handleVisibilityChange();
@@ -35,20 +37,22 @@ export class AppLifecycleBrowserEventsCoordinator {
     const cleanupRegisteredListeners: Array<() => void> = [];
     this.triggerResume = triggerResume;
     this.lifecycleGeneration += 1;
+    this.capturedWindow = window;
+    this.capturedDocument = document;
 
     try {
-      document.addEventListener('visibilitychange', this.visibilityHandler);
+      this.capturedDocument.addEventListener('visibilitychange', this.visibilityHandler);
       cleanupRegisteredListeners.push(() =>
-        document.removeEventListener('visibilitychange', this.visibilityHandler));
-      window.addEventListener('blur', this.blurHandler);
-      cleanupRegisteredListeners.push(() => window.removeEventListener('blur', this.blurHandler));
-      window.addEventListener('focus', this.focusHandler);
-      cleanupRegisteredListeners.push(() => window.removeEventListener('focus', this.focusHandler));
-      window.addEventListener('pageshow', this.pageshowHandler as EventListener);
+        this.capturedDocument!.removeEventListener('visibilitychange', this.visibilityHandler));
+      this.capturedWindow.addEventListener('blur', this.blurHandler);
+      cleanupRegisteredListeners.push(() => this.capturedWindow!.removeEventListener('blur', this.blurHandler));
+      this.capturedWindow.addEventListener('focus', this.focusHandler);
+      cleanupRegisteredListeners.push(() => this.capturedWindow!.removeEventListener('focus', this.focusHandler));
+      this.capturedWindow.addEventListener('pageshow', this.pageshowHandler as EventListener);
       cleanupRegisteredListeners.push(() =>
-        window.removeEventListener('pageshow', this.pageshowHandler as EventListener));
-      window.addEventListener('online', this.onlineHandler);
-      cleanupRegisteredListeners.push(() => window.removeEventListener('online', this.onlineHandler));
+        this.capturedWindow!.removeEventListener('pageshow', this.pageshowHandler as EventListener));
+      this.capturedWindow.addEventListener('online', this.onlineHandler);
+      cleanupRegisteredListeners.push(() => this.capturedWindow!.removeEventListener('online', this.onlineHandler));
       this.initialized = true;
       this.infoSafely('Lifecycle orchestrator initialized');
       return true;
@@ -58,26 +62,30 @@ export class AppLifecycleBrowserEventsCoordinator {
       }
       this.triggerResume = null;
       this.initialized = false;
+      this.capturedWindow = null;
+      this.capturedDocument = null;
       this.lifecycleGeneration += 1;
       throw error;
     }
   }
 
   cleanup(): void {
-    if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+    if (this.capturedDocument && this.capturedWindow) {
       this.removeBrowserListener(() =>
-        document.removeEventListener('visibilitychange', this.visibilityHandler));
-      this.removeBrowserListener(() => window.removeEventListener('blur', this.blurHandler));
-      this.removeBrowserListener(() => window.removeEventListener('focus', this.focusHandler));
+        this.capturedDocument!.removeEventListener('visibilitychange', this.visibilityHandler));
+      this.removeBrowserListener(() => this.capturedWindow!.removeEventListener('blur', this.blurHandler));
+      this.removeBrowserListener(() => this.capturedWindow!.removeEventListener('focus', this.focusHandler));
       this.removeBrowserListener(() =>
-        window.removeEventListener('pageshow', this.pageshowHandler as EventListener));
-      this.removeBrowserListener(() => window.removeEventListener('online', this.onlineHandler));
+        this.capturedWindow!.removeEventListener('pageshow', this.pageshowHandler as EventListener));
+      this.removeBrowserListener(() => this.capturedWindow!.removeEventListener('online', this.onlineHandler));
     }
     this.hiddenAt = null;
     this.lastBackgroundDurationMs = 0;
     this.triggerResume = null;
     this.pendingResumeReasons.clear();
     this.initialized = false;
+    this.capturedWindow = null;
+    this.capturedDocument = null;
     this.lifecycleGeneration += 1;
   }
 

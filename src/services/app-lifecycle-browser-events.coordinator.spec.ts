@@ -5,6 +5,36 @@ import { setVisibilityState } from './app-lifecycle-orchestrator.test-harness';
 import { AppLifecycleBrowserEventsCoordinator } from './app-lifecycle-browser-events.coordinator';
 import { LoggerService } from './logger.service';
 
+interface ListenerTarget {
+  addEventListener(type: string, listener: EventListener): void;
+  removeEventListener(type: string, listener: EventListener): void;
+  dispatchEvent(type: string): void;
+  listenerCount(type: string): number;
+}
+
+function createListenerTarget(): ListenerTarget {
+  const listeners = new Map<string, Set<EventListener>>();
+
+  return {
+    addEventListener(type: string, listener: EventListener): void {
+      const current = listeners.get(type) ?? new Set<EventListener>();
+      current.add(listener);
+      listeners.set(type, current);
+    },
+    removeEventListener(type: string, listener: EventListener): void {
+      listeners.get(type)?.delete(listener);
+    },
+    dispatchEvent(type: string): void {
+      for (const listener of listeners.get(type) ?? []) {
+        listener(new Event(type));
+      }
+    },
+    listenerCount(type: string): number {
+      return listeners.get(type)?.size ?? 0;
+    },
+  };
+}
+
 describe('AppLifecycleBrowserEventsCoordinator', () => {
   let coordinator: AppLifecycleBrowserEventsCoordinator;
   let suspendTransport: ReturnType<typeof vi.fn>;
@@ -54,6 +84,7 @@ describe('AppLifecycleBrowserEventsCoordinator', () => {
   afterEach(() => {
     coordinator.cleanup();
     setVisibilityState('visible');
+    vi.unstubAllGlobals();
     vi.restoreAllMocks();
     TestBed.resetTestingModule();
   });
@@ -391,6 +422,96 @@ describe('AppLifecycleBrowserEventsCoordinator', () => {
     expect(coordinator.initialize(triggerResume)).toBe(true);
     window.dispatchEvent(new Event('online'));
     expect(triggerResume).toHaveBeenCalledWith('online');
+  });
+
+  it('cleans listeners from the exact original Window/Document targets after globals are replaced', () => {
+    const triggerResume = vi.fn();
+    const originalDocument = createListenerTarget();
+    const originalWindow = createListenerTarget();
+    vi.stubGlobal('document', originalDocument);
+    vi.stubGlobal('window', originalWindow);
+
+    expect(coordinator.initialize(triggerResume)).toBe(true);
+
+    const replacementDocument = createListenerTarget();
+    const replacementWindow = createListenerTarget();
+    vi.stubGlobal('document', replacementDocument);
+    vi.stubGlobal('window', replacementWindow);
+
+    coordinator.cleanup();
+
+    expect(originalDocument.listenerCount('visibilitychange')).toBe(0);
+    expect(originalWindow.listenerCount('blur')).toBe(0);
+    expect(originalWindow.listenerCount('focus')).toBe(0);
+    expect(originalWindow.listenerCount('pageshow')).toBe(0);
+    expect(originalWindow.listenerCount('online')).toBe(0);
+    expect(replacementDocument.listenerCount('visibilitychange')).toBe(0);
+    expect(replacementWindow.listenerCount('blur')).toBe(0);
+    expect(replacementWindow.listenerCount('focus')).toBe(0);
+    expect(replacementWindow.listenerCount('pageshow')).toBe(0);
+    expect(replacementWindow.listenerCount('online')).toBe(0);
+  });
+
+  it('reinitializes replacement targets once without inheriting stale original activity', () => {
+    const firstResume = vi.fn();
+    const originalDocument = createListenerTarget();
+    const originalWindow = createListenerTarget();
+    vi.stubGlobal('document', originalDocument);
+    vi.stubGlobal('window', originalWindow);
+
+    expect(coordinator.initialize(firstResume)).toBe(true);
+
+    const replacementDocument = createListenerTarget();
+    const replacementWindow = createListenerTarget();
+    vi.stubGlobal('document', replacementDocument);
+    vi.stubGlobal('window', replacementWindow);
+
+    coordinator.cleanup();
+    expect(coordinator.initialize(firstResume)).toBe(true);
+
+    expect(originalDocument.listenerCount('visibilitychange')).toBe(0);
+    expect(originalWindow.listenerCount('online')).toBe(0);
+    expect(replacementDocument.listenerCount('visibilitychange')).toBe(1);
+    expect(replacementWindow.listenerCount('online')).toBe(1);
+
+    originalWindow.dispatchEvent('online');
+    expect(firstResume).not.toHaveBeenCalled();
+    replacementWindow.dispatchEvent('online');
+    expect(firstResume).toHaveBeenCalledOnce();
+    expect(firstResume).toHaveBeenCalledWith('online');
+
+    expect(coordinator.initialize(firstResume)).toBe(false);
+    expect(replacementDocument.listenerCount('visibilitychange')).toBe(1);
+    expect(replacementWindow.listenerCount('online')).toBe(1);
+  });
+
+  it('rolls back partial registration from captured original targets when globals change mid-failure', () => {
+    const triggerResume = vi.fn();
+    const initializationError = new Error('pageshow listener rejected');
+    const originalDocument = createListenerTarget();
+    const originalWindow = createListenerTarget();
+    vi.stubGlobal('document', originalDocument);
+    vi.stubGlobal('window', originalWindow);
+
+    const originalAddEventListener = originalWindow.addEventListener;
+    originalWindow.addEventListener = ((type: string, listener: EventListener) => {
+      if (type === 'pageshow') {
+        vi.stubGlobal('document', createListenerTarget());
+        vi.stubGlobal('window', createListenerTarget());
+        throw initializationError;
+      }
+      originalAddEventListener(type, listener);
+    }) as typeof originalWindow.addEventListener;
+
+    expect(() => coordinator.initialize(triggerResume)).toThrow(initializationError);
+
+    const replacementDocument = (globalThis as unknown as { document: ListenerTarget }).document;
+    const replacementWindow = (globalThis as unknown as { window: ListenerTarget }).window;
+
+    expect(originalDocument.listenerCount('visibilitychange')).toBe(0);
+    expect(originalWindow.listenerCount('blur')).toBe(0);
+    expect(replacementDocument.listenerCount('visibilitychange')).toBe(0);
+    expect(replacementWindow.listenerCount('blur')).toBe(0);
   });
 
   it('suspends transport only once during a continuous hidden session', () => {
