@@ -686,7 +686,14 @@ export class SimpleSyncService {
   async loadProjectListMetadataFromCloud(userId: string, options: ProjectListMetadataLoadOptions = {}): Promise<Project[] | null> { return this.projectDataService.loadProjectListMetadataFromCloud(userId, options); }
 
   // 同名 delegate：项目删除链路已抽离到 ProjectDeleteCoordinatorService（单一事实源）。
-  async deleteProjectFromCloud(projectId: string, userId: string, operationId?: string): Promise<Result<void, OperationError>> { return this.projectDelete.deleteProjectFromCloud(projectId, userId, operationId); }
+  async deleteProjectFromCloud(
+    projectId: string,
+    userId: string,
+    operationId?: string,
+    baseUpdatedAt?: string | null,
+  ): Promise<Result<void, OperationError>> {
+    return this.projectDelete.deleteProjectFromCloud(projectId, userId, operationId, baseUpdatedAt);
+  }
 
   async loadSingleProject(projectId: string, userId: string): Promise<Project | null> { return this.loadFullProject(projectId, userId); }
 

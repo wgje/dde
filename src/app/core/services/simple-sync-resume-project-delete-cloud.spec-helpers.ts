@@ -22,6 +22,10 @@ export function registerSimpleSyncStartupSnapshotAndProjectDeleteSpecs(
     mockProjectStore = typeof context.mockProjectStore === 'function'
       ? context.mockProjectStore()
       : { getProject: vi.fn(() => undefined) };
+    mockProjectStore.getProject.mockReturnValue({
+      id: 'project-1',
+      updatedAt: '2026-07-14T00:00:00.000Z',
+    });
     new DataSafetyAuditPersistence().save('user-1', { replayLog: [], lastWriteExplain: null });
   }
 
@@ -105,7 +109,7 @@ export function registerSimpleSyncStartupSnapshotAndProjectDeleteSpecs(
       expect(mockClient.rpc).not.toHaveBeenCalledWith('soft_delete_project', expect.anything());
     });
 
-    it('deleteProjectFromCloud 在 sync RPC 开启时应调用受 protocol/epoch 保护的 sync_delete_project', async () => {
+    it('deleteProjectFromCloud 缺少删除基线时应拒绝 RPC，避免刷新后无条件覆盖远端项目', async () => {
       mockSupabase.isConfigured = true;
       mockSupabase.clientAsync.mockResolvedValue(mockClient);
       mockClient.auth.getSession = vi.fn().mockResolvedValue({
@@ -113,22 +117,53 @@ export function registerSimpleSyncStartupSnapshotAndProjectDeleteSpecs(
       });
       mockSyncRpcClient.isFeatureEnabled.mockReturnValue(true);
       mockSyncRpcClient.isClientRejected.mockReturnValue(false);
-      mockSyncRpcClient.deleteProject.mockResolvedValueOnce({
-        status: 'applied',
-        entityId: 'project-1',
-        serverUpdatedAt: '2026-04-30T09:00:00.000Z',
-        raw: {},
-      });
+      mockProjectStore.getProject.mockReturnValueOnce(undefined);
       mockClient.rpc = vi.fn().mockResolvedValue({ data: true, error: null });
 
       const result = await service.deleteProjectFromCloud('project-1', 'user-1', 'op-project-sync-delete-replay');
 
-      expect(result.ok).toBe(true);
-      expect(mockSyncRpcClient.deleteProject).toHaveBeenCalledWith(expect.objectContaining({
-        projectId: 'project-1',
-        baseUpdatedAt: null,
-      }));
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.code).toBe('SYNC_CONFLICT');
+        expect(result.error.details).toEqual(expect.objectContaining({
+          projectId: 'project-1',
+          retryable: false,
+          reason: 'missing_base_updated_at',
+        }));
+      }
+      expect(mockSyncRpcClient.deleteProject).not.toHaveBeenCalled();
       expect(mockClient.rpc).not.toHaveBeenCalledWith('soft_delete_project', expect.anything());
+    });
+
+    it('deleteProjectFromCloud 应使用持久化队列传入的删除基线，不依赖已被本地移除的项目快照', async () => {
+      mockSupabase.isConfigured = true;
+      mockSupabase.clientAsync.mockResolvedValue(mockClient);
+      mockClient.auth.getSession = vi.fn().mockResolvedValue({
+        data: { session: { user: { id: 'user-1' } } },
+      });
+      mockProjectStore.getProject.mockReturnValueOnce(undefined);
+      mockSyncRpcClient.isFeatureEnabled.mockReturnValue(true);
+      mockSyncRpcClient.isClientRejected.mockReturnValue(false);
+      mockSyncRpcClient.deleteProject.mockResolvedValueOnce({
+        status: 'applied',
+        entityId: 'project-durable-delete-baseline',
+        serverUpdatedAt: '2026-07-14T01:10:00.000Z',
+        raw: {},
+      });
+
+      const result = await service.deleteProjectFromCloud(
+        'project-durable-delete-baseline',
+        'user-1',
+        'op-project-durable-delete-baseline',
+        '2026-07-14T01:00:00.000Z',
+      );
+
+      expect(result.ok).toBe(true);
+      expect(mockSyncRpcClient.deleteProject).toHaveBeenCalledWith({
+        operationId: 'op-project-durable-delete-baseline',
+        projectId: 'project-durable-delete-baseline',
+        baseUpdatedAt: '2026-07-14T01:00:00.000Z',
+      });
     });
 
     it('deleteProjectFromCloud 应优先使用调用方传入的 operationId', async () => {
