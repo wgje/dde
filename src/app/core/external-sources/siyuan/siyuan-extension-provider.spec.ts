@@ -35,12 +35,12 @@ describe('siyuan-extension-provider', () => {
           }));
         });
       }
-      if (payload.type === 'nanoflow.siyuan.test-connection') {
+      if (payload.type === 'nanoflow.siyuan.v3.test-connection') {
         queueMicrotask(() => {
           window.dispatchEvent(new MessageEvent('message', {
             origin: window.location.origin,
             data: {
-              type: 'nanoflow.siyuan.test-connection-result',
+              type: 'nanoflow.siyuan.v3.test-connection-result',
               requestId: payload.requestId,
               ownerUserId: OWNER_A,
               ok: false,
@@ -64,7 +64,7 @@ describe('siyuan-extension-provider', () => {
     const postRelay = vi.spyOn(
       privateProvider,
       'postRelayRequest',
-    ).mockResolvedValue({ type: 'nanoflow.siyuan.set-config-result', ok: true });
+    ).mockResolvedValue({ type: 'nanoflow.siyuan.v3.set-config-result', ok: true });
 
     const result = await provider.pushConfig(
       { baseUrl: 'http://127.0.0.1:6806', token: 'secret-token' },
@@ -80,7 +80,7 @@ describe('siyuan-extension-provider', () => {
       configIssuedAt: number;
       payload: Record<string, unknown>;
     };
-    expect(call.requestType).toBe('nanoflow.siyuan.set-config');
+    expect(call.requestType).toBe('nanoflow.siyuan.v3.set-config');
     expect(call.ownerUserId).toBe(OWNER_A);
     expect(call.configIssuedAt).toBe(100);
     // payload 只能包含 baseUrl/token，杜绝把额外字段透传到 content-script。
@@ -94,7 +94,7 @@ describe('siyuan-extension-provider', () => {
     vi.spyOn(
       privateProvider,
       'postRelayRequest',
-    ).mockResolvedValue({ type: 'nanoflow.siyuan.set-config-result', ok: false, errorCode: 'token-invalid' });
+    ).mockResolvedValue({ type: 'nanoflow.siyuan.v3.set-config-result', ok: false, errorCode: 'token-invalid' });
 
     const result = await provider.pushConfig(
       { baseUrl: 'http://127.0.0.1:6806', token: 'x' },
@@ -126,7 +126,7 @@ describe('siyuan-extension-provider', () => {
     const postRelay = vi.spyOn(
       privateProvider,
       'postRelayRequest',
-    ).mockResolvedValue({ type: 'nanoflow.siyuan.set-config-result', ok: true });
+    ).mockResolvedValue({ type: 'nanoflow.siyuan.v3.set-config-result', ok: true });
 
     await provider.pushConfig({ baseUrl: 'http://127.0.0.1:6806' }, OWNER_A, 103);
 
@@ -154,12 +154,12 @@ describe('siyuan-extension-provider', () => {
       const postMessageSpy = vi.spyOn(window, 'postMessage').mockImplementation((message: unknown) => {
         if (typeof message !== 'object' || message === null) return;
         const payload = message as { type?: string; requestId?: string };
-        if (payload.type !== 'nanoflow.siyuan.get-config-status') return;
+        if (payload.type !== 'nanoflow.siyuan.v3.get-config-status') return;
         queueMicrotask(() => {
           window.dispatchEvent(new MessageEvent('message', {
             origin: window.location.origin,
             data: {
-              type: 'nanoflow.siyuan.config-status-result',
+              type: 'nanoflow.siyuan.v3.config-status-result',
               requestId: payload.requestId,
               ownerUserId: OWNER_A,
               ok: true,
@@ -170,14 +170,14 @@ describe('siyuan-extension-provider', () => {
       });
 
       const response = await privateProvider.postRelayRequest({
-        requestType: 'nanoflow.siyuan.get-config-status',
-        responseType: 'nanoflow.siyuan.config-status-result',
+        requestType: 'nanoflow.siyuan.v3.get-config-status',
+        responseType: 'nanoflow.siyuan.v3.config-status-result',
         ownerUserId: OWNER_A,
       });
 
       expect(postMessageSpy).toHaveBeenCalledWith(
         {
-          type: 'nanoflow.siyuan.get-config-status',
+          type: 'nanoflow.siyuan.v3.get-config-status',
           requestId: '01010101-0101-4101-8101-010101010101',
           ownerUserId: OWNER_A,
         },
@@ -214,12 +214,12 @@ describe('siyuan-extension-provider', () => {
     vi.spyOn(window, 'postMessage').mockImplementation((message: unknown) => {
       if (typeof message !== 'object' || message === null) return;
       const request = message as { type?: string; requestId?: string };
-      if (request.type !== 'nanoflow.siyuan.get-config-status') return;
+      if (request.type !== 'nanoflow.siyuan.v3.get-config-status') return;
       queueMicrotask(() => {
         window.dispatchEvent(new MessageEvent('message', {
           origin: window.location.origin,
           data: {
-            type: 'nanoflow.siyuan.config-status-result',
+            type: 'nanoflow.siyuan.v3.config-status-result',
             requestId: request.requestId,
             ok: true,
             data: { hasToken: true },
@@ -229,7 +229,7 @@ describe('siyuan-extension-provider', () => {
           window.dispatchEvent(new MessageEvent('message', {
             origin: window.location.origin,
             data: {
-              type: 'nanoflow.siyuan.config-status-result',
+              type: 'nanoflow.siyuan.v3.config-status-result',
               requestId: request.requestId,
               ownerUserId: OWNER_A,
               ok: true,
@@ -241,8 +241,8 @@ describe('siyuan-extension-provider', () => {
     });
 
     const response = await privateProvider.postRelayRequest({
-      requestType: 'nanoflow.siyuan.get-config-status',
-      responseType: 'nanoflow.siyuan.config-status-result',
+      requestType: 'nanoflow.siyuan.v3.get-config-status',
+      responseType: 'nanoflow.siyuan.v3.config-status-result',
       ownerUserId: OWNER_A,
     }) as { ownerUserId?: string; data?: { hasToken?: boolean } };
 
@@ -272,7 +272,7 @@ describe('siyuan-extension-provider', () => {
       privateProvider,
       'postRelayRequest',
     ).mockResolvedValue({
-      type: 'nanoflow.siyuan.config-status-result',
+      type: 'nanoflow.siyuan.v3.config-status-result',
       ok: false,
       errorCode: 'runtime-not-supported',
     });
@@ -290,7 +290,7 @@ describe('siyuan-extension-provider', () => {
       privateProvider,
       'postRelayRequest',
     ).mockResolvedValue({
-      type: 'nanoflow.siyuan.config-status-result',
+      type: 'nanoflow.siyuan.v3.config-status-result',
       ok: true,
       data: { baseUrl: 'http://127.0.0.1:6806', hasToken: true },
     });
@@ -390,8 +390,8 @@ describe('siyuan-extension-provider', () => {
 
     try {
       await expect(privateProvider.postRelayRequest({
-        requestType: 'nanoflow.siyuan.get-config-status',
-        responseType: 'nanoflow.siyuan.config-status-result',
+        requestType: 'nanoflow.siyuan.v3.get-config-status',
+        responseType: 'nanoflow.siyuan.v3.config-status-result',
         ownerUserId: OWNER_A,
         signal: abortController.signal,
       })).rejects.toThrow('postMessage failed');

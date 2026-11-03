@@ -3,20 +3,14 @@ const BUILTIN_ALLOWED_ORIGINS = new Set([
   'https://www.nanoflow.app',
   'https://nanoflow.pages.dev',
   'https://dde-eight.vercel.app',
-  'http://localhost:4200',
-  'http://localhost:5173',
-  'http://localhost:3020',
-  'http://127.0.0.1:4200',
-  'http://127.0.0.1:5173',
-  'http://127.0.0.1:3020',
 ]);
 
 const ALLOWED_MESSAGE_TYPES = new Set([
   'nanoflow.siyuan.ping',
-  'nanoflow.siyuan.get-preview',
-  'nanoflow.siyuan.test-connection',
-  'nanoflow.siyuan.set-config',
-  'nanoflow.siyuan.get-config-status',
+  'nanoflow.siyuan.v3.get-preview',
+  'nanoflow.siyuan.v3.test-connection',
+  'nanoflow.siyuan.v3.set-config',
+  'nanoflow.siyuan.v3.get-config-status',
 ]);
 
 function isAllowedOrigin(origin) {
@@ -31,10 +25,10 @@ function isAllowedOrigin(origin) {
 
 function responseTypeFor(messageType) {
   if (messageType === 'nanoflow.siyuan.ping') return 'nanoflow.siyuan.pong';
-  if (messageType === 'nanoflow.siyuan.test-connection') return 'nanoflow.siyuan.test-connection-result';
-  if (messageType === 'nanoflow.siyuan.set-config') return 'nanoflow.siyuan.set-config-result';
-  if (messageType === 'nanoflow.siyuan.get-config-status') return 'nanoflow.siyuan.config-status-result';
-  return 'nanoflow.siyuan.preview-result';
+  if (messageType === 'nanoflow.siyuan.v3.test-connection') return 'nanoflow.siyuan.v3.test-connection-result';
+  if (messageType === 'nanoflow.siyuan.v3.set-config') return 'nanoflow.siyuan.v3.set-config-result';
+  if (messageType === 'nanoflow.siyuan.v3.get-config-status') return 'nanoflow.siyuan.v3.config-status-result';
+  return 'nanoflow.siyuan.v3.preview-result';
 }
 
 function buildErrorResponse(message, errorCode = 'unknown') {
