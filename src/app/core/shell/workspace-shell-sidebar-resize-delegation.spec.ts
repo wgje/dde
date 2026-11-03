@@ -2,12 +2,12 @@ import { describe, expect, it } from 'vitest';
 
 import {
   readWorkspaceShellSource,
-  readWorkspaceShellTemplate,
+  readWorkspaceShellTemplates,
 } from './workspace-shell-source.spec-helpers';
 
 describe('WorkspaceShellComponent sidebar resize delegation', () => {
   it('binds resize state and drag startup directly to the sidebar resize controller', () => {
-    const template = readWorkspaceShellTemplate();
+    const template = readWorkspaceShellTemplates();
 
     expect(template).toContain('template.interaction.sidebarResize.isResizingAny()');
     expect(template).toContain(

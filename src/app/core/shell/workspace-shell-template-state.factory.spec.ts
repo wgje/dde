@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import {
-  createWorkspaceShellTemplateState,
+import type {
+  WorkspaceShellTemplateState,
 } from './workspace-shell-template-state.factory';
 import {
   readWorkspaceShellControllerGraphCallOptions,
@@ -9,11 +9,13 @@ import {
   readWorkspaceShellSource,
   readWorkspaceShellStartupTemplateSurfacesCallOptions,
   readWorkspaceShellStartupTemplateSurfacesSource,
-  readWorkspaceShellTemplateSurfaceSource,
   readWorkspaceShellTemplate,
+  readWorkspaceShellTemplateSurfaceSource,
+  readWorkspaceShellTemplates,
 } from './workspace-shell-source.spec-helpers';
 
 type TemplateStateFactoryModule = {
+  createWorkspaceShellTemplateState?: unknown;
   createWorkspaceShellTemplateStateDependencies?: unknown;
 };
 
@@ -23,7 +25,21 @@ async function loadTemplateStateFactoryModule(): Promise<TemplateStateFactoryMod
 }
 
 describe('createWorkspaceShellTemplateState', () => {
-  it('groups the read-side state consumed by the WorkspaceShellComponent template', () => {
+  it('exposes concrete callable state handles to Angular templates', () => {
+    const assertTemplateStateTypes = (state: WorkspaceShellTemplateState): void => {
+      const isMobile: () => boolean = state.isMobile;
+      const blockingStartupHintOverlayVisible: () => boolean =
+        state.floatingNoticeChrome.blockingStartupHintOverlayVisible;
+      const showLoginRequired: () => boolean =
+        state.derivedUiState.showLoginRequired;
+
+      void [isMobile, blockingStartupHintOverlayVisible, showLoginRequired];
+    };
+
+    expect(assertTemplateStateTypes).toBeTypeOf('function');
+  });
+
+  it('groups the read-side state consumed by the WorkspaceShellComponent template', async () => {
     const options = {
       authCoord: {
         bootstrapFailed: vi.fn(),
@@ -78,8 +94,15 @@ describe('createWorkspaceShellTemplateState', () => {
       },
       unifiedSearchQuery: vi.fn(),
     };
+    const {
+      createWorkspaceShellTemplateState,
+    } = await loadTemplateStateFactoryModule();
+    expect(createWorkspaceShellTemplateState).toBeTypeOf('function');
+    const createTemplateState = createWorkspaceShellTemplateState as (
+      fixture: typeof options
+    ) => unknown;
 
-    expect(createWorkspaceShellTemplateState(options)).toEqual({
+    expect(createTemplateState(options)).toEqual({
       activeProjectId: options.projectState.activeProjectId,
       authCoord: options.authCoord,
       currentUserId: options.userSession.currentUserId,
@@ -227,7 +250,8 @@ describe('createWorkspaceShellTemplateState', () => {
   });
 
   it('keeps template-only service reads behind template.state bindings', () => {
-    const template = readWorkspaceShellTemplate();
+    // 中文注释：根模板拆分出子组件后，该合同覆盖根模板 + 全部壳层子模板的联合视图
+    const template = readWorkspaceShellTemplates();
 
     expect(template).toContain('template.state.authCoord.bootstrapFailed()');
     expect(template).toContain('template.state.projectCoord.renamingProjectId()');
@@ -239,5 +263,16 @@ describe('createWorkspaceShellTemplateState', () => {
     expect(template).not.toMatch(/(?<!template\.state\.)\bsupabaseClient\./);
     expect(template).not.toMatch(/(?<!template\.state\.)\bfocusSyncControllers\./);
     expect(template).not.toMatch(/(?<!state\.)\bisMobile\(\)/);
+  });
+
+  it('keeps login actionable when the deferred login overlay chunk fails', () => {
+    const template = readWorkspaceShellTemplate();
+    const errorStart = template.indexOf('@error {', template.indexOf('login-required-overlay-fallback'));
+    const errorEnd = template.indexOf('<router-outlet', errorStart);
+    const loginOverlayErrorBlock = template.slice(errorStart, errorEnd);
+
+    expect(loginOverlayErrorBlock).toContain('login-required-overlay-error');
+    expect(loginOverlayErrorBlock).toContain('template.interaction.actions.openLoginModal()');
+    expect(loginOverlayErrorBlock).toContain('<button');
   });
 });

@@ -48,43 +48,56 @@ export interface WorkspaceShellTemplateSyncCoordinatorLike {
 }
 
 export interface WorkspaceShellTemplateState {
-  readonly activeProjectId: unknown;
-  readonly authCoord: unknown;
-  readonly currentUserId: unknown;
-  readonly deletedTasks: unknown;
-  readonly derivedUiState: unknown;
-  readonly floatingNoticeChrome: unknown;
-  readonly focusChrome: unknown;
-  readonly focusPrefs: unknown;
-  readonly focusSyncControllers: unknown;
-  readonly isMobile: unknown;
-  readonly isSidebarOpen: unknown;
-  readonly offlineMode: unknown;
-  readonly projectCoord: unknown;
-  readonly projects: unknown;
-  readonly searchLazyLoad: unknown;
-  readonly sessionExpired: unknown;
-  readonly supabaseClient: unknown;
-  readonly unifiedSearchQuery: unknown;
+  readonly activeProjectId:
+    WorkspaceShellTemplateStateDependencies['projectState']['activeProjectId'];
+  readonly authCoord: WorkspaceShellTemplateStateDependencies['authCoord'];
+  readonly currentUserId:
+    WorkspaceShellTemplateStateDependencies['userSession']['currentUserId'];
+  readonly deletedTasks:
+    WorkspaceShellTemplateStateDependencies['projectState']['deletedTasks'];
+  readonly derivedUiState:
+    WorkspaceShellTemplateStateDependencies['derivedUiState'];
+  readonly floatingNoticeChrome:
+    WorkspaceShellTemplateStateDependencies['floatingNoticeChrome'];
+  readonly focusChrome: WorkspaceShellTemplateStateDependencies['focusChrome'];
+  readonly focusPrefs: WorkspaceShellTemplateStateDependencies['focusPrefs'];
+  readonly focusSyncControllers:
+    WorkspaceShellTemplateStateDependencies['focusSyncControllers'];
+  readonly isMobile: WorkspaceShellTemplateStateDependencies['isMobile'];
+  readonly isSidebarOpen:
+    WorkspaceShellTemplateStateDependencies['isSidebarOpen'];
+  readonly offlineMode:
+    WorkspaceShellTemplateStateDependencies['syncCoordinator']['offlineMode'];
+  readonly projectCoord: WorkspaceShellTemplateStateDependencies['projectCoord'];
+  readonly projects:
+    WorkspaceShellTemplateStateDependencies['projectState']['projects'];
+  readonly searchLazyLoad:
+    WorkspaceShellTemplateStateDependencies['searchLazyLoad'];
+  readonly sessionExpired:
+    WorkspaceShellTemplateStateDependencies['syncCoordinator']['sessionExpired'];
+  readonly supabaseClient:
+    WorkspaceShellTemplateStateDependencies['supabaseClient'];
+  readonly unifiedSearchQuery:
+    WorkspaceShellTemplateStateDependencies['unifiedSearchQuery'];
 }
 
 type WorkspaceShellTemplateStateConstrainedOptions =
   WorkspaceShellTemplateStateFactoryOptions<
-    unknown,
-    unknown,
-    unknown,
-    WorkspaceShellTemplateProjectStateLike,
-    unknown,
-    unknown,
-    WorkspaceShellTemplateUserSessionLike,
-    WorkspaceShellTemplateSyncCoordinatorLike,
-    unknown,
-    unknown,
-    unknown,
-    unknown,
-    unknown,
-    unknown,
-    unknown
+    WorkspaceShellGraphContext['authCoord'],
+    WorkspaceShellSessionRoutingSurface['focusSyncControllers'],
+    WorkspaceShellGraphContext['uiState']['isMobile'],
+    WorkspaceShellGraphContext['projectState'],
+    WorkspaceShellGraphContext['projectCoord'],
+    WorkspaceShellGraphContext['supabaseClient'],
+    WorkspaceShellGraphContext['userSession'],
+    WorkspaceShellGraphContext['syncCoordinator'],
+    WorkspaceShellInteractionSurfaces['derivedUiState'],
+    WorkspaceShellSessionRoutingSurface['chrome']['floatingNoticeChrome'],
+    WorkspaceShellSessionRoutingSurface['chrome']['focusChrome'],
+    WorkspaceShellGraphContext['focusPrefs'],
+    WorkspaceShellGraphContext['uiState']['sidebarOpen'],
+    WorkspaceShellBaseSurfaces['searchDelegates']['searchLazyLoad'],
+    WorkspaceShellBaseSurfaces['searchDelegates']['unifiedSearchQuery']
   >;
 
 export type WorkspaceShellTemplateStateDependencies =
@@ -174,7 +187,9 @@ export function createWorkspaceShellTemplateState(
 
 function createWorkspaceShellTemplateProjectState<
   TProjectState extends WorkspaceShellTemplateProjectStateLike,
->(projectState: TProjectState) {
+>(
+  projectState: TProjectState,
+): Pick<TProjectState, 'activeProjectId' | 'deletedTasks' | 'projects'> {
   return {
     activeProjectId: projectState.activeProjectId,
     deletedTasks: projectState.deletedTasks,
@@ -188,10 +203,23 @@ function createWorkspaceShellTemplateSessionState<
 >(
   userSession: TUserSession,
   syncCoordinator: TSyncCoordinator,
-) {
+): Pick<TUserSession, 'currentUserId'>
+  & Pick<TSyncCoordinator, 'offlineMode' | 'sessionExpired'> {
   return {
     currentUserId: userSession.currentUserId,
     offlineMode: syncCoordinator.offlineMode,
     sessionExpired: syncCoordinator.sessionExpired,
   };
 }
+import type {
+  WorkspaceShellBaseSurfaces,
+} from './workspace-shell-base-surfaces.factory';
+import type {
+  WorkspaceShellGraphContext,
+} from './workspace-shell-graph-context.factory';
+import type {
+  WorkspaceShellInteractionSurfaces,
+} from './workspace-shell-interaction-surfaces.factory';
+import type {
+  WorkspaceShellSessionRoutingSurface,
+} from './workspace-shell-session-routing-surface.factory';

@@ -195,3 +195,24 @@ function escapeRegExp(value: string): string {
 export function readWorkspaceShellTemplate(): string {
   return readFileSync(join(process.cwd(), 'src/workspace-shell.component.html'), 'utf8');
 }
+
+/**
+ * 读取壳层全部模板视图（根模板 + 拆分出的子组件模板），
+ * 并把子组件里的 signal input 读法 `template().` 归一化为 `template.`，
+ * 让「模板只能通过 template.* 表面读服务」类合同断言可以覆盖拆分后的视图。
+ */
+export function readWorkspaceShellTemplates(): string {
+  const childTemplatePaths = [
+    'src/app/core/shell/workspace-session-status-overlays.component.ts',
+    'src/app/core/shell/workspace-startup-hint-overlays.component.ts',
+    'src/app/core/shell/workspace-login-required-overlay.component.ts',
+    'src/app/core/shell/workspace-sidebar-panel.component.html',
+  ];
+  const normalize = (source: string): string => source.split('template().').join('template.');
+  return [
+    readWorkspaceShellTemplate(),
+    ...childTemplatePaths.map(path => readFileSync(join(process.cwd(), path), 'utf8')),
+  ]
+    .map(normalize)
+    .join('\n');
+}

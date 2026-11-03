@@ -14,7 +14,7 @@ import {
   readWorkspaceShellInteractionSurfacesCallOptions,
   readWorkspaceShellInteractionSurfacesSource,
   readWorkspaceShellSource,
-  readWorkspaceShellTemplate,
+  readWorkspaceShellTemplates,
 } from './workspace-shell-source.spec-helpers';
 
 describe('createWorkspaceShellInteractionDelegates', () => {
@@ -76,7 +76,7 @@ describe('createWorkspaceShellInteractionDelegates', () => {
     const componentSource = readWorkspaceShellSource();
     const graphSource = readWorkspaceShellControllerGraphSource();
     const interactionSurfacesSource = readWorkspaceShellInteractionSurfacesSource();
-    const template = readWorkspaceShellTemplate();
+    const template = readWorkspaceShellTemplates();
 
     expect(graphSource).toContain('createWorkspaceShellInteractionSurfaces({');
     expect(interactionSurfacesSource).toContain(

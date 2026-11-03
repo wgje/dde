@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
 import { describe, expect, it, vi } from 'vitest';
 
 import {
@@ -56,6 +59,20 @@ function createDeferred<T>() {
 }
 
 describe('createWorkspaceShellToolLazyLoadHostsLoader', () => {
+  it('delegates loader lifecycle state to a named controller', () => {
+    const source = readFileSync(
+      join(__dirname, 'workspace-shell-tool-lazy-load-hosts-loader.factory.ts'),
+      'utf8',
+    );
+
+    expect(source).toContain('WorkspaceShellToolLazyLoadHostsLoaderController');
+    expect(source).toContain('new WorkspaceShellToolLazyLoadHostsLoaderController');
+    expect(source).not.toContain('let hostsPromise');
+    expect(source).not.toContain('let hostsInstance');
+    expect(source).not.toContain('let isTornDown');
+    expect(source).not.toContain('let didTearDownHosts');
+  });
+
   it('loads tool hosts once and reuses the resolved instance', async () => {
     const hosts = createHosts();
     const createToolLazyLoadHosts = vi.fn(() => hosts);

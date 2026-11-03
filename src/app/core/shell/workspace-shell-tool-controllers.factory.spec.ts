@@ -1,12 +1,57 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
 import { describe, expect, it, vi } from 'vitest';
 
 import { createWorkspaceShellToolControllers } from './workspace-shell-tool-controllers.factory';
+import { createWorkspaceShellPanelToolsIntentHolder } from './workspace-shell-tool-controllers.factory';
 import type {
   WorkspaceShellToolLazyLoadDelegateOptions,
   WorkspaceShellToolLazyLoadDelegates,
 } from './workspace-shell-tool-lazy-load-delegates.factory';
 
 describe('createWorkspaceShellToolControllers', () => {
+  it('replays a pending panel tools intent when the panel registers', () => {
+    const holder = createWorkspaceShellPanelToolsIntentHolder();
+    const handler = vi.fn();
+
+    holder.emit();
+    holder.register(handler);
+
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects stale unregister and later ABA registration', () => {
+    const holder = createWorkspaceShellPanelToolsIntentHolder();
+    const first = vi.fn();
+    const second = vi.fn();
+    const firstSubscription = holder.register(first);
+
+    firstSubscription.unregister();
+    const secondSubscription = holder.register(second);
+    firstSubscription.unregister();
+    holder.emit();
+
+    expect(first).not.toHaveBeenCalled();
+    expect(second).toHaveBeenCalledTimes(1);
+    expect(secondSubscription.unregister).toEqual(expect.any(Function));
+  });
+
+  it('moves widget gate lazy-load state into its controller', () => {
+    const source = readFileSync(
+      join(__dirname, 'workspace-shell-tool-controllers.factory.ts'),
+      'utf8',
+    );
+
+    expect(source).toContain(
+      'WorkspaceShellWidgetGateMutationLazyLoadController',
+    );
+    expect(source).toContain(
+      "import('./workspace-shell-widget-gate-mutation.factory')",
+    );
+    expect(source).not.toContain('widgetGateMutationPromise');
+  });
+
   it('wires tool lazy-load delegates and widget gate mutations through one shell boundary', async () => {
     const sidebarOpen = { set: vi.fn() };
     const sidebarPreload = vi.fn();

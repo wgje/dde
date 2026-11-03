@@ -10,9 +10,11 @@ import type {
   WorkspaceShellWidgetGateMutationFactoryOptions,
 } from './workspace-shell-widget-gate-mutation.factory';
 import type {
-  WorkspaceShellWidgetGateMutation,
   WorkspaceShellWidgetGateMutationController,
 } from './workspace-shell-widget-gate-mutation.controller';
+import {
+  WorkspaceShellWidgetGateMutationLazyLoadController,
+} from './workspace-shell-widget-gate-mutation-lazy-load.controller';
 import type { WorkspaceShellSidebarToolsHostDelegate } from './workspace-shell-sidebar-tools-lazy-load-host.controller';
 
 type WorkspaceShellBlackBoxService =
@@ -21,13 +23,6 @@ type WorkspaceShellBlackBoxService =
       { ok: true } | { ok: false; error: { message: string } }
     >;
   };
-
-type WorkspaceShellWidgetGateMutationProxyOptions = Pick<
-  WorkspaceShellWidgetGateMutationFactoryOptions,
-  'blackBoxService' | 'logger' | 'sidebarOpen' | 'warn'
-> & {
-  sidebarToolsLazyLoad: WorkspaceShellSidebarToolsHostDelegate;
-};
 
 export interface WorkspaceShellToolControllersOptions
   extends Omit<
@@ -63,6 +58,56 @@ export interface WorkspaceShellToolControllers {
   readonly toolTemplateBindings: WorkspaceShellToolLazyLoadTemplateBindings;
   readonly sidebarToolsLazyLoad: WorkspaceShellSidebarToolsHostDelegate;
   readonly widgetGateMutation: Pick<WorkspaceShellWidgetGateMutationController, 'apply'>;
+  readonly panelToolsIntent?: WorkspaceShellPanelToolsIntentHolder;
+}
+
+export interface WorkspaceShellPanelToolsIntentSubscription {
+  readonly unregister: () => void;
+}
+
+export interface WorkspaceShellPanelToolsIntentHolder {
+  readonly register: (handler: () => void) => WorkspaceShellPanelToolsIntentSubscription;
+  readonly emit: () => void;
+}
+
+export function createWorkspaceShellPanelToolsIntentHolder(): WorkspaceShellPanelToolsIntentHolder {
+  let handler: (() => void) | null = null;
+  let generation = 0;
+  let pendingEmit = false;
+
+  return {
+    register(registeredHandler: () => void): WorkspaceShellPanelToolsIntentSubscription {
+      if (typeof registeredHandler !== 'function') {
+        throw new TypeError('Panel tools intent holder requires a handler function');
+      }
+
+      const registeredGeneration = ++generation;
+      handler = registeredHandler;
+      if (pendingEmit) {
+        pendingEmit = false;
+        registeredHandler();
+      }
+
+      return {
+        unregister: () => {
+          if (
+            handler === registeredHandler
+            && generation === registeredGeneration
+          ) {
+            handler = null;
+            generation += 1;
+          }
+        },
+      };
+    },
+    emit: () => {
+      if (handler) {
+        handler();
+        return;
+      }
+      pendingEmit = true;
+    },
+  };
 }
 
 export function createWorkspaceShellToolControllers(
@@ -90,43 +135,24 @@ export function createWorkspaceShellToolControllers(
     warn,
   });
   const sidebarToolsLazyLoad = toolLazyLoad.sidebarToolsLazyLoad;
+  const panelToolsIntent = createWorkspaceShellPanelToolsIntentHolder();
 
   return {
     toolLazyLoad,
     toolTemplateBindings: toolLazyLoad.templateBindings,
     sidebarToolsLazyLoad,
-    widgetGateMutation: createWorkspaceShellWidgetGateMutationProxy({
-      blackBoxService,
-      logger,
-      sidebarOpen,
-      sidebarToolsLazyLoad,
-      warn,
+    widgetGateMutation: new WorkspaceShellWidgetGateMutationLazyLoadController({
+      loadController: () => import('./workspace-shell-widget-gate-mutation.factory')
+        .then(({ createWorkspaceShellWidgetGateMutationController }) =>
+          createWorkspaceShellWidgetGateMutationController({
+            sidebarOpen,
+            preloadSidebarTools: reason => sidebarToolsLazyLoad.preload(reason),
+            blackBoxService,
+            logger,
+            warn,
+          })
+        ),
     }),
-  };
-}
-
-function createWorkspaceShellWidgetGateMutationProxy(
-  options: WorkspaceShellWidgetGateMutationProxyOptions,
-): Pick<WorkspaceShellWidgetGateMutationController, 'apply'> {
-  let widgetGateMutationPromise: Promise<WorkspaceShellWidgetGateMutationController> | null = null;
-  const getWidgetGateMutation = (): Promise<WorkspaceShellWidgetGateMutationController> => {
-    widgetGateMutationPromise ??= import('./workspace-shell-widget-gate-mutation.factory')
-      .then(({ createWorkspaceShellWidgetGateMutationController }) =>
-        createWorkspaceShellWidgetGateMutationController({
-          sidebarOpen: options.sidebarOpen,
-          preloadSidebarTools: (reason) => options.sidebarToolsLazyLoad.preload(reason),
-          blackBoxService: options.blackBoxService,
-          logger: options.logger,
-          warn: options.warn,
-        })
-      );
-    return widgetGateMutationPromise;
-  };
-
-  return {
-    apply: async (intent: WorkspaceShellWidgetGateMutation) => {
-      const controller = await getWidgetGateMutation();
-      await controller.apply(intent);
-    },
+    panelToolsIntent,
   };
 }

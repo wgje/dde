@@ -37,7 +37,7 @@ export interface WorkspaceShellTemplateSurfaceOptions<
   >;
   readonly toolControllers: Pick<
     WorkspaceShellToolControllers,
-    'sidebarToolsLazyLoad' | 'toolTemplateBindings'
+    'sidebarToolsLazyLoad' | 'toolTemplateBindings' | 'panelToolsIntent'
   >;
 }
 
@@ -57,6 +57,7 @@ export interface WorkspaceShellTemplateSurface<
   readonly tools: {
     readonly bindings: WorkspaceShellToolControllers['toolTemplateBindings'];
     readonly sidebar: WorkspaceShellToolControllers['sidebarToolsLazyLoad'];
+    readonly panelToolsIntent?: WorkspaceShellToolControllers['panelToolsIntent'];
   };
 }
 
@@ -81,6 +82,9 @@ export function createWorkspaceShellTemplateSurface<
     tools: {
       bindings: options.toolControllers.toolTemplateBindings,
       sidebar: options.toolControllers.sidebarToolsLazyLoad,
+      ...(options.toolControllers.panelToolsIntent
+        ? { panelToolsIntent: options.toolControllers.panelToolsIntent }
+        : {}),
     },
   };
 }

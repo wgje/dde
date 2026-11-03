@@ -1,38 +1,42 @@
-import { Component, ChangeDetectionStrategy, OnInit, OnDestroy, AfterViewInit } from '@angular/core';
-import { CommonModule } from '@angular/common';
+import { DOCUMENT } from '@angular/common';
+import { Component, ChangeDetectionStrategy, OnInit, OnDestroy, AfterViewInit, inject } from '@angular/core';
 import { RouterOutlet } from '@angular/router';
 import { ToastContainerComponent } from './app/shared/components/toast-container.component';
-import { SyncStatusComponent } from './app/shared/components/sync-status.component';
 import { OfflineBannerComponent } from './app/shared/components/offline-banner.component';
 import { DemoBannerComponent } from './app/shared/components/demo-banner.component';
 import { PwaInstallPromptBannerComponent } from './app/shared/components/pwa-install-prompt-banner.component';
 import { WorkspaceShellCoreComponent } from './app/core/shell/workspace-shell-core.component';
 import { WorkspaceSidebarComponent } from './app/core/shell/workspace-sidebar.component';
+import { WorkspaceSidebarPanelComponent } from './app/core/shell/workspace-sidebar-panel.component';
 import { WorkspaceOverlaysComponent } from './app/core/shell/workspace-overlays.component';
-import { WorkspaceBootstrapFailureComponent } from './app/core/shell/workspace-bootstrap-failure.component';
+import { WorkspaceSessionStatusOverlaysComponent } from './app/core/shell/workspace-session-status-overlays.component';
+import { WorkspaceStartupHintOverlaysComponent } from './app/core/shell/workspace-startup-hint-overlays.component';
+import { WorkspaceLoginRequiredOverlayComponent } from './app/core/shell/workspace-login-required-overlay.component';
 import { FocusModeComponent } from './app/features/focus/focus-mode.component';
 import { createWorkspaceShellControllerGraph } from './app/core/shell/workspace-shell-controller-graph.factory';
 
 /**
  * 应用根组件
  *
- * 认证逻辑委托到 AppAuthCoordinatorService
+ * 认证逻辑委托到 AppAuthCoordinatorService；
+ * 会话状态/启动提示/侧栏/未登录占位视图分别下沉到 core/shell 下的子组件。
  */
 @Component({
   selector: 'app-workspace-shell',
   standalone: true,
   imports: [
-    CommonModule,
     RouterOutlet,
     ToastContainerComponent,
-    SyncStatusComponent,
     OfflineBannerComponent,
     DemoBannerComponent,
     PwaInstallPromptBannerComponent,
     WorkspaceShellCoreComponent,
     WorkspaceSidebarComponent,
+    WorkspaceSidebarPanelComponent,
     WorkspaceOverlaysComponent,
-    WorkspaceBootstrapFailureComponent,
+    WorkspaceSessionStatusOverlaysComponent,
+    WorkspaceStartupHintOverlaysComponent,
+    WorkspaceLoginRequiredOverlayComponent,
     // Focus 覆盖层仍走模板 defer
     FocusModeComponent,
   ],
@@ -42,6 +46,7 @@ import { createWorkspaceShellControllerGraph } from './app/core/shell/workspace-
 export class WorkspaceShellComponent
   implements OnInit, OnDestroy, AfterViewInit
 {
+  private readonly documentRef = inject(DOCUMENT);
   private readonly shellGraph = createWorkspaceShellControllerGraph();
   protected readonly template = this.shellGraph.template;
   private readonly shellLifecycle = this.shellGraph.shellLifecycle;
@@ -60,6 +65,10 @@ export class WorkspaceShellComponent
 
   ngOnDestroy() {
     this.shellLifecycle.destroyController.destroy();
+  }
+
+  protected reloadCurrentDocument(): void {
+    this.documentRef.defaultView?.location.reload();
   }
 
 }
