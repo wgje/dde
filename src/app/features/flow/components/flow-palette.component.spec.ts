@@ -169,6 +169,18 @@ describe('FlowPaletteComponent', () => {
     expect(component.completionRate()).toBe(0);
   });
 
+  it('待分配卡片应暴露稳定任务身份供 drop 落点解析', () => {
+    const task = { ...createTask('unassigned-target'), stage: null };
+    unassignedTasks.set([task]);
+    component.setWorkbenchTab('unassigned');
+    fixture.detectChanges();
+
+    const card = fixture.nativeElement.querySelector(
+      '[data-testid="flow-palette-task-unassigned-target"]',
+    ) as HTMLElement | null;
+    expect(card?.dataset['unassignedTaskId']).toBe(task.id);
+  });
+
   it('在未选中项目时不应误显示完成率', () => {
     activeProject.set(null);
     blackBoxEntriesMap.set(new Map([
