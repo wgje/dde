@@ -9,14 +9,13 @@ import {
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { Router } from '@angular/router';
-import { SupabaseClientService } from '../../../services/supabase-client.service';
+import { AuthPasswordRecoveryService } from '../../../services/auth-password-recovery.service';
 import { ToastService } from '../../../services/toast.service';
 import { LoggerService } from '../../../services/logger.service';
 
 /**
  * 密码重置组件
- * 处理 Supabase 发送的密码重置邮件回调
- * 路由: /reset-password?access_token=xxx&refresh_token=xxx&type=recovery
+ * 处理隔离的 Supabase PKCE 或 implicit 密码重置回调
  */
 // 【P2-25 修复】添加 OnPush
 @Component({
@@ -53,10 +52,10 @@ import { LoggerService } from '../../../services/logger.service';
               </div>
               <div class="ml-3">
                 <h3 class="text-sm font-medium text-red-800 dark:text-red-200">
-                  密码重置链接无效或已过期
+                  {{ error() ? '无法验证密码重置链接' : '密码重置链接无效或已过期' }}
                 </h3>
                 <div class="mt-2 text-sm text-red-700 dark:text-red-300">
-                  <p>请重新请求密码重置邮件。</p>
+                  <p>{{ error() || '请重新请求密码重置邮件。' }}</p>
                 </div>
               </div>
             </div>
@@ -163,11 +162,12 @@ import { LoggerService } from '../../../services/logger.service';
   `]
 })
 export class ResetPasswordComponent implements OnInit, OnDestroy {
-  private supabase = inject(SupabaseClientService);
+  private readonly recovery = inject(AuthPasswordRecoveryService);
   private router = inject(Router);
   private toast = inject(ToastService);
   private readonly logger = inject(LoggerService);
   private loginNavigationTimer: ReturnType<typeof setTimeout> | null = null;
+  private destroyed = false;
 
   isLoading = signal(true);
   isValid = signal(false);
@@ -183,77 +183,29 @@ export class ResetPasswordComponent implements OnInit, OnDestroy {
   }
 
   ngOnDestroy(): void {
+    this.destroyed = true;
     this.clearLoginNavigationTimer();
-  }
-
-  private async getSupabaseClientOrThrow() {
-    const client = await this.supabase.clientAsync();
-    if (!client) {
-      throw new Error('认证服务尚未就绪，请稍后重试');
-    }
-    return client;
+    void this.recovery.dispose().catch((error: unknown) => {
+      this.logger.error('ResetPassword', 'Recovery session cleanup failed', error);
+    });
   }
 
   /**
-   * 验证重置令牌
-   * Supabase 会在 URL hash 中传递 access_token 和 refresh_token
+   * 验证隔离恢复会话，不接触当前主身份。
    */
   private async verifyResetToken() {
-    if (!this.supabase.isConfigured) {
-      this.isLoading.set(false);
-      this.isValid.set(false);
-      this.error.set('Supabase 未配置');
-      return;
-    }
-
     try {
-      const client = await this.getSupabaseClientOrThrow();
-
-      // 检查 URL hash 中是否有 token（Supabase 默认行为）
-      const hash = window.location.hash;
-      
-      if (hash && hash.includes('access_token')) {
-        // 解析 hash 参数
-        const params = new URLSearchParams(hash.substring(1));
-        const accessToken = params.get('access_token');
-        const refreshToken = params.get('refresh_token');
-        const type = params.get('type');
-
-        if (type === 'recovery' && accessToken && refreshToken) {
-          // 设置会话
-          const { error } = await client.auth.setSession({
-            access_token: accessToken,
-            refresh_token: refreshToken
-          });
-
-          if (error) {
-            throw error;
-          }
-
-          this.isValid.set(true);
-          
-          // 清除 URL hash
-          window.history.replaceState(null, '', window.location.pathname);
-        } else {
-          this.isValid.set(false);
-        }
-      } else {
-        // 检查是否已有有效会话（可能是页面刷新）
-        const { data: { session } } = await client.auth.getSession();
-        
-        if (session) {
-          this.isValid.set(true);
-        } else {
-          this.isValid.set(false);
-        }
-      }
+      const valid = await this.recovery.prepareFromCurrentUrl();
+      if (this.destroyed) return;
+      this.isValid.set(valid);
     } catch (e: unknown) {
+      if (this.destroyed) return;
       const err = e as { message?: string };
       this.logger.error('ResetPassword', 'Token verification failed', e);
       this.isValid.set(false);
       this.error.set(err?.message ?? '验证失败');
     } finally {
-      this.isLoading.set(false);
+      if (!this.destroyed) this.isLoading.set(false);
     }
   }
 
@@ -279,21 +231,11 @@ export class ResetPasswordComponent implements OnInit, OnDestroy {
     this.isSubmitting.set(true);
 
     try {
-      const client = await this.getSupabaseClientOrThrow();
-
-      const { error } = await client.auth.updateUser({
-        password: this.newPassword
-      });
-
-      if (error) {
-        throw error;
-      }
+      await this.recovery.completePasswordReset(this.newPassword);
+      if (this.destroyed) return;
 
       this.isSuccess.set(true);
       this.toast.success('密码重置成功', '请使用新密码登录');
-
-      // 登出并跳转到登录页
-      await client.auth.signOut();
 
       this.clearLoginNavigationTimer();
       this.loginNavigationTimer = setTimeout(() => {
@@ -301,11 +243,14 @@ export class ResetPasswordComponent implements OnInit, OnDestroy {
         void this.router.navigate(['/projects']);
       }, 2000);
     } catch (e: unknown) {
+      if (this.destroyed) return;
       const err = e as { message?: string };
       this.logger.error('ResetPassword', 'Password reset failed', e);
-      this.error.set(err?.message ?? '密码重置失败，请重试');
+      this.error.set(err?.message === 'AUTH_RECOVERY_UPDATE_OUTCOME_UNKNOWN'
+        ? '密码更新结果尚未确认，请先尝试使用新密码登录；如失败，请重新发起重置。'
+        : err?.message ?? '密码重置失败，请重试');
     } finally {
-      this.isSubmitting.set(false);
+      if (!this.destroyed) this.isSubmitting.set(false);
     }
   }
 
