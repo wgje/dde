@@ -2,7 +2,7 @@ import { NavigationEnd, type ActivatedRoute, type Router } from '@angular/router
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Subject } from 'rxjs';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   createWorkspaceShellRouteSyncDelegate,
@@ -47,6 +47,75 @@ function createRouter() {
     } as unknown as Router,
   };
 }
+
+function createLazyRouteSyncFixture() {
+  const router = createRouter().router;
+  const switchActiveProject = vi.fn();
+  const resolveStartupProjectFallbackId = vi.fn(() => 'project-1');
+  const warn = vi.fn();
+  const options = {
+    route: () => createRoute('project-1'),
+    router: () => router,
+    projectState: {
+      projects: () => [{ id: 'project-1' }],
+      activeProjectId: () => 'project-1',
+    },
+    userSession: {
+      canAuthoritativelyRejectProjectRoute: () => true,
+      isProjectAuthoritativelyAccessible: () => true,
+      switchActiveProject,
+    },
+    startupEntryControllers: () => ({
+      mobileRootStartupNavigation: {
+        resolveStartupProjectFallbackId,
+        navigateRootStartupToTextProject: vi.fn(),
+      },
+    }),
+    warn,
+  };
+  return { options, resolveStartupProjectFallbackId, router, switchActiveProject, warn };
+}
+
+function createLazyDelegateHarness(
+  controllerOverrides: Partial<ReturnType<typeof createWorkspaceShellRouteSyncController>> = {},
+  deferFactory = false,
+) {
+  const routeSyncController = {
+    cleanup: vi.fn(),
+    setupRouteSync: vi.fn(),
+    syncStateFromRoute: vi.fn(),
+    updateUrlForProject: vi.fn(),
+    ...controllerOverrides,
+  };
+  let resolveFactory!: () => void;
+  let rejectFactory!: (error: unknown) => void;
+  const factoryResult = deferFactory
+    ? new Promise<typeof routeSyncController>((resolve, reject) => {
+      resolveFactory = () => resolve(routeSyncController);
+      rejectFactory = reject;
+    })
+    : routeSyncController;
+  const createRouteSyncController = vi
+    .spyOn(routeSyncControllerFactory, 'createWorkspaceShellRouteSyncController')
+    .mockImplementation(() => factoryResult as unknown as
+      ReturnType<typeof createWorkspaceShellRouteSyncController>);
+  const { options, warn } = createLazyRouteSyncFixture();
+  const controller = createWorkspaceShellRouteSyncDelegate(options);
+  return {
+    controller,
+    createRouteSyncController,
+    rejectFactory,
+    resolveFactory,
+    routeSyncController,
+    warn,
+  };
+}
+
+async function settleLazyRouteSync(): Promise<void> {
+  await vi.dynamicImportSettled();
+}
+
+afterEach(() => vi.restoreAllMocks());
 
 function createController() {
   let route = createRoute('project-1');
@@ -157,38 +226,13 @@ describe('createWorkspaceShellRouteSyncController', () => {
   });
 
   it('creates the route sync delegate lazily from shell dependencies', async () => {
-    const routeValue = createRoute('project-1');
-    const routerValue = createRouter().router;
-    const route = vi.fn(() => routeValue);
-    const router = vi.fn(() => routerValue);
-    const projectState = {
-      projects: vi.fn(() => [{ id: 'project-1' }]),
-      activeProjectId: vi.fn(() => 'project-1'),
-    };
-    const userSession = {
-      canAuthoritativelyRejectProjectRoute: vi.fn(() => true),
-      isProjectAuthoritativelyAccessible: vi.fn(() => true),
-      switchActiveProject: vi.fn(),
-    };
-    const mobileRootStartupNavigation = {
-      resolveStartupProjectFallbackId: vi.fn(() => 'project-1'),
-      navigateRootStartupToTextProject: vi.fn(),
-    };
-    const warn = vi.fn();
-
-    const controller = createWorkspaceShellRouteSyncDelegate({
-      route,
-      router,
-      projectState,
-      userSession,
-      startupEntryControllers: () => ({ mobileRootStartupNavigation }),
-      warn,
-    });
+    const fixture = createLazyRouteSyncFixture();
+    const controller = createWorkspaceShellRouteSyncDelegate(fixture.options);
 
     controller.updateUrlForProject('project-1');
     await vi.dynamicImportSettled();
     await Promise.resolve();
-    expect(routerValue.navigate).toHaveBeenCalledWith(
+    expect(fixture.router.navigate).toHaveBeenCalledWith(
       ['/projects', 'project-1'],
       { replaceUrl: true, queryParamsHandling: 'preserve' },
     );
@@ -196,76 +240,109 @@ describe('createWorkspaceShellRouteSyncController', () => {
     controller.setupRouteSync();
     await vi.dynamicImportSettled();
     await Promise.resolve();
-    expect(userSession.switchActiveProject).toHaveBeenCalledWith('project-1');
-    expect(mobileRootStartupNavigation.resolveStartupProjectFallbackId)
+    expect(fixture.switchActiveProject).toHaveBeenCalledWith('project-1');
+    expect(fixture.resolveStartupProjectFallbackId)
       .not.toHaveBeenCalled();
   });
 
   it('classifies loaded route sync delegate operation failures separately from lazy-load failures', async () => {
+    const loadError = new Error('route sync load failed');
     const operationError = new Error('route sync setup failed');
-    const routeValue = createRoute('project-1');
-    const routerValue = createRouter().router;
-    const route = vi.fn(() => routeValue);
-    const router = vi.fn(() => routerValue);
-    const projectState = {
-      projects: vi.fn(() => [{ id: 'project-1' }]),
-      activeProjectId: vi.fn(() => 'project-1'),
-    };
-    const userSession = {
-      canAuthoritativelyRejectProjectRoute: vi.fn(() => true),
-      isProjectAuthoritativelyAccessible: vi.fn(() => true),
-      switchActiveProject: vi.fn(),
-    };
-    const mobileRootStartupNavigation = {
-      resolveStartupProjectFallbackId: vi.fn(() => 'project-1'),
-      navigateRootStartupToTextProject: vi.fn(),
-    };
-    const warn = vi.fn();
-    const routeSyncController = {
-      cleanup: vi.fn(),
+    const harness = createLazyDelegateHarness({
       setupRouteSync: vi.fn(() => {
         throw operationError;
       }),
-      syncStateFromRoute: vi.fn(),
-      updateUrlForProject: vi.fn(),
-    };
-    const createRouteSyncController = vi
-      .spyOn(routeSyncControllerFactory, 'createWorkspaceShellRouteSyncController')
-      .mockReturnValue(routeSyncController as unknown as ReturnType<typeof createWorkspaceShellRouteSyncController>);
+    });
+    harness.createRouteSyncController.mockRejectedValueOnce(loadError);
+    harness.controller.setupRouteSync();
+    await settleLazyRouteSync();
+    harness.controller.setupRouteSync();
+    await settleLazyRouteSync();
+    expect(harness.createRouteSyncController).toHaveBeenCalledTimes(2);
+    expect(harness.routeSyncController.setupRouteSync).toHaveBeenCalledTimes(1);
+    expect(harness.warn.mock.calls).toEqual([
+      ['Workspace route sync controller 懒加载失败，已跳过本次路由同步', loadError],
+      ['Workspace route sync controller 操作执行失败，已跳过本次路由同步', operationError],
+    ]);
+    harness.controller.updateUrlForProject('project-1');
+    await settleLazyRouteSync();
+    expect(harness.createRouteSyncController).toHaveBeenCalledTimes(2);
+    expect(harness.routeSyncController.updateUrlForProject).toHaveBeenCalledWith('project-1');
+  });
 
-    try {
-      const controller = createWorkspaceShellRouteSyncDelegate({
-        route,
-        router,
-        projectState,
-        userSession,
-        startupEntryControllers: () => ({ mobileRootStartupNavigation }),
-        warn,
-      });
+  it('retires queued route sync work when cleanup wins before lazy resolution', async () => {
+    const harness = createLazyDelegateHarness({}, true);
+    harness.controller.setupRouteSync();
+    harness.controller.syncStateFromRoute();
+    harness.controller.updateUrlForProject('project-1');
+    await settleLazyRouteSync();
+    harness.controller.cleanup();
+    harness.controller.cleanup();
+    harness.resolveFactory();
+    await settleLazyRouteSync();
+    expect(harness.routeSyncController.cleanup).toHaveBeenCalledOnce();
+    expect(harness.routeSyncController.setupRouteSync).not.toHaveBeenCalled();
+    expect(harness.routeSyncController.syncStateFromRoute).not.toHaveBeenCalled();
+    expect(harness.routeSyncController.updateUrlForProject).not.toHaveBeenCalled();
+  });
 
-      controller.setupRouteSync();
-      await vi.dynamicImportSettled();
-      await Promise.resolve();
+  it('suppresses every route sync operation after cleanup without starting a load', async () => {
+    const harness = createLazyDelegateHarness();
+    harness.controller.cleanup();
+    harness.controller.setupRouteSync();
+    harness.controller.syncStateFromRoute();
+    harness.controller.updateUrlForProject('project-1');
+    await settleLazyRouteSync();
+    expect(harness.createRouteSyncController).not.toHaveBeenCalled();
+    expect(harness.routeSyncController.cleanup).not.toHaveBeenCalled();
+  });
 
-      expect(routeSyncController.setupRouteSync).toHaveBeenCalledTimes(1);
-      expect(warn).toHaveBeenCalledWith(
-        'Workspace route sync controller 操作执行失败，已跳过本次路由同步',
-        operationError,
-      );
-      expect(warn).not.toHaveBeenCalledWith(
-        'Workspace route sync controller 懒加载失败，已跳过本次路由同步',
-        operationError,
-      );
+  it('cleans a loaded route sync controller once and suppresses later operations', async () => {
+    const harness = createLazyDelegateHarness();
+    harness.controller.setupRouteSync();
+    await settleLazyRouteSync();
+    harness.controller.cleanup();
+    harness.controller.cleanup();
+    harness.controller.syncStateFromRoute();
+    harness.controller.updateUrlForProject('project-2');
+    await settleLazyRouteSync();
+    expect(harness.routeSyncController.setupRouteSync).toHaveBeenCalledOnce();
+    expect(harness.routeSyncController.cleanup).toHaveBeenCalledOnce();
+    expect(harness.routeSyncController.syncStateFromRoute).not.toHaveBeenCalled();
+    expect(harness.routeSyncController.updateUrlForProject).not.toHaveBeenCalled();
+  });
 
-      controller.updateUrlForProject('project-1');
-      await vi.dynamicImportSettled();
-      await Promise.resolve();
+  it('classifies a late lazy rejection after cleanup only as a cleanup warning', async () => {
+    const loadError = new Error('late route sync load failed');
+    const harness = createLazyDelegateHarness({}, true);
+    harness.controller.setupRouteSync();
+    await settleLazyRouteSync();
+    harness.controller.cleanup();
+    harness.rejectFactory(loadError);
+    await settleLazyRouteSync();
+    expect(harness.warn).toHaveBeenCalledOnce();
+    expect(harness.warn).toHaveBeenCalledWith(
+      'Workspace route sync controller 清理失败，已跳过',
+      loadError,
+    );
+  });
 
-      expect(createRouteSyncController).toHaveBeenCalledTimes(1);
-      expect(routeSyncController.updateUrlForProject).toHaveBeenCalledWith('project-1');
-    } finally {
-      createRouteSyncController.mockRestore();
-    }
+  it('reports a loaded route sync cleanup failure exactly once', async () => {
+    const cleanupError = new Error('route sync cleanup failed');
+    const harness = createLazyDelegateHarness({
+      cleanup: vi.fn(() => {
+        throw cleanupError;
+      }),
+    });
+    harness.controller.setupRouteSync();
+    await settleLazyRouteSync();
+    harness.controller.cleanup();
+    harness.controller.cleanup();
+    expect(harness.warn).toHaveBeenCalledOnce();
+    expect(harness.warn).toHaveBeenCalledWith(
+      'Workspace route sync controller 清理失败，已跳过',
+      cleanupError,
+    );
   });
 
   it('keeps user session route guards grouped at the routing surface boundary', () => {

@@ -280,27 +280,30 @@ describe('WorkspaceShellRouteSyncController', () => {
     expect(unsubscribe).not.toHaveBeenCalled();
   });
 
-  it('ignores navigation events from replaced route sync subscriptions', () => {
-    const routeListeners: Array<(event: unknown) => void> = [];
-    const { controller, navigateRootStartupToTextProject } = createController({
+  it('processes synchronously emitted navigation events before the initial route sync', () => {
+    const record: string[] = [];
+    const { controller } = createController({
       activeProjectId: () => 'project-1',
+      navigateRootStartupToTextProject: () => {
+        record.push('route-sync');
+      },
       subscribeToRouteEvents: (listener) => {
-        routeListeners.push(listener);
+        record.push('subscribe');
+        listener('navigation-end');
+        record.push('subscribed');
         return { unsubscribe: vi.fn() };
       },
       isNavigationEnd: () => true,
     });
 
     controller.setupRouteSync();
-    controller.setupRouteSync();
 
-    expect(navigateRootStartupToTextProject).toHaveBeenCalledTimes(2);
-
-    routeListeners[0]?.('navigation-end');
-    expect(navigateRootStartupToTextProject).toHaveBeenCalledTimes(2);
-
-    routeListeners[1]?.('navigation-end');
-    expect(navigateRootStartupToTextProject).toHaveBeenCalledTimes(3);
+    expect(record).toEqual([
+      'subscribe',
+      'route-sync',
+      'subscribed',
+      'route-sync',
+    ]);
   });
 
   it('continues initial route sync when route event subscription setup fails', () => {
@@ -363,98 +366,4 @@ describe('WorkspaceShellRouteSyncController', () => {
     );
   });
 
-  it('isolates route sync failures from navigation end listeners', () => {
-    const routeListenerRef: { current?: (event: unknown) => void } = {};
-    const syncError = new Error('route sync failed');
-    let currentRoute = routeWithDeepestProject('project-1');
-    const { controller, warn } = createController({
-      route: () => currentRoute,
-      canAuthoritativelyRejectProjectRoute: () => true,
-      isProjectAuthoritativelyAccessible: (projectId) => {
-        if (projectId === 'project-9') {
-          throw syncError;
-        }
-        return true;
-      },
-      subscribeToRouteEvents: (listener) => {
-        routeListenerRef.current = listener;
-        return { unsubscribe: vi.fn() };
-      },
-      isNavigationEnd: () => true,
-    });
-
-    expect(() => controller.setupRouteSync()).not.toThrow();
-    currentRoute = routeWithDeepestProject('project-9');
-    expect(() => routeListenerRef.current?.('navigation-end')).not.toThrow();
-
-    expect(warn).toHaveBeenCalledWith(
-      'Workspace route sync from navigation event failed',
-      syncError,
-    );
-  });
-
-  it('isolates navigation event predicate failures from route listeners', () => {
-    const routeListenerRef: { current?: (event: unknown) => void } = {};
-    const predicateError = new Error('navigation predicate failed');
-    const { controller, navigateRootStartupToTextProject, warn } = createController({
-      activeProjectId: () => 'project-1',
-      subscribeToRouteEvents: (listener) => {
-        routeListenerRef.current = listener;
-        return { unsubscribe: vi.fn() };
-      },
-      isNavigationEnd: () => {
-        throw predicateError;
-      },
-    });
-
-    expect(() => controller.setupRouteSync()).not.toThrow();
-    expect(() => routeListenerRef.current?.('navigation-end')).not.toThrow();
-
-    expect(navigateRootStartupToTextProject).toHaveBeenCalledTimes(1);
-    expect(warn).toHaveBeenCalledWith(
-      'Workspace route sync navigation event predicate failed',
-      predicateError,
-    );
-  });
-
-  it('replaces an existing route sync subscription and cleans it up', () => {
-    const unsubscribe = vi.fn();
-    const { controller } = createController({
-      subscribeToRouteEvents: () => ({ unsubscribe }),
-      isNavigationEnd: () => true,
-    });
-
-    controller.setupRouteSync();
-    controller.setupRouteSync();
-    controller.cleanup();
-
-    expect(unsubscribe).toHaveBeenCalledTimes(2);
-  });
-
-  it('isolates unsubscribe failures while replacing the route sync subscription', () => {
-    const unsubscribeError = new Error('route subscription cleanup failed');
-    const firstUnsubscribe = vi.fn(() => {
-      throw unsubscribeError;
-    });
-    const secondUnsubscribe = vi.fn();
-    const subscribeToRouteEvents = vi.fn()
-      .mockReturnValueOnce({ unsubscribe: firstUnsubscribe })
-      .mockReturnValueOnce({ unsubscribe: secondUnsubscribe });
-    const { controller, navigateRootStartupToTextProject, warn } = createController({
-      activeProjectId: () => 'project-1',
-      subscribeToRouteEvents,
-      isNavigationEnd: () => true,
-    });
-
-    controller.setupRouteSync();
-    controller.setupRouteSync();
-
-    expect(subscribeToRouteEvents).toHaveBeenCalledTimes(2);
-    expect(firstUnsubscribe).toHaveBeenCalledTimes(1);
-    expect(warn).toHaveBeenCalledWith(
-      'Workspace route sync subscription cleanup failed',
-      unsubscribeError,
-    );
-    expect(navigateRootStartupToTextProject).toHaveBeenCalledTimes(2);
-  });
 });

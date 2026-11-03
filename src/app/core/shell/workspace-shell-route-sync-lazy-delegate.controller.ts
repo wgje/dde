@@ -12,9 +12,27 @@ const ROUTE_SYNC_LOAD_FAILURE_MESSAGE =
 const ROUTE_SYNC_OPERATION_FAILURE_MESSAGE =
   'Workspace route sync controller 操作执行失败，已跳过本次路由同步';
 
+interface WorkspaceShellRouteSyncLazyDelegate {
+  setupRouteSync(): void;
+  syncStateFromRoute(): void;
+  teardown(): void;
+  updateUrlForProject(projectId: string): void;
+}
+
+function createRouteSyncLazyDelegate(
+  controller: WorkspaceShellRouteSyncControllerLike,
+): WorkspaceShellRouteSyncLazyDelegate {
+  return {
+    setupRouteSync: () => controller.setupRouteSync(),
+    syncStateFromRoute: () => controller.syncStateFromRoute(),
+    teardown: () => controller.cleanup(),
+    updateUrlForProject: projectId => controller.updateUrlForProject(projectId),
+  };
+}
+
 export class WorkspaceShellRouteSyncLazyDelegateController {
   private readonly host: WorkspaceShellLazyDelegateCallHostController<
-    WorkspaceShellRouteSyncControllerLike
+    WorkspaceShellRouteSyncLazyDelegate
   >;
 
   constructor(options: WorkspaceShellRouteSyncFactoryOptions) {
@@ -22,7 +40,8 @@ export class WorkspaceShellRouteSyncLazyDelegateController {
       options,
     });
     this.host = new WorkspaceShellLazyDelegateCallHostController({
-      createDelegate: () => loadRouteSyncController(),
+      createDelegate: () => loadRouteSyncController()
+        .then(createRouteSyncLazyDelegate),
       loadFailureMessage: ROUTE_SYNC_LOAD_FAILURE_MESSAGE,
       teardownFailureMessage: 'Workspace route sync controller 清理失败，已跳过',
       warn: options.warn,
@@ -38,7 +57,7 @@ export class WorkspaceShellRouteSyncLazyDelegateController {
   }
 
   cleanup(): void {
-    this.host.runIfLoaded(controller => controller.cleanup());
+    this.host.teardown();
   }
 
   syncStateFromRoute(): void {

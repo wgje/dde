@@ -2,16 +2,16 @@ import {
   readWorkspaceShellRouteProjectId,
   type WorkspaceShellRouteNodeLike,
 } from './workspace-shell-route-project-id';
+import {
+  WorkspaceShellRouteEventSubscriptionController,
+  type WorkspaceShellRouteEventSubscription,
+} from './workspace-shell-route-event-subscription.controller';
 
 export type { WorkspaceShellRouteNodeLike };
 
 export interface WorkspaceShellRouteNavigateOptions {
   replaceUrl?: boolean;
   queryParamsHandling?: 'preserve';
-}
-
-export interface WorkspaceShellRouteSyncSubscription {
-  unsubscribe: () => void;
 }
 
 export interface WorkspaceShellRouteSyncControllerOptions {
@@ -25,43 +25,26 @@ export interface WorkspaceShellRouteSyncControllerOptions {
   navigateRootStartupToTextProject: (projectId: string) => void;
   navigate: (commands: string[], options?: WorkspaceShellRouteNavigateOptions) => Promise<unknown> | unknown;
   warn: (message: string, error: unknown) => void;
-  subscribeToRouteEvents?: (listener: (event: unknown) => void) => WorkspaceShellRouteSyncSubscription;
+  subscribeToRouteEvents?: (
+    listener: (event: unknown) => void,
+  ) => WorkspaceShellRouteEventSubscription;
   isNavigationEnd?: (event: unknown) => boolean;
 }
 
 export class WorkspaceShellRouteSyncController {
-  private routeEventsSubscription: WorkspaceShellRouteSyncSubscription | null = null;
-  private routeEventsGeneration = 0;
+  private readonly routeEvents: WorkspaceShellRouteEventSubscriptionController;
 
-  constructor(private readonly options: WorkspaceShellRouteSyncControllerOptions) {}
+  constructor(private readonly options: WorkspaceShellRouteSyncControllerOptions) {
+    this.routeEvents = new WorkspaceShellRouteEventSubscriptionController({
+      subscribeToRouteEvents: options.subscribeToRouteEvents,
+      isNavigationEnd: options.isNavigationEnd,
+      onNavigationEnd: () => this.syncStateFromRoute(),
+      warn: options.warn,
+    });
+  }
 
   setupRouteSync(): void {
-    this.cleanup();
-    const routeEventsGeneration = ++this.routeEventsGeneration;
-    try {
-      this.routeEventsSubscription = this.options.subscribeToRouteEvents?.((event) => {
-        if (routeEventsGeneration !== this.routeEventsGeneration) return;
-
-        try {
-          if (this.options.isNavigationEnd?.(event) !== true) return;
-        } catch (error) {
-          this.warn(
-            'Workspace route sync navigation event predicate failed',
-            error,
-          );
-          return;
-        }
-
-        try {
-          this.syncStateFromRoute();
-        } catch (error) {
-          this.warn('Workspace route sync from navigation event failed', error);
-        }
-      }) ?? null;
-    } catch (error) {
-      this.routeEventsSubscription = null;
-      this.warn('Workspace route sync subscription setup failed', error);
-    }
+    this.routeEvents.setup();
 
     try {
       this.syncStateFromRoute();
@@ -71,14 +54,7 @@ export class WorkspaceShellRouteSyncController {
   }
 
   cleanup(): void {
-    const subscription = this.routeEventsSubscription;
-    this.routeEventsSubscription = null;
-    this.routeEventsGeneration += 1;
-    try {
-      subscription?.unsubscribe();
-    } catch (error) {
-      this.warn('Workspace route sync subscription cleanup failed', error);
-    }
+    this.routeEvents.cleanup();
   }
 
   syncStateFromRoute(): void {
