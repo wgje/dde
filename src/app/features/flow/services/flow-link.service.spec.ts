@@ -754,6 +754,30 @@ describe('FlowLinkService', () => {
     expect(mockTaskOps.connectionAdapter.addCrossTreeConnection).not.toHaveBeenCalled();
   });
 
+  it('目标待分配任务移动期间发生 A-B-A 项目切换时仍按 generation 阻止建链', async () => {
+    uiStateMock.isMobile.set(false);
+    TestBed.flushEffects();
+    const source = { id: 'source-a', title: 'Source A', stage: 1 } as any;
+    const target = { id: 'target-a', title: 'Target A', stage: null } as any;
+    mockProjectState.getTask.mockImplementation((id: string) => id === target.id ? target : null);
+    let resolveMove!: (result: { ok: boolean }) => void;
+    mockTaskOps.moveTaskToStage.mockReturnValueOnce(
+      new Promise(resolve => { resolveMove = resolve; }),
+    );
+    service.isLinkMode.set(true);
+    service.linkSourceTask.set(source);
+
+    const pending = service.handleLinkModeClick(target.id);
+    mockProjectState.activeProjectId.set('project-2');
+    TestBed.flushEffects();
+    mockProjectState.activeProjectId.set('project-1');
+    TestBed.flushEffects();
+    resolveMove({ ok: true });
+
+    await expect(pending).resolves.toBe(false);
+    expect(mockTaskOps.connectionAdapter.addCrossTreeConnection).not.toHaveBeenCalled();
+  });
+
   it('项目切换后首个同键保存应独立执行并更新新编辑器', async () => {
     uiStateMock.isMobile.set(false);
     TestBed.flushEffects();
