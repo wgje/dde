@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
+import { TestBed } from '@angular/core/testing';
 
 import type { AppLifecycleOrchestratorService } from './app-lifecycle-orchestrator.service';
 import { flushResumeWithoutDrainingLongTimers } from './app-lifecycle-orchestrator.test-harness';
+import { SessionRuntimeResetRegistry } from './session-runtime-reset.service';
 
 type SpecMock = ReturnType<typeof vi.fn>;
 
@@ -165,5 +167,42 @@ export function registerAppLifecyclePendingPersistSpecs(
         window.removeEventListener('unhandledrejection', onUnhandledRejection);
       }
     });
+
+    it.each(['owner-change', 'clear-local-data'] as const)(
+      '%s reset 应作废旧 pending persist 微任务并允许新会话重新调度',
+      async resetReason => {
+        const originalQueueMicrotask = globalThis.queueMicrotask;
+        const callbacks: Array<() => void> = [];
+        context.syncCoordinator().hasPendingLocalChanges.mockReturnValue(true);
+        globalThis.queueMicrotask = vi.fn((callback: VoidFunction) => {
+          callbacks.push(callback);
+        }) as typeof queueMicrotask;
+
+        try {
+          await context.service().triggerResume('visibility-quick');
+          expect(callbacks).toHaveLength(1);
+
+          TestBed.inject(SessionRuntimeResetRegistry).resetAll(resetReason);
+          callbacks.shift()?.();
+          await Promise.resolve();
+          await Promise.resolve();
+
+          expect(context.syncCoordinator().flushPendingPersistToCloud).not.toHaveBeenCalled();
+
+          await context.service().triggerResume('visibility-quick');
+          expect(callbacks).toHaveLength(1);
+          callbacks.shift()?.();
+          await Promise.resolve();
+          await Promise.resolve();
+
+          expect(context.syncCoordinator().flushPendingPersistToCloud).toHaveBeenCalledTimes(1);
+          expect(context.syncCoordinator().flushPendingPersistToCloud).toHaveBeenCalledWith(
+            'resume:visibility-quick',
+          );
+        } finally {
+          globalThis.queueMicrotask = originalQueueMicrotask;
+        }
+      },
+    );
   });
 }

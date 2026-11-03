@@ -5,6 +5,7 @@ import { ChangeTrackerService } from './change-tracker.service';
 import { LoggerService } from './logger.service';
 import { ProjectStateService } from './project-state.service';
 import { SentryAlertService } from './sentry-alert.service';
+import { SessionRuntimeResetRegistry } from './session-runtime-reset.service';
 import { ToastService } from './toast.service';
 import { TabSyncService } from './tab-sync.service';
 import {
@@ -101,7 +102,7 @@ export class SyncCoordinatorPersistService {
    * 持久化前快照在内容版本未变化时只多一个 updatedAt 印章，可安全跳过。
    */
   private lastSnapshotLocalChangeVersion = -1;
-  private readonly persistAuthContext = new PersistAuthContextTracker();
+  private readonly persistAuthContext = new PersistAuthContextTracker(inject(SessionRuntimeResetRegistry));
   private syncAttempts = 0;
   private syncConfirmed = 0;
 
@@ -167,7 +168,7 @@ export class SyncCoordinatorPersistService {
 
     const projects = this.projectState.getProjectsWithCurrentData();
     if (projects.length > 0) {
-      this.projectData.saveOfflineSnapshot(projects, ownerUserId);
+      await this.projectData.saveOfflineSnapshotAndWait(projects, ownerUserId);
       this.recordOfflineSnapshotVersion();
       this.logger.info('切换账号前已保存本地快照', {
         projectCount: projects.length,

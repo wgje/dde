@@ -22,13 +22,18 @@ export class AppLifecycleReloadCoordinator {
   private readonly toast = inject(ToastService);
   private readonly swUpdate = inject(SwUpdate, { optional: true });
 
-  private autoReloadScheduled = false;
+  private autoReloadQuotaReserved = false;
+  private autoReloadTimer: ReturnType<typeof setTimeout> | null = null;
 
   async triggerVersionReload(
     addLifecycleBreadcrumb: LifecycleBreadcrumb,
     resetVersionPrompt: () => void,
   ): Promise<void> {
     try {
+      if (!this.isOnlineForReload()) {
+        resetVersionPrompt();
+        return;
+      }
       if (this.swUpdate?.isEnabled) {
         try {
           await this.swUpdate.activateUpdate();
@@ -40,6 +45,10 @@ export class AppLifecycleReloadCoordinator {
         }
       }
 
+      if (!this.isOnlineForReload()) {
+        resetVersionPrompt();
+        return;
+      }
       reloadViaForceClearCache();
     } catch (err) {
       this.logger.warn('triggerVersionReload failed', err);
@@ -52,11 +61,12 @@ export class AppLifecycleReloadCoordinator {
     error: unknown,
     consecutiveFailures: number,
   ): void {
-    if (this.autoReloadScheduled) return;
+    if (this.autoReloadQuotaReserved) return;
     if (consecutiveFailures < APP_LIFECYCLE_CONFIG.AUTO_RELOAD_FAILURE_THRESHOLD) return;
+    if (!this.isOnlineForReload()) return;
     if (!this.consumeAutoReloadQuota()) return;
 
-    this.autoReloadScheduled = true;
+    this.autoReloadQuotaReserved = true;
 
     this.toast.warning(
       '恢复失败',
@@ -77,15 +87,35 @@ export class AppLifecycleReloadCoordinator {
       },
     });
 
-    setTimeout(() => {
+    this.autoReloadTimer = setTimeout(() => {
+      this.autoReloadTimer = null;
+      if (!this.isOnlineForReload()) {
+        this.autoReloadQuotaReserved = false;
+        this.restoreAutoReloadQuota();
+        return;
+      }
       try {
         reloadViaForceClearCache();
+        this.autoReloadQuotaReserved = false;
       } catch (error) {
-        this.autoReloadScheduled = false;
+        this.autoReloadQuotaReserved = false;
         this.restoreAutoReloadQuota();
         this.warnSafely('Lifecycle auto reload failed', error);
       }
     }, 1500);
+  }
+
+  private isOnlineForReload(): boolean {
+    return typeof navigator === 'undefined' || navigator.onLine !== false;
+  }
+
+  resetSessionRuntime(): void {
+    if (this.autoReloadTimer !== null) {
+      clearTimeout(this.autoReloadTimer);
+      this.autoReloadTimer = null;
+    }
+    if (this.autoReloadQuotaReserved) this.restoreAutoReloadQuota();
+    this.autoReloadQuotaReserved = false;
   }
 
   private consumeAutoReloadQuota(): boolean {

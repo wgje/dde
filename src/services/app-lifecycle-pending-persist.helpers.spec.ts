@@ -1,168 +1,125 @@
-import { describe, expect, it, vi } from 'vitest';
-import { schedulePendingPersistRecovery } from './app-lifecycle-pending-persist.helpers';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const flushMicrotasks = async (): Promise<void> => {
-  for (let index = 0; index < 3; index += 1) {
-    await Promise.resolve();
-  }
-};
+import {
+  PendingPersistRecoveryController,
+  type PendingPersistRecoveryDeps,
+} from './app-lifecycle-pending-persist.helpers';
 
-describe('schedulePendingPersistRecovery', () => {
-  it('does not schedule recovery when there are no pending local changes', async () => {
-    const deps = createDeps({ hasPendingLocalChanges: () => false });
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>(resolvePromise => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
 
-    schedulePendingPersistRecovery('visibility-quick', deps);
-    await flushMicrotasks();
+async function flushMicrotasks(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+}
 
-    expect(deps.addBreadcrumb).not.toHaveBeenCalled();
-    expect(deps.flushPendingPersistToCloud).not.toHaveBeenCalled();
+function createDeps(): PendingPersistRecoveryDeps {
+  return {
+    hasPendingLocalChanges: vi.fn().mockReturnValue(true),
+    addBreadcrumb: vi.fn(),
+    flushPendingPersistToCloud: vi.fn().mockResolvedValue(true),
+    captureException: vi.fn(),
+    logger: { warn: vi.fn() },
+  };
+}
+
+describe('PendingPersistRecoveryController session reset', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
   });
 
-  it('isolates breadcrumb and queue scheduling failures while preserving pending persist flush', async () => {
-    const breadcrumbError = new Error('breadcrumb failed');
-    const scheduleError = new Error('queueMicrotask failed');
-    const originalQueueMicrotask = globalThis.queueMicrotask;
-    const deps = createDeps({
-      addBreadcrumb: vi.fn(() => {
-        throw breadcrumbError;
-      }),
-    });
-    globalThis.queueMicrotask = vi.fn(() => {
-      throw scheduleError;
-    }) as unknown as typeof queueMicrotask;
-
-    try {
-      schedulePendingPersistRecovery('visibility-quick', deps);
-      await flushMicrotasks();
-
-      expect(deps.logger.warn).toHaveBeenCalledWith(
-        'Resume pending persist recovery breadcrumb failed',
-        { reason: 'visibility-quick', error: breadcrumbError },
-      );
-      expect(deps.logger.warn).toHaveBeenCalledWith(
-        'Resume pending persist recovery scheduling failed',
-        { reason: 'visibility-quick', error: scheduleError },
-      );
-      expect(deps.flushPendingPersistToCloud).toHaveBeenCalledWith('resume:visibility-quick');
-    } finally {
-      globalThis.queueMicrotask = originalQueueMicrotask;
-    }
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
-  it('isolates telemetry failure after pending persist flush rejection', async () => {
-    const persistError = new Error('persist failed');
-    const captureError = new Error('capture failed');
-    const deps = createDeps({
-      flushPendingPersistToCloud: vi.fn().mockRejectedValue(persistError),
-      captureException: vi.fn(() => {
-        throw captureError;
-      }),
-    });
+  it('reset 应作废旧微任务且允许新会话立即重新调度', async () => {
+    const deps = createDeps();
+    const controller = new PendingPersistRecoveryController(deps);
 
-    schedulePendingPersistRecovery('online', deps);
-    await flushMicrotasks();
-
-    expect(deps.logger.warn).toHaveBeenCalledWith(
-      'Resume pending persist recovery failed',
-      { reason: 'online', error: persistError },
-    );
-    expect(deps.logger.warn).toHaveBeenCalledWith(
-      'Resume pending persist recovery telemetry failed',
-      { reason: 'online', error: captureError },
-    );
-  });
-
-  it('deduplicates repeated recovery scheduling while a pending persist flush is already queued', async () => {
-    const hasPendingLocalChanges = vi.fn()
-      .mockReturnValueOnce(true)
-      .mockReturnValueOnce(true)
-      .mockReturnValue(false);
-    const deps = createDeps({ hasPendingLocalChanges });
-
-    schedulePendingPersistRecovery('visibility-quick', deps);
-    schedulePendingPersistRecovery('online', deps);
+    controller.schedule('online');
+    controller.reset();
+    controller.schedule('pageshow');
     await flushMicrotasks();
 
     expect(deps.flushPendingPersistToCloud).toHaveBeenCalledTimes(1);
-    expect(deps.flushPendingPersistToCloud).toHaveBeenCalledWith('resume:visibility-quick');
+    expect(deps.flushPendingPersistToCloud).toHaveBeenCalledWith('resume:pageshow');
   });
 
-  it('reruns recovery with the later reason when pending changes remain during an active flush', async () => {
-    const firstFlush = createDeferred<unknown>();
-    const deps = createDeps({
-      flushPendingPersistToCloud: vi.fn()
-        .mockReturnValueOnce(firstFlush.promise)
-        .mockResolvedValueOnce(true),
+  it('旧 in-flight finally 不得提前消费新代际 queued reason', async () => {
+    const oldFlush = createDeferred<boolean>();
+    const currentFlush = createDeferred<boolean>();
+    const deps = createDeps();
+    vi.mocked(deps.flushPendingPersistToCloud)
+      .mockImplementationOnce(() => oldFlush.promise)
+      .mockImplementationOnce(() => currentFlush.promise)
+      .mockResolvedValueOnce(true);
+    const controller = new PendingPersistRecoveryController(deps);
+
+    controller.schedule('online');
+    await flushMicrotasks();
+
+    controller.reset();
+    controller.schedule('visibility-threshold');
+    await flushMicrotasks();
+    controller.schedule('pageshow');
+
+    oldFlush.resolve(false);
+    await flushMicrotasks();
+    expect(deps.flushPendingPersistToCloud).toHaveBeenCalledTimes(2);
+
+    currentFlush.resolve(true);
+    await flushMicrotasks();
+    expect(deps.flushPendingPersistToCloud).toHaveBeenCalledTimes(3);
+    expect(deps.flushPendingPersistToCloud).toHaveBeenLastCalledWith('resume:pageshow');
+  });
+
+  it('reset 应取消旧 retry timer 且不永久销毁控制器', async () => {
+    const deps = createDeps();
+    vi.mocked(deps.flushPendingPersistToCloud)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
+    const controller = new PendingPersistRecoveryController(deps);
+
+    controller.schedule('online');
+    await flushMicrotasks();
+    controller.reset();
+
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(deps.flushPendingPersistToCloud).toHaveBeenCalledTimes(1);
+
+    controller.schedule('pageshow');
+    await flushMicrotasks();
+    expect(deps.flushPendingPersistToCloud).toHaveBeenCalledTimes(2);
+    expect(deps.flushPendingPersistToCloud).toHaveBeenLastCalledWith('resume:pageshow');
+  });
+
+  it('flush rejection 后仍有本地变更时应安排重试', async () => {
+    const error = new Error('temporary persist failure');
+    const deps = createDeps();
+    vi.mocked(deps.flushPendingPersistToCloud)
+      .mockRejectedValueOnce(error)
+      .mockResolvedValueOnce(true);
+    const controller = new PendingPersistRecoveryController(deps);
+
+    controller.schedule('online');
+    await flushMicrotasks();
+
+    expect(deps.flushPendingPersistToCloud).toHaveBeenCalledTimes(1);
+    expect(deps.captureException).toHaveBeenCalledWith(error, {
+      operation: 'lifecycle.resume.pending-persist',
+      reason: 'online',
     });
 
-    schedulePendingPersistRecovery('visibility-quick', deps);
-    await flushMicrotasks();
-
-    expect(deps.flushPendingPersistToCloud).toHaveBeenCalledTimes(1);
-    expect(deps.flushPendingPersistToCloud).toHaveBeenCalledWith('resume:visibility-quick');
-
-    schedulePendingPersistRecovery('online', deps);
-    await flushMicrotasks();
-
-    expect(deps.flushPendingPersistToCloud).toHaveBeenCalledTimes(1);
-
-    firstFlush.resolve(false);
+    await vi.advanceTimersByTimeAsync(1_500);
     await flushMicrotasks();
 
     expect(deps.flushPendingPersistToCloud).toHaveBeenCalledTimes(2);
     expect(deps.flushPendingPersistToCloud).toHaveBeenLastCalledWith('resume:online');
   });
-
-  it('reschedules recovery after a false flush result while pending changes remain', async () => {
-    const originalQueueMicrotask = globalThis.queueMicrotask;
-    globalThis.queueMicrotask = ((callback: VoidFunction) => {
-      void Promise.resolve().then(callback);
-    }) as typeof queueMicrotask;
-    vi.useFakeTimers();
-    const deps = createDeps({
-      flushPendingPersistToCloud: vi.fn()
-        .mockResolvedValueOnce(false)
-        .mockResolvedValueOnce(true),
-    });
-
-    try {
-      schedulePendingPersistRecovery('online', deps);
-      await flushMicrotasks();
-
-      expect(deps.flushPendingPersistToCloud).toHaveBeenCalledTimes(1);
-
-      await vi.advanceTimersByTimeAsync(1500);
-      await flushMicrotasks();
-
-      expect(deps.flushPendingPersistToCloud).toHaveBeenCalledTimes(2);
-      expect(deps.flushPendingPersistToCloud).toHaveBeenLastCalledWith('resume:online');
-    } finally {
-      vi.useRealTimers();
-      globalThis.queueMicrotask = originalQueueMicrotask;
-    }
-  });
 });
-
-function createDeps(overrides: Partial<Parameters<typeof schedulePendingPersistRecovery>[1]> = {}) {
-  return {
-    hasPendingLocalChanges: vi.fn().mockReturnValue(true),
-    addBreadcrumb: vi.fn(),
-    flushPendingPersistToCloud: vi.fn().mockResolvedValue(false),
-    captureException: vi.fn(),
-    logger: {
-      warn: vi.fn(),
-    },
-    ...overrides,
-  };
-}
-
-function createDeferred<T>(): {
-  promise: Promise<T>;
-  resolve: (value: T) => void;
-} {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((resolvePromise) => {
-    resolve = resolvePromise;
-  });
-  return { promise, resolve };
-}

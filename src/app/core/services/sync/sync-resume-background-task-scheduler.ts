@@ -68,14 +68,23 @@ export class SyncResumeBackgroundTaskScheduler {
   scheduleRemoteProbeFallback(runProbe: () => void, delayMs: number): void {
     this.cancelRemoteProbeFallback();
     const generation = ++this.remoteProbeFallbackGeneration;
-    this.remoteProbeFallbackTimeout = setTimeout(() => {
-      if (generation !== this.remoteProbeFallbackGeneration) {
-        return;
+    try {
+      this.remoteProbeFallbackTimeout = setTimeout(() => {
+        if (generation !== this.remoteProbeFallbackGeneration) {
+          return;
+        }
+        this.remoteProbeFallbackGeneration += 1;
+        this.remoteProbeFallbackTimeout = null;
+        this.runTask('remote-probe-fallback', runProbe);
+      }, delayMs);
+    } catch (error) {
+      if (generation === this.remoteProbeFallbackGeneration) {
+        this.remoteProbeFallbackGeneration += 1;
       }
-      this.remoteProbeFallbackGeneration += 1;
       this.remoteProbeFallbackTimeout = null;
+      this.reportTaskError('remote-probe-fallback', error);
       this.runTask('remote-probe-fallback', runProbe);
-    }, delayMs);
+    }
   }
 
   cancelAll(): void {
@@ -101,9 +110,10 @@ export class SyncResumeBackgroundTaskScheduler {
 
   cancelRetryContinuation(): void {
     this.retryContinuationGeneration += 1;
-    if (this.retryContinuationTimeout !== null) {
-      clearTimeout(this.retryContinuationTimeout);
-      this.retryContinuationTimeout = null;
+    const retryContinuationTimeout = this.retryContinuationTimeout;
+    this.retryContinuationTimeout = null;
+    if (retryContinuationTimeout !== null) {
+      this.clearTimeoutSafely('retry-continuation', retryContinuationTimeout);
     }
 
     const retryContinuationIdleCallback = this.retryContinuationIdleCallback;
@@ -124,11 +134,23 @@ export class SyncResumeBackgroundTaskScheduler {
 
   cancelRemoteProbeFallback(): void {
     this.remoteProbeFallbackGeneration += 1;
-    if (this.remoteProbeFallbackTimeout === null) {
+    const remoteProbeFallbackTimeout = this.remoteProbeFallbackTimeout;
+    this.remoteProbeFallbackTimeout = null;
+    if (remoteProbeFallbackTimeout === null) {
       return;
     }
 
-    clearTimeout(this.remoteProbeFallbackTimeout);
-    this.remoteProbeFallbackTimeout = null;
+    this.clearTimeoutSafely('remote-probe-fallback', remoteProbeFallbackTimeout);
+  }
+
+  private clearTimeoutSafely(
+    source: SyncResumeBackgroundTaskSource,
+    timeout: ReturnType<typeof setTimeout>,
+  ): void {
+    try {
+      clearTimeout(timeout);
+    } catch (error) {
+      this.reportTaskError(source, error);
+    }
   }
 }

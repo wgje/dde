@@ -4,6 +4,7 @@ import { TestBed } from '@angular/core/testing';
 import { APP_LIFECYCLE_CONFIG } from '../config';
 import type { AppLifecycleOrchestratorService } from './app-lifecycle-orchestrator.service';
 import { flushResumeWithoutDrainingLongTimers } from './app-lifecycle-orchestrator.test-harness';
+import { SessionRuntimeResetRegistry } from './session-runtime-reset.service';
 
 type SpecMock = ReturnType<typeof vi.fn>;
 
@@ -11,6 +12,9 @@ export interface AppLifecycleResumeQueueSpecContext {
   service: () => AppLifecycleOrchestratorService;
   simpleSync: () => {
     recoverAfterResume: SpecMock;
+  };
+  sessionManager: () => {
+    validateOrRefreshOnResume: SpecMock;
   };
 }
 
@@ -123,6 +127,37 @@ export function registerAppLifecycleResumeQueueSpecs(
       expect(heavyCalls.map(([reason]) => reason)).toEqual(['online', 'pageshow']);
     });
 
+    it('queued resume 运行期间再次入队应继续衔接下一轮恢复', async () => {
+      let resolveQuickRecovery: (() => void) | null = null;
+      let resolveOnlineRecovery: (() => void) | null = null;
+      context.simpleSync().recoverAfterResume
+        .mockImplementationOnce(() => new Promise<void>(resolve => {
+          resolveQuickRecovery = resolve;
+        }))
+        .mockImplementationOnce(() => new Promise<void>(resolve => {
+          resolveOnlineRecovery = resolve;
+        }));
+
+      const quickResume = context.service().triggerResume('visibility-quick');
+      await Promise.resolve();
+      await Promise.resolve();
+      const onlineResume = context.service().triggerResume('online');
+
+      resolveQuickRecovery!();
+      await flushResumeWithoutDrainingLongTimers();
+      expect(resolveOnlineRecovery).toBeTypeOf('function');
+
+      const pageshowResume = context.service().triggerResume('pageshow');
+      resolveOnlineRecovery!();
+      await Promise.all([quickResume, onlineResume, pageshowResume]);
+      await flushResumeWithoutDrainingLongTimers();
+
+      const fullResumeReasons = context.simpleSync().recoverAfterResume.mock.calls
+        .filter(([, options]) => options?.mode === 'light' && options?.stage === 'full')
+        .map(([reason]) => reason);
+      expect(fullResumeReasons).toEqual(['visibility-quick', 'online', 'pageshow']);
+    });
+
     it('destroy cleanup 后已排队的 heavy resume 不应在 quick resume 完成后继续执行', async () => {
       let resolveQuickRecovery: (() => void) | null = null;
       context.simpleSync().recoverAfterResume.mockImplementationOnce(
@@ -174,5 +209,124 @@ export function registerAppLifecycleResumeQueueSpecs(
       await vi.advanceTimersByTimeAsync(APP_LIFECYCLE_CONFIG.RESUME_TIMEOUT_MS + 10);
       await resumePromise;
     });
+
+    it('owner reset 后旧 active/queued resume 不得阻塞或覆盖新会话恢复', async () => {
+      let resolveOldRecovery: (() => void) | null = null;
+      let resolveNewRecovery: (() => void) | null = null;
+      let resolvePostResetQueuedRecoveryStarted: (() => void) | null = null;
+      const postResetQueuedRecoveryStarted = new Promise<void>(resolve => {
+        resolvePostResetQueuedRecoveryStarted = resolve;
+      });
+      context.simpleSync().recoverAfterResume
+        .mockImplementationOnce(() => new Promise<void>(resolve => {
+          resolveOldRecovery = resolve;
+        }))
+        .mockImplementationOnce(() => new Promise<void>(resolve => {
+          resolveNewRecovery = resolve;
+        }))
+        .mockImplementationOnce(() => {
+          resolvePostResetQueuedRecoveryStarted!();
+          return Promise.resolve();
+        });
+
+      const oldResume = context.service().triggerResume('visibility-quick');
+      await Promise.resolve();
+      await Promise.resolve();
+      const oldQueuedResume = context.service().triggerResume('online');
+
+      TestBed.inject(SessionRuntimeResetRegistry).resetAll('owner-change');
+      const newResume = context.service().triggerResume('visibility-quick');
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(context.simpleSync().recoverAfterResume).toHaveBeenCalledTimes(2);
+      expect(resolveNewRecovery).toBeTypeOf('function');
+      expect(context.service().isResuming()).toBe(true);
+      const newQueuedResume = context.service().triggerResume('pageshow');
+
+      resolveOldRecovery!();
+      await Promise.allSettled([oldResume, oldQueuedResume]);
+      await Promise.resolve();
+
+      expect(context.simpleSync().recoverAfterResume).toHaveBeenCalledTimes(2);
+      expect(context.service().isResuming()).toBe(true);
+
+      resolveNewRecovery!();
+      await Promise.all([newResume, newQueuedResume, postResetQueuedRecoveryStarted]);
+      await flushResumeWithoutDrainingLongTimers();
+      const postResetQueuedReasons = context.simpleSync().recoverAfterResume.mock.calls
+        .slice(2)
+        .map(([reason]) => reason);
+      expect(postResetQueuedReasons).toContain('pageshow');
+      expect(postResetQueuedReasons).not.toContain('online');
+      expect(context.service().isResuming()).toBe(false);
+    });
+
+    it('owner reset 后旧 session 校验晚到 deferred 不得重新排队恢复', async () => {
+      let resolveSessionValidation: ((result: {
+        ok: boolean;
+        refreshed: boolean;
+        deferred: boolean;
+        reason: string;
+      }) => void) | null = null;
+      context.sessionManager().validateOrRefreshOnResume.mockReturnValueOnce(
+        new Promise(resolve => {
+          resolveSessionValidation = resolve;
+        }),
+      );
+
+      const oldResume = context.service().triggerResume('online');
+      await Promise.resolve();
+      TestBed.inject(SessionRuntimeResetRegistry).resetAll('owner-change');
+      resolveSessionValidation!({
+        ok: false,
+        refreshed: false,
+        deferred: true,
+        reason: 'browser-network-suspended',
+      });
+
+      await oldResume;
+      await vi.advanceTimersByTimeAsync(APP_LIFECYCLE_CONFIG.RESUME_TIMEOUT_MS + 100);
+
+      expect(context.sessionManager().validateOrRefreshOnResume).toHaveBeenCalledTimes(1);
+      expect(context.simpleSync().recoverAfterResume).not.toHaveBeenCalled();
+    });
+
+    it.each(['owner-change', 'clear-local-data'] as const)(
+      '%s reset 应取消已排入的 deferred retry timer',
+      async resetReason => {
+        context.sessionManager().validateOrRefreshOnResume.mockResolvedValueOnce({
+          ok: false,
+          refreshed: false,
+          deferred: true,
+          reason: 'browser-network-suspended',
+        });
+
+        await context.service().triggerResume('online');
+        expect(context.sessionManager().validateOrRefreshOnResume).toHaveBeenCalledTimes(1);
+
+        TestBed.inject(SessionRuntimeResetRegistry).resetAll(resetReason);
+        await vi.advanceTimersByTimeAsync(APP_LIFECYCLE_CONFIG.RESUME_TIMEOUT_MS + 100);
+
+        expect(context.sessionManager().validateOrRefreshOnResume).toHaveBeenCalledTimes(1);
+        expect(context.simpleSync().recoverAfterResume).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(['owner-change', 'clear-local-data'] as const)(
+      '%s reset 应清除旧会话 heavy cooldown',
+      async resetReason => {
+        await context.service().triggerResume('online');
+        await flushResumeWithoutDrainingLongTimers();
+
+        expect(context.service().lastHeavyRecoveryAt()).not.toBeNull();
+        expect(context.service().isHeavyRecoveryInCooldown()).toBe(true);
+
+        TestBed.inject(SessionRuntimeResetRegistry).resetAll(resetReason);
+
+        expect(context.service().lastHeavyRecoveryAt()).toBeNull();
+        expect(context.service().isHeavyRecoveryInCooldown()).toBe(false);
+      },
+    );
   });
 }

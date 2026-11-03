@@ -1,6 +1,7 @@
 /** SimpleSyncService 门面只做同步编排；新增业务分支应下切到 sync 子服务。 */
 
 import { Injectable, inject, computed, DestroyRef, Injector } from '@angular/core';
+import { SessionRuntimeResetRegistry } from '../../../services/session-runtime-reset.service';
 import { SupabaseClientService } from '../../../services/supabase-client.service';
 import { LoggerService } from '../../../services/logger.service';
 import { ToastService } from '../../../services/toast.service';
@@ -83,6 +84,8 @@ export class SimpleSyncService {
   private readonly clockSync = inject(ClockSyncService);
   private readonly eventBus = inject(EventBusService);
   private readonly destroyRef = inject(DestroyRef);
+  private readonly sessionRuntimeReset = inject(SessionRuntimeResetRegistry);
+  private unregisterSessionRuntimeReset: (() => void) | null = null;
   private readonly changeTracker = inject(ChangeTrackerService);
 
   // 子服务注入
@@ -161,6 +164,14 @@ export class SimpleSyncService {
   });
 
   constructor() {
+    this.unregisterSessionRuntimeReset = this.sessionRuntimeReset.register(
+      'SimpleSyncService',
+      () => this.stopRuntime(),
+    );
+    this.destroyRef.onDestroy(() => {
+      this.unregisterSessionRuntimeReset?.();
+      this.unregisterSessionRuntimeReset = null;
+    });
     this.runtime.setupSyncStateListeners();
     configureSimpleSyncBatchCallbacks({
       batchSyncService: this.batchSyncService,

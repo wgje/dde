@@ -10,22 +10,23 @@
  *
  * 为什么抽离：
  * - AGENTS.md §12 单文件 ≤ 800 行硬线；SimpleSyncService 长期越界，文件头要求只做「下切」。
- * - 恢复链路是自洽的横切责任，依赖全部可注入；`loadProjectsFromCloud` 兜底直接走
- *   注入的 `ProjectDataService`，因此无需任何回指门面的回调（零循环 DI）。
+ * - 恢复链路是自洽的横切责任，依赖全部可注入；全量兜底复用
+ *   `SyncCoordinatorProjectRefreshService.downloadAndMerge()`，保证远端结果会合并进状态。
  *
  * 验证：SimpleSyncService.spec 有专属 `recoverAfterResume` describe 块，直接调用真实方法
  * 覆盖 online/light/compensation/远端不可达/会话延后等多模式；门面 `recoverAfterResume()`
  * 改为委托本协调器后该套用例继续校验零回归。
  */
-import { Injectable, inject } from '@angular/core';
+import { DestroyRef, Injectable, Injector, inject } from '@angular/core';
 import { LoggerService } from '../../../../services/logger.service';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
+import { SessionRuntimeResetRegistry } from '../../../../services/session-runtime-reset.service';
 import { SyncStateService } from './sync-state.service';
 import { SessionManagerService } from './session-manager.service';
 import { ConnectivityRecoveryService } from './connectivity-recovery.service';
 import { RetryQueueService } from './retry-queue.service';
 import { RealtimePollingService } from './realtime-polling.service';
-import { ProjectDataService } from './project-data.service';
+import { SyncCoordinatorProjectRefreshService } from '../../../../services/sync-coordinator-project-refresh.service';
 import { FEATURE_FLAGS } from '../../../../config/feature-flags.config';
 import { APP_LIFECYCLE_CONFIG } from '../../../../config/app-lifecycle.config';
 import { SYNC_CONFIG } from '../../../../config/sync.config';
@@ -113,7 +114,7 @@ export class SyncResumeCoordinatorService {
   private readonly connectivityRecovery = inject(ConnectivityRecoveryService);
   private readonly retryQueueService = inject(RetryQueueService);
   private readonly realtimePollingService = inject(RealtimePollingService);
-  private readonly projectDataService = inject(ProjectDataService);
+  private readonly injector = inject(Injector);
 
   private readonly recoveryTicketState = new Map<string, RecoveryTicketState>();
   private readonly backgroundTasks = new SyncResumeBackgroundTaskScheduler({
@@ -131,6 +132,15 @@ export class SyncResumeCoordinatorService {
   private remoteProbeFallbackGeneration = 0;
   /** 主恢复链路的 newest-wins 代际：新恢复启动后，仍在途的旧恢复在下一个阶段边界让位 */
   private recoveryFlightGeneration = 0;
+  private readonly destroyRef = inject(DestroyRef);
+  private readonly unregisterSessionRuntimeReset = inject(SessionRuntimeResetRegistry).register(
+    'SyncResumeCoordinatorService',
+    () => this.resetSessionRuntime(),
+  );
+
+  constructor() {
+    this.destroyRef.onDestroy(this.unregisterSessionRuntimeReset);
+  }
 
   cancelPendingBackgroundRecovery(options: {
     preserveRetryContinuation?: boolean;
@@ -146,6 +156,13 @@ export class SyncResumeCoordinatorService {
     }
   }
 
+  private resetSessionRuntime(): void {
+    this.recoveryFlightGeneration += 1;
+    this.cancelPendingBackgroundRecovery();
+    this.recoveryTicketState.clear();
+  }
+
+  // eslint-disable-next-line max-lines-per-function -- generation guards must stay ordered at each recovery await boundary
   async recoverAfterResume(reason: string, options: ResumeRecoverOptions = {}): Promise<void> {
     const context = this.createResumeRecoveryContext(reason, options);
     this.syncStateService.update({
@@ -176,13 +193,14 @@ export class SyncResumeCoordinatorService {
     try {
       if (!this.ensureOnlineForRecovery(context)) return;
 
-      const sessionGate = await this.resolveRecoverySession(context);
+      const sessionGate = await this.resolveRecoverySession(context, flightGeneration);
       if (this.isRecoveryFlightSuperseded(flightGeneration, context, 'session-gate')) return;
       if (!sessionGate.shouldContinue) return;
       this.connectivityRecovery.cancelScheduledRecovery();
 
-      if (!(await this.ensureRecoveryRemoteReady(context))) return;
+      const remoteReady = await this.ensureRecoveryRemoteReady(context, flightGeneration);
       if (this.isRecoveryFlightSuperseded(flightGeneration, context, 'remote-ready')) return;
+      if (!remoteReady) return;
 
       await this.processResumeRetryQueue(context);
       if (this.isRecoveryFlightSuperseded(flightGeneration, context, 'retry-queue')) return;
@@ -190,16 +208,28 @@ export class SyncResumeCoordinatorService {
       // 2) 恢复实时更新状态（若之前被暂停），并在 heavy 下探测远端变更
       await this.resumeRealtimeAfterRecovery(context);
       if (this.isRecoveryFlightSuperseded(flightGeneration, context, 'realtime-resume')) return;
+      await this.connectivityRecovery.flushAttachmentCleanupOutboxAfterResume(
+        context.reason,
+        this.createRecoveryContinuationGuard(flightGeneration, context, 'attachment-cleanup-resume'),
+      );
+      if (this.isRecoveryFlightSuperseded(flightGeneration, context, 'attachment-cleanup-resume')) return;
 
       // light 模式只做本地状态恢复，不触发远端探测
-      const recoveryModeCompleted = await this.runResumeRemoteProbe(context, ticketContext);
+      const recoveryModeCompleted = await this.runResumeRemoteProbe(
+        context,
+        ticketContext,
+        flightGeneration,
+      );
+      if (this.isRecoveryFlightSuperseded(flightGeneration, context, 'remote-probe')) return;
       if (recoveryModeCompleted) {
         this.markRecoveryTicketMode(context, ticketContext);
       }
       this.addRecoveryCompleteBreadcrumb(context);
     } finally {
       this.releaseActiveRecoveryTicketMode(context, ticketContext);
-      this.connectivityRecovery.flushPendingConnectivityRecovery(context.reason);
+      if (flightGeneration === this.recoveryFlightGeneration) {
+        this.connectivityRecovery.flushPendingConnectivityRecovery(context.reason);
+      }
     }
   }
 
@@ -246,6 +276,21 @@ export class SyncResumeCoordinatorService {
       phase,
     });
     return true;
+  }
+
+  private createRecoveryContinuationGuard(
+    flightGeneration: number,
+    context: ResumeRecoveryContext,
+    phase: string,
+  ): () => boolean {
+    let stillCurrent = true;
+    return () => {
+      if (!stillCurrent) {
+        return false;
+      }
+      stillCurrent = !this.isRecoveryFlightSuperseded(flightGeneration, context, phase);
+      return stillCurrent;
+    };
   }
 
   private createResumeRecoveryContext(reason: string, options: ResumeRecoverOptions): ResumeRecoveryContext {
@@ -329,7 +374,10 @@ export class SyncResumeCoordinatorService {
     return false;
   }
 
-  private async resolveRecoverySession(context: ResumeRecoveryContext): Promise<ResumeSessionGate> {
+  private async resolveRecoverySession(
+    context: ResumeRecoveryContext,
+    flightGeneration: number,
+  ): Promise<ResumeSessionGate> {
     if (context.options.sessionValidated === true) {
       return { shouldContinue: true, session: null };
     }
@@ -349,7 +397,9 @@ export class SyncResumeCoordinatorService {
     const resumeSession = await this.sessionManager.validateOrRefreshOnResume(context.reason);
     if (resumeSession.deferred) {
       const delayMs = Math.max(100, getRemainingBrowserNetworkResumeDelayMs() + 50);
-      this.connectivityRecovery.scheduleConnectivityRecovery(`${context.reason}:session-deferred`, delayMs);
+      if (flightGeneration === this.recoveryFlightGeneration) {
+        this.connectivityRecovery.scheduleConnectivityRecovery(`${context.reason}:session-deferred`, delayMs);
+      }
       this.logger.info('页面恢复时会话校验延后，跳过本轮远端恢复链路', {
         reason: context.reason,
         mode: context.mode,
@@ -374,17 +424,22 @@ export class SyncResumeCoordinatorService {
     return { shouldContinue: true, session: null };
   }
 
-  private async ensureRecoveryRemoteReady(context: ResumeRecoveryContext): Promise<boolean> {
+  private async ensureRecoveryRemoteReady(
+    context: ResumeRecoveryContext,
+    flightGeneration: number,
+  ): Promise<boolean> {
     const remoteReady = await this.connectivityRecovery.probeRemoteReachability(
       context.reason,
       Math.max(SYNC_CONFIG.CONNECTIVITY_PROBE_TIMEOUT, context.resumeProbeTimeoutMs),
       true
     );
     if (remoteReady) return true;
-    this.connectivityRecovery.scheduleConnectivityRecovery(
-      context.reason,
-      SYNC_CONFIG.CONNECTIVITY_PROBE_INTERVAL,
-    );
+    if (flightGeneration === this.recoveryFlightGeneration) {
+      this.connectivityRecovery.scheduleConnectivityRecovery(
+        context.reason,
+        SYNC_CONFIG.CONNECTIVITY_PROBE_INTERVAL,
+      );
+    }
     return false;
   }
 
@@ -519,9 +574,10 @@ export class SyncResumeCoordinatorService {
   private async runResumeRemoteProbe(
     context: ResumeRecoveryContext,
     ticketContext: RecoveryTicketContext,
+    flightGeneration: number,
   ): Promise<boolean> {
     if (this.shouldRunResumeRemoteProbe(context, ticketContext)) {
-      return this.runHeavyResumeRemoteProbe(context, ticketContext);
+      return this.runHeavyResumeRemoteProbe(context, ticketContext, flightGeneration);
     }
     this.addTicketProbeSkippedBreadcrumb(context, ticketContext);
     return true;
@@ -540,16 +596,19 @@ export class SyncResumeCoordinatorService {
   private async runHeavyResumeRemoteProbe(
     context: ResumeRecoveryContext,
     ticketContext: RecoveryTicketContext,
+    flightGeneration: number,
   ): Promise<boolean> {
     const fallbackGeneration = ++this.remoteProbeFallbackGeneration;
     const payload = this.buildResumeRemoteProbePayload();
     const firstProbe = await this.triggerRemoteProbeWithTimeout(payload, context.resumeProbeTimeoutMs);
+    if (this.isRecoveryFlightSuperseded(flightGeneration, context, 'remote-probe-result')) return false;
     let triggered = firstProbe.triggered;
     let timedOutProbeTriggered = false;
     const hasCallback = this.realtimePollingService.hasRemoteChangeCallback();
 
     if (firstProbe.timedOut) {
       void firstProbe.completion.then(completed => {
+        if (this.isRecoveryFlightSuperseded(flightGeneration, context, 'remote-probe-completion')) return;
         timedOutProbeTriggered = completed;
         if (completed && fallbackGeneration === this.remoteProbeFallbackGeneration) {
           this.markRecoveryTicketProbeCompleted(context, ticketContext);
@@ -562,9 +621,13 @@ export class SyncResumeCoordinatorService {
     if (!triggered && hasCallback && !firstProbe.timedOut
       && fallbackGeneration === this.remoteProbeFallbackGeneration) {
       triggered = await this.retryResumeRemoteProbe(context, payload);
+      if (this.isRecoveryFlightSuperseded(flightGeneration, context, 'remote-probe-retry')) return false;
     }
 
-    const backgroundFallbackScheduled = !triggered && firstProbe.timedOut && hasCallback;
+    const backgroundFallbackScheduled = !triggered
+      && firstProbe.timedOut
+      && hasCallback
+      && !this.isRecoveryFlightSuperseded(flightGeneration, context, 'remote-probe-fallback-schedule');
     if (backgroundFallbackScheduled) {
       this.scheduleRemoteProbeBackgroundFallback(
         context,
@@ -576,7 +639,7 @@ export class SyncResumeCoordinatorService {
     }
 
     if (!triggered && !backgroundFallbackScheduled) {
-      await this.handleUntriggeredRemoteProbeFallback(context, hasCallback);
+      await this.handleUntriggeredRemoteProbeFallback(context, hasCallback, flightGeneration);
     }
 
     if (triggered) {
@@ -652,7 +715,9 @@ export class SyncResumeCoordinatorService {
   private async handleUntriggeredRemoteProbeFallback(
     context: ResumeRecoveryContext,
     hasCallback: boolean,
+    flightGeneration: number,
   ): Promise<void> {
+    if (this.isRecoveryFlightSuperseded(flightGeneration, context, 'remote-probe-fallback')) return;
     if (!context.interactionFirstEnabled) {
       this.safeAddBreadcrumb({
         category: 'lifecycle',
@@ -664,8 +729,11 @@ export class SyncResumeCoordinatorService {
       // 全量云端加载兜底前必须重新校验会话：链路前段的 session 快照可能在慢速
       // probe/retry 阶段之后已经过期或发生账号切换，不能拿旧 userId 拉取云端项目
       const fallbackSession = await this.sessionManager.validateSession();
+      if (this.isRecoveryFlightSuperseded(flightGeneration, context, 'remote-probe-fallback-session')) return;
       if (fallbackSession.valid && fallbackSession.userId) {
-        await this.projectDataService.loadProjectsFromCloud(fallbackSession.userId);
+        await this.injector
+          .get(SyncCoordinatorProjectRefreshService)
+          .downloadAndMerge(fallbackSession.userId);
       }
       return;
     }

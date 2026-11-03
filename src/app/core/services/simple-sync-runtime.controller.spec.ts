@@ -156,6 +156,36 @@ describe('SimpleSyncRuntimeController', () => {
     expect(deps.connectivityRecovery.cancelScheduledRecovery).toHaveBeenCalledTimes(1);
   });
 
+  it('停止后已捕获的 online/offline 回调不应继续修改同步状态', () => {
+    const listeners: {
+      online?: EventListenerOrEventListenerObject;
+      offline?: EventListenerOrEventListenerObject;
+    } = {};
+    const removeListener = window.removeEventListener.bind(window);
+    vi.spyOn(window, 'removeEventListener').mockImplementation((type, listener, options) => {
+      if (type === 'online') listeners.online = listener;
+      if (type === 'offline') listeners.offline = listener;
+      removeListener(type, listener, options);
+    });
+
+    controller.startRuntime();
+    controller.stopRuntime();
+    vi.mocked(deps.syncStateService.setOnline).mockClear();
+
+    const onlineListener = listeners.online;
+    const offlineListener = listeners.offline;
+    if (typeof onlineListener === 'function') onlineListener(new Event('online'));
+    else onlineListener?.handleEvent(new Event('online'));
+    if (typeof offlineListener === 'function') offlineListener(new Event('offline'));
+    else offlineListener?.handleEvent(new Event('offline'));
+
+    expect(deps.syncStateService.setOnline).not.toHaveBeenCalled();
+    expect(deps.syncStateService.setOfflineMode).not.toHaveBeenCalled();
+    expect(deps.connectivityRecovery.cancelScheduledRecovery).not.toHaveBeenCalled();
+    expect(deps.connectivityRecovery.restoreRemoteConnectivity).not.toHaveBeenCalled();
+    expect(deps.realtimePollingService.suspendTransport).not.toHaveBeenCalled();
+  });
+
   it('stopRuntime 后迟到的 Supabase connectivity 回调不应再改写同步状态或恢复链', () => {
     type ConnectivityCallback = (change: { offline: boolean; source: 'request' | 'realtime' }) => void;
     let connectivityCallback: ConnectivityCallback | null = null;

@@ -38,7 +38,8 @@ import { shouldRunFocusGateResumeCheck } from './app-lifecycle-focus-gate.helper
 import {
   AppLifecycleBreadcrumbsController,
 } from './app-lifecycle-breadcrumb.helpers';
-import { schedulePendingPersistRecovery } from './app-lifecycle-pending-persist.helpers';
+import { PendingPersistRecoveryController } from './app-lifecycle-pending-persist.helpers';
+import { SessionRuntimeResetRegistry } from './session-runtime-reset.service';
 import {
   selectHigherPriorityResumeReason,
   shouldQueueResumeAfterCurrent,
@@ -63,14 +64,20 @@ export class AppLifecycleOrchestratorService {
   private readonly browserEvents = inject(AppLifecycleBrowserEventsCoordinator);
   private readonly injector = inject(Injector);
   private readonly destroyRef = inject(DestroyRef);
-
+  private readonly sessionRuntimeReset = inject(SessionRuntimeResetRegistry);
+  private readonly pendingPersistRecovery = new PendingPersistRecoveryController({
+    hasPendingLocalChanges: () => this.syncCoordinator.hasPendingLocalChanges(),
+    addBreadcrumb: breadcrumb => this.sentryLazyLoader.addBreadcrumb(breadcrumb),
+    flushPendingPersistToCloud: persistReason => this.syncCoordinator.flushPendingPersistToCloud(persistReason),
+    captureException: (error, context) => this.sentryLazyLoader.captureException(error, context),
+    logger: this.logger,
+  });
   private readonly isResumingSignal = signal(false);
   private readonly lastResumeAtSignal = signal<number | null>(null);
   private readonly lastHeavyRecoveryAtSignal = signal<number | null>(null);
   private readonly lastRecoveryMetricsSignal = signal<RecoveryMetricsSnapshot | null>(null);
   private readonly compensationTicketIdSignal = signal<string | null>(null);
   private readonly currentRecoveryTicketSignal = signal<LifecycleRecoveryTicket | null>(null);
-
   private resumePromise: Promise<void> | null = null;
   private activeResumeReason: AppResumeReason | null = null;
   private queuedResumeReason: AppResumeReason | null = null;
@@ -79,8 +86,8 @@ export class AppLifecycleOrchestratorService {
   // 仅用于诊断：会话失败计数永远不会触发 auto-reload（reload 无法修复 no-session 状态）。
   private consecutiveSessionFailures = 0;
   private recoveryCompensationGeneration = 0;
+  private sessionGeneration = 0;
   private destroyed = false;
-
   private hasPendingVersion = false;
   private hasShownResumeVersionPrompt = false;
 
@@ -95,7 +102,13 @@ export class AppLifecycleOrchestratorService {
   }
 
   constructor() {
-    this.destroyRef.onDestroy(() => this.cleanup());
+    const unregisterSessionRuntimeReset = this.sessionRuntimeReset.register(
+      'AppLifecycleOrchestratorService', () => this.resetSessionRuntime(),
+    );
+    this.destroyRef.onDestroy(() => {
+      unregisterSessionRuntimeReset();
+      this.cleanup();
+    });
   }
 
   /** 注册 resume/recovery 监听器；必须早于异步启动服务，且保持幂等与 SSR-safe。 */
@@ -149,11 +162,15 @@ export class AppLifecycleOrchestratorService {
     if (this.resumePromise) {
       if (shouldQueueResumeAfterCurrent(this.activeResumeReason, reason)) {
         this.queuedResumeReason = selectHigherPriorityResumeReason(this.queuedResumeReason, reason);
-        this.queuedResumePromise ??= this.resumePromise
-          .then(() => this.runQueuedResume())
-          .finally(() => {
-            this.queuedResumePromise = null;
-          });
+        if (!this.queuedResumePromise) {
+          const generation = this.sessionGeneration;
+          const queuedResumePromise = this.resumePromise
+            .then(() => this.runQueuedResume(generation))
+            .finally(() => {
+              if (this.queuedResumePromise === queuedResumePromise) this.queuedResumePromise = null;
+            });
+          this.queuedResumePromise = queuedResumePromise;
+        }
         return this.queuedResumePromise;
       }
       return this.resumePromise;
@@ -176,24 +193,17 @@ export class AppLifecycleOrchestratorService {
     } finally {
       if (this.resumePromise === currentResumePromise) {
         this.resumePromise = null;
-      }
-      if (this.activeResumeReason === reason) {
-        this.activeResumeReason = null;
+        if (this.activeResumeReason === reason) this.activeResumeReason = null;
       }
     }
   }
-
-  private async runQueuedResume(): Promise<void> {
-    if (this.destroyed) {
+  private async runQueuedResume(generation: number): Promise<void> {
+    while (!this.destroyed && generation === this.sessionGeneration) {
+      const reason = this.queuedResumeReason;
       this.queuedResumeReason = null;
-      return;
+      if (!reason) return;
+      await this.triggerResume(reason);
     }
-    const reason = this.queuedResumeReason;
-    this.queuedResumeReason = null;
-    if (!reason) {
-      return;
-    }
-    await this.triggerResume(reason);
   }
 
   /**
@@ -218,15 +228,18 @@ export class AppLifecycleOrchestratorService {
         this.executeRecoveryPipeline(reason, runHeavyRecovery, recoveryTicket),
         APP_LIFECYCLE_CONFIG.RESUME_TIMEOUT_MS
       );
+      if (!this.isResumeExecutionCurrent(recoveryTicket)) return;
 
       if (this.handleDeferredPipelineResult(reason, pipelineResult, startAt)) return;
       if (this.handleSessionPipelineFailure(reason, pipelineResult, startAt)) return;
       this.handleSuccessfulResume(reason, recoveryTicket, pipelineResult, startAt);
     } catch (error) {
-      this.handlePipelineException(reason, error, startAt);
+      if (this.isResumeExecutionCurrent(recoveryTicket)) this.handlePipelineException(reason, error, startAt);
     } finally {
-      this.currentRecoveryTicketSignal.set(null);
-      this.isResumingSignal.set(false);
+      if (this.isResumeExecutionCurrent(recoveryTicket)) {
+        this.currentRecoveryTicketSignal.set(null);
+        this.isResumingSignal.set(false);
+      }
     }
   }
 
@@ -545,13 +558,7 @@ export class AppLifecycleOrchestratorService {
   }
 
   private kickPendingPersistRecovery(reason: AppResumeReason): void {
-    schedulePendingPersistRecovery(reason, {
-      hasPendingLocalChanges: () => this.syncCoordinator.hasPendingLocalChanges(),
-      addBreadcrumb: breadcrumb => this.sentryLazyLoader.addBreadcrumb(breadcrumb),
-      flushPendingPersistToCloud: persistReason => this.syncCoordinator.flushPendingPersistToCloud(persistReason),
-      captureException: (error, context) => this.sentryLazyLoader.captureException(error, context),
-      logger: this.logger,
-    });
+    this.pendingPersistRecovery.schedule(reason);
   }
 
   private scheduleRecoveryCompensation(
@@ -767,18 +774,26 @@ export class AppLifecycleOrchestratorService {
     publishRecoveryMetrics(next, this.sentryLazyLoader);
   }
 
-  private cleanup(): void {
-    this.destroyed = true;
+  private resetSessionRuntime(): void {
+    this.sessionGeneration += 1;
     this.queuedResumeReason = null;
     this.queuedResumePromise = null;
     this.resumePromise = null;
     this.activeResumeReason = null;
     this.deferredResume.clear();
+    this.pendingPersistRecovery.reset();
+    this.reloadCoordinator.resetSessionRuntime();
+    this.consecutiveFailures = this.consecutiveSessionFailures = 0;
+    this.lastHeavyRecoveryAtSignal.set(null);
     this.recoveryCompensationGeneration += 1;
     this.currentRecoveryTicketSignal.set(null);
     this.isResumingSignal.set(false);
     this.compensationTicketIdSignal.set(null);
-
+  }
+  private cleanup(): void {
+    this.destroyed = true;
+    this.resetSessionRuntime();
+    this.pendingPersistRecovery.destroy();
     this.browserEvents.cleanup();
   }
 }

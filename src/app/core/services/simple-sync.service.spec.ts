@@ -722,6 +722,18 @@ describe('SimpleSyncService', () => {
     enablePollutionGuard();
   });
 
+  it('会话运行时重置应停止全部 SimpleSync 后台 runtime', () => {
+    const connectivityRecovery = testInjector.get(ConnectivityRecoveryService);
+    const stopConnectivity = vi.spyOn(connectivityRecovery, 'stopRuntime');
+    service.startRuntime();
+
+    testInjector.get(SessionRuntimeResetRegistry).resetAll('owner-change');
+
+    expect(stopConnectivity).toHaveBeenCalledOnce();
+    expect(mockRetryQueueService.stopLoop).toHaveBeenCalledOnce();
+    expect(mockRealtimePolling.teardownRuntime).toHaveBeenCalledOnce();
+  });
+
   it('listProjectHeadsSince 应向探针传递固定上限水位', async () => {
     const listProjectHeadsSince = vi.fn().mockResolvedValue(null);
     Reflect.set(service, 'projectDataService', { listProjectHeadsSince });

@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
+import { TestBed } from '@angular/core/testing';
 import type { AppLifecycleOrchestratorService } from './app-lifecycle-orchestrator.service';
 import { flushResumeWithoutDrainingLongTimers } from './app-lifecycle-orchestrator.test-harness';
+import { SessionRuntimeResetRegistry } from './session-runtime-reset.service';
 
 type SpecMock = ReturnType<typeof vi.fn>;
 
@@ -178,5 +180,67 @@ export function registerAppLifecycleAutoReloadSpecs(context: AppLifecycleAutoRel
       // deferred 应记 success breadcrumb（带 deferred: true），不应记 fail
       expect(findFailBreadcrumbs()).toHaveLength(0);
     });
+
+    it.each(['owner-change', 'clear-local-data'] as const)(
+      '%s reset 应清除旧 pipeline failure 计数',
+      async resetReason => {
+        context.simpleSync().recoverAfterResume.mockRejectedValue(new Error('boom'));
+
+        await context.service().triggerResume('visibility-quick');
+        await flushResumeWithoutDrainingLongTimers();
+        expectNoAutoReload();
+
+        TestBed.inject(SessionRuntimeResetRegistry).resetAll(resetReason);
+        await context.service().triggerResume('visibility-quick');
+        await flushResumeWithoutDrainingLongTimers();
+
+        expectNoAutoReload();
+      },
+    );
+
+    it.each(['owner-change', 'clear-local-data'] as const)(
+      '%s reset 应清除旧 session failure 计数',
+      async resetReason => {
+        context.sessionManager().validateOrRefreshOnResume.mockResolvedValue({
+          ok: false,
+          refreshed: false,
+          deferred: false,
+          reason: 'no-session',
+        });
+
+        await context.service().triggerResume('visibility-quick');
+        TestBed.inject(SessionRuntimeResetRegistry).resetAll(resetReason);
+        await context.service().triggerResume('visibility-quick');
+        await flushResumeWithoutDrainingLongTimers();
+
+        const failCrumbs = findFailBreadcrumbs();
+        expect(failCrumbs).toHaveLength(2);
+        expect(failCrumbs[1]?.data?.['consecutiveSessionFailures']).toBe(1);
+      },
+    );
+
+    it.each(['owner-change', 'clear-local-data'] as const)(
+      '%s reset 应取消旧 auto-reload timer 且允许新会话重新安排',
+      async resetReason => {
+        context.simpleSync().recoverAfterResume.mockRejectedValue(new Error('boom'));
+
+        await context.service().triggerResume('visibility-quick');
+        await context.service().triggerResume('visibility-quick');
+        TestBed.inject(SessionRuntimeResetRegistry).resetAll(resetReason);
+
+        await vi.advanceTimersByTimeAsync(2_000);
+        expect(context.reloadViaForceClearCache).not.toHaveBeenCalled();
+
+        await context.service().triggerResume('visibility-quick');
+        await context.service().triggerResume('visibility-quick');
+        const reloadMessageCalls = context.sentry().captureMessage.mock.calls.filter(
+          ([message]) => message === 'Lifecycle auto reload scheduled',
+        );
+        expect(reloadMessageCalls).toHaveLength(2);
+
+        await vi.advanceTimersByTimeAsync(2_000);
+        expect(context.reloadViaForceClearCache).toHaveBeenCalledTimes(1);
+      },
+    );
   });
 }

@@ -81,6 +81,7 @@ export class SimpleSyncRuntimeController {
   private runtimeStarted = false;
   private syncStateListenersSetup = false;
   private readonly handleOnline = () => {
+    if (!this.runtimeStarted) return;
     this.deps.logger.info('网络恢复');
     this.deps.syncStateService.setOnline(true);
     if (!this.deps.supabase.isOfflineMode()) {
@@ -98,6 +99,7 @@ export class SimpleSyncRuntimeController {
       });
   };
   private readonly handleOffline = () => {
+    if (!this.runtimeStarted) return;
     this.deps.logger.info('网络断开');
     this.deps.syncStateService.setOnline(false);
     this.deps.syncStateService.setOfflineMode(true);

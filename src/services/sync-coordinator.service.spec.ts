@@ -44,6 +44,7 @@ import { ToastService } from './toast.service';
 import { LayoutService } from './layout.service';
 import { LoggerService } from './logger.service';
 import { SentryAlertService } from './sentry-alert.service';
+import { SessionRuntimeResetRegistry } from './session-runtime-reset.service';
 import { SyncModeService } from './sync-mode.service';
 import { PersistSchedulerService } from './persist-scheduler.service';
 import { BlackBoxSyncService } from './black-box-sync.service';
@@ -460,6 +461,7 @@ function buildCoordinatorProviders() {
     { provide: AuthService, useValue: mockAuthService },
     { provide: ToastService, useValue: mockToastService },
     { provide: SentryAlertService, useValue: mockSentryAlertService },
+    SessionRuntimeResetRegistry,
     { provide: LayoutService, useValue: mockLayoutService },
     { provide: LoggerService, useValue: mockLoggerService },
     { provide: SyncModeService, useValue: mockSyncModeService },
@@ -582,6 +584,43 @@ describe('SyncCoordinatorService', () => {
     service.destroy();
 
     expect(mockRetryQueueService.clear).not.toHaveBeenCalled();
+  });
+
+  it('owner A→B→A during autosave should not let the old A completion clear dirty state', async () => {
+    const project = createTestProject({
+      id: 'project-owner-aba',
+      version: 1,
+      pendingSync: true,
+    });
+    mockProjectStateService.projects.set([project]);
+    mockProjectStateService.activeProject.set(project);
+    mockProjectStateService.activeProjectId.set(project.id);
+    mockChangeTrackerService.clearProjectChanges.mockClear();
+    mockChangeTrackerService.clearProjectFieldLocks.mockClear();
+
+    let resolveSave!: (result: { success: boolean; newVersion: number }) => void;
+    mockSyncService.saveProjectSmart.mockImplementationOnce(
+      () => new Promise(resolve => {
+        resolveSave = resolve;
+      }),
+    );
+
+    service.markLocalChanges('content');
+    const flush = service.flushPendingPersistToCloud('owner-aba', { force: true });
+    await vi.waitFor(() => {
+      expect(mockSyncService.saveProjectSmart).toHaveBeenCalledOnce();
+    });
+
+    mockAuthService.currentUserId.mockReturnValue('user-b');
+    injector.get(SessionRuntimeResetRegistry).resetAll('owner-change');
+    mockAuthService.currentUserId.mockReturnValue('user-123');
+    resolveSave({ success: true, newVersion: 9 });
+
+    await expect(flush).resolves.toBe(false);
+    expect(service.hasPendingLocalChanges()).toBe(true);
+    expect(mockProjectStateService.projects()[0]?.version).toBe(1);
+    expect(mockChangeTrackerService.clearProjectFieldLocks).not.toHaveBeenCalled();
+    expect(mockChangeTrackerService.clearProjectChanges).not.toHaveBeenCalled();
   });
 
   it('softDeleteTasksBatch 应将 operationId 转发到任务同步服务', async () => {

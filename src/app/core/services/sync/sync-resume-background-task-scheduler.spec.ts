@@ -4,8 +4,9 @@ import { SyncResumeBackgroundTaskScheduler } from './sync-resume-background-task
 
 describe('SyncResumeBackgroundTaskScheduler', () => {
   afterEach(() => {
-    vi.useRealTimers();
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
+    vi.useRealTimers();
   });
 
   it('keeps retry continuation backoff as a minimum delay even when idle callback fires immediately', () => {
@@ -210,6 +211,41 @@ describe('SyncResumeBackgroundTaskScheduler', () => {
     expect(runProbe).not.toHaveBeenCalled();
   });
 
+  it('cancelAll continues clearing remote probe fallback when retry timeout cleanup fails', () => {
+    const runSlice = vi.fn();
+    const runProbe = vi.fn();
+    const timerCleanupError = new Error('retry timeout cleanup failed');
+    const onTaskError = vi.fn();
+    const scheduler = new SyncResumeBackgroundTaskScheduler({ onTaskError });
+    const queuedTimeouts = new Map<number, () => void>();
+    let nextTimerId = 1;
+    vi.spyOn(globalThis, 'setTimeout').mockImplementation((callback: TimerHandler) => {
+      const timerId = nextTimerId++;
+      queuedTimeouts.set(timerId, callback as () => void);
+      return timerId as unknown as ReturnType<typeof setTimeout>;
+    });
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout').mockImplementation((timerId) => {
+      const numericTimerId = timerId as unknown as number;
+      if (numericTimerId === 1) {
+        throw timerCleanupError;
+      }
+      queuedTimeouts.delete(numericTimerId);
+    });
+
+    scheduler.scheduleRetryContinuation(runSlice, 200);
+    scheduler.scheduleRemoteProbeFallback(runProbe, 200);
+
+    expect(() => scheduler.cancelAll()).not.toThrow();
+    queuedTimeouts.get(1)?.();
+    queuedTimeouts.get(2)?.();
+
+    expect(clearTimeoutSpy).toHaveBeenCalledWith(1);
+    expect(clearTimeoutSpy).toHaveBeenCalledWith(2);
+    expect(runSlice).not.toHaveBeenCalled();
+    expect(runProbe).not.toHaveBeenCalled();
+    expect(onTaskError).toHaveBeenCalledWith('retry-continuation', timerCleanupError);
+  });
+
   it('cancelRemoteProbeFallback preserves queued retry continuation callbacks', () => {
     vi.useFakeTimers();
     const runSlice = vi.fn();
@@ -316,6 +352,21 @@ describe('SyncResumeBackgroundTaskScheduler', () => {
     expect(onTaskError).toHaveBeenCalledWith('remote-probe-fallback', callbackError);
   });
 
+  it('runs the remote probe fallback immediately when timeout scheduling fails', () => {
+    const timerScheduleError = new Error('remote timeout scheduling failed');
+    const runProbe = vi.fn();
+    const onTaskError = vi.fn();
+    const scheduler = new SyncResumeBackgroundTaskScheduler({ onTaskError });
+    vi.spyOn(globalThis, 'setTimeout').mockImplementation(() => {
+      throw timerScheduleError;
+    });
+
+    expect(() => scheduler.scheduleRemoteProbeFallback(runProbe, 200)).not.toThrow();
+
+    expect(runProbe).toHaveBeenCalledOnce();
+    expect(onTaskError).toHaveBeenCalledWith('remote-probe-fallback', timerScheduleError);
+  });
+
   it('clears a remote probe fallback timeout when the handle is 0', () => {
     const runProbe = vi.fn();
     const scheduler = new SyncResumeBackgroundTaskScheduler();
@@ -328,5 +379,28 @@ describe('SyncResumeBackgroundTaskScheduler', () => {
 
     expect(clearTimeoutSpy).toHaveBeenCalledWith(0);
     expect(runProbe).not.toHaveBeenCalled();
+  });
+
+  it('keeps a canceled remote probe fallback stale when timeout cleanup fails', () => {
+    const runProbe = vi.fn();
+    const timerCleanupError = new Error('remote timeout cleanup failed');
+    const onTaskError = vi.fn();
+    const scheduler = new SyncResumeBackgroundTaskScheduler({ onTaskError });
+    let queuedTimeout: (() => void) | null = null;
+    vi.spyOn(globalThis, 'setTimeout').mockImplementation((callback: TimerHandler) => {
+      queuedTimeout = callback as () => void;
+      return 1 as unknown as ReturnType<typeof setTimeout>;
+    });
+    vi.spyOn(globalThis, 'clearTimeout').mockImplementation(() => {
+      throw timerCleanupError;
+    });
+
+    scheduler.scheduleRemoteProbeFallback(runProbe, 200);
+
+    expect(() => scheduler.cancelRemoteProbeFallback()).not.toThrow();
+    queuedTimeout!();
+
+    expect(runProbe).not.toHaveBeenCalled();
+    expect(onTaskError).toHaveBeenCalledWith('remote-probe-fallback', timerCleanupError);
   });
 });
