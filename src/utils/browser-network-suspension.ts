@@ -6,9 +6,7 @@ const BROWSER_NETWORK_SUSPENDED_ERROR_MESSAGE = 'Browser network IO suspended';
 
 let trackingInitialized = false;
 let networkBlockedUntil = 0;
-let visibilityChangeHandler: (() => void) | null = null;
-let pageShowHandler: ((event: PageTransitionEvent) => void) | null = null;
-let onlineHandler: (() => void) | null = null;
+let registeredListenerCleanups: Array<() => void> = [];
 
 function armNetworkResumeGrace(graceMs = NETWORK_VISIBLE_RESUME_GRACE_MS): void {
   networkBlockedUntil = Math.max(networkBlockedUntil, Date.now() + graceMs);
@@ -47,10 +45,6 @@ export function ensureBrowserNetworkSuspensionTracking(): void {
     armNetworkResumeGrace(NETWORK_ONLINE_RESUME_GRACE_MS);
   };
 
-  visibilityChangeHandler = nextVisibilityChangeHandler;
-  pageShowHandler = nextPageShowHandler;
-  onlineHandler = nextOnlineHandler;
-
   try {
     currentDocument.addEventListener('visibilitychange', nextVisibilityChangeHandler);
     registeredCleanups.push(() => {
@@ -67,14 +61,13 @@ export function ensureBrowserNetworkSuspensionTracking(): void {
       currentWindow.removeEventListener('online', nextOnlineHandler);
     });
     trackingInitialized = true;
+    registeredListenerCleanups = registeredCleanups;
   } catch (error) {
     for (const cleanup of registeredCleanups.reverse()) {
       runListenerCleanupBestEffort(cleanup);
     }
 
-    visibilityChangeHandler = null;
-    pageShowHandler = null;
-    onlineHandler = null;
+    registeredListenerCleanups = [];
     trackingInitialized = false;
     throw error;
   }
@@ -102,30 +95,12 @@ export function createBrowserNetworkSuspendedError(): Error {
 }
 
 export function resetBrowserNetworkSuspensionTrackingForTests(): void {
-  if (typeof document !== 'undefined' && visibilityChangeHandler) {
-    const handler = visibilityChangeHandler;
-    runListenerCleanupBestEffort(() => {
-      document.removeEventListener('visibilitychange', handler);
-    });
+  const cleanups = registeredListenerCleanups;
+  registeredListenerCleanups = [];
+  for (const cleanup of cleanups) {
+    runListenerCleanupBestEffort(cleanup);
   }
 
-  if (typeof window !== 'undefined' && pageShowHandler) {
-    const handler = pageShowHandler;
-    runListenerCleanupBestEffort(() => {
-      window.removeEventListener('pageshow', handler as EventListener);
-    });
-  }
-
-  if (typeof window !== 'undefined' && onlineHandler) {
-    const handler = onlineHandler;
-    runListenerCleanupBestEffort(() => {
-      window.removeEventListener('online', handler);
-    });
-  }
-
-  visibilityChangeHandler = null;
-  pageShowHandler = null;
-  onlineHandler = null;
   networkBlockedUntil = 0;
   trackingInitialized = false;
 }
