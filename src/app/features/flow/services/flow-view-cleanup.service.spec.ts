@@ -29,6 +29,10 @@ vi.mock('./flow-task-operations.service', () => ({
   FlowTaskOperationsService: class FlowTaskOperationsService {},
 }));
 
+vi.mock('./flow-batch-delete.service', () => ({
+  FlowBatchDeleteService: class FlowBatchDeleteService {},
+}));
+
 vi.mock('./flow-palette-resize.service', () => ({
   FlowPaletteResizeService: class FlowPaletteResizeService {},
 }));
@@ -53,6 +57,7 @@ describe('FlowViewCleanupService', () => {
   let FlowLinkServiceClass: typeof import('./flow-link.service').FlowLinkService;
   let FlowDragDropServiceClass: typeof import('./flow-drag-drop.service').FlowDragDropService;
   let FlowTaskOperationsServiceClass: typeof import('./flow-task-operations.service').FlowTaskOperationsService;
+  let FlowBatchDeleteServiceClass: typeof import('./flow-batch-delete.service').FlowBatchDeleteService;
   let FlowPaletteResizeServiceClass: typeof import('./flow-palette-resize.service').FlowPaletteResizeService;
   let FlowCommandServiceClass: typeof import('./flow-command.service').FlowCommandService;
   let flowTemplateEventHandlers: import('./flow-template-events').FlowTemplateEventHandlers;
@@ -80,6 +85,7 @@ describe('FlowViewCleanupService', () => {
   const taskOps = {
     dispose: vi.fn(),
   };
+  const batchDelete = { reset: vi.fn() };
   const paletteResize = {
     cancelActiveResize: vi.fn(),
   };
@@ -101,6 +107,7 @@ describe('FlowViewCleanupService', () => {
     ({ FlowLinkService: FlowLinkServiceClass } = await import('./flow-link.service'));
     ({ FlowDragDropService: FlowDragDropServiceClass } = await import('./flow-drag-drop.service'));
     ({ FlowTaskOperationsService: FlowTaskOperationsServiceClass } = await import('./flow-task-operations.service'));
+    ({ FlowBatchDeleteService: FlowBatchDeleteServiceClass } = await import('./flow-batch-delete.service'));
     ({ FlowPaletteResizeService: FlowPaletteResizeServiceClass } = await import('./flow-palette-resize.service'));
     ({ FlowCommandService: FlowCommandServiceClass } = await import('./flow-command.service'));
     ({ flowTemplateEventHandlers } = await import('./flow-template-events'));
@@ -115,12 +122,21 @@ describe('FlowViewCleanupService', () => {
         { provide: FlowLinkServiceClass, useValue: link },
         { provide: FlowDragDropServiceClass, useValue: dragDrop },
         { provide: FlowTaskOperationsServiceClass, useValue: taskOps },
+        { provide: FlowBatchDeleteServiceClass, useValue: batchDelete },
         { provide: FlowPaletteResizeServiceClass, useValue: paletteResize },
         { provide: FlowCommandServiceClass, useValue: flowCommand },
       ],
     });
 
     service = TestBed.inject(FlowViewCleanupServiceClass);
+  });
+
+  it('retires the reusable batch-delete owner during view cleanup', () => {
+    service.performCleanup({
+      pendingTimers: [], pendingRetryRafIds: [], overviewResizeTimer: null, idleInitHandle: null,
+    }, vi.fn());
+
+    expect(batchDelete.reset).toHaveBeenCalledOnce();
   });
 
   afterEach(() => {

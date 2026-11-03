@@ -207,8 +207,8 @@ export class FlowTaskOperationsService {
    * @param explicitIds 用户显式选中的任务 ID 列表
    * @returns 实际删除的任务数量（含级联子任务）
    */
-  deleteTasksBatch(explicitIds: string[]): Promise<number> {
-    return this.taskOps.deleteTasksBatch(explicitIds);
+  deleteTasksBatch(explicitIds: string[], canPublishUi?: () => boolean): Promise<number> {
+    return this.taskOps.deleteTasksBatch(explicitIds, canPublishUi);
   }
   
   /**

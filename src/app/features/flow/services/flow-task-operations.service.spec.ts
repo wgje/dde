@@ -119,10 +119,11 @@ describe('FlowTaskOperationsService', () => {
   });
 
   it('waits for durable batch deletion count', async () => {
-    const deletedCount = await service.deleteTasksBatch(['task-1', 'task-2']);
+    const canPublishUi = vi.fn(() => true);
+    const deletedCount = await service.deleteTasksBatch(['task-1', 'task-2'], canPublishUi);
 
     expect(deletedCount).toBe(2);
-    expect(mockTaskOps.deleteTasksBatch).toHaveBeenCalledWith(['task-1', 'task-2']);
+    expect(mockTaskOps.deleteTasksBatch).toHaveBeenCalledWith(['task-1', 'task-2'], canPublishUi);
   });
 
   it('returns durable attachment update result to callers', async () => {

@@ -17,6 +17,7 @@ import { FlowTouchService } from './flow-touch.service';
 import { FlowLinkService } from './flow-link.service';
 import { FlowDragDropService } from './flow-drag-drop.service';
 import { FlowTaskOperationsService } from './flow-task-operations.service';
+import { FlowBatchDeleteService } from './flow-batch-delete.service';
 import { FlowCommandService } from './flow-command.service';
 import { FlowPaletteResizeService } from './flow-palette-resize.service';
 import { flowTemplateEventHandlers } from './flow-template-events';
@@ -47,6 +48,7 @@ export class FlowViewCleanupService {
   private readonly link = inject(FlowLinkService);
   private readonly dragDrop = inject(FlowDragDropService);
   private readonly taskOps = inject(FlowTaskOperationsService);
+  private readonly batchDelete = inject(FlowBatchDeleteService);
   private readonly flowCommand = inject(FlowCommandService);
   private readonly paletteResize = inject(FlowPaletteResizeService);
 
@@ -134,6 +136,7 @@ export class FlowViewCleanupService {
     this.runCleanupStep(() => this.link.dispose());
     this.runCleanupStep(() => this.dragDrop.dispose());
     this.runCleanupStep(() => this.taskOps.dispose());
+    this.runCleanupStep(() => this.batchDelete.reset());
     this.runCleanupStep(() => this.paletteResize.cancelActiveResize());
   }
 
