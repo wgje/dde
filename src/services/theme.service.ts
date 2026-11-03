@@ -14,6 +14,11 @@ import { createSyncOperationId } from '../utils/sync-operation-id';
 /** 本地颜色模式覆盖的存储键 */
 const LOCAL_COLOR_MODE_KEY = 'nanoflow.colorMode.local';
 
+interface ThemeLoadContext {
+  userId: string;
+  generation: number;
+}
+
 /**
  * 主题服务
  * 从 StoreService 拆分出来，专门管理主题相关逻辑
@@ -66,6 +71,8 @@ export class ThemeService {
   /** 系统偏好媒体查询 */
   private systemPreferenceQuery: MediaQueryList | null = null;
   private systemPreferenceHandler: ((event: MediaQueryListEvent) => void) | null = null;
+  private themeLoadGeneration = 0;
+  private destroyed = false;
   
   constructor() {
     if (isPlatformBrowser(this.platformId)) {
@@ -74,6 +81,8 @@ export class ThemeService {
       this.setupEffects();
     }
     this.destroyRef.onDestroy(() => {
+      this.destroyed = true;
+      this.themeLoadGeneration += 1;
       if (this.systemPreferenceQuery && this.systemPreferenceHandler) {
         this.systemPreferenceQuery.removeEventListener('change', this.systemPreferenceHandler);
         this.systemPreferenceQuery = null;
@@ -138,13 +147,17 @@ export class ThemeService {
   /**
    * 从云端加载主题偏好
    */
-  async loadUserTheme() {
+  async loadUserTheme(): Promise<void> {
+    const generation = ++this.themeLoadGeneration;
     const userId = this.authService.currentUserId();
-    if (!userId) return;
+    if (!userId || this.destroyed) return;
+    const context: ThemeLoadContext = { userId, generation };
 
-    const recoveredPreferences = await this.flushPendingPreferenceSync(userId);
+    const recoveredPreferences = await this.flushPendingPreferenceSync(context);
+    if (!this.isThemeLoadCurrent(context)) return;
     
     const prefs = await this.userPrefsSync.loadUserPreferences(userId);
+    if (!this.isThemeLoadCurrent(context)) return;
     const theme = recoveredPreferences?.theme ?? prefs?.theme;
     if (theme) {
       this.theme.set(theme);
@@ -363,39 +376,53 @@ export class ThemeService {
     }
   }
 
-  private async flushPendingPreferenceSync(userId: string): Promise<{
+  private async flushPendingPreferenceSync(context: ThemeLoadContext): Promise<{
     theme?: ThemeType;
     colorMode?: ColorMode;
   } | null> {
-    const pending = await this.pendingPreferenceOutbox.readPendingPreference(userId);
-    if (!pending) {
+    const pending = await this.pendingPreferenceOutbox.readPendingPreference(context.userId);
+    if (!pending || !this.isThemeLoadCurrent(context)) {
       return null;
     }
 
     try {
-      const actionId = await this.actionQueue.enqueueDurablyForOwner(userId, {
+      if (!this.isThemeLoadCurrent(context)) return null;
+      const actionId = await this.actionQueue.enqueueDurablyForOwner(context.userId, {
         operationId: pending.operationId,
         type: 'update',
         entityType: 'preference',
-        entityId: userId,
+        entityId: context.userId,
         payload: {
-          userId,
-          sourceUserId: userId,
+          userId: context.userId,
+          sourceUserId: context.userId,
           preferences: pending.preferences,
         },
       });
+      if (!this.isThemeLoadCurrent(context)) return null;
 
       if (actionId) {
-        await this.pendingPreferenceOutbox.removePendingPreference(userId);
+        await this.pendingPreferenceOutbox.removePendingPreference(context.userId);
+        if (!this.isThemeLoadCurrent(context)) return null;
       }
     } catch (error) {
-      this.logger.warn('主题 pending 偏好恢复入队失败，保留本地恢复记录', { userId, error });
+      if (!this.isThemeLoadCurrent(context)) return null;
+      this.logger.warn('主题 pending 偏好恢复入队失败，保留本地恢复记录', {
+        userId: context.userId,
+        error,
+      });
     }
 
+    if (!this.isThemeLoadCurrent(context)) return null;
     return {
       theme: pending.preferences.theme,
       colorMode: pending.preferences.colorMode,
     };
+  }
+
+  private isThemeLoadCurrent(context: ThemeLoadContext): boolean {
+    return !this.destroyed
+      && context.generation === this.themeLoadGeneration
+      && this.authService.currentUserId() === context.userId;
   }
   
   /**

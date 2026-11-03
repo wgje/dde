@@ -10,6 +10,14 @@ import { LoggerService } from './logger.service';
 import { ActionQueueService } from './action-queue.service';
 import { PendingPreferenceOutboxService } from './pending-preference-outbox.service';
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(resolver => {
+    resolve = resolver;
+  });
+  return { promise, resolve };
+}
+
 describe('ThemeService', () => {
   const syncService = {
     loadUserPreferences: vi.fn(),
@@ -43,6 +51,8 @@ describe('ThemeService', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.clearAllMocks();
+    syncService.loadUserPreferences.mockReset();
+    syncService.loadUserPreferences.mockResolvedValue(null);
     authService.currentUserId.mockReturnValue(null);
     actionQueue.enqueueDurablyForOwner.mockResolvedValue('queued-preference');
     pendingPreferenceOutbox.savePendingPreference.mockResolvedValue(undefined);
@@ -455,6 +465,167 @@ describe('ThemeService', () => {
     expect(service.theme()).toBe('forest');
     expect(service.colorMode()).toBe('dark');
     expect(pendingPreferenceOutbox.removePendingPreference).not.toHaveBeenCalledWith('user-1');
+  });
+
+  it('pending 偏好读取期间 owner 切换后不得继续入队或写入主题副作用', async () => {
+    authService.currentUserId.mockReturnValue('user-a');
+    const pendingRead = deferred<{
+      userId: string;
+      preferences: { theme: 'forest'; colorMode: 'dark' };
+      operationId: string;
+      updatedAt: string;
+    } | null>();
+    pendingPreferenceOutbox.readPendingPreference.mockReturnValueOnce(pendingRead.promise);
+    const service = createService();
+    const updateTag = vi.spyOn(TestBed.inject(Meta), 'updateTag');
+
+    const loadPromise = service.loadUserTheme();
+    authService.currentUserId.mockReturnValue('user-b');
+    pendingRead.resolve({
+      userId: 'user-a',
+      preferences: { theme: 'forest', colorMode: 'dark' },
+      operationId: 'pending-user-a',
+      updatedAt: '2026-07-14T00:00:00.000Z',
+    });
+    await loadPromise;
+
+    expect(actionQueue.enqueueDurablyForOwner).not.toHaveBeenCalled();
+    expect(syncService.loadUserPreferences).not.toHaveBeenCalled();
+    expect(service.theme()).toBe('default');
+    expect(service.colorMode()).toBe('system');
+    expect(document.documentElement.getAttribute('data-theme')).toBeNull();
+    expect(document.documentElement.getAttribute('data-color-mode')).toBeNull();
+    expect(localStorage.getItem('nanoflow.theme')).toBeNull();
+    expect(updateTag).not.toHaveBeenCalled();
+  });
+
+  it('pending 偏好入队期间 owner 切换后不得删除 A pending 或加载云端主题', async () => {
+    authService.currentUserId.mockReturnValue('user-a');
+    pendingPreferenceOutbox.readPendingPreference.mockResolvedValueOnce({
+      userId: 'user-a',
+      preferences: { theme: 'forest', colorMode: 'dark' },
+      operationId: 'pending-user-a',
+      updatedAt: '2026-07-14T00:00:00.000Z',
+    });
+    const enqueue = deferred<string>();
+    actionQueue.enqueueDurablyForOwner.mockReturnValueOnce(enqueue.promise);
+    const service = createService();
+    const updateTag = vi.spyOn(TestBed.inject(Meta), 'updateTag');
+
+    const loadPromise = service.loadUserTheme();
+    await vi.waitFor(() => expect(actionQueue.enqueueDurablyForOwner).toHaveBeenCalledOnce());
+    authService.currentUserId.mockReturnValue('user-b');
+    enqueue.resolve('queued-user-a');
+    await loadPromise;
+
+    expect(pendingPreferenceOutbox.removePendingPreference).not.toHaveBeenCalled();
+    expect(syncService.loadUserPreferences).not.toHaveBeenCalled();
+    expect(service.theme()).toBe('default');
+    expect(service.colorMode()).toBe('system');
+    expect(localStorage.getItem('nanoflow.theme')).toBeNull();
+    expect(updateTag).not.toHaveBeenCalled();
+  });
+
+  it('云端主题加载期间 owner 切换后不得写 signal DOM localStorage 或 meta', async () => {
+    authService.currentUserId.mockReturnValue('user-a');
+    const cloudLoad = deferred<{
+      theme: 'ocean';
+      colorMode: 'dark';
+      layoutDirection: 'ltr';
+      floatingWindowPref: 'auto';
+    } | null>();
+    syncService.loadUserPreferences.mockReturnValueOnce(cloudLoad.promise);
+    const service = createService();
+    const updateTag = vi.spyOn(TestBed.inject(Meta), 'updateTag');
+
+    const loadPromise = service.loadUserTheme();
+    await vi.waitFor(() => expect(syncService.loadUserPreferences).toHaveBeenCalledWith('user-a'));
+    authService.currentUserId.mockReturnValue('user-b');
+    cloudLoad.resolve({
+      theme: 'ocean',
+      colorMode: 'dark',
+      layoutDirection: 'ltr',
+      floatingWindowPref: 'auto',
+    });
+    await loadPromise;
+
+    expect(service.theme()).toBe('default');
+    expect(service.colorMode()).toBe('system');
+    expect(document.documentElement.getAttribute('data-theme')).toBeNull();
+    expect(document.documentElement.getAttribute('data-color-mode')).toBeNull();
+    expect(localStorage.getItem('nanoflow.theme')).toBeNull();
+    expect(updateTag).not.toHaveBeenCalled();
+  });
+
+  it('同 owner 的新 load 应使旧 load stale，旧结果不得覆盖新主题', async () => {
+    authService.currentUserId.mockReturnValue('user-a');
+    const oldCloudLoad = deferred<{
+      theme: 'ocean';
+      colorMode: 'light';
+      layoutDirection: 'ltr';
+      floatingWindowPref: 'auto';
+    } | null>();
+    syncService.loadUserPreferences
+      .mockReturnValueOnce(oldCloudLoad.promise)
+      .mockResolvedValueOnce({
+        theme: 'forest',
+        colorMode: 'dark',
+        layoutDirection: 'ltr',
+        floatingWindowPref: 'auto',
+      });
+    const service = createService();
+
+    const oldLoadPromise = service.loadUserTheme();
+    await vi.waitFor(() => expect(syncService.loadUserPreferences).toHaveBeenCalledTimes(1));
+    await service.loadUserTheme();
+
+    expect(service.theme()).toBe('forest');
+    expect(service.colorMode()).toBe('dark');
+
+    oldCloudLoad.resolve({
+      theme: 'ocean',
+      colorMode: 'light',
+      layoutDirection: 'ltr',
+      floatingWindowPref: 'auto',
+    });
+    await oldLoadPromise;
+
+    expect(service.theme()).toBe('forest');
+    expect(service.colorMode()).toBe('dark');
+    expect(document.documentElement.getAttribute('data-theme')).toBe('forest');
+    expect(document.documentElement.getAttribute('data-color-mode')).toBe('dark');
+    expect(localStorage.getItem('nanoflow.theme')).toBe('forest');
+  });
+
+  it('destroy 后迟到的云端主题结果不得产生任何副作用', async () => {
+    authService.currentUserId.mockReturnValue('user-a');
+    const cloudLoad = deferred<{
+      theme: 'ocean';
+      colorMode: 'dark';
+      layoutDirection: 'ltr';
+      floatingWindowPref: 'auto';
+    } | null>();
+    syncService.loadUserPreferences.mockReturnValueOnce(cloudLoad.promise);
+    const service = createService();
+    const updateTag = vi.spyOn(TestBed.inject(Meta), 'updateTag');
+
+    const loadPromise = service.loadUserTheme();
+    await vi.waitFor(() => expect(syncService.loadUserPreferences).toHaveBeenCalledOnce());
+    TestBed.resetTestingModule();
+    cloudLoad.resolve({
+      theme: 'ocean',
+      colorMode: 'dark',
+      layoutDirection: 'ltr',
+      floatingWindowPref: 'auto',
+    });
+    await loadPromise;
+
+    expect(service.theme()).toBe('default');
+    expect(service.colorMode()).toBe('system');
+    expect(document.documentElement.getAttribute('data-theme')).toBeNull();
+    expect(document.documentElement.getAttribute('data-color-mode')).toBeNull();
+    expect(localStorage.getItem('nanoflow.theme')).toBeNull();
+    expect(updateTag).not.toHaveBeenCalled();
   });
 
   it('setTheme 应更新 data-theme 并同步 theme-color 为当前主题背景色', async () => {
