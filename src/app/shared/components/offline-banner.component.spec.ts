@@ -143,4 +143,75 @@ describe('OfflineBannerComponent', () => {
 
     expect(clearTimeoutSpy).toHaveBeenCalledWith(0);
   });
+
+  it('keeps the indicator visible during the recovery fade window and hides when the timer fires', () => {
+    vi.useFakeTimers();
+    networkOnline.set(false);
+    fixture.detectChanges();
+    expect(component.showIndicator()).toBe(true);
+
+    networkOnline.set(true);
+    fixture.detectChanges();
+    expect(component.showIndicator()).toBe(true);
+
+    vi.advanceTimersByTime(2999);
+    expect(component.showIndicator()).toBe(true);
+
+    vi.advanceTimersByTime(1);
+    expect(component.showIndicator()).toBe(false);
+  });
+
+  it('keeps the indicator visible after service-down recovery until the fade timer fires', () => {
+    vi.useFakeTimers();
+    syncState.update(state => ({ ...state, offlineMode: true, isOnline: true }));
+    fixture.detectChanges();
+    expect(component.showIndicator()).toBe(true);
+
+    syncState.update(state => ({ ...state, offlineMode: false, isOnline: true }));
+    fixture.detectChanges();
+    expect(component.showIndicator()).toBe(true);
+
+    vi.advanceTimersByTime(2999);
+    expect(component.showIndicator()).toBe(true);
+
+    vi.advanceTimersByTime(1);
+    expect(component.showIndicator()).toBe(false);
+  });
+
+  it('cancels the pending fade when the user becomes offline or frozen again before expiry', () => {
+    vi.useFakeTimers();
+    networkOnline.set(false);
+    fixture.detectChanges();
+    networkOnline.set(true);
+    fixture.detectChanges();
+
+    networkOnline.set(false);
+    fixture.detectChanges();
+    expect(component.showIndicator()).toBe(true);
+
+    vi.advanceTimersByTime(4000);
+    expect(component.showIndicator()).toBe(true);
+  });
+
+  it('does not accumulate fade timers across repeated recovery', () => {
+    vi.useFakeTimers();
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+
+    networkOnline.set(false);
+    fixture.detectChanges();
+    networkOnline.set(true);
+    fixture.detectChanges();
+    networkOnline.set(false);
+    fixture.detectChanges();
+    networkOnline.set(true);
+    fixture.detectChanges();
+
+    const pendingTimers = setTimeoutSpy.mock.calls.filter(([, delay]) => delay === 3000);
+    expect(pendingTimers.length).toBe(2);
+
+    vi.advanceTimersByTime(3000);
+    expect(component.showIndicator()).toBe(false);
+    vi.advanceTimersByTime(1000);
+    expect(component.showIndicator()).toBe(false);
+  });
 });

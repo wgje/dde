@@ -136,7 +136,8 @@ export class OfflineBannerComponent {
       }
 
       // 根据状态决定是否显示指示器
-      const shouldShow = !isOnline || offlineMode || queueFrozen;
+      const recovering = this.fadeOutTimer !== null;
+      const shouldShow = !isOnline || offlineMode || queueFrozen || recovering;
       this.showIndicator.set(shouldShow);
       
       // 更新状态
