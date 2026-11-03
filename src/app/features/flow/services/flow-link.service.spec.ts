@@ -647,6 +647,145 @@ describe('FlowLinkService', () => {
     });
   });
 
+  it('桌面端项目切换应立即退役旧项目连接 UI，同项目重复发布应保留', () => {
+    uiStateMock.isMobile.set(false);
+    TestBed.flushEffects();
+    service.toggleLinkMode();
+    service.linkSourceTask.set({ id: 'source-a', title: 'Source A' } as any);
+    service.showLinkTypeDialog('source-a', 'target-a', 120, 200);
+    service.openConnectionEditor('source-a', 'target-a', 'A description', 120, 220, 'A title', {
+      isCrossTree: true,
+      mode: 'edit',
+    });
+
+    mockProjectState.activeProjectId.set('project-1');
+    expect(service.isLinkMode()).toBe(true);
+    expect(service.linkTypeDialog()).not.toBeNull();
+    expect(service.connectionEditorData()).not.toBeNull();
+
+    mockProjectState.activeProjectId.set('project-2');
+    expect(service.isLinkMode()).toBe(false);
+    expect(service.linkSourceTask()).toBeNull();
+    expect(service.linkTypeDialog()).toBeNull();
+    expect(service.connectionEditorData()).toBeNull();
+  });
+
+  it('旧项目延迟对话框完成不应清空新项目对话框', async () => {
+    uiStateMock.isMobile.set(false);
+    TestBed.flushEffects();
+    let resolveAdd!: (saved: boolean) => void;
+    mockTaskOps.connectionAdapter.addCrossTreeConnection.mockReturnValueOnce(
+      new Promise<boolean>(resolve => { resolveAdd = resolve; }),
+    );
+    service.showLinkTypeDialog('source-a', 'target-a', 120, 200);
+    const pendingA = service.confirmCrossTreeLink();
+
+    mockProjectState.activeProjectId.set('project-2');
+    service.showLinkTypeDialog('source-b', 'target-b', 220, 300);
+    resolveAdd(true);
+
+    await expect(pendingA).resolves.toBe(true);
+    expect(service.linkTypeDialog()).toMatchObject({ sourceId: 'source-b', targetId: 'target-b' });
+  });
+
+  it('旧项目延迟建链完成不应清空新项目连接模式', async () => {
+    uiStateMock.isMobile.set(false);
+    TestBed.flushEffects();
+    const sourceA = { id: 'source-a', title: 'Source A', stage: 1 } as any;
+    const targetA = { id: 'target-a', title: 'Target A', stage: 1 } as any;
+    const sourceB = { id: 'source-b', title: 'Source B', stage: 1 } as any;
+    mockProjectState.getTask.mockImplementation((id: string) => id === targetA.id ? targetA : null);
+    let resolveAdd!: (saved: boolean) => void;
+    mockTaskOps.connectionAdapter.addCrossTreeConnection.mockReturnValueOnce(
+      new Promise<boolean>(resolve => { resolveAdd = resolve; }),
+    );
+    service.isLinkMode.set(true);
+    service.linkSourceTask.set(sourceA);
+    const pendingA = service.handleLinkModeClick(targetA.id);
+
+    mockProjectState.activeProjectId.set('project-2');
+    service.toggleLinkMode();
+    service.linkSourceTask.set(sourceB);
+    resolveAdd(true);
+
+    await expect(pendingA).resolves.toBe(true);
+    expect(service.isLinkMode()).toBe(true);
+    expect(service.linkSourceTask()).toBe(sourceB);
+  });
+
+  it('目标待分配任务移动期间切换项目时，连接模式不得在新项目启动第二次建链', async () => {
+    uiStateMock.isMobile.set(false);
+    TestBed.flushEffects();
+    const source = { id: 'source-a', title: 'Source A', stage: 1 } as any;
+    const target = { id: 'target-a', title: 'Target A', stage: null } as any;
+    mockProjectState.getTask.mockImplementation((id: string) => id === target.id ? target : null);
+    let resolveMove!: (result: { ok: boolean }) => void;
+    mockTaskOps.moveTaskToStage.mockReturnValueOnce(
+      new Promise(resolve => { resolveMove = resolve; }),
+    );
+    service.isLinkMode.set(true);
+    service.linkSourceTask.set(source);
+
+    const pending = service.handleLinkModeClick(target.id);
+    mockProjectState.activeProjectId.set('project-2');
+    resolveMove({ ok: true });
+
+    await expect(pending).resolves.toBe(false);
+    expect(mockTaskOps.connectionAdapter.addCrossTreeConnection).not.toHaveBeenCalled();
+  });
+
+  it('跨树对话框的目标任务移动期间切换项目时不得在新项目启动建链', async () => {
+    uiStateMock.isMobile.set(false);
+    TestBed.flushEffects();
+    const source = { id: 'source-a', title: 'Source A', stage: 1 } as any;
+    const target = { id: 'target-a', title: 'Target A', stage: null } as any;
+    mockProjectState.getTask.mockImplementation((id: string) => id === source.id ? source : id === target.id ? target : null);
+    let resolveMove!: (result: { ok: boolean }) => void;
+    mockTaskOps.moveTaskToStage.mockReturnValueOnce(
+      new Promise(resolve => { resolveMove = resolve; }),
+    );
+    service.showLinkTypeDialog(source.id, target.id, 120, 200);
+
+    const pending = service.confirmCrossTreeLink();
+    mockProjectState.activeProjectId.set('project-2');
+    resolveMove({ ok: true });
+
+    await expect(pending).resolves.toBe(false);
+    expect(mockTaskOps.connectionAdapter.addCrossTreeConnection).not.toHaveBeenCalled();
+  });
+
+  it('项目切换后首个同键保存应独立执行并更新新编辑器', async () => {
+    uiStateMock.isMobile.set(false);
+    TestBed.flushEffects();
+    let resolveA!: (saved: boolean) => void;
+    let resolveB!: (saved: boolean) => void;
+    mockTaskOps.connectionAdapter.updateConnectionContent
+      .mockReturnValueOnce(new Promise<boolean>(resolve => { resolveA = resolve; }))
+      .mockReturnValueOnce(new Promise<boolean>(resolve => { resolveB = resolve; }));
+    service.openConnectionEditor('source-task', 'target-task', 'A description', 120, 220, 'A title');
+    const pendingA = service.saveConnectionContent('source-task', 'target-task', 'Saved A', 'Saved A description');
+
+    mockProjectState.activeProjectId.set('project-2');
+    service.openConnectionEditor('source-task', 'target-task', 'B description', 220, 320, 'B title');
+    const pendingB = service.saveConnectionContent('source-task', 'target-task', 'Saved B', 'Saved B description');
+
+    expect(mockTaskOps.connectionAdapter.updateConnectionContent).toHaveBeenCalledTimes(2);
+    resolveB(true);
+    await expect(pendingB).resolves.toBe(true);
+    resolveA(true);
+    await expect(pendingA).resolves.toBe(true);
+    expect(service.connectionEditorData()).toMatchObject({ title: 'Saved B', description: 'Saved B description' });
+  });
+
+  it('项目切换后到达的旧编辑器保存不应启动新项目写入', async () => {
+    uiStateMock.isMobile.set(false);
+    TestBed.flushEffects();
+    service.openConnectionEditor('source-a', 'target-a', 'A description', 120, 220, 'A title');
+    mockProjectState.activeProjectId.set('project-2');
+    await expect(service.saveConnectionContent('source-a', 'target-a', 'Late A', 'Late A description')).resolves.toBe(false);
+    expect(mockTaskOps.connectionAdapter.updateConnectionContent).not.toHaveBeenCalled();
+  });
+
   it('dispose 应清空 root 单例上的临时连接 UI 状态，避免重建 Flow 视图时复用旧浮层', () => {
     service.toggleLinkMode();
     service.linkSourceTask.set({ id: 'source-task', title: '源任务' } as any);

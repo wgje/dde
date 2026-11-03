@@ -1,4 +1,4 @@
-import { Injectable, Injector, inject, signal, NgZone, DestroyRef, effect } from '@angular/core';
+import { computed, DestroyRef, effect, inject, Injectable, Injector, linkedSignal, NgZone, signal, untracked } from '@angular/core';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
 import { LoggerService } from '../../../../services/logger.service';
@@ -33,6 +33,8 @@ interface OpenConnectionEditorOptions {
   mode: ConnectionEditorMode;
 }
 
+type TransientUiOwner = { projectId: string | null; generation: number };
+
 /**
  * FlowLinkService - 连接线管理服务
  * 
@@ -61,6 +63,15 @@ export class FlowLinkService {
   private readonly relinkService = inject(FlowLinkRelinkService);
   private readonly zone = inject(NgZone);
   private readonly destroyRef = inject(DestroyRef);
+  private readonly desktopProjectId = computed(() => this.uiState.isMobile() ? undefined : this.projectState.activeProjectId());
+  private transientUiProjectId = this.projectState.activeProjectId();
+  private transientUiGeneration = 0;
+  private projectLinkedSignal<T>(initialValue: T) {
+    return linkedSignal<string | null | undefined, T>({
+      source: this.desktopProjectId,
+      computation: (projectId, previous) => projectId === undefined || previous?.source === undefined ? previous?.value ?? initialValue : initialValue,
+    });
+  }
 
   private get taskOps(): TaskOperationAdapterService {
     return this.injector.get(TaskOperationAdapterService);
@@ -69,10 +80,10 @@ export class FlowLinkService {
   // ========== 连接模式状态 ==========
   
   /** 是否处于连接模式 */
-  readonly isLinkMode = signal(false);
+  readonly isLinkMode = this.projectLinkedSignal(false);
   
   /** 连接模式下选中的源任务 */
-  readonly linkSourceTask = signal<Task | null>(null);
+  readonly linkSourceTask = this.projectLinkedSignal<Task | null>(null);
 
   private readonly hintOnlyUiEffect = effect(() => {
     if (!this.isHintOnlyStartupReadOnly()) {
@@ -112,15 +123,15 @@ export class FlowLinkService {
   // ========== 连接类型对话框状态 ==========
   
   /** 连接类型选择对话框数据 */
-  readonly linkTypeDialog = signal<LinkTypeDialogData | null>(null);
+  readonly linkTypeDialog = this.projectLinkedSignal<LinkTypeDialogData | null>(null);
   
   // ========== 联系块编辑器状态 ==========
   
   /** 联系块编辑器数据 */
-  readonly connectionEditorData = signal<ConnectionEditorData | null>(null);
+  readonly connectionEditorData = this.projectLinkedSignal<ConnectionEditorData | null>(null);
   
   /** 联系块编辑器位置 */
-  readonly connectionEditorPos = signal<PanelPosition>({ x: 0, y: 0 });
+  readonly connectionEditorPos = this.projectLinkedSignal<PanelPosition>({ x: 0, y: 0 });
   
   // ========== 移动端连接线删除提示 ==========
   
@@ -156,14 +167,18 @@ export class FlowLinkService {
     detachTask: taskId => this.taskOps.detachTask(taskId),
     logger: this.logger,
     isDestroyed: () => this.isDestroyed,
+    captureOperationOwner: () => this.captureTransientUiOwner(),
+    isOperationOwnerCurrent: owner => this.isTransientUiOwnerCurrent(owner),
   });
   
   // ========== 销毁标志 ==========
   private isDestroyed = false;
+  private readonly transientUiOwnerEffect = effect(() => { this.projectState.activeProjectId(); untracked(() => this.syncTransientUiOwner()); });
   
   // ========== 连接模式方法 ==========
 
   private guardHintOnlyLinkMutation(actionLabel: string): boolean {
+    this.syncTransientUiOwner();
     if (!this.taskOps.isHintOnlyStartupReadOnly()) {
       return false;
     }
@@ -198,6 +213,7 @@ export class FlowLinkService {
    * @returns 是否已创建连接
    */
   async handleLinkModeClick(taskId: string): Promise<boolean> {
+    const owner = this.captureTransientUiOwner();
     const task = this.projectState.getTask(taskId);
     if (!task) return false;
 
@@ -230,19 +246,18 @@ export class FlowLinkService {
         const inferredStage = source.stage ?? 1;
         const result = await this.taskOps.moveTaskToStage(taskId, inferredStage, undefined, null);
         if (!result.ok) {
-          this.toast.error('创建关联失败', result.error?.message || '未知错误');
-          this.linkSourceTask.set(null);
-          this.isLinkMode.set(false);
+          this.commitTransientUi(owner, () => { this.toast.error('创建关联失败', result.error?.message || '未知错误'); this.cancelLinkMode(); });
           return false;
         }
+        if (!this.isTransientUiOwnerCurrent(owner)) return false;
       }
       const saved = await this.taskOps.connectionAdapter.addCrossTreeConnection(source.id, taskId);
+      if (!this.isTransientUiOwnerCurrent(owner)) return saved;
       if (!saved) {
         this.toast.error('创建关联失败', '关联变更未能写入本地队列');
         return false;
       }
-      this.linkSourceTask.set(null);
-      this.isLinkMode.set(false);
+      this.cancelLinkMode();
       return true;
     }
     
@@ -290,6 +305,7 @@ export class FlowLinkService {
   async confirmParentChildLink(): Promise<boolean> {
     const dialog = this.linkTypeDialog();
     if (!dialog) return false;
+    const owner = this.captureTransientUiOwner();
 
     if (this.guardHintOnlyLinkMutation('创建连接')) {
       return false;
@@ -317,11 +333,10 @@ export class FlowLinkService {
     if (parentStage === null && dialog.targetTask?.stage === null) {
       const result = await this.taskOps.moveTaskToStage(dialog.targetId, null, undefined, dialog.sourceId);
       if (!result.ok) {
-        this.toast.error('连接失败', result.error?.message || '未知错误');
-        this.linkTypeDialog.set(null);
+        this.commitTransientUi(owner, () => { this.toast.error('连接失败', result.error?.message || '未知错误'); this.linkTypeDialog.set(null); });
         return false;
       }
-      this.linkTypeDialog.set(null);
+      this.commitTransientUi(owner, () => this.linkTypeDialog.set(null));
       return true;
     }
 
@@ -329,11 +344,10 @@ export class FlowLinkService {
 
     const result = await this.taskOps.moveTaskToStage(dialog.targetId, nextStage, undefined, dialog.sourceId);
     if (!result.ok) {
-      this.toast.error('连接失败', result.error?.message || '未知错误');
-      this.linkTypeDialog.set(null);
+      this.commitTransientUi(owner, () => { this.toast.error('连接失败', result.error?.message || '未知错误'); this.linkTypeDialog.set(null); });
       return false;
     }
-    this.linkTypeDialog.set(null);
+    this.commitTransientUi(owner, () => this.linkTypeDialog.set(null));
     return true;
   }
   
@@ -343,6 +357,7 @@ export class FlowLinkService {
   async confirmCrossTreeLink(): Promise<boolean> {
     const dialog = this.linkTypeDialog();
     if (!dialog) return false;
+    const owner = this.captureTransientUiOwner();
     if (this.guardHintOnlyLinkMutation('创建关联')) {
       return false;
     }
@@ -357,13 +372,14 @@ export class FlowLinkService {
       const inferredStage = dialog.sourceTask?.stage ?? 1;
       const result = await this.taskOps.moveTaskToStage(dialog.targetId, inferredStage, undefined, null);
       if (!result.ok) {
-        this.toast.error('创建关联失败', result.error?.message || '未知错误');
-        this.linkTypeDialog.set(null);
+        this.commitTransientUi(owner, () => { this.toast.error('创建关联失败', result.error?.message || '未知错误'); this.linkTypeDialog.set(null); });
         return false;
       }
+      if (!this.isTransientUiOwnerCurrent(owner)) return false;
     }
 
     const saved = await this.taskOps.connectionAdapter.addCrossTreeConnection(dialog.sourceId, dialog.targetId);
+    if (!this.isTransientUiOwnerCurrent(owner)) return saved;
     if (!saved) {
       this.toast.error('创建关联失败', '关联变更未能写入本地队列');
       return false;
@@ -396,6 +412,7 @@ export class FlowLinkService {
     x: number,
     y: number
   ): Promise<LinkGestureResult> {
+    const owner = this.captureTransientUiOwner();
     const childTask = this.projectState.getTask(targetId);
     const sourceTask = this.projectState.getTask(sourceId);
 
@@ -407,9 +424,9 @@ export class FlowLinkService {
       sourceTask,
       childTask,
       logGesture: (source, child) => this.logLinkGesture(sourceId, targetId, source, child),
-      warnCannotSelfConnect: () => this.toast.warning('无法连接', '节点不能连接到自身'),
+      warnCannotSelfConnect: () => this.commitTransientUi(owner, () => this.toast.warning('无法连接', '节点不能连接到自身')),
       warnInvalidUnassignedParent: () => {
-        this.toast.warning('无法连接', '待分配块无法成为任务块的父节点');
+        this.commitTransientUi(owner, () => this.toast.warning('无法连接', '待分配块无法成为任务块的父节点'));
       },
       guardMutation: action => this.guardHintOnlyLinkMutation(action),
       handleTaskToUnassignedLink: child => {
@@ -418,10 +435,10 @@ export class FlowLinkService {
       },
       moveTaskToStage: (taskId, stage, parentId) =>
         this.taskOps.moveTaskToStage(taskId, stage, undefined, parentId),
-      toastError: (title, message) => this.toast.error(title, message),
-      toastSuccess: (title, message) => this.toast.success(title, message),
+      toastError: (title, message) => this.commitTransientUi(owner, () => this.toast.error(title, message)),
+      toastSuccess: (title, message) => this.commitTransientUi(owner, () => this.toast.success(title, message)),
       addCrossTreeConnection: () => this.taskOps.connectionAdapter.addCrossTreeConnection(sourceId, targetId),
-      showLinkTypeDialog: () => this.showLinkTypeDialog(sourceId, targetId, x, y),
+      showLinkTypeDialog: () => this.commitTransientUi(owner, () => this.showLinkTypeDialog(sourceId, targetId, x, y)),
     });
   }
 
@@ -448,6 +465,7 @@ export class FlowLinkService {
       mode: 'preview',
     }
   ): void {
+    this.syncTransientUiOwner();
     this.connectionEditor.open(
       sourceId,
       targetId,
@@ -496,6 +514,9 @@ export class FlowLinkService {
    * @param description 描述（悬停显示）
    */
   saveConnectionContent(sourceId: string, targetId: string, title: string, description: string): Promise<boolean> {
+    this.syncTransientUiOwner();
+    const current = this.connectionEditorData();
+    if (!current || current.sourceId !== sourceId || current.targetId !== targetId) return Promise.resolve(false);
     return this.connectionEditor.saveContent(sourceId, targetId, title, description);
   }
   
@@ -722,10 +743,28 @@ export class FlowLinkService {
   
   // ========== 私有方法 ==========
 
+  private captureTransientUiOwner(): TransientUiOwner {
+    this.syncTransientUiOwner(); return { projectId: this.transientUiProjectId, generation: this.transientUiGeneration };
+  }
+
+  private isTransientUiOwnerCurrent(owner: TransientUiOwner): boolean {
+    this.syncTransientUiOwner(); return owner.projectId === this.transientUiProjectId && owner.generation === this.transientUiGeneration;
+  }
+
+  private syncTransientUiOwner(): void {
+    const projectId = this.projectState.activeProjectId();
+    if (projectId === this.transientUiProjectId) return;
+    this.transientUiProjectId = projectId;
+    this.transientUiGeneration++;
+    if (!this.uiState.isMobile()) this.resetProjectTransientUiState();
+  }
+
+  private commitTransientUi(owner: TransientUiOwner, commit: () => void): void { if (this.isTransientUiOwnerCurrent(owner)) commit(); }
+
+  private resetProjectTransientUiState(): void { this.cancelLinkMode(); this.linkTypeDialog.set(null); this.connectionEditor.dispose(); }
+
   private resetTransientUiState(): void {
-    this.cancelLinkMode();
-    this.linkTypeDialog.set(null);
-    this.connectionEditor.dispose();
+    this.resetProjectTransientUiState();
     this.transientUi.clearAll();
   }
   
