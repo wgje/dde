@@ -69,6 +69,47 @@ describe('timeout — withTimeout', () => {
     await assertion;
   });
 
+  it('已 abort 的 signal 立即以超时消息拒绝且不等长超时', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const promise = withTimeout(
+      new Promise<never>(() => undefined),
+      { timeout: 1000, timeoutMessage: 'pre-aborted', signal: controller.signal },
+    );
+    let rejectionError: unknown;
+    promise.catch((error: unknown) => { rejectionError = error; });
+    await Promise.resolve();
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(rejectionError).toBeInstanceOf(Error);
+    expect((rejectionError as Error).message).toBe('pre-aborted');
+  });
+
+  it('启动后 abort 时立即拒绝并清理外部监听器', async () => {
+    const controller = new AbortController();
+    const removeSpy = vi.spyOn(controller.signal, 'removeEventListener');
+    const promise = withTimeout(
+      new Promise<never>(() => undefined),
+      { timeout: 1000, timeoutMessage: 'aborted', signal: controller.signal },
+    );
+    const rejection = expect(promise).rejects.toThrow('aborted');
+    setTimeout(() => controller.abort(), 10);
+    await vi.advanceTimersByTimeAsync(10);
+    await rejection;
+    expect(vi.getTimerCount()).toBe(0);
+    expect(removeSpy).toHaveBeenCalledWith('abort', expect.any(Function));
+  });
+
+  it('正常 resolve 后清理定时器和外部监听器，晚到 abort 无副作用', async () => {
+    const controller = new AbortController();
+    const removeSpy = vi.spyOn(controller.signal, 'removeEventListener');
+    await withTimeout(Promise.resolve('ok'), { timeout: 1000, signal: controller.signal });
+    expect(vi.getTimerCount()).toBe(0);
+    expect(removeSpy).toHaveBeenCalledWith('abort', expect.any(Function));
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(2000);
+  });
+
   it('underlying Promise 抛错时直接透传错误', async () => {
     const err = new Error('inner-failure');
     await expect(withTimeout(Promise.reject(err), { timeout: 1000 })).rejects.toBe(err);

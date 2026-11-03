@@ -106,28 +106,32 @@ export async function withTimeout<T>(
   // 创建 AbortController 用于超时
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-  
+  let rejectTimeout!: (error: Error) => void;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    rejectTimeout = reject;
+  });
+  const onAbort = () => rejectTimeout(new Error(timeoutMessage));
+  controller.signal.addEventListener('abort', onAbort, { once: true });
+
   // 如果提供了外部信号，链接它
+  let externalAbortListener: (() => void) | undefined;
   if (options.signal) {
-    if (options.signal.aborted) {
-      controller.abort();
-    } else {
-      options.signal.addEventListener('abort', () => controller.abort(), { once: true });
+    if (!options.signal.aborted) {
+      externalAbortListener = () => controller.abort();
+      options.signal.addEventListener('abort', externalAbortListener, { once: true });
     }
   }
-  
+
   try {
-    const result = await Promise.race([
-      promise,
-      new Promise<never>((_, reject) => {
-        controller.signal.addEventListener('abort', () => {
-          reject(new Error(timeoutMessage));
-        });
-      })
-    ]);
-    return result;
+    const race = Promise.race([promise, timeoutPromise]);
+    if (options.signal?.aborted) controller.abort();
+    return await race;
   } finally {
     clearTimeout(timeoutId);
+    if (options.signal && externalAbortListener) {
+      options.signal.removeEventListener('abort', externalAbortListener);
+    }
+    controller.signal.removeEventListener('abort', onAbort);
   }
 }
 
