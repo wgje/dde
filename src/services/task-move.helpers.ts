@@ -278,6 +278,18 @@ export function replaceChildSubtreeInProject(
     sourceTaskId: input.sourceTaskId,
     specificChildId: input.specificChildId,
   });
+  if (input.specificChildId && childrenToDetach.length === 0) {
+    input.setResult(failure(
+      ErrorCodes.VALIDATION_ERROR,
+      '待替换子任务已变化，请刷新后重试',
+      {
+        sourceTaskId: input.sourceTaskId,
+        specificChildId: input.specificChildId,
+        targetUnassignedId: input.targetUnassignedId,
+      },
+    ));
+    return input.project;
+  }
 
   input.assignSubtreeToStage(
     input.targetUnassignedId,

@@ -4,6 +4,7 @@ import type { Project, Task } from '../models';
 import {
   assignUnassignedSubtreeInProject,
   assignUnassignedToTaskInProject,
+  replaceChildSubtreeInProject,
   resolveAssignedMoveParentId,
   selectReplacementChildrenToDetach,
   validateUnassignedStageParent,
@@ -248,5 +249,54 @@ describe('assignUnassignedToTaskInProject', () => {
     expect(fixSubtreeRanks).toHaveBeenCalledWith('target', expect.any(Array));
     expect(rebalance).toHaveBeenCalledTimes(1);
     expect(setResult).not.toHaveBeenCalled();
+  });
+});
+
+describe('replaceChildSubtreeInProject', () => {
+  it('fails atomically when the requested child is stale or no longer belongs to the source task', () => {
+    const assignSubtreeToStage = vi.fn();
+    const detachChildrenAsUnassigned = vi.fn();
+    const rebalance = vi.fn((project: Project) => project);
+    const setResult = vi.fn();
+    const project = createProject({
+      tasks: [
+        createTask({ id: 'source', stage: 1, rank: 1000 }),
+        createTask({ id: 'current-child', stage: 2, parentId: 'source', rank: 2000 }),
+        createTask({ id: 'replacement', stage: null, parentId: null, rank: 0 }),
+      ],
+    });
+
+    const result = replaceChildSubtreeInProject({
+      applyRefusalStrategy: vi.fn().mockReturnValue({ ok: true, rank: 1500 }),
+      assignSubtreeToStage,
+      collectSubtreeIds: vi.fn().mockReturnValue(new Set(['replacement'])),
+      computeInsertRank: vi.fn().mockReturnValue(1500),
+      detachChildrenAsUnassigned,
+      fixSubtreeRanks: vi.fn(),
+      project,
+      rebalance,
+      setResult,
+      sourceTaskId: 'source',
+      specificChildId: 'stale-child',
+      targetStage: 2,
+      targetUnassignedId: 'replacement',
+    });
+
+    expect(result).toBe(project);
+    expect(setResult).toHaveBeenCalledWith(expect.objectContaining({
+      ok: false,
+      error: expect.objectContaining({ code: 'VALIDATION_ERROR' }),
+    }));
+    expect(assignSubtreeToStage).not.toHaveBeenCalled();
+    expect(detachChildrenAsUnassigned).not.toHaveBeenCalled();
+    expect(rebalance).not.toHaveBeenCalled();
+    expect(project.tasks.find(task => task.id === 'replacement')).toMatchObject({
+      stage: null,
+      parentId: null,
+    });
+    expect(project.tasks.find(task => task.id === 'current-child')).toMatchObject({
+      stage: 2,
+      parentId: 'source',
+    });
   });
 });
