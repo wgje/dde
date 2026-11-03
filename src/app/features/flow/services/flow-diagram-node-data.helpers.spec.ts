@@ -59,14 +59,38 @@ function node(key: string, options: Partial<GoJSNodeData> = {}): GoJSNodeData {
 
 describe('flow diagram node data helpers', () => {
   it('computes stable node locations from existing model data, stored task coordinates, or stage slots', () => {
-    const existingNodeMap = new Map<string, { loc?: string }>([
-      ['existing', { loc: '10 20' }],
+    const existingNodeMap = new Map<string, { loc?: string; stage?: number | null; parentId?: string | null }>([
+      ['existing', { loc: '10 20', stage: 1, parentId: null }],
     ]);
 
-    expect(computeFlowNodeLocation(task('existing'), existingNodeMap, 3)).toBe('10 20');
+    expect(computeFlowNodeLocation(task('existing', { x: 40, y: 50 }), existingNodeMap, 3)).toBe('10 20');
     expect(computeFlowNodeLocation(task('stored', { x: 40, y: 50 }), existingNodeMap, 3)).toBe('40 50');
     expect(computeFlowNodeLocation(task('new-stage-3', { stage: 3 }), existingNodeMap, 2)).toBe('300 200');
     expect(computeFlowNodeLocation(task('new-unassigned', { stage: null }), existingNodeMap, 2)).toBe('0 200');
+  });
+
+  it('uses persisted task coordinates when an existing node changes stage', () => {
+    const existingNodeMap = new Map([
+      ['moved-stage', { loc: '10 20', stage: 1, parentId: null }],
+    ]);
+
+    expect(computeFlowNodeLocation(
+      task('moved-stage', { stage: 3, x: 320, y: 240 }),
+      existingNodeMap,
+      0,
+    )).toBe('320 240');
+  });
+
+  it('uses the current stage slot when parent changes without stored coordinates', () => {
+    const existingNodeMap = new Map([
+      ['moved-parent', { loc: '10 20', stage: 2, parentId: 'old-parent' }],
+    ]);
+
+    expect(computeFlowNodeLocation(
+      task('moved-parent', { stage: 2, parentId: 'new-parent' }),
+      existingNodeMap,
+      3,
+    )).toBe('150 300');
   });
 
   it('matches normalized search text across task text, display id, attachments, and tags', () => {

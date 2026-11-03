@@ -11,13 +11,21 @@ export interface FlowNodeColors {
 }
 
 export function computeFlowNodeLocation(
-  task: Pick<Task, 'id' | 'stage' | 'x' | 'y'>,
-  existingNodeMap: ReadonlyMap<string, { loc?: unknown }>,
+  task: Pick<Task, 'id' | 'stage' | 'parentId' | 'x' | 'y'>,
+  existingNodeMap: ReadonlyMap<string, {
+    loc?: unknown;
+    stage?: unknown;
+    parentId?: unknown;
+  }>,
   newNodeIndex: number,
 ): string {
   const existingNode = existingNodeMap.get(task.id);
+  const topologyChanged = existingNode !== undefined && (
+    'stage' in existingNode && existingNode.stage !== task.stage
+    || 'parentId' in existingNode && existingNode.parentId !== task.parentId
+  );
 
-  if (typeof existingNode?.loc === 'string' && existingNode.loc.length > 0) {
+  if (!topologyChanged && typeof existingNode?.loc === 'string' && existingNode.loc.length > 0) {
     return existingNode.loc;
   }
   if (task.x !== 0 || task.y !== 0) {
