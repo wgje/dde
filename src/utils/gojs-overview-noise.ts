@@ -22,7 +22,7 @@
  * 双约束让命中面极窄，几乎不可能误吞其他异常。
  */
 
-const NULL_WIDTH_PATTERN = /Cannot read properties of null \(reading [\u2018\u2019'"]width[\u2018\u2019'"]\)/i;
+const NULL_WIDTH_PATTERN = /Cannot read properties of null \(reading [\u2018\u2019\u201c\u201d'"]width[\u2018\u2019\u201c\u201d'"]\)/i;
 const ORIGIN_RECT_PATTERN = /_getOriginRect/;
 
 /**
