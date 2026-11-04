@@ -77,6 +77,8 @@ The 2026-11-04 ActionQueue closure follow-up passed 27 restore-related spec file
 
 The 2026-11-05 detached ActionQueue read-back follow-up passed 17 related spec files in a single-worker, non-parallel Vitest run (446/446 tests), plus `npm run typecheck` and `git diff --check`. Coverage includes final-checkpoint-only single-use authorization, all-stage marker progress, owner-token changes during asynchronous queue publication, detached loading remaining unknown, rollback after read-back failure, and post-rollback activation failure. This closes only the user-facing local restore transaction boundary; RetryQueue, export snapshot, Supabase migration, Android widget, and other data-safety groups remain open. No database migration or deployment was run.
 
+The 2026-11-05 verification refresh on baseline `37642fd6` passed 19 restore, settings, queue, and session spec files serially with per-file isolation (527/527 tests). `npm run typecheck` and `git diff --check` passed. This refresh verifies only the user-facing local restore transaction scope above; the other data-safety groups remain open.
+
 ### 2.2 Remaining gaps
 
 Only the four gaps below remain. The user-facing restore transaction and the previously listed offline-snapshot replacement and sync-RPC-unavailable local task-deletion audit gaps are closed for the exact scopes and evidence named in section 2.1; the other data-safety groups remain open.
