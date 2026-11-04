@@ -37,16 +37,16 @@ interface ExtensionMessage {
 }
 
 type RelayRequestType =
-  | 'nanoflow.siyuan.v3.get-preview'
-  | 'nanoflow.siyuan.v3.test-connection'
-  | 'nanoflow.siyuan.v3.set-config'
-  | 'nanoflow.siyuan.v3.get-config-status';
+  | 'nanoflow.siyuan.get-preview'
+  | 'nanoflow.siyuan.test-connection'
+  | 'nanoflow.siyuan.set-config'
+  | 'nanoflow.siyuan.get-config-status';
 
 type RelayResponseType =
-  | 'nanoflow.siyuan.v3.preview-result'
-  | 'nanoflow.siyuan.v3.test-connection-result'
-  | 'nanoflow.siyuan.v3.set-config-result'
-  | 'nanoflow.siyuan.v3.config-status-result';
+  | 'nanoflow.siyuan.preview-result'
+  | 'nanoflow.siyuan.test-connection-result'
+  | 'nanoflow.siyuan.set-config-result'
+  | 'nanoflow.siyuan.config-status-result';
 
 const ALLOWED_ERROR_CODES: readonly SiyuanPreviewErrorCode[] = [
   'not-configured',
@@ -140,8 +140,8 @@ export class SiyuanExtensionProvider implements SiyuanPreviewProvider {
     if (input.token !== undefined) payload.token = input.token;
     try {
       const response = await this.postRelayRequest({
-        requestType: 'nanoflow.siyuan.v3.set-config',
-        responseType: 'nanoflow.siyuan.v3.set-config-result',
+        requestType: 'nanoflow.siyuan.set-config',
+        responseType: 'nanoflow.siyuan.set-config-result',
         ownerUserId,
         configIssuedAt,
         payload,
@@ -170,8 +170,8 @@ export class SiyuanExtensionProvider implements SiyuanPreviewProvider {
     if (!await this.pingExtension()) return { kind: 'unavailable' };
     try {
       const response = await this.postRelayRequest({
-        requestType: 'nanoflow.siyuan.v3.get-config-status',
-        responseType: 'nanoflow.siyuan.v3.config-status-result',
+        requestType: 'nanoflow.siyuan.get-config-status',
+        responseType: 'nanoflow.siyuan.config-status-result',
         ownerUserId,
       });
       if (response.ok !== true || !response.data) {
@@ -241,8 +241,8 @@ export class SiyuanExtensionProvider implements SiyuanPreviewProvider {
 
   private postConnectionTest(ownerUserId: string, signal?: AbortSignal): Promise<ExtensionMessage> {
     return this.postRelayRequest({
-      requestType: 'nanoflow.siyuan.v3.test-connection',
-      responseType: 'nanoflow.siyuan.v3.test-connection-result',
+      requestType: 'nanoflow.siyuan.test-connection',
+      responseType: 'nanoflow.siyuan.test-connection-result',
       ownerUserId,
       signal,
     });
@@ -254,8 +254,8 @@ export class SiyuanExtensionProvider implements SiyuanPreviewProvider {
     ownerUserId: string,
   ): Promise<ExtensionMessage> {
     return this.postRelayRequest({
-      requestType: 'nanoflow.siyuan.v3.get-preview',
-      responseType: 'nanoflow.siyuan.v3.preview-result',
+      requestType: 'nanoflow.siyuan.get-preview',
+      responseType: 'nanoflow.siyuan.preview-result',
       ownerUserId,
       payload: { blockId, includeChildren: true, maxChildren: SIYUAN_CONFIG.MAX_PREVIEW_CHILDREN, maxChars: SIYUAN_CONFIG.MAX_PREVIEW_CHARS },
       signal,

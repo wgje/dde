@@ -5,7 +5,6 @@
 ## 安全边界
 
 - token 按 NanoFlow owner 分桶保存在扩展 `chrome.storage.local`，background 只读取与请求中 captured owner 匹配的记录。
-- v0.3 owner-bound 操作使用 `nanoflow.siyuan.v3.*` 消息；旧 content-script 不会把这些请求转发到 background。
 - 页面 → 扩展消息携带 owner 标识；旧版全局 `baseUrl/token` 不会猜测归属或自动迁移，只会 fail-closed，并可在 Options 页清除。
 - 用户在 NanoFlow 设置页填写 baseUrl / token 后，浏览器通过 content-script 把字段写入当前 owner 的扩展记录，**扩展不会回传 token 明文**（`get-config-status` 仅返回 `{ baseUrl, hasToken }`）；NanoFlow 页面端**不**把 token 持久化到 IndexedDB 或上传到云端。
 - content script 只在 NanoFlow 正式域名和托管预览域名注入（含 `https://www.nanoflow.app`）；发布 manifest 与运行时 allowlist 保持一致。

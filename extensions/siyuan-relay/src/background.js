@@ -33,16 +33,16 @@ async function handleMessage(message) {
   if (message.type === 'nanoflow.siyuan.ping') {
     return { type: 'nanoflow.siyuan.pong', requestId: readRequestId(message), ok: true };
   }
-  if (message.type === 'nanoflow.siyuan.v3.test-connection') {
+  if (message.type === 'nanoflow.siyuan.test-connection') {
     return testConnection(message);
   }
-  if (message.type === 'nanoflow.siyuan.v3.get-preview') {
+  if (message.type === 'nanoflow.siyuan.get-preview') {
     return getPreview(message);
   }
-  if (message.type === 'nanoflow.siyuan.v3.set-config') {
+  if (message.type === 'nanoflow.siyuan.set-config') {
     return setConfig(message);
   }
-  if (message.type === 'nanoflow.siyuan.v3.get-config-status') {
+  if (message.type === 'nanoflow.siyuan.get-config-status') {
     return getConfigStatus(message);
   }
   return buildPreviewError(message, 'unknown');
@@ -54,7 +54,7 @@ async function setConfig(message) {
   const configIssuedAt = readConfigIssuedAt(message);
   if (!ownerUserId || configIssuedAt === undefined) {
     return {
-      type: 'nanoflow.siyuan.v3.set-config-result',
+      type: 'nanoflow.siyuan.set-config-result',
       requestId,
       ok: false,
       errorCode: 'not-configured',
@@ -64,7 +64,7 @@ async function setConfig(message) {
   // 仅允许 payload 中出现 baseUrl/token 两个键，拒绝任何额外字段以收敛 attack surface。
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)
     || Object.keys(payload).some(key => key !== 'baseUrl' && key !== 'token')) {
-    return { type: 'nanoflow.siyuan.v3.set-config-result', requestId, ownerUserId, ok: false, errorCode: 'unknown' };
+    return { type: 'nanoflow.siyuan.set-config-result', requestId, ownerUserId, ok: false, errorCode: 'unknown' };
   }
   const rawBaseUrl = typeof payload.baseUrl === 'string' ? payload.baseUrl.trim() : '';
   const baseUrl = rawBaseUrl || DEFAULT_BASE_URL;
@@ -72,13 +72,13 @@ async function setConfig(message) {
     // 复用 token-invalid 而非新增错误码：UI 在 saveSiyuanConfigToExtension 中已用同一份白名单校验过 baseUrl，
     // 走到这里说明页面被绕过（被注入脚本或调试器），此时把请求统一拒绝即可；下游 UI 的提示文案虽然偏向 token，
     // 但用户最终修复路径仍是"改 baseUrl 或 token 后重新保存"。
-    return { type: 'nanoflow.siyuan.v3.set-config-result', requestId, ownerUserId, ok: false, errorCode: 'token-invalid' };
+    return { type: 'nanoflow.siyuan.set-config-result', requestId, ownerUserId, ok: false, errorCode: 'token-invalid' };
   }
   // 空字符串视为"清除授权"，与扩展 Options 页 clearConfig 行为一致。
   const hasTokenField = Object.prototype.hasOwnProperty.call(payload, 'token');
   const rawToken = hasTokenField && typeof payload.token === 'string' ? payload.token : undefined;
   if (rawToken !== undefined && rawToken.length > MAX_TOKEN_LENGTH) {
-    return { type: 'nanoflow.siyuan.v3.set-config-result', requestId, ownerUserId, ok: false, errorCode: 'token-invalid' };
+    return { type: 'nanoflow.siyuan.set-config-result', requestId, ownerUserId, ok: false, errorCode: 'token-invalid' };
   }
   return serializeOwnerConfigWrite(ownerUserId, async () => {
     try {
@@ -86,7 +86,7 @@ async function setConfig(message) {
       const stored = await chrome.storage.local.get([storageKey]);
       const existing = readOwnerConfigRecord(stored[storageKey], ownerUserId);
       if (existing && configIssuedAt < existing.configIssuedAt) {
-        return { type: 'nanoflow.siyuan.v3.set-config-result', requestId, ownerUserId, ok: true };
+        return { type: 'nanoflow.siyuan.set-config-result', requestId, ownerUserId, ok: true };
       }
       const token = hasTokenField ? rawToken ?? '' : existing?.token ?? '';
       const record = { ownerUserId, baseUrl, configIssuedAt };
@@ -95,9 +95,9 @@ async function setConfig(message) {
       }
       await chrome.storage.local.set({ [storageKey]: record });
       await chrome.storage.local.remove(LEGACY_CONFIG_KEYS);
-      return { type: 'nanoflow.siyuan.v3.set-config-result', requestId, ownerUserId, ok: true };
+      return { type: 'nanoflow.siyuan.set-config-result', requestId, ownerUserId, ok: true };
     } catch {
-      return { type: 'nanoflow.siyuan.v3.set-config-result', requestId, ownerUserId, ok: false, errorCode: 'unknown' };
+      return { type: 'nanoflow.siyuan.set-config-result', requestId, ownerUserId, ok: false, errorCode: 'unknown' };
     }
   });
 }
@@ -107,7 +107,7 @@ async function getConfigStatus(message) {
   const ownerUserId = readOwnerUserId(message);
   if (!ownerUserId) {
     return {
-      type: 'nanoflow.siyuan.v3.config-status-result',
+      type: 'nanoflow.siyuan.config-status-result',
       requestId,
       ok: false,
       errorCode: 'not-configured',
@@ -121,14 +121,14 @@ async function getConfigStatus(message) {
     const hasToken = Boolean(config?.token);
     // 仅回传 baseUrl 与 hasToken，绝不把 token 明文经 message channel 返回页面。
     return {
-      type: 'nanoflow.siyuan.v3.config-status-result',
+      type: 'nanoflow.siyuan.config-status-result',
       requestId,
       ownerUserId,
       ok: true,
       data: { baseUrl, hasToken },
     };
   } catch {
-    return { type: 'nanoflow.siyuan.v3.config-status-result', requestId, ownerUserId, ok: false, errorCode: 'unknown' };
+    return { type: 'nanoflow.siyuan.config-status-result', requestId, ownerUserId, ok: false, errorCode: 'unknown' };
   }
 }
 
@@ -136,7 +136,7 @@ async function testConnection(message) {
   const ownerUserId = readOwnerUserId(message);
   if (!ownerUserId) {
     return {
-      type: 'nanoflow.siyuan.v3.test-connection-result',
+      type: 'nanoflow.siyuan.test-connection-result',
       requestId: readRequestId(message),
       ok: false,
       errorCode: 'not-configured',
@@ -146,14 +146,14 @@ async function testConnection(message) {
     const config = await loadConfig(ownerUserId);
     await callSiyuan(config, '/api/system/version', {});
     return {
-      type: 'nanoflow.siyuan.v3.test-connection-result',
+      type: 'nanoflow.siyuan.test-connection-result',
       requestId: readRequestId(message),
       ownerUserId,
       ok: true,
     };
   } catch (error) {
     return {
-      type: 'nanoflow.siyuan.v3.test-connection-result',
+      type: 'nanoflow.siyuan.test-connection-result',
       requestId: readRequestId(message),
       ownerUserId,
       ok: false,
@@ -194,7 +194,7 @@ async function getPreview(message) {
     const truncatedText = plainText.length > maxChars ? `${plainText.slice(0, maxChars).trim()}…` : plainText;
 
     return {
-      type: 'nanoflow.siyuan.v3.preview-result',
+      type: 'nanoflow.siyuan.preview-result',
       requestId,
       ownerUserId,
       ok: true,
@@ -414,7 +414,7 @@ function readConfigIssuedAt(message) {
 
 function buildPreviewError(message, errorCode) {
   return {
-    type: 'nanoflow.siyuan.v3.preview-result',
+    type: 'nanoflow.siyuan.preview-result',
     requestId: readRequestId(message),
     ownerUserId: readOwnerUserId(message),
     ok: false,
