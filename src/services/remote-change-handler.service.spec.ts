@@ -20,8 +20,15 @@ import { LoggerService } from './logger.service';
 import { ChangeTrackerService } from './change-tracker.service';
 import { PermissionDeniedHandlerService } from './permission-denied-handler.service';
 import { UserSessionService } from './user-session.service';
+import { ActionQueueService } from './action-queue.service';
 import { ProjectDataService } from '../app/core/services/sync/project-data.service';
-import type { Connection, Project, Task } from '../models';
+import { TaskSyncOperationsService } from '../app/core/services/sync/task-sync-operations.service';
+import type { TombstoneQueryResult } from '../app/core/services/sync/task-sync-operations.types';
+import type { Project, Task } from '../models';
+import { registerRemoteChangeHandlerProjectRaceSpecs } from './remote-change-handler-project-race.spec-helpers';
+import { registerRemoteChangeHandlerRoutingSpecs } from './remote-change-handler-routing.spec-helpers';
+import { registerRemoteChangeHandlerDurableDirtyProtectionSpecs } from './remote-change-handler-durable-dirty-protection.spec-helpers';
+import { registerRemoteChangeHandlerTaskRequestRaceSpecs } from './remote-change-handler-task-request-race.spec-helpers';
 
 type SpyFn = ReturnType<typeof vi.fn>;
 type ProjectChangeCallbackPayload = { eventType?: string; projectId?: string } | undefined;
@@ -58,16 +65,6 @@ function createProject(overrides: Partial<Project> = {}): Project {
   };
 }
 
-function createConnection(overrides: Partial<Connection> = {}): Connection {
-  return {
-    id: overrides.id ?? 'conn-1',
-    source: overrides.source ?? 'task-1',
-    target: overrides.target ?? 'task-2',
-    deletedAt: overrides.deletedAt,
-    updatedAt: overrides.updatedAt,
-  };
-}
-
 async function flushPromises(): Promise<void> {
   await Promise.resolve();
   await Promise.resolve();
@@ -79,7 +76,6 @@ describe('RemoteChangeHandlerService', () => {
     setupRemoteChangeCallbacks: SpyFn;
     hasPendingLocalChanges: SpyFn;
     hasPendingChangesForProject: SpyFn;
-    subscribeToProjectPendingWriteStateChanges: SpyFn;
     getAccessibleProjectProbe: SpyFn;
     getLastPersistAt: SpyFn;
     getTombstoneIds: SpyFn;
@@ -91,16 +87,35 @@ describe('RemoteChangeHandlerService', () => {
   let mockLogger: { debug: SpyFn; info: SpyFn; warn: SpyFn; error: SpyFn };
   let mockToast: { info: SpyFn; warning: SpyFn };
   let mockPermissionDeniedHandler: { handlePermissionDenied: SpyFn };
-  let currentAuthUserId: string | null;
-  let currentSessionUserId: string | null;
-  let currentSessionGeneration: number;
+  let mockTaskSyncOps: { getTombstoneIdsWithStatus: SpyFn };
+  let mockActionQueue: {
+    getPendingActionsForProject: SpyFn;
+    hasPendingActions: SpyFn;
+    hasDurablePendingTaskMutation: SpyFn;
+  };
+  let mockChangeTracker: {
+    hasUnsyncedChanges: SpyFn;
+    pruneExpiredChanges: SpyFn;
+    getPendingChange: SpyFn;
+    getLockedFields: SpyFn;
+  };
+  let mockUndoService: { clearOutdatedHistory: SpyFn; clearTaskHistory: SpyFn };
+  let mockUserSession: {
+    currentUserId: SpyFn;
+    getCurrentSessionGeneration: SpyFn;
+    isSessionContextCurrent: SpyFn;
+  };
+  let currentUserId: string | null;
+  let sessionGeneration: number;
   let localProjects: Project[];
   let mockProjectState: {
     projects: SpyFn;
+    getProjectsWithCurrentData: SpyFn;
     activeProjectId: SpyFn;
     setActiveProjectId: SpyFn;
     updateProjects: SpyFn;
     getProject: SpyFn;
+    getProjectWithCurrentData: SpyFn;
   };
   let projectChangeCallback: ((payload: ProjectChangeCallbackPayload) => Promise<void>) | null = null;
   let taskChangeCallback: ((payload: Partial<RemoteTaskChangePayload>) => void) | null = null;
@@ -108,9 +123,6 @@ describe('RemoteChangeHandlerService', () => {
   beforeEach(() => {
     projectChangeCallback = null;
     taskChangeCallback = null;
-    currentAuthUserId = 'user-123';
-    currentSessionUserId = 'user-123';
-    currentSessionGeneration = 1;
     
     mockLogger = {
       debug: vi.fn(),
@@ -125,9 +137,12 @@ describe('RemoteChangeHandlerService', () => {
         taskChangeCallback = taskCb;
       }),
       hasPendingLocalChanges: vi.fn().mockReturnValue(false),
-      hasPendingChangesForProject: vi.fn().mockReturnValue(false),
-      subscribeToProjectPendingWriteStateChanges: vi.fn(() => () => {}),
-      getAccessibleProjectProbe: vi.fn().mockResolvedValue({ accessible: false, watermark: null }),
+      hasPendingChangesForProject: vi.fn(),
+      getAccessibleProjectProbe: vi.fn().mockResolvedValue({
+        projectId: 'project-1',
+        accessible: false,
+        watermark: null,
+      }),
       getLastPersistAt: vi.fn().mockReturnValue(0),
       getTombstoneIds: vi.fn().mockResolvedValue(new Set()),
       smartMerge: vi.fn((local, remote) => ({ project: remote, conflictCount: 0 })),
@@ -148,16 +163,56 @@ describe('RemoteChangeHandlerService', () => {
     mockPermissionDeniedHandler = {
       handlePermissionDenied: vi.fn().mockResolvedValue(undefined),
     };
+    mockTaskSyncOps = {
+      getTombstoneIdsWithStatus: vi.fn().mockResolvedValue({
+        ids: new Set(),
+        deletedAtByTaskId: new Map(),
+        fromRemote: true,
+        localCacheOnly: false,
+        timestamp: Date.now(),
+      } satisfies TombstoneQueryResult),
+    };
+    mockActionQueue = {
+      getPendingActionsForProject: vi.fn().mockReturnValue([]),
+      hasPendingActions: vi.fn().mockReturnValue(false),
+      hasDurablePendingTaskMutation: vi.fn().mockReturnValue(false),
+    };
+    mockSyncCoordinator.hasPendingChangesForProject.mockImplementation(
+      (projectId: string) => (
+        (mockActionQueue.getPendingActionsForProject as (id: string) => unknown[])(projectId).length > 0
+      ),
+    );
+    mockChangeTracker = {
+      hasUnsyncedChanges: vi.fn().mockReturnValue(false),
+      pruneExpiredChanges: vi.fn(),
+      getPendingChange: vi.fn().mockReturnValue(null),
+      getLockedFields: vi.fn().mockReturnValue([]),
+    };
+    mockUndoService = {
+      clearOutdatedHistory: vi.fn().mockReturnValue(0),
+      clearTaskHistory: vi.fn(),
+    };
+    currentUserId = 'user-123';
+    sessionGeneration = 1;
+    mockUserSession = {
+      currentUserId: vi.fn(() => currentUserId),
+      getCurrentSessionGeneration: vi.fn(() => sessionGeneration),
+      isSessionContextCurrent: vi.fn((generation: number, userId: string | null) => (
+        generation === sessionGeneration && userId === currentUserId
+      )),
+    };
 
     localProjects = [];
     mockProjectState = {
       projects: vi.fn(() => localProjects),
+      getProjectsWithCurrentData: vi.fn(() => localProjects),
       activeProjectId: vi.fn().mockReturnValue(null),
       setActiveProjectId: vi.fn(),
       updateProjects: vi.fn((updater: (projects: Project[]) => Project[]) => {
         localProjects = updater(localProjects);
       }),
       getProject: vi.fn((projectId: string) => localProjects.find(project => project.id === projectId)),
+      getProjectWithCurrentData: vi.fn((projectId: string) => localProjects.find(project => project.id === projectId)),
     };
     
     TestBed.configureTestingModule({
@@ -168,25 +223,16 @@ describe('RemoteChangeHandlerService', () => {
           loadFullProject: mockSyncCoordinator.core.loadSingleProject,
           getAccessibleProjectProbe: vi.fn(),
         } },
-        { provide: UndoService, useValue: { clearOutdatedHistory: vi.fn(), clearTaskHistory: vi.fn() } },
+        { provide: TaskSyncOperationsService, useValue: mockTaskSyncOps },
+        { provide: ActionQueueService, useValue: mockActionQueue },
+        { provide: UndoService, useValue: mockUndoService },
         { provide: UiStateService, useValue: mockUiState },
         { provide: ProjectStateService, useValue: mockProjectState },
         { provide: ToastService, useValue: mockToast },
-        { provide: AuthService, useValue: { currentUserId: vi.fn(() => currentAuthUserId) } },
-        { provide: UserSessionService, useValue: {
-          currentUserId: vi.fn(() => currentSessionUserId),
-          getCurrentSessionGeneration: vi.fn(() => currentSessionGeneration),
-          isSessionContextCurrent: vi.fn((generation: number, userId: string) => (
-            generation === currentSessionGeneration && userId === currentSessionUserId
-          )),
-        } },
+        { provide: AuthService, useValue: { currentUserId: vi.fn(() => currentUserId) } },
+        { provide: UserSessionService, useValue: mockUserSession },
         { provide: LoggerService, useValue: { category: () => mockLogger } },
-        { provide: ChangeTrackerService, useValue: {
-          hasUnsyncedChanges: vi.fn().mockReturnValue(false),
-          pruneExpiredChanges: vi.fn(),
-          getPendingChange: vi.fn().mockReturnValue(null),
-          getLockedFields: vi.fn().mockReturnValue([])
-        } },
+        { provide: ChangeTrackerService, useValue: mockChangeTracker },
         { provide: PermissionDeniedHandlerService, useValue: mockPermissionDeniedHandler }
       ]
     });
@@ -194,179 +240,58 @@ describe('RemoteChangeHandlerService', () => {
     service = TestBed.inject(RemoteChangeHandlerService);
   });
 
-  describe('setupCallbacks', () => {
-    it('应正确设置回调', () => {
-      const onLoadProjects = vi.fn().mockResolvedValue(undefined);
-      
-      service.setupCallbacks(onLoadProjects);
-      
-      expect(mockSyncCoordinator.setupRemoteChangeCallbacks).toHaveBeenCalled();
-      expect(projectChangeCallback).toBeTruthy();
-      expect(taskChangeCallback).toBeTruthy();
-    });
-    
-    it('重复调用应记录警告并跳过', () => {
-      const onLoadProjects = vi.fn().mockResolvedValue(undefined);
-      
-      service.setupCallbacks(onLoadProjects);
-      service.setupCallbacks(onLoadProjects);
-      
-      expect(mockLogger.warn).toHaveBeenCalledWith(
-        'setupCallbacks 已被调用过，跳过重复初始化'
-      );
-      // 只应调用一次
-      expect(mockSyncCoordinator.setupRemoteChangeCallbacks).toHaveBeenCalledTimes(1);
-    });
+  registerRemoteChangeHandlerProjectRaceSpecs({
+    service: () => service,
+    projectChangeCallback: () => projectChangeCallback!,
+    localProjects: () => localProjects,
+    setLocalProjects: projects => { localProjects = projects; },
+    setCurrentUserId: userId => { currentUserId = userId; },
+    setSessionGeneration: generation => { sessionGeneration = generation; },
+    syncCoordinator: () => mockSyncCoordinator,
+    taskSyncOps: () => mockTaskSyncOps,
+    projectState: () => mockProjectState,
+    undoService: () => mockUndoService,
   });
 
-  describe('Polling 事件路由', () => {
-    it('polling 事件应调用 onLoadProjects 而非 handleIncrementalUpdate', async () => {
-      const onLoadProjects = vi.fn().mockResolvedValue(undefined);
-      
-      service.setupCallbacks(onLoadProjects);
-      
-      // 模拟 polling 事件
-      const pollingPayload = { eventType: 'polling', projectId: 'project-1' };
-      await projectChangeCallback!(pollingPayload);
-      
-      expect(onLoadProjects).toHaveBeenCalled();
-      // 不应调用 loadSingleProject（handleIncrementalUpdate 的标志）
-      expect(mockSyncCoordinator.core.loadSingleProject).not.toHaveBeenCalled();
-    });
-
-    it('配置 onRefreshActiveProject 时应优先走活动项目静默刷新', async () => {
-      const onLoadProjects = vi.fn().mockResolvedValue(undefined);
-      const onRefreshActiveProject = vi.fn().mockResolvedValue(undefined);
-
-      service.setupCallbacks({
-        onLoadProjects,
-        onRefreshActiveProject,
-      });
-
-      await projectChangeCallback!({ eventType: 'polling', projectId: 'project-1' });
-
-      expect(onRefreshActiveProject).toHaveBeenCalledWith('remote:polling');
-      expect(onLoadProjects).not.toHaveBeenCalled();
-      expect(mockSyncCoordinator.core.loadSingleProject).not.toHaveBeenCalled();
-    });
-    
-    it('无 eventType 的事件应调用 onLoadProjects', async () => {
-      const onLoadProjects = vi.fn().mockResolvedValue(undefined);
-      
-      service.setupCallbacks(onLoadProjects);
-      
-      // 模拟无 eventType 的事件
-      const payload = { projectId: 'project-1' };
-      await projectChangeCallback!(payload);
-      
-      expect(onLoadProjects).toHaveBeenCalled();
-    });
+  registerRemoteChangeHandlerRoutingSpecs({
+    service: () => service,
+    projectChangeCallback: () => projectChangeCallback!,
+    taskChangeCallback: () => taskChangeCallback,
+    syncCoordinator: () => mockSyncCoordinator,
+    logger: () => mockLogger,
+    actionQueue: () => mockActionQueue,
+    localProjects: () => localProjects,
+    setLocalProjects: projects => { localProjects = projects; },
   });
 
-  describe('Realtime 事件路由', () => {
-    it('INSERT 事件应调用 handleIncrementalUpdate', async () => {
-      const onLoadProjects = vi.fn().mockResolvedValue(undefined);
-      
-      service.setupCallbacks(onLoadProjects);
-      
-      // 模拟 INSERT 事件
-      const insertPayload: RemoteProjectChangePayload = { 
-        eventType: 'INSERT', 
-        projectId: 'project-1' 
-      };
-      await projectChangeCallback!(insertPayload);
-      
-      // handleIncrementalUpdate 会调用 loadSingleProject
-      expect(mockSyncCoordinator.core.loadSingleProject).toHaveBeenCalledWith('project-1', 'user-123');
-      // 不应调用 onLoadProjects
-      expect(onLoadProjects).not.toHaveBeenCalled();
-    });
-    
-    it('UPDATE 事件应调用 handleIncrementalUpdate', async () => {
-      const onLoadProjects = vi.fn().mockResolvedValue(undefined);
-      
-      service.setupCallbacks(onLoadProjects);
-      
-      const updatePayload: RemoteProjectChangePayload = { 
-        eventType: 'UPDATE', 
-        projectId: 'project-1' 
-      };
-      await projectChangeCallback!(updatePayload);
-      
-      expect(mockSyncCoordinator.core.loadSingleProject).toHaveBeenCalled();
-      expect(onLoadProjects).not.toHaveBeenCalled();
-    });
+  registerRemoteChangeHandlerDurableDirtyProtectionSpecs({
+    service: () => service,
+    projectChangeCallback: () => projectChangeCallback!,
+    taskChangeCallback: () => taskChangeCallback!,
+    localProjects: () => localProjects,
+    setLocalProjects: projects => { localProjects = projects; },
+    projectState: () => mockProjectState,
+    syncCoordinator: () => mockSyncCoordinator,
+    taskSyncOps: () => mockTaskSyncOps,
+    actionQueue: () => mockActionQueue,
+    changeTracker: () => mockChangeTracker,
+  });
 
-    it('stale project UPDATE 不应在版本检查前应用远端删除集合', async () => {
-      localProjects = [
-        createProject({
-          id: 'project-1',
-          version: 5,
-          tasks: [
-            createTask({ id: 'task-still-local' }),
-            createTask({ id: 'task-other' }),
-          ],
-          connections: [
-            createConnection({
-              id: 'conn-still-local',
-              source: 'task-still-local',
-              target: 'task-other',
-            }),
-          ],
-        }),
-      ];
-      mockSyncCoordinator.core.loadSingleProject.mockResolvedValueOnce(createProject({
-        id: 'project-1',
-        version: 4,
-        tasks: [
-          createTask({
-            id: 'task-still-local',
-            deletedAt: '2026-02-01T00:00:00.000Z',
-          }),
-          createTask({ id: 'task-other' }),
-        ],
-        connections: [
-          createConnection({
-            id: 'conn-still-local',
-            source: 'task-still-local',
-            target: 'task-other',
-            deletedAt: '2026-02-01T00:00:00.000Z',
-          }),
-        ],
-      }));
-
-      service.setupCallbacks(vi.fn().mockResolvedValue(undefined));
-
-      await projectChangeCallback!({
-        eventType: 'UPDATE',
-        projectId: 'project-1',
-      });
-
-      expect(localProjects[0].tasks.map(task => task.id)).toEqual([
-        'task-still-local',
-        'task-other',
-      ]);
-      expect(localProjects[0].connections.map(connection => connection.id)).toEqual([
-        'conn-still-local',
-      ]);
-      expect(mockSyncCoordinator.smartMerge).not.toHaveBeenCalled();
-    });
-    
-    it('DELETE 事件应调用 handleIncrementalUpdate', async () => {
-      const onLoadProjects = vi.fn().mockResolvedValue(undefined);
-      
-      service.setupCallbacks(onLoadProjects);
-      
-      const deletePayload: RemoteProjectChangePayload = { 
-        eventType: 'DELETE', 
-        projectId: 'project-1' 
-      };
-      await projectChangeCallback!(deletePayload);
-      
-      // DELETE 事件不调用 loadSingleProject，而是直接从本地删除
-      // 但也不应调用 onLoadProjects
-      expect(onLoadProjects).not.toHaveBeenCalled();
-    });
+  registerRemoteChangeHandlerTaskRequestRaceSpecs({
+    service: () => service,
+    taskChangeCallback: () => taskChangeCallback!,
+    localProjects: () => localProjects,
+    setLocalProjects: projects => { localProjects = projects; },
+    setCurrentUserId: userId => { currentUserId = userId; },
+    setSessionGeneration: generation => { sessionGeneration = generation; },
+    projectState: () => ({
+      activeProjectId: mockProjectState.activeProjectId,
+      updateProjects: mockProjectState.updateProjects,
+    }),
+    syncCoordinator: () => mockSyncCoordinator,
+    logger: () => mockLogger,
+    permissionDeniedHandler: () => mockPermissionDeniedHandler,
+    toast: () => mockToast,
   });
 
   describe('编辑保护', () => {
@@ -427,6 +352,105 @@ describe('RemoteChangeHandlerService', () => {
     });
   });
 
+  it('项目级软删除不得在 tombstone-aware merge 前移除更新更晚的本地任务', async () => {
+    const localTask = createTask({
+      id: 'task-local-newer',
+      updatedAt: '2026-02-03T00:00:00.000Z',
+    });
+    localProjects = [createProject({
+      id: 'project-1',
+      version: 1,
+      tasks: [localTask],
+    })];
+    mockSyncCoordinator.core.loadSingleProject.mockResolvedValueOnce(createProject({
+      id: 'project-1',
+      version: 2,
+      tasks: [createTask({
+        id: 'task-local-newer',
+        updatedAt: '2026-02-02T00:00:00.000Z',
+        deletedAt: '2026-02-02T00:00:00.000Z',
+      })],
+    }));
+    mockTaskSyncOps.getTombstoneIdsWithStatus.mockResolvedValueOnce({
+      ids: new Set(['task-local-newer']),
+      deletedAtByTaskId: new Map([
+        ['task-local-newer', Date.parse('2026-02-02T00:00:00.000Z')],
+      ]),
+      fromRemote: true,
+      localCacheOnly: false,
+      timestamp: Date.now(),
+    } satisfies TombstoneQueryResult);
+    mockSyncCoordinator.smartMerge.mockImplementationOnce((local: Project) => ({
+      project: local,
+      conflictCount: 0,
+    }));
+    service.setupCallbacks(vi.fn().mockResolvedValue(undefined));
+
+    await projectChangeCallback!({ eventType: 'UPDATE', projectId: 'project-1' });
+
+    expect(mockSyncCoordinator.smartMerge).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tasks: [expect.objectContaining({ id: 'task-local-newer' })],
+      }),
+      expect.anything(),
+      expect.objectContaining({
+        ids: new Set(['task-local-newer']),
+      }),
+    );
+    expect(localProjects[0].tasks.map(task => task.id)).toEqual(['task-local-newer']);
+  });
+
+  it('项目级合并必须使用当前 TaskStore 数据而不是陈旧 ProjectStore 壳', async () => {
+    localProjects = [createProject({
+      id: 'project-1',
+      version: 1,
+      tasks: [createTask({ id: 'task-1', stage: null, rank: 0 })],
+    })];
+    const currentDataProject = createProject({
+      id: 'project-1',
+      version: 1,
+      tasks: [
+        createTask({
+          id: 'task-1',
+          stage: 2,
+          rank: 2000,
+          updatedAt: '2026-02-03T00:01:00.000Z',
+        }),
+        createTask({
+          id: 'task-2',
+          stage: 3,
+          rank: 3000,
+          updatedAt: '2026-02-03T00:02:00.000Z',
+        }),
+      ],
+    });
+    mockProjectState.getProjectWithCurrentData.mockReturnValue(currentDataProject);
+    mockSyncCoordinator.core.loadSingleProject.mockResolvedValueOnce(createProject({
+      id: 'project-1',
+      version: 2,
+      tasks: currentDataProject.tasks,
+    }));
+    mockSyncCoordinator.smartMerge.mockImplementationOnce((local: Project) => ({
+      project: local,
+      conflictCount: 0,
+    }));
+    service.setupCallbacks(vi.fn().mockResolvedValue(undefined));
+
+    await projectChangeCallback!({ eventType: 'UPDATE', projectId: 'project-1' });
+
+    expect(mockSyncCoordinator.smartMerge).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tasks: expect.arrayContaining([
+          expect.objectContaining({ id: 'task-1', stage: 2, rank: 2000 }),
+          expect.objectContaining({ id: 'task-2', stage: 3, rank: 3000 }),
+        ]),
+      }),
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(localProjects[0].tasks.map(task => task.id).sort()).toEqual(['task-1', 'task-2']);
+  });
+
   describe('任务级更新', () => {
     it('DELETE 事件应在回声保护窗口内被跳过', () => {
       mockSyncCoordinator.getLastPersistAt.mockReturnValue(Date.now() - 1000); // 1秒前
@@ -446,6 +470,29 @@ describe('RemoteChangeHandlerService', () => {
         expect.objectContaining({ eventType: 'DELETE', taskId: 'task-1' })
       );
     });
+
+    it('缺少 projectId 的 DELETE 必须从当前 TaskStore 投影定位任务项目', () => {
+      localProjects = [createProject({ id: 'project-1', tasks: [] })];
+      mockProjectState.getProjectsWithCurrentData.mockReturnValue([
+        createProject({
+          id: 'project-1',
+          tasks: [createTask({ id: 'task-1', stage: 2 })],
+        }),
+      ]);
+      mockProjectState.activeProjectId.mockReturnValue('project-1');
+      mockSyncCoordinator.core.loadSingleProject.mockResolvedValueOnce(createProject({
+        id: 'project-1',
+        tasks: [],
+      }));
+      service.setupCallbacks(vi.fn().mockResolvedValue(undefined));
+
+      taskChangeCallback!({
+        eventType: 'DELETE',
+        taskId: 'task-1',
+      });
+
+      expect(mockSyncCoordinator.core.loadSingleProject).toHaveBeenCalledWith('project-1', 'user-123');
+    });
     
     it('回声保护窗口外的任务更新应正常处理', () => {
       mockSyncCoordinator.getLastPersistAt.mockReturnValue(Date.now() - 5000); // 5秒前
@@ -464,6 +511,118 @@ describe('RemoteChangeHandlerService', () => {
       expect(mockLogger.debug).not.toHaveBeenCalledWith(
         '跳过任务级远程更新',
         expect.anything()
+      );
+    });
+
+    it('DELETE tombstone 早于本地任务更新时间时必须保留本地任务', async () => {
+      localProjects = [createProject({
+        id: 'project-1',
+        tasks: [createTask({
+          id: 'task-1',
+          updatedAt: '2026-02-03T00:00:00.000Z',
+        })],
+      })];
+      mockProjectState.activeProjectId.mockReturnValue('project-1');
+      mockSyncCoordinator.core.loadSingleProject.mockResolvedValueOnce(createProject({
+        id: 'project-1',
+        tasks: [],
+      }));
+      mockTaskSyncOps.getTombstoneIdsWithStatus.mockResolvedValueOnce({
+        ids: new Set(['task-1']),
+        deletedAtByTaskId: new Map([
+          ['task-1', Date.parse('2026-02-02T00:00:00.000Z')],
+        ]),
+        fromRemote: true,
+        localCacheOnly: false,
+        timestamp: Date.now(),
+      } satisfies TombstoneQueryResult);
+      service.setupCallbacks(vi.fn().mockResolvedValue(undefined));
+
+      taskChangeCallback!({
+        eventType: 'DELETE',
+        taskId: 'task-1',
+        projectId: 'project-1',
+      });
+      await flushPromises();
+      await flushPromises();
+
+      expect(localProjects[0].tasks.map(task => task.id)).toEqual(['task-1']);
+      expect(mockUndoService.clearTaskHistory).not.toHaveBeenCalled();
+    });
+
+    it('DELETE tombstone 晚于本地任务更新时间时应确认删除本地任务', async () => {
+      localProjects = [createProject({
+        id: 'project-1',
+        tasks: [createTask({
+          id: 'task-1',
+          updatedAt: '2026-02-02T00:00:00.000Z',
+        })],
+      })];
+      mockProjectState.activeProjectId.mockReturnValue('project-1');
+      mockSyncCoordinator.core.loadSingleProject.mockResolvedValueOnce(createProject({
+        id: 'project-1',
+        tasks: [],
+      }));
+      mockTaskSyncOps.getTombstoneIdsWithStatus.mockResolvedValueOnce({
+        ids: new Set(['task-1']),
+        deletedAtByTaskId: new Map([
+          ['task-1', Date.parse('2026-02-03T00:00:00.000Z')],
+        ]),
+        fromRemote: true,
+        localCacheOnly: false,
+        timestamp: Date.now(),
+      } satisfies TombstoneQueryResult);
+      service.setupCallbacks(vi.fn().mockResolvedValue(undefined));
+
+      taskChangeCallback!({
+        eventType: 'DELETE',
+        taskId: 'task-1',
+        projectId: 'project-1',
+      });
+      await flushPromises();
+      await flushPromises();
+
+      expect(localProjects[0].tasks).toEqual([]);
+      expect(mockUndoService.clearTaskHistory).toHaveBeenCalledWith('task-1', 'project-1');
+    });
+
+    it('DELETE 仅有 local-cache tombstone 证据时必须保留本地任务', async () => {
+      localProjects = [createProject({
+        id: 'project-1',
+        tasks: [createTask({
+          id: 'task-1',
+          updatedAt: '2026-02-02T00:00:00.000Z',
+        })],
+      })];
+      mockProjectState.activeProjectId.mockReturnValue('project-1');
+      mockSyncCoordinator.core.loadSingleProject.mockResolvedValueOnce(createProject({
+        id: 'project-1',
+        tasks: [],
+      }));
+      mockTaskSyncOps.getTombstoneIdsWithStatus.mockResolvedValueOnce({
+        ids: new Set(['task-1']),
+        deletedAtByTaskId: new Map([
+          ['task-1', Date.parse('2026-02-03T00:00:00.000Z')],
+        ]),
+        fromRemote: false,
+        localCacheOnly: true,
+        timestamp: Date.now(),
+      } satisfies TombstoneQueryResult);
+      service.setupCallbacks(vi.fn().mockResolvedValue(undefined));
+
+      taskChangeCallback!({
+        eventType: 'DELETE',
+        taskId: 'task-1',
+        projectId: 'project-1',
+      });
+      await flushPromises();
+      await flushPromises();
+
+      expect(localProjects[0].tasks.map(task => task.id)).toEqual(['task-1']);
+      expect(mockUndoService.clearTaskHistory).not.toHaveBeenCalled();
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        '远程任务删除仅有本地 tombstone 缓存证据，已保留本地任务',
+        expect.objectContaining({ taskId: 'task-1', projectId: 'project-1' }),
       );
     });
 
@@ -503,113 +662,45 @@ describe('RemoteChangeHandlerService', () => {
           code: '42501',
           status: 401,
         }),
-        [expect.objectContaining({ id: 'task-1', title: 'Local task' })],
+        [affectedTask],
         'project-1',
-        expect.objectContaining({ ownerUserId: 'user-123', shouldNotify: expect.any(Function) }),
+        expect.objectContaining({
+          ownerUserId: 'user-123',
+          shouldNotify: expect.any(Function),
+        }),
       );
       expect(mockToast.warning).not.toHaveBeenCalled();
     });
 
-    it('账号切换后仍按请求起点保全任务快照，且不向新会话提示', async () => {
-      const originalTask = createTask({ id: 'task-1', title: 'Owner A task' });
-      localProjects = [createProject({ id: 'project-1', tasks: [originalTask] })];
-      mockProjectState.activeProjectId.mockReturnValue('project-1');
-
-      let rejectLoad: (error: unknown) => void = () => undefined;
-      mockSyncCoordinator.core.loadSingleProject.mockImplementationOnce(() => new Promise<Project | null>((_resolve, reject) => {
-        rejectLoad = reject;
-      }));
-
-      service.setupCallbacks(vi.fn().mockResolvedValue(undefined));
-      taskChangeCallback!({ eventType: 'UPDATE', taskId: 'task-1', projectId: 'project-1' });
-
-      currentAuthUserId = 'user-456';
-      currentSessionUserId = 'user-456';
-      currentSessionGeneration = 2;
+    it('任务级幂等检查必须使用当前 TaskStore revision 而不是陈旧项目壳', async () => {
       localProjects = [createProject({
         id: 'project-1',
-        tasks: [createTask({ id: 'task-1', title: 'Owner B task' })],
+        tasks: [createTask({
+          id: 'task-1',
+          title: 'Stale shell',
+          updatedAt: '2026-02-03T00:00:00.000Z',
+        })],
       })];
-
-      rejectLoad({ code: '42501', message: 'permission denied for table tasks', status: 401 });
-      await flushPromises();
-      await flushPromises();
-
-      const call = mockPermissionDeniedHandler.handlePermissionDenied.mock.calls[0];
-      expect(call).toBeDefined();
-      expect(call?.[1]).toEqual([expect.objectContaining({ id: 'task-1', title: 'Owner A task' })]);
-      expect(call?.[2]).toBe('project-1');
-      const context = call?.[3] as { ownerUserId: string; shouldNotify: () => boolean };
-      expect(context.ownerUserId).toBe('user-123');
-      expect(context.shouldNotify()).toBe(false);
-      expect(mockToast.warning).not.toHaveBeenCalled();
-    });
-
-    it('账号切换后旧会话成功响应不会覆盖新 owner 的同 ID 任务', async () => {
-      localProjects = [createProject({
+      const currentDataProject = createProject({
         id: 'project-1',
-        tasks: [createTask({ id: 'task-1', title: 'Owner A task' })],
-      })];
+        tasks: [createTask({
+          id: 'task-1',
+          title: 'Current local',
+          stage: 2,
+          updatedAt: '2026-02-03T00:02:00.000Z',
+        })],
+      });
+      mockProjectState.getProjectWithCurrentData.mockReturnValue(currentDataProject);
       mockProjectState.activeProjectId.mockReturnValue('project-1');
-
-      let resolveLoad: (project: Project) => void = () => undefined;
-      mockSyncCoordinator.core.loadSingleProject.mockImplementationOnce(() => new Promise<Project | null>(resolve => {
-        resolveLoad = project => resolve(project);
-      }));
-
-      service.setupCallbacks(vi.fn().mockResolvedValue(undefined));
-      taskChangeCallback!({ eventType: 'UPDATE', taskId: 'task-1', projectId: 'project-1' });
-
-      currentAuthUserId = 'user-456';
-      currentSessionUserId = 'user-456';
-      currentSessionGeneration = 2;
-      localProjects = [createProject({
+      mockSyncCoordinator.core.loadSingleProject.mockResolvedValueOnce(createProject({
         id: 'project-1',
-        tasks: [createTask({ id: 'task-1', title: 'Owner B task' })],
-      })];
-
-      resolveLoad(createProject({
-        id: 'project-1',
-        tasks: [createTask({ id: 'task-1', title: 'Owner A remote task' })],
+        tasks: [createTask({
+          id: 'task-1',
+          title: 'Older remote',
+          stage: null,
+          updatedAt: '2026-02-03T00:01:00.000Z',
+        })],
       }));
-      await flushPromises();
-      await flushPromises();
-
-      expect(localProjects[0]?.tasks[0]?.title).toBe('Owner B task');
-      expect(mockSyncCoordinator.getTombstoneIds).not.toHaveBeenCalled();
-    });
-
-    it('tombstone 加载期间被新请求取代的任务更新不应再写入本地项目', async () => {
-      let resolveTombstones: (ids: Set<string>) => void = () => undefined;
-      localProjects = [
-        createProject({
-          id: 'project-1',
-          tasks: [
-            createTask({
-              id: 'task-1',
-              title: 'Local title',
-              updatedAt: '2026-01-01T00:00:00.000Z',
-            }),
-          ],
-        }),
-      ];
-      mockProjectState.activeProjectId.mockReturnValue('project-1');
-      mockSyncCoordinator.core.loadSingleProject
-        .mockResolvedValueOnce(createProject({
-          id: 'project-1',
-          tasks: [
-            createTask({
-              id: 'task-1',
-              title: 'Remote title',
-              updatedAt: '2026-02-01T00:00:00.000Z',
-            }),
-          ],
-        }))
-        .mockImplementationOnce(() => new Promise<Project | null>(() => undefined));
-      mockSyncCoordinator.getTombstoneIds.mockImplementationOnce(() => new Promise<Set<string>>(resolve => {
-        resolveTombstones = resolve;
-      }));
-
       service.setupCallbacks(vi.fn().mockResolvedValue(undefined));
 
       taskChangeCallback!({
@@ -618,20 +709,61 @@ describe('RemoteChangeHandlerService', () => {
         projectId: 'project-1',
       });
       await flushPromises();
+      await flushPromises();
+
+      expect(mockProjectState.getProjectWithCurrentData).toHaveBeenCalledWith('project-1');
+      expect(mockProjectState.updateProjects).not.toHaveBeenCalled();
+      expect(mockLogger.debug).toHaveBeenCalledWith(
+        '幂等检查：跳过过时或相同版本的远程更新',
+        expect.objectContaining({ taskId: 'task-1' }),
+      );
+    });
+
+    it('权限错误数据保全必须从当前 TaskStore 读取受影响任务', async () => {
+      const affectedTask = createTask({ id: 'task-1', title: 'Current local task', stage: 2 });
+      const expectedSnapshot = structuredClone(affectedTask);
+      localProjects = [createProject({ id: 'project-1', tasks: [] })];
+      mockProjectState.getProjectWithCurrentData.mockReturnValue(createProject({
+        id: 'project-1',
+        tasks: [affectedTask],
+      }));
+      mockProjectState.activeProjectId.mockReturnValue('project-1');
+      mockSyncCoordinator.core.loadSingleProject.mockRejectedValueOnce({
+        error: {
+          code: '42501',
+          message: 'permission denied for table tasks',
+        },
+        status: 401,
+      });
+      service.setupCallbacks(vi.fn().mockResolvedValue(undefined));
 
       taskChangeCallback!({
         eventType: 'UPDATE',
-        taskId: 'task-2',
+        taskId: 'task-1',
         projectId: 'project-1',
       });
-      resolveTombstones(new Set());
+      affectedTask.title = 'Changed after request start';
+      await flushPromises();
       await flushPromises();
 
-      expect(localProjects[0].tasks[0].title).toBe('Local title');
-      expect(mockLogger.debug).toHaveBeenCalledWith(
-        '远程任务更新已被更新请求取代',
-        expect.objectContaining({ requestId: 1, currentId: 2 }),
+      expect(mockPermissionDeniedHandler.handlePermissionDenied).toHaveBeenCalledWith(
+        expect.anything(),
+        [expectedSnapshot],
+        'project-1',
+        expect.objectContaining({
+          ownerUserId: 'user-123',
+          shouldNotify: expect.any(Function),
+        }),
       );
+      const permissionContext = mockPermissionDeniedHandler.handlePermissionDenied.mock.calls[0][3] as {
+        ownerUserId: string;
+        shouldNotify: () => boolean;
+      };
+      expect(permissionContext.shouldNotify()).toBe(true);
+      currentUserId = 'user-456';
+      sessionGeneration = 2;
+      expect(permissionContext.shouldNotify()).toBe(false);
     });
+
   });
 });

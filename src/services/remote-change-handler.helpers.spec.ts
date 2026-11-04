@@ -4,6 +4,7 @@ import {
   buildRemoteTaskDirtyFields,
   canApplyRemoteTaskUpdateResult,
   collectRemoteProjectDeletionSets,
+  decideRemoteTaskDeletion,
   mergeRemoteTaskWithLocalDirtyFields,
   removeDeletedRecords,
   removeRemoteTaskFromProject,
@@ -93,6 +94,32 @@ describe('remote-change-handler.helpers', () => {
       lastPersistAt: 6_000,
       echoProtectionMs: 3_000,
     })).toBe(false);
+  });
+
+  it('远端删除只有在 tombstone 时间明确且不早于本地更新时才允许应用', () => {
+    const localTask = task({ updatedAt: '2026-02-03T00:00:00.000Z' });
+
+    expect(decideRemoteTaskDeletion({
+      localTask,
+      tombstonePresent: false,
+    })).toEqual({ shouldDelete: false, reason: 'missing-tombstone' });
+
+    expect(decideRemoteTaskDeletion({
+      localTask,
+      tombstonePresent: true,
+    })).toEqual({ shouldDelete: false, reason: 'missing-tombstone-timestamp' });
+
+    expect(decideRemoteTaskDeletion({
+      localTask,
+      tombstonePresent: true,
+      tombstoneDeletedAt: Date.parse('2026-02-02T00:00:00.000Z'),
+    })).toEqual({ shouldDelete: false, reason: 'local-newer-than-tombstone' });
+
+    expect(decideRemoteTaskDeletion({
+      localTask,
+      tombstonePresent: true,
+      tombstoneDeletedAt: Date.parse('2026-02-04T00:00:00.000Z'),
+    })).toEqual({ shouldDelete: true, reason: 'confirmed-tombstone' });
   });
 
   it('收集并移除远端软删除任务和连接', () => {

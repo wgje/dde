@@ -412,12 +412,15 @@ export class ChangeTrackerService {
   /**
    * 清理超过保护窗口的历史脏记录
    */
-  pruneExpiredChanges(maxAgeMs = SYNC_CONFIG.DIRTY_PROTECTION_WINDOW_MS): number {
+  pruneExpiredChanges(
+    maxAgeMs = SYNC_CONFIG.DIRTY_PROTECTION_WINDOW_MS,
+    shouldRetain?: (record: ChangeRecord) => boolean,
+  ): number {
     const now = Date.now();
     let cleaned = 0;
     const keysToDelete: string[] = [];
     this.pendingChanges.forEach((record, key) => {
-      if (now - record.timestamp > maxAgeMs) {
+      if (now - record.timestamp > maxAgeMs && !shouldRetain?.(record)) {
         keysToDelete.push(key);
       }
     });

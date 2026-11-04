@@ -1,9 +1,12 @@
-import type { Project, Task } from '../models';
+import { isSameRevision } from '../app/core/state/store-data-safety.helpers';
+import type { Connection, Project, Task } from '../models';
 
 export interface RemoteProjectDeletionSets {
   deletedTaskIds: Set<string>;
   deletedConnectionIds: Set<string>;
 }
+
+export type RemoteConnectionDeletionGuard = ReadonlyMap<string, Connection | undefined>;
 
 export interface SkipRemoteProjectUpdateInput {
   isEditing: boolean;
@@ -82,6 +85,19 @@ export interface RemoveRemoteTaskFromProjectResult {
   remainingTasks: number;
 }
 
+export interface RemoteTaskDeletionDecisionInput {
+  localTask?: Pick<Task, 'updatedAt'> | null;
+  tombstonePresent: boolean;
+  tombstoneDeletedAt?: number;
+}
+
+export type RemoteTaskDeletionDecision =
+  | { shouldDelete: true; reason: 'confirmed-tombstone' }
+  | {
+      shouldDelete: false;
+      reason: 'missing-tombstone' | 'missing-tombstone-timestamp' | 'local-newer-than-tombstone';
+    };
+
 export interface CanApplyRemoteTaskUpdateResultInput {
   requestId: number;
   currentRequestId: number;
@@ -110,11 +126,50 @@ export function shouldSkipRemoteTaskUpdate(input: SkipRemoteTaskUpdateInput): bo
   return input.now - input.lastPersistAt < input.echoProtectionMs;
 }
 
+export function decideRemoteTaskDeletion(
+  input: RemoteTaskDeletionDecisionInput,
+): RemoteTaskDeletionDecision {
+  if (!input.tombstonePresent) {
+    return { shouldDelete: false, reason: 'missing-tombstone' };
+  }
+  if (!Number.isFinite(input.tombstoneDeletedAt)) {
+    return { shouldDelete: false, reason: 'missing-tombstone-timestamp' };
+  }
+
+  const localUpdatedAt = input.localTask?.updatedAt
+    ? Date.parse(input.localTask.updatedAt)
+    : Number.NaN;
+  if (Number.isFinite(localUpdatedAt) && localUpdatedAt > input.tombstoneDeletedAt!) {
+    return { shouldDelete: false, reason: 'local-newer-than-tombstone' };
+  }
+
+  return { shouldDelete: true, reason: 'confirmed-tombstone' };
+}
+
 export function collectRemoteProjectDeletionSets(remoteProject: Project): RemoteProjectDeletionSets {
   return {
     deletedTaskIds: new Set((remoteProject.tasks || []).filter(t => t.deletedAt).map(t => t.id)),
     deletedConnectionIds: new Set((remoteProject.connections || []).filter(c => c.deletedAt).map(c => c.id)),
   };
+}
+
+export function captureRemoteConnectionDeletionGuard(
+  project: Pick<Project, 'connections'>,
+  deletionSets: Pick<RemoteProjectDeletionSets, 'deletedConnectionIds'>,
+): RemoteConnectionDeletionGuard {
+  const connectionsById = new Map(project.connections.map(connection => [connection.id, connection]));
+  return new Map(Array.from(deletionSets.deletedConnectionIds, connectionId => {
+    const connection = connectionsById.get(connectionId);
+    return [connectionId, connection ? { ...connection } : undefined] as const;
+  }));
+}
+
+export function isRemoteConnectionDeletionStillCurrent(
+  guard: RemoteConnectionDeletionGuard,
+  currentConnection: Connection,
+): boolean {
+  return guard.has(currentConnection.id)
+    && isSameRevision(guard.get(currentConnection.id), currentConnection);
 }
 
 export function removeDeletedRecords(remoteProject: Project): Project {

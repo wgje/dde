@@ -1,7 +1,8 @@
 /** 处理远程项目/任务变更；订阅、持久化、会话管理分别由 SyncCoordinator/UserSession 负责。 */
 import { Injectable, inject, DestroyRef } from '@angular/core';
 import { SyncCoordinatorService } from './sync-coordinator.service';
-import { ProjectDataService } from '../core-bridge';
+import { ActionQueueService } from './action-queue.service';
+import { ProjectDataService, TaskSyncOperationsService } from '../core-bridge';
 import { UndoService } from './undo.service';
 import { UiStateService } from './ui-state.service';
 import { ProjectStateService } from './project-state.service';
@@ -23,21 +24,33 @@ import type {
 } from './remote-change-handler.types';
 import {
   canApplyRemoteTaskUpdateResult,
+  captureRemoteConnectionDeletionGuard,
   collectRemoteProjectDeletionSets,
+  decideRemoteTaskDeletion,
+  isRemoteConnectionDeletionStillCurrent,
   removeDeletedRecords,
   removeRemoteTaskFromProject,
   resolveRemoteTaskTargetProject,
   shouldAddRemoteTask,
-  shouldSkipRemoteProjectUpdate,
-  shouldSkipRemoteTaskUpdate,
   shouldSkipStaleRemoteTask,
+  type RemoteConnectionDeletionGuard,
   type RemoteProjectDeletionSets,
 } from './remote-change-handler.helpers';
+import {
+  captureRemoteProjectSessionContext,
+  createRemoteTaskUpdateContext,
+  createStaleRemoteProjectSessionLogContext,
+  evaluateRemoteProjectUpdateGuard,
+  isPermissionDeniedRemoteTaskError,
+  shouldSkipRemoteTaskChange,
+} from './remote-change-handler-context';
 import { RemoteTaskMergeController } from './remote-task-merge.controller';
+import { RemoteTaskUpdateRequestController } from './remote-task-update-request.controller';
 import {
   RemoteProjectDeleteDeferralController,
-  type RemoteProjectDeleteSessionContext,
+  type RemoteProjectDeleteSessionContext as RemoteProjectSessionContext,
 } from './remote-project-delete-deferral.controller';
+import { createTaskTombstoneSnapshot } from './conflict-resolution-merge.helpers';
 export type { RemoteChangeCallbacks, RemoteProjectChangePayload, RemoteTaskChangePayload } from './remote-change-handler.types';
 
 @Injectable({
@@ -47,7 +60,9 @@ export class RemoteChangeHandlerService {
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('RemoteChangeHandler');
   private syncCoordinator = inject(SyncCoordinatorService);
+  private actionQueue = inject(ActionQueueService);
   private projectData = inject(ProjectDataService);
+  private taskSyncOps = inject(TaskSyncOperationsService);
   private undoService = inject(UndoService);
   private uiState = inject(UiStateService);
   private projectState = inject(ProjectStateService);
@@ -63,13 +78,18 @@ export class RemoteChangeHandlerService {
     isEditing: () => this.uiState.isEditing,
     logger: this.logger,
   });
+  /** 回调是否已设置（防止重复调用） */
+  private callbacksInitialized = false;
+
+  /** 按 project/task 隔离，只允许同一任务的最新请求继续。 */
+  private readonly taskUpdateRequests = new RemoteTaskUpdateRequestController();
   private readonly projectDeleteDeferral = new RemoteProjectDeleteDeferralController({
     hasPendingWrite: (projectId, ownerUserId) => (
       this.syncCoordinator.hasPendingLocalChanges()
       || this.syncCoordinator.hasPendingChangesForProject(projectId, ownerUserId)
     ),
     isSessionCurrent: (context, projectId) => (
-      this.isRemoteProjectSessionCurrent(context, projectId)
+      this.isRemoteProjectSessionCurrent(context, projectId, 'deferred-project-delete')
     ),
     probe: projectId => this.syncCoordinator.getAccessibleProjectProbe(projectId),
     apply: projectId => this.applyRemoteProjectDelete(projectId),
@@ -77,38 +97,17 @@ export class RemoteChangeHandlerService {
     info: (message, context) => this.logger.info(message, context),
     warn: (message, context) => this.logger.warn(message, context),
   });
-  /** 
-   * 用于防止在编辑期间处理远程变更的时间阈值（毫秒）
-   * 【修复】从 300ms 增加到 2000ms，给弱网环境更多保护时间
-   */
-  private static readonly EDIT_GUARD_THRESHOLD_MS = 2000;
-  
-  /** 回调是否已设置（防止重复调用） */
-  private callbacksInitialized = false;
-  
-  /** 服务是否已销毁（用于取消进行中的异步操作） */
-  private isDestroyed = false;
-  
-  /** 
-   * 当前任务更新请求 ID
-   * 使用单调递增的 ID 替代 AbortController，确保只处理最新请求结果
-   * 注：Supabase JS 客户端不原生支持 AbortSignal，此设计更可靠
-   */
-  private taskUpdateRequestId = 0;
   
   constructor() {
     const unsubscribePendingWriteState = this.syncCoordinator
       .subscribeToProjectPendingWriteStateChanges?.(() => {
         this.projectDeleteDeferral.requestReevaluation();
       });
-    // 注册 HMR/测试清理
     this.destroyRef.onDestroy(() => {
       unsubscribePendingWriteState?.();
       this.projectDeleteDeferral.destroy();
-      this.isDestroyed = true;
       this.callbacksInitialized = false;
-      // 递增请求 ID，使所有进行中的请求结果被忽略
-      this.taskUpdateRequestId++;
+      this.taskUpdateRequests.destroy();
     });
   }
 
@@ -140,11 +139,10 @@ export class RemoteChangeHandlerService {
         if (projectId && (eventType === 'INSERT' || eventType === 'UPDATE')) {
           this.projectDeleteDeferral.cancel(projectId);
         }
-        const forceDeleteDeferral = this.shouldSkipRemoteUpdate();
 
-        // 项目级更新：如果用户正在编辑，跳过以防止冲突
-        // DELETE 仍需进入 owner 和队列检查，不能直接丢弃事件。
-        if (forceDeleteDeferral && eventType !== 'DELETE') {
+        const shouldSkipRemoteUpdate = this.shouldSkipRemoteUpdate();
+        // DELETE 必须进入延迟判定，不能因全局脏状态直接丢失事件。
+        if (eventType !== 'DELETE' && shouldSkipRemoteUpdate) {
           this.logger.debug('跳过项目级远程更新');
           return;
         }
@@ -155,7 +153,7 @@ export class RemoteChangeHandlerService {
           if (isRealtimeEvent && projectId) {
             await this.handleIncrementalUpdate(
               payload as RemoteProjectChangePayload,
-              forceDeleteDeferral,
+              shouldSkipRemoteUpdate,
             );
           } else if (normalizedCallbacks.onRefreshActiveProject) {
             await normalizedCallbacks.onRefreshActiveProject(`remote:${eventType ?? 'unknown'}`);
@@ -190,51 +188,25 @@ export class RemoteChangeHandlerService {
   private shouldSkipRemoteUpdate(): boolean {
     const isEditing = this.uiState.isEditing;
     const hasPending = this.syncCoordinator.hasPendingLocalChanges();
-    const decision = shouldSkipRemoteProjectUpdate({
+    const decision = evaluateRemoteProjectUpdateGuard(
       isEditing,
-      hasPendingLocalChanges: hasPending,
-      now: Date.now(),
-      lastPersistAt: this.syncCoordinator.getLastPersistAt(),
-      guardMs: RemoteChangeHandlerService.EDIT_GUARD_THRESHOLD_MS,
-    });
+      hasPending,
+      Date.now(),
+      this.syncCoordinator.getLastPersistAt(),
+    );
     
     // 添加调试日志
-    if (decision.shouldSkip) {
-      this.logger.debug('跳过远程项目更新', {
-        isEditing,
-        hasPendingLocalChanges: hasPending,
-        timeSinceLastPersist: decision.timeSinceLastPersist,
-        inEditGuard: decision.inEditGuard,
-        threshold: RemoteChangeHandlerService.EDIT_GUARD_THRESHOLD_MS
-      });
+    if (decision.logContext) {
+      this.logger.debug('跳过远程项目更新', decision.logContext);
     }
     
     return decision.shouldSkip;
   }
-  
-  /**
-   * 检查是否应跳过远程任务级更新
-   * 更宽松的策略：只在刚刚有持久化操作时跳过，允许不同任务的并发更新
-   * 【修复】增加回声保护时间到 3000ms，匹配同步防抖时间 (SYNC_CONFIG.DEBOUNCE_DELAY)
-   * 防止本机操作的"回声"覆盖本地状态
-   */
+
   private shouldSkipTaskUpdate(payload: RemoteTaskChangePayload): boolean {
-    // 【关键修复】回声保护时间增加到 3 秒，匹配同步防抖延迟
-    const ECHO_PROTECTION_WINDOW = 3000;
-    const inEchoGuard = shouldSkipRemoteTaskUpdate({
-      now: Date.now(),
-      lastPersistAt: this.syncCoordinator.getLastPersistAt(),
-      echoProtectionMs: ECHO_PROTECTION_WINDOW,
-    });
-
-    // DELETE 事件不需要加载远程项目，且对一致性很关键；仅应用回声保护。
-    if (payload.eventType === 'DELETE') {
-      return inEchoGuard;
-    }
-
-    // UPDATE/INSERT 需要尽量及时处理（尤其是软删除 tombstone 通过 UPDATE 传播）。
-    // 这里不再因“编辑中/有待同步变更”而整体跳过；改由后续合并逻辑按字段保护本地脏数据。
-    return inEchoGuard;
+    return shouldSkipRemoteTaskChange(
+      payload, Date.now(), this.syncCoordinator.getLastPersistAt(),
+    );
   }
 
   /**
@@ -247,7 +219,7 @@ export class RemoteChangeHandlerService {
     const { eventType, projectId } = payload;
 
     if (eventType === 'DELETE') {
-      const sessionContext = this.captureRemoteProjectSessionContext();
+      const sessionContext = captureRemoteProjectSessionContext(this.userSession);
       if (!sessionContext) {
         this.logger.warn('远程项目删除缺少当前 owner/session，已保留本地数据', { projectId });
         return;
@@ -263,7 +235,6 @@ export class RemoteChangeHandlerService {
 
   private applyRemoteProjectDelete(projectId: string): void {
     this.undoService.clearOutdatedHistory(projectId, Number.MAX_SAFE_INTEGER);
-
     const wasActiveProject = this.projectState.activeProjectId() === projectId;
     this.projectState.updateProjects(ps => ps.filter(p => p.id !== projectId));
     if (wasActiveProject) {
@@ -272,36 +243,13 @@ export class RemoteChangeHandlerService {
     }
   }
 
-  private captureRemoteProjectSessionContext(): RemoteProjectDeleteSessionContext | null {
-    const userId = this.userSession.currentUserId();
-    if (!userId) return null;
-    return {
-      userId,
-      sessionGeneration: this.userSession.getCurrentSessionGeneration(),
-    };
-  }
-
-  private isRemoteProjectSessionCurrent(
-    context: RemoteProjectDeleteSessionContext,
-    projectId: string,
-  ): boolean {
-    if (this.userSession.isSessionContextCurrent(context.sessionGeneration, context.userId)) {
-      return true;
-    }
-    this.logger.debug('丢弃过期远程项目删除', {
-      projectId,
-      expectedSessionGeneration: context.sessionGeneration,
-      currentSessionGeneration: this.userSession.getCurrentSessionGeneration(),
-    });
-    return false;
-  }
-
   private async applyRemoteProjectUpsert(projectId: string): Promise<void> {
-    const userId = this.authService.currentUserId();
-    if (!userId) return;
+    const sessionContext = captureRemoteProjectSessionContext(this.userSession);
+    if (!sessionContext) return;
+    if (this.shouldDeferRemoteProjectUpsert(sessionContext, projectId, 'before-project-load')) return;
 
-    const remoteProject = await this.projectData.loadFullProject(projectId, userId);
-    if (!remoteProject) return;
+    const remoteProject = await this.projectData.loadFullProject(projectId, sessionContext.userId);
+    if (!remoteProject || this.shouldDeferRemoteProjectUpsert(sessionContext, projectId, 'project-load')) return;
 
     const deletionSets = collectRemoteProjectDeletionSets(remoteProject);
     const cleanedRemoteProject = removeDeletedRecords(remoteProject);
@@ -320,33 +268,61 @@ export class RemoteChangeHandlerService {
       return;
     }
 
-    this.applyRemoteProjectDeletions(projectId, deletionSets);
-    await this.mergeNewerRemoteProject(projectId, localProject, remoteProject, cleanedRemoteProject);
+    await this.mergeNewerRemoteProject(
+      projectId,
+      localProject,
+      remoteProject,
+      cleanedRemoteProject,
+      deletionSets,
+      sessionContext,
+    );
   }
 
-  private applyRemoteProjectDeletions(projectId: string, deletionSets: RemoteProjectDeletionSets): void {
-    const { deletedTaskIds, deletedConnectionIds } = deletionSets;
-    if (deletedTaskIds.size === 0 && deletedConnectionIds.size === 0) return;
+  private isRemoteProjectSessionCurrent(
+    context: RemoteProjectSessionContext,
+    projectId: string,
+    stage: string,
+  ): boolean {
+    if (this.userSession.isSessionContextCurrent(context.sessionGeneration, context.userId)) return true;
+    this.logger.debug(
+      '丢弃过期远程项目更新',
+      createStaleRemoteProjectSessionLogContext(context, projectId, stage, this.userSession),
+    );
+    return false;
+  }
 
-    this.logger.info('处理远程删除操作', {
+  private shouldDeferRemoteProjectUpsert(
+    context: RemoteProjectSessionContext,
+    projectId: string,
+    stage: string,
+  ): boolean {
+    if (!this.isRemoteProjectSessionCurrent(context, projectId, stage)) return true;
+    if (!this.syncCoordinator.hasPendingChangesForProject(projectId, context.userId)) return false;
+    this.logger.debug('跳过项目级远程更新，当前 owner 存在待处理本地写入', {
+      projectId, ownerUserId: context.userId, stage,
+    });
+    return true;
+  }
+
+  private applyRemoteConnectionDeletions(projectId: string, deletionGuard: RemoteConnectionDeletionGuard): void {
+    if (deletionGuard.size === 0) return;
+
+    this.logger.info('处理远程连接删除操作', {
       projectId,
-      deletedTaskCount: deletedTaskIds.size,
-      deletedConnectionCount: deletedConnectionIds.size
+      deletedConnectionCount: deletionGuard.size
     });
 
     this.projectState.updateProjects(ps => ps.map(p => {
       if (p.id !== projectId) return p;
 
-      const updatedTasks = p.tasks.filter(t => !deletedTaskIds.has(t.id));
-      const updatedConnections = p.connections.filter(c => !deletedConnectionIds.has(c.id));
+      const updatedConnections = p.connections.filter(c => !isRemoteConnectionDeletionStillCurrent(deletionGuard, c));
 
-      if (updatedTasks.length === p.tasks.length && updatedConnections.length === p.connections.length) {
+      if (updatedConnections.length === p.connections.length) {
         return p;
       }
 
       return this.syncCoordinator.validateAndRebalance({
         ...p,
-        tasks: updatedTasks,
         connections: updatedConnections
       });
     }));
@@ -356,13 +332,31 @@ export class RemoteChangeHandlerService {
     projectId: string,
     localProject: Project,
     remoteProject: Project,
-    cleanedRemoteProject: Project
+    cleanedRemoteProject: Project,
+    deletionSets: RemoteProjectDeletionSets,
+    sessionContext: RemoteProjectSessionContext,
   ): Promise<void> {
-    const localVersion = localProject.version ?? 0;
     const remoteVersion = remoteProject.version ?? 0;
-    if (remoteVersion <= localVersion) return;
+    const connectionDeletionGuard = captureRemoteConnectionDeletionGuard(
+      this.projectState.getProjectWithCurrentData(projectId) ?? localProject, deletionSets);
 
-    const versionDiff = remoteVersion - localVersion;
+    const tombstoneResult = await this.taskSyncOps.getTombstoneIdsWithStatus(projectId);
+    if (this.shouldDeferRemoteProjectUpsert(sessionContext, projectId, 'tombstone-load')) return;
+
+    const currentLocalProject = this.projectState.getProject(projectId);
+    if (!currentLocalProject) return;
+    const currentLocalVersion = currentLocalProject.version ?? 0;
+    if (remoteVersion <= currentLocalVersion) {
+      this.logger.debug('跳过等待期间已过时的远程项目更新', {
+        projectId, currentLocalVersion, remoteVersion,
+      });
+      return;
+    }
+
+    this.applyRemoteConnectionDeletions(projectId, connectionDeletionGuard);
+    const mergeBaseProject = this.projectState.getProjectWithCurrentData(projectId);
+    if (!mergeBaseProject) return;
+    const versionDiff = remoteVersion - currentLocalVersion;
     const clearedCount = this.undoService.clearOutdatedHistory(projectId, remoteVersion);
     if (clearedCount > 0) {
       this.logger.debug(`清理了 ${clearedCount} 条过时的撤销历史`, { projectId });
@@ -372,11 +366,11 @@ export class RemoteChangeHandlerService {
       this.toastService.info('数据已更新', '其他设备的更改已同步，当前编辑内容将与远程合并');
     }
 
-    const tombstoneIds = await this.syncCoordinator.getTombstoneIds(projectId);
-    const currentLocalProject = this.projectState.getProject(projectId);
-    if (!currentLocalProject) return;
-
-    const mergeResult = this.syncCoordinator.smartMerge(currentLocalProject, cleanedRemoteProject, tombstoneIds);
+    const mergeResult = this.syncCoordinator.smartMerge(
+      mergeBaseProject,
+      cleanedRemoteProject,
+      createTaskTombstoneSnapshot(tombstoneResult.ids, tombstoneResult.deletedAtByTaskId),
+    );
     if (mergeResult.conflictCount > 0 && this.uiState.isEditing) {
       this.toastService.warning('合并提示', '检测到与远程更改的冲突，已自动合并');
     }
@@ -385,18 +379,15 @@ export class RemoteChangeHandlerService {
     this.projectState.updateProjects(ps => ps.map(p => p.id === projectId ? validated : p));
   }
 
-  /**
-   * 处理任务级别的实时更新
-   * 
-   * 🔧 关键修复点：
-   * 1. 任务删除需要正确处理 projectId 缺失的情况
-   * 2. 任务更新需要智能合并本地编辑和远程变更
-   * 3. 需要正确处理位置、状态、stage 等所有字段的同步
-   */
+  /** 处理任务级别的实时更新。 */
   private handleTaskLevelUpdate(payload: RemoteTaskChangePayload): void {
     const { eventType, taskId, projectId } = payload;
-    this.changeTracker.pruneExpiredChanges(SYNC_CONFIG.DIRTY_PROTECTION_WINDOW_MS);
-    
+    this.changeTracker.pruneExpiredChanges(
+      SYNC_CONFIG.DIRTY_PROTECTION_WINDOW_MS,
+      record => record.entityType === 'task'
+        && this.actionQueue.hasDurablePendingTaskMutation(record.projectId, record.entityId),
+    );
+
     // 添加调试日志
     this.logger.info('[TaskSync] 收到任务变更事件', { eventType, taskId, projectId });
 
@@ -408,7 +399,7 @@ export class RemoteChangeHandlerService {
       eventType,
       taskId,
       projectId,
-      projects: this.projectState.projects(),
+      projects: this.projectState.getProjectsWithCurrentData(),
     });
 
     if (targetResolution.targetProjectId === null) {
@@ -434,7 +425,7 @@ export class RemoteChangeHandlerService {
 
     switch (eventType) {
       case 'DELETE':
-        this.applyRemoteTaskDelete(taskId, targetProjectId);
+        this.queueRemoteTaskUpsert(eventType, taskId, targetProjectId);
         break;
 
       case 'INSERT':
@@ -447,15 +438,6 @@ export class RemoteChangeHandlerService {
         this.logger.warn(`未处理的任务事件类型: ${eventType}`, { taskId, projectId });
         break;
     }
-  }
-
-  private applyRemoteTaskDelete(taskId: string, projectId: string): void {
-    this.logger.info('处理远程任务删除', { taskId, projectId });
-
-    this.undoService.clearTaskHistory(taskId, projectId);
-    this.projectState.updateProjects(projects =>
-      projects.map(p => this.removeTaskFromProject(p, taskId, projectId, true))
-    );
   }
 
   private removeTaskFromProject(project: Project, taskId: string, projectId: string, logMissing = false): Project {
@@ -486,11 +468,12 @@ export class RemoteChangeHandlerService {
     if (!userId || !ownerUserId || userId !== ownerUserId) return;
 
     const sessionGeneration = this.userSession.getCurrentSessionGeneration();
-    const localTask = this.projectState.getProject(targetProjectId)?.tasks.find(task => task.id === taskId);
+    const localTask = this.projectState.getProjectWithCurrentData(targetProjectId)
+      ?.tasks.find(task => task.id === taskId);
     const permissionDeniedTaskSnapshot = localTask ? structuredClone(localTask) : null;
     if (!this.userSession.isSessionContextCurrent(sessionGeneration, ownerUserId)) return;
 
-    const context: RemoteTaskUpdateContext = {
+    const context = createRemoteTaskUpdateContext({
       eventType,
       taskId,
       targetProjectId,
@@ -498,8 +481,8 @@ export class RemoteChangeHandlerService {
       sessionGeneration,
       permissionDeniedTaskSnapshot,
       currentProjectId: this.projectState.activeProjectId(),
-      requestId: ++this.taskUpdateRequestId
-    };
+      requestId: this.taskUpdateRequests.start(targetProjectId, taskId),
+    });
 
     this.logger.info('开始加载远程任务更新', {
       eventType,
@@ -550,10 +533,11 @@ export class RemoteChangeHandlerService {
       return false;
     }
 
+    const currentRequestId = this.taskUpdateRequests.getCurrentRequestId(context.targetProjectId, context.taskId);
     const decision = canApplyRemoteTaskUpdateResult({
       requestId: context.requestId,
-      currentRequestId: this.taskUpdateRequestId,
-      isDestroyed: this.isDestroyed,
+      currentRequestId,
+      isDestroyed: this.taskUpdateRequests.isDestroyed,
       activeProjectId: this.projectState.activeProjectId(),
       originalProjectId: context.currentProjectId,
     });
@@ -563,7 +547,7 @@ export class RemoteChangeHandlerService {
     if (decision.reason === 'superseded') {
       this.logger.debug('远程任务更新已被更新请求取代', {
         requestId: context.requestId,
-        currentId: this.taskUpdateRequestId
+        currentId: currentRequestId
       });
       return false;
     }
@@ -603,12 +587,11 @@ export class RemoteChangeHandlerService {
   }
 
   private async handleMissingRemoteTask(remoteProject: Project, context: RemoteTaskUpdateContext): Promise<void> {
-    const tombstoneIds = await this.syncCoordinator.getTombstoneIds(context.targetProjectId);
+    const tombstoneResult = await this.taskSyncOps.getTombstoneIdsWithStatus(context.targetProjectId);
     if (!this.canApplyTaskUpdateResult(context)) return;
-    const isTombstoned = tombstoneIds.has(context.taskId);
     const pendingLocal = this.getPendingTaskChange(context.targetProjectId, context.taskId);
 
-    if (!isTombstoned && pendingLocal && pendingLocal.changeType !== 'delete') {
+    if (pendingLocal && pendingLocal.changeType !== 'delete') {
       this.logger.debug('远程项目中暂未见任务，但本地存在待同步变更，保留本地状态', {
         taskId: context.taskId,
         projectId: context.targetProjectId,
@@ -618,10 +601,50 @@ export class RemoteChangeHandlerService {
       return;
     }
 
+    if (tombstoneResult.localCacheOnly || !tombstoneResult.fromRemote) {
+      this.logger.warn('远程任务删除仅有本地 tombstone 缓存证据，已保留本地任务', {
+        taskId: context.taskId,
+        projectId: context.targetProjectId,
+        tombstonePresent: tombstoneResult.ids.has(context.taskId),
+        tombstoneDeletedAt: tombstoneResult.deletedAtByTaskId?.get(context.taskId) ?? null,
+        fromRemote: tombstoneResult.fromRemote,
+        localCacheOnly: tombstoneResult.localCacheOnly,
+      });
+      return;
+    }
+
+    const localProject = this.projectState.getProjectWithCurrentData(context.targetProjectId)
+      ?? this.projectState.getProject(context.targetProjectId);
+    const localTask = localProject?.tasks.find(task => task.id === context.taskId);
+    const deletionDecision = decideRemoteTaskDeletion({
+      localTask,
+      tombstonePresent: tombstoneResult.ids.has(context.taskId),
+      tombstoneDeletedAt: tombstoneResult.deletedAtByTaskId?.get(context.taskId),
+    });
+
+    if (!deletionDecision.shouldDelete) {
+      this.logger.warn('远程任务删除缺少足够证据，已保留本地任务', {
+        taskId: context.taskId,
+        projectId: context.targetProjectId,
+        reason: deletionDecision.reason,
+        localUpdatedAt: localTask?.updatedAt ?? null,
+        tombstoneDeletedAt: tombstoneResult.deletedAtByTaskId?.get(context.taskId) ?? null,
+        localCacheOnly: tombstoneResult.localCacheOnly,
+      });
+      return;
+    }
+
+    this.convergeMissingRemoteTaskDeletion(remoteProject, context, deletionDecision.reason);
+  }
+
+  private convergeMissingRemoteTaskDeletion(
+    remoteProject: Project, context: RemoteTaskUpdateContext,
+    reason: ReturnType<typeof decideRemoteTaskDeletion>['reason'],
+  ): void {
     this.logger.info('远程任务已不在项目中，按删除收敛本地状态', {
       taskId: context.taskId,
       projectId: context.targetProjectId,
-      reason: isTombstoned ? 'tombstoned' : 'missing',
+      reason,
       totalTasks: remoteProject.tasks.length
     });
 
@@ -647,7 +670,7 @@ export class RemoteChangeHandlerService {
   }
 
   private shouldSkipStaleRemoteTask(remoteTask: Task, context: RemoteTaskUpdateContext): boolean {
-    const localProject = this.projectState.getProject(context.targetProjectId);
+    const localProject = this.projectState.getProjectWithCurrentData(context.targetProjectId);
     const existingLocalTask = localProject?.tasks.find(t => t.id === context.taskId);
 
     if (!existingLocalTask?.updatedAt || !remoteTask.updatedAt) return false;
@@ -727,17 +750,15 @@ export class RemoteChangeHandlerService {
   }
 
   private async handleRemoteTaskUpdateError(error: unknown, context: RemoteTaskUpdateContext): Promise<void> {
-    const supabaseError = supabaseErrorToError(error);
-    const isPermissionDenied = this.isPermissionDeniedError(supabaseError);
-    if (!isPermissionDenied && (
-      context.requestId !== this.taskUpdateRequestId
-      || this.isDestroyed
+    if (
+      !this.taskUpdateRequests.isCurrent(context.targetProjectId, context.taskId, context.requestId)
       || !this.userSession.isSessionContextCurrent(context.sessionGeneration, context.ownerUserId)
-    )) return;
+    ) return;
 
     this.logger.error('处理远程任务更新失败', error);
 
-    if (isPermissionDenied) {
+    const supabaseError = supabaseErrorToError(error);
+    if (isPermissionDeniedRemoteTaskError(supabaseError)) {
       await this.handlePermissionDeniedTaskUpdate(supabaseError, context);
       return;
     }
@@ -749,20 +770,6 @@ export class RemoteChangeHandlerService {
         onClick: () => reloadViaForceClearCache()
       }
     });
-  }
-
-  private isPermissionDeniedError(supabaseError: ReturnType<typeof supabaseErrorToError>): boolean {
-    return supabaseError.errorType === 'PermissionError'
-      || supabaseError.code === '403'
-      || supabaseError.code === 403
-      || supabaseError.code === '401'
-      || supabaseError.code === 401
-      || supabaseError.code === '42501'
-      || supabaseError.code === 42501
-      || supabaseError.status === '403'
-      || supabaseError.status === 403
-      || supabaseError.status === '401'
-      || supabaseError.status === 401;
   }
 
   private async handlePermissionDeniedTaskUpdate(
@@ -784,19 +791,27 @@ export class RemoteChangeHandlerService {
       context.targetProjectId,
       {
         ownerUserId: context.ownerUserId,
-        shouldNotify: () => context.requestId === this.taskUpdateRequestId
-          && !this.isDestroyed
-          && this.userSession.isSessionContextCurrent(context.sessionGeneration, context.ownerUserId),
+        shouldNotify: () => this.taskUpdateRequests.isCurrent(
+          context.targetProjectId,
+          context.taskId,
+          context.requestId,
+        ) && this.userSession.isSessionContextCurrent(
+          context.sessionGeneration,
+          context.ownerUserId,
+        ),
       },
     );
   }
 
   private getPendingTaskChange(projectId: string, taskId: string): ReturnType<ChangeTrackerService['getPendingChange']> {
+    const maxAgeMs = this.actionQueue.hasDurablePendingTaskMutation(projectId, taskId)
+      ? Number.POSITIVE_INFINITY
+      : SYNC_CONFIG.DIRTY_PROTECTION_WINDOW_MS;
     return this.changeTracker.getPendingChange(
       projectId,
       'task',
       taskId,
-      SYNC_CONFIG.DIRTY_PROTECTION_WINDOW_MS
+      maxAgeMs
     );
   }
   
@@ -806,10 +821,7 @@ export class RemoteChangeHandlerService {
    * 重置服务状态（用于测试和 HMR）
    */
   reset(): void {
-    // 重置请求 ID，使所有进行中的请求结果被忽略
-    this.taskUpdateRequestId++;
-    
+    this.taskUpdateRequests.reset();
     this.callbacksInitialized = false;
-    this.isDestroyed = false;
   }
 }

@@ -61,7 +61,9 @@ export class RemoteProjectDeleteDeferralController {
     this.reevaluationInFlight = this.drainReevaluationRequests()
       .finally(() => {
         this.reevaluationInFlight = null;
-        if (this.reevaluationRequested) this.requestReevaluation();
+        if (this.reevaluationRequested) {
+          this.requestReevaluation();
+        }
       });
   }
 
@@ -85,15 +87,21 @@ export class RemoteProjectDeleteDeferralController {
         this.deferred.delete(projectId);
         continue;
       }
-      if (this.options.hasPendingWrite(projectId, context.userId)) continue;
+      if (this.options.hasPendingWrite(projectId, context.userId)) {
+        continue;
+      }
 
       const probe = await this.probeSafely(projectId);
-      if (this.destroyed || this.deferred.get(projectId) !== context) continue;
+      if (this.destroyed || this.deferred.get(projectId) !== context) {
+        continue;
+      }
       if (!this.options.isSessionCurrent(context, projectId)) {
         this.deferred.delete(projectId);
         continue;
       }
-      if (this.options.hasPendingWrite(projectId, context.userId)) continue;
+      if (this.options.hasPendingWrite(projectId, context.userId)) {
+        continue;
+      }
       if (probe === null) {
         this.options.warn('延迟项目删除重评估缺少权威探针，继续保留本地数据', { projectId });
         continue;

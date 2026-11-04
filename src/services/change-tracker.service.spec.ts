@@ -79,6 +79,31 @@ describe('ChangeTrackerService', () => {
       expect(changes.tasksToUpdate[0].id).toBe('task-1');
     });
 
+    it('retains expired task changes when a durable action still owns them', () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-11-04T00:00:00.000Z'));
+      try {
+        const durableTask = { ...mockTask, id: 'task-durable' };
+        const expiredTask = { ...mockTask, id: 'task-expired' };
+        service.trackTaskUpdate('project-1', durableTask, ['title']);
+        service.trackTaskUpdate('project-1', expiredTask, ['content']);
+        vi.advanceTimersByTime(1001);
+
+        const removed = service.pruneExpiredChanges(
+          1000,
+          record => record.entityType === 'task' && record.entityId === 'task-durable',
+        );
+
+        expect(removed).toBe(1);
+        expect(service.getPendingChange('project-1', 'task', 'task-durable', Number.POSITIVE_INFINITY))
+          .toEqual(expect.objectContaining({ entityId: 'task-durable' }));
+        expect(service.getPendingChange('project-1', 'task', 'task-expired', Number.POSITIVE_INFINITY))
+          .toBeUndefined();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('应该追踪任务删除', () => {
       service.trackTaskDelete('project-1', 'task-1');
 
