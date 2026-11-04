@@ -36,6 +36,8 @@
 import { Injectable, inject, OnDestroy, signal } from '@angular/core';
 import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
+import { AuthService } from './auth.service';
+import { SessionRuntimeResetRegistry } from './session-runtime-reset.service';
 import {
   countActiveProjectTabs,
   filterActiveRemoteLocksForTask,
@@ -51,6 +53,7 @@ import {
 interface TabMessage {
   type: 'project-opened' | 'project-closed' | 'heartbeat' | 'data-synced' | 'edit-lock' | 'edit-unlock';
   tabId: string;
+  ownerUserId?: string | null;
   projectId?: string;
   projectName?: string;
   timestamp: number;
@@ -119,6 +122,8 @@ export class TabSyncService implements OnDestroy {
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('TabSync');
   private readonly toast = inject(ToastService);
+  private readonly authService = inject(AuthService);
+  private readonly sessionRuntimeReset = inject(SessionRuntimeResetRegistry);
   
   /** 当前标签页唯一 ID */
   private readonly tabId = crypto.randomUUID().substring(0, 8);
@@ -162,8 +167,13 @@ export class TabSyncService implements OnDestroy {
   /** 【v5.10 新增】警告冷却追踪 */
   private lastWarningTime = new Map<string, number>();
   private isDestroyed = false;
+  private readonly unregisterSessionRuntimeReset: () => void;
   
   constructor() {
+    this.unregisterSessionRuntimeReset = this.sessionRuntimeReset.register(
+      'TabSyncService',
+      () => this.resetSessionRuntime(),
+    );
     this.isSupported = typeof BroadcastChannel !== 'undefined';
     
     if (this.isSupported) {
@@ -178,6 +188,7 @@ export class TabSyncService implements OnDestroy {
   ngOnDestroy(): void {
     if (this.isDestroyed) return;
     this.isDestroyed = true;
+    this.unregisterSessionRuntimeReset();
     this.cleanup();
   }
   
@@ -202,6 +213,7 @@ export class TabSyncService implements OnDestroy {
     const message: TabMessage = {
       type: 'project-opened',
       tabId: this.tabId,
+      ownerUserId: this.authService.currentUserId(),
       projectId,
       projectName,
       timestamp: Date.now(),
@@ -234,6 +246,7 @@ export class TabSyncService implements OnDestroy {
     const message: TabMessage = {
       type: 'project-closed',
       tabId: this.tabId,
+      ownerUserId: this.authService.currentUserId(),
       projectId: this.currentProjectId,
       timestamp: Date.now(),
     };
@@ -277,6 +290,7 @@ export class TabSyncService implements OnDestroy {
     const message: TabMessage = {
       type: 'data-synced',
       tabId: this.tabId,
+      ownerUserId: this.authService.currentUserId(),
       projectId,
       projectUpdatedAt: updatedAt,
       timestamp: Date.now(),
@@ -319,6 +333,7 @@ export class TabSyncService implements OnDestroy {
     if (this.isDestroyed) return;
     // 忽略自己发送的消息
     if (message.tabId === this.tabId) return;
+    if ((message.ownerUserId ?? null) !== this.authService.currentUserId()) return;
     
     switch (message.type) {
       case 'project-opened':
@@ -418,6 +433,13 @@ export class TabSyncService implements OnDestroy {
     }, TAB_SYNC_CONFIG.HEARTBEAT_INTERVAL);
     this.heartbeatTimer = timer;
   }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer === null) return;
+    const heartbeatTimer = this.heartbeatTimer;
+    this.heartbeatTimer = null;
+    this.clearIntervalSafely(heartbeatTimer);
+  }
   
   private sendHeartbeat(): void {
     if (!this.channel || !this.currentProjectId) return;
@@ -425,6 +447,7 @@ export class TabSyncService implements OnDestroy {
     const message: TabMessage = {
       type: 'heartbeat',
       tabId: this.tabId,
+      ownerUserId: this.authService.currentUserId(),
       projectId: this.currentProjectId,
       timestamp: Date.now(),
     };
@@ -458,12 +481,7 @@ export class TabSyncService implements OnDestroy {
     // 【v5.10】清理并发状态
     this.cleanupConcurrencyState();
     
-    // 停止心跳
-    if (this.heartbeatTimer !== null) {
-      const heartbeatTimer = this.heartbeatTimer;
-      this.heartbeatTimer = null;
-      this.clearIntervalSafely(heartbeatTimer);
-    }
+    this.stopHeartbeat();
     
     // 关闭 channel
     if (this.channel) {
@@ -645,6 +663,7 @@ export class TabSyncService implements OnDestroy {
     const message: TabMessage = {
       type: 'edit-lock',
       tabId: this.tabId,
+      ownerUserId: this.authService.currentUserId(),
       timestamp: Date.now(),
       editLock: lock,
     };
@@ -661,6 +680,7 @@ export class TabSyncService implements OnDestroy {
     const message: TabMessage = {
       type: 'edit-unlock',
       tabId: this.tabId,
+      ownerUserId: this.authService.currentUserId(),
       timestamp: Date.now(),
       editLock: lock,
     };
@@ -746,6 +766,22 @@ export class TabSyncService implements OnDestroy {
     
     // 清理警告冷却追踪
     this.lastWarningTime.clear();
+  }
+
+  private resetSessionRuntime(): void {
+    this.broadcastProjectCloseForCleanup();
+    this.releaseAllEditLocks();
+    this.cleanupConcurrencyState();
+    this.activeTabs.clear();
+    this.remoteEditLocks.clear();
+    this.concurrentEditCount.set(0);
+
+    // Replace the timer so an already queued tick from the previous session
+    // cannot keep broadcasting with stale project state.
+    this.stopHeartbeat();
+    if (this.isSupported && this.channel) {
+      this.startHeartbeat();
+    }
   }
 
   private clearIntervalSafely(timer: ReturnType<typeof setInterval>): void {

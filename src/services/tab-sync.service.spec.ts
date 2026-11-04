@@ -1,8 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { Injector, runInInjectionContext } from '@angular/core';
+import { Injector, runInInjectionContext, signal } from '@angular/core';
 import { TabSyncService, TabEditLock, ConcurrentEditEvent } from './tab-sync.service';
 import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
+import { AuthService } from './auth.service';
+import { SessionRuntimeResetRegistry } from './session-runtime-reset.service';
 
 /**
  * Mock BroadcastChannel for testing
@@ -71,14 +73,17 @@ describe('TabSyncService', () => {
     };
   };
 
-  const createServiceInstance = () => {
+  const createServiceInstance = (ownerUserId = 'user-1') => {
     const toast = createToastMock();
     const logger = createLoggerMock();
+    const currentUserId = signal<string | null>(ownerUserId);
 
     const injector = Injector.create({
       providers: [
         { provide: ToastService, useValue: toast },
         { provide: LoggerService, useValue: logger.provider },
+        { provide: AuthService, useValue: { currentUserId } },
+        SessionRuntimeResetRegistry,
       ],
     });
 
@@ -90,6 +95,11 @@ describe('TabSyncService', () => {
       toast,
       logger: logger.provider,
       loggerMethods: logger.methods,
+      currentUserId,
+      sessionRuntimeReset: runInInjectionContext(
+        injector,
+        () => injector.get(SessionRuntimeResetRegistry),
+      ),
     };
   };
 
@@ -261,6 +271,59 @@ describe('TabSyncService', () => {
     });
   });
 
+  describe('会话运行时重置', () => {
+    it('reset 时广播项目关闭与编辑解锁并清空本地会话状态', async () => {
+      const firstTab = createServiceInstance('shared-owner');
+      const secondTab = createServiceInstance('shared-owner');
+      firstTab.service.notifyProjectOpen('proj-reset', 'Reset Project');
+      secondTab.service.notifyProjectOpen('proj-reset', 'Reset Project');
+      firstTab.service.acquireEditLock('task-reset', 'content');
+      await flushBroadcast();
+
+      expect(secondTab.service.getOtherTabsCount('proj-reset')).toBe(1);
+      expect(secondTab.service.isBeingEditedByOtherTab('task-reset', 'content')).toBe(true);
+
+      firstTab.sessionRuntimeReset.resetAll('owner-change');
+      await flushBroadcast();
+
+      expect(secondTab.service.getOtherTabsCount('proj-reset')).toBe(0);
+      expect(secondTab.service.isBeingEditedByOtherTab('task-reset', 'content')).toBe(false);
+      expect((firstTab.service as unknown as { currentProjectId: string | null }).currentProjectId).toBeNull();
+      expect((firstTab.service as unknown as { localEditLocks: Map<string, unknown> }).localEditLocks.size).toBe(0);
+      expect(firstTab.service.concurrentEditCount()).toBe(0);
+    });
+
+    it('不同 owner 的标签页消息互不计数且不触发冲突提醒', async () => {
+      const firstTab = createServiceInstance('owner-a');
+      const secondTab = createServiceInstance('owner-b');
+
+      firstTab.service.notifyProjectOpen('shared-project-id', 'Owner A Project');
+      secondTab.service.notifyProjectOpen('shared-project-id', 'Owner B Project');
+      await flushBroadcast();
+
+      expect(firstTab.service.getOtherTabsCount('shared-project-id')).toBe(0);
+      expect(secondTab.service.getOtherTabsCount('shared-project-id')).toBe(0);
+      expect(firstTab.toast.warning).not.toHaveBeenCalled();
+      expect(secondTab.toast.warning).not.toHaveBeenCalled();
+    });
+
+    it('旧 owner 已排队的 data-synced 在切号后不得刷新新会话', async () => {
+      const sender = createServiceInstance('old-owner');
+      const receiver = createServiceInstance('old-owner');
+      const onDataSynced = vi.fn();
+      receiver.service.notifyProjectOpen('same-project-id', 'Old Project');
+      receiver.service.setOnDataSyncedCallback(onDataSynced);
+
+      sender.service.notifyDataSynced('same-project-id', '2026-07-14T00:00:00.000Z');
+      receiver.sessionRuntimeReset.resetAll('owner-change');
+      receiver.currentUserId.set('new-owner');
+      receiver.service.notifyProjectOpen('same-project-id', 'New Project');
+      await flushBroadcast();
+
+      expect(onDataSynced).not.toHaveBeenCalled();
+    });
+  });
+
   describe('BroadcastChannel 初始化边界', () => {
     it('BroadcastChannel 创建失败时不应启动心跳定时器', () => {
       vi.useFakeTimers();
@@ -279,6 +342,8 @@ describe('TabSyncService', () => {
         providers: [
           { provide: ToastService, useValue: createToastMock() },
           { provide: LoggerService, useValue: logger.provider },
+          { provide: AuthService, useValue: { currentUserId: signal<string | null>('user-1') } },
+          SessionRuntimeResetRegistry,
         ],
       });
       const instance = runInInjectionContext(injector, () => new TabSyncService());
