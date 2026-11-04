@@ -24,7 +24,7 @@ export class ProjectShellFlowRestoreSchedulerController {
 
   scheduleFlowIdleRestore(projectId: string): void {
     const triggerRestore = () => {
-      if (this.isDestroyed) return;
+      if (this.isDestroyed || this.options.flowIntentActivated()) return;
       this.options.activateFlowIntent('restore-idle');
       this.options.setActiveView('flow');
       this.options.reportFlowRestoreMode('applied', {

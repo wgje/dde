@@ -64,6 +64,34 @@ describe('ProjectShellFlowRestoreSchedulerController', () => {
     });
   });
 
+  it('skips desktop idle restore after the user activates Flow', () => {
+    const idleWork: { restoreCallback?: IdleRequestCallback } = {};
+    let flowIntentActivated = false;
+    const activateFlowIntent = vi.fn();
+    const setActiveView = vi.fn();
+    const reportFlowRestoreMode = vi.fn();
+    vi.stubGlobal('requestIdleCallback', vi.fn((callback: IdleRequestCallback) => {
+      idleWork.restoreCallback = callback;
+      return 17;
+    }));
+    vi.stubGlobal('cancelIdleCallback', vi.fn());
+    const controller = new ProjectShellFlowRestoreSchedulerController(createOptions({
+      activateFlowIntent,
+      flowIntentActivated: () => flowIntentActivated,
+      reportFlowRestoreMode,
+      setActiveView,
+    }));
+
+    controller.scheduleFlowIdleRestore('project-1');
+    vi.advanceTimersByTime(STARTUP_PERF_CONFIG.FLOW_RESTORE_IDLE_DELAY_MS);
+    flowIntentActivated = true;
+    idleWork.restoreCallback?.({ didTimeout: false, timeRemaining: () => 50 });
+
+    expect(activateFlowIntent).not.toHaveBeenCalled();
+    expect(setActiveView).not.toHaveBeenCalled();
+    expect(reportFlowRestoreMode).not.toHaveBeenCalled();
+  });
+
   it('skips a queued weak-network preload after Flow intent activates', () => {
     let flowIntentActivated = false;
     const setFlowPrefetchOnlyActivated = vi.fn();
