@@ -26,21 +26,6 @@ import {
 import type {
   WorkspaceShellSessionExitSurface,
 } from './workspace-shell-session-exit-surface.factory';
-import type {
-  WorkspaceShellRoutingSurface,
-} from './workspace-shell-routing-surface.factory';
-import type {
-  WorkspaceShellFocusSyncControllers,
-} from './workspace-shell-focus-sync-controllers.factory';
-import type {
-  WorkspaceShellChromeSurface,
-} from './workspace-shell-chrome-surface.factory';
-import type {
-  WorkspaceShellSearchDelegates,
-} from './workspace-shell-search-delegates.factory';
-import type {
-  WorkspaceShellDerivedUiStateController,
-} from './workspace-shell-derived-ui-state.controller';
 
 export type WorkspaceShellInteractionModalCoord =
   WorkspaceShellInteractionDelegatesOptions['modalCoord'] &
@@ -57,46 +42,6 @@ export interface WorkspaceShellInteractionSurface<
     WorkspaceShellInteractionLazyLoadDelegates['modalCallbacks'];
   readonly modalLazyLoad: WorkspaceShellModalLazyLoadDelegates<TModalCoord>;
 }
-
-export type WorkspaceShellInteractionBoundarySurfaceOptions<
-  TModalCoord extends WorkspaceShellInteractionModalCoord =
-    WorkspaceShellInteractionModalCoord,
-> = Omit<
-  WorkspaceShellInteractionSurfaceOptions<TModalCoord>,
-  | 'dockEngine'
-  | 'focus'
-  | 'layout'
-  | 'modalLoading'
-  | 'navigation'
-  | 'runtime'
-  | 'searchController'
-  | 'searchLazyLoad'
-> & {
-  readonly routing: Pick<
-    WorkspaceShellRoutingSurface,
-    'router' | 'routeUrl'
-  >;
-  readonly focusSyncControllers: Pick<
-    WorkspaceShellFocusSyncControllers,
-    'mobileFocusGate'
-  >;
-  readonly chrome: Pick<WorkspaceShellChromeSurface, 'dockEngine'>;
-  readonly lazyServiceRefs: {
-    readonly parkingService: WorkspaceShellInteractionDelegatesOptions['runtime']['lazyServiceRefs']['parkingService'];
-  };
-  readonly uiState:
-    WorkspaceShellInteractionDelegatesOptions['layout']['uiState'] & {
-      readonly sidebarOpen:
-        WorkspaceShellInteractionDelegatesOptions['layout']['sidebarOpen'];
-    };
-  readonly projectState:
-    WorkspaceShellInteractionDelegatesOptions['navigation']['projectState'];
-  readonly searchDelegates: Pick<
-    WorkspaceShellSearchDelegates,
-    'searchController' | 'searchLazyLoad'
-  >;
-  readonly derivedUiState: Pick<WorkspaceShellDerivedUiStateController, 'modalLoading'>;
-};
 
 export interface WorkspaceShellInteractionSurfaceOptions<
   TModalCoord extends WorkspaceShellInteractionModalCoord =
@@ -125,46 +70,6 @@ export interface WorkspaceShellInteractionSurfaceOptions<
   readonly createModalLazyLoadDelegates?: (
     options: WorkspaceShellModalLazyLoadFactoryOptions<TModalCoord>,
   ) => WorkspaceShellModalLazyLoadDelegates<TModalCoord>;
-}
-
-function createWorkspaceShellInteractionBoundarySurfaceOptions<
-  TModalCoord extends WorkspaceShellInteractionModalCoord,
->(
-  options: WorkspaceShellInteractionBoundarySurfaceOptions<TModalCoord>,
-): WorkspaceShellInteractionSurfaceOptions<TModalCoord> {
-  const {
-    chrome,
-    derivedUiState,
-    focusSyncControllers,
-    lazyServiceRefs,
-    projectState,
-    routing,
-    searchDelegates,
-    uiState,
-    ...surfaceOptions
-  } = options;
-
-  return {
-    ...surfaceOptions,
-    dockEngine: chrome.dockEngine,
-    navigation: {
-      router: routing.router,
-      projectState,
-    },
-    layout: {
-      uiState,
-      sidebarOpen: uiState.sidebarOpen,
-    },
-    focus: {
-      mobileFocusGate: focusSyncControllers.mobileFocusGate,
-    },
-    runtime: {
-      lazyServiceRefs,
-    },
-    searchController: searchDelegates.searchController,
-    searchLazyLoad: searchDelegates.searchLazyLoad,
-    modalLoading: derivedUiState.modalLoading,
-  };
 }
 
 export function createWorkspaceShellInteractionSurface<
@@ -204,14 +109,4 @@ export function createWorkspaceShellInteractionSurface<
     modalCallbacks,
     modalLazyLoad: createModalLazyLoadDelegates(modalLazyLoadOptions),
   };
-}
-
-export function createWorkspaceShellInteractionBoundarySurface<
-  TModalCoord extends WorkspaceShellInteractionModalCoord,
->(
-  options: WorkspaceShellInteractionBoundarySurfaceOptions<TModalCoord>,
-): WorkspaceShellInteractionSurface<TModalCoord> {
-  return createWorkspaceShellInteractionSurface(
-    createWorkspaceShellInteractionBoundarySurfaceOptions(options),
-  );
 }

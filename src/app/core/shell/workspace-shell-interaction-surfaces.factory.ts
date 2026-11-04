@@ -9,7 +9,7 @@ import {
 import {
   createWorkspaceShellInteractionBoundarySurface,
   type WorkspaceShellInteractionBoundarySurfaceOptions,
-} from './workspace-shell-interaction-surface.factory';
+} from './workspace-shell-interaction-boundary-surface.factory';
 
 export type WorkspaceShellInteractionSurfacesOptions =
   WorkspaceShellDerivedUiStateFactoryOptions &
