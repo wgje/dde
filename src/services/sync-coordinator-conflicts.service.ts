@@ -44,10 +44,8 @@ export class SyncCoordinatorConflictService {
     pendingTaskDeleteIds?: string[],
     pendingTaskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap,
     conflictedAt?: string,
-    isCurrent?: () => boolean,
   ): Promise<boolean> {
-    if (isCurrent?.() === false) return false;
-    const saved = await this.conflictStorage.saveConflict({
+    return await this.conflictStorage.saveConflict({
       projectId: localProject.id,
       localProject,
       remoteProject,
@@ -62,7 +60,6 @@ export class SyncCoordinatorConflictService {
       pendingTaskDeleteBaseUpdatedAtMap,
       acknowledged: false,
     });
-    return isCurrent?.() === false ? false : saved;
   }
 
   async publishConflict(
@@ -91,7 +88,6 @@ export class SyncCoordinatorConflictService {
           pendingTaskDeleteIds,
           pendingTaskDeleteBaseUpdatedAtMap,
           activeConflict?.conflictedAt,
-          isCurrent,
         );
         if (isCurrent?.() === false) return;
       } catch (error) {
@@ -121,43 +117,30 @@ export class SyncCoordinatorConflictService {
   ): Promise<void> {
     if (isCurrent?.() === false) return;
     const conflictedAt = new Date().toISOString();
-    await this.saveConflictSilently(
-      localProject,
-      remoteProject,
-      [],
-      ownerUserId,
-      pendingTaskDeleteIds,
-      pendingTaskDeleteBaseUpdatedAtMap,
-      conflictedAt,
-      isCurrent,
-    ).catch(error => {
+    let saved = false;
+    try {
+      saved = await this.saveConflictSilently(
+        localProject, remoteProject, [], ownerUserId, pendingTaskDeleteIds,
+        pendingTaskDeleteBaseUpdatedAtMap, conflictedAt,
+      );
+    } catch (error) {
       this.logger.warn('保存冲突隔离区记录失败', { error, projectId: localProject.id });
-      return false;
-    }).then(saved => {
-      if (isCurrent?.() === false) return;
-      if (!saved) {
-        this.logger.warn('冲突隔离区记录未持久化，跳过 active conflict 发布以避免刷新后丢失双方数据', {
-          projectId: localProject.id,
-        });
-        return;
-      }
-
-      const conflictData: SyncConflictData = {
-        local: localProject,
-        remote: remoteProject,
+    }
+    if (isCurrent?.() === false) return;
+    if (!saved) {
+      this.logger.warn('冲突隔离区记录未持久化，跳过 active conflict 发布以避免刷新后丢失双方数据', {
         projectId: localProject.id,
-        conflictedAt,
-        pendingTaskDeleteIds,
-        pendingTaskDeleteBaseUpdatedAtMap,
-      };
-      this.syncStateService.setConflict(conflictData);
-      this.conflict$.next({
-        localProject,
-        remoteProject,
-        projectId: localProject.id,
-        pendingTaskDeleteIds,
-        pendingTaskDeleteBaseUpdatedAtMap,
       });
+      return;
+    }
+    const conflictData: SyncConflictData = {
+      local: localProject, remote: remoteProject, projectId: localProject.id, conflictedAt,
+      pendingTaskDeleteIds, pendingTaskDeleteBaseUpdatedAtMap,
+    };
+    this.syncStateService.setConflict(conflictData);
+    this.conflict$.next({
+      localProject, remoteProject, projectId: localProject.id,
+      pendingTaskDeleteIds, pendingTaskDeleteBaseUpdatedAtMap,
     });
   }
 
@@ -260,8 +243,6 @@ export class SyncCoordinatorConflictService {
       ownerUserId,
       pendingTaskDeleteIds,
       pendingTaskDeleteBaseUpdatedAtMap,
-      undefined,
-      isCurrent,
     );
   }
 

@@ -116,30 +116,39 @@ describe('SyncCoordinatorConflictService', () => {
     expect(events).toHaveLength(1);
   });
 
-  it('冲突证据持久化完成前会话失效时不应报告成功', async () => {
+  it('会话切换发生在冲突写入期间时保留捕获 owner 的证据但不发布过期状态', async () => {
     const saveConflict = createDeferred<boolean>();
-    const save = vi.fn(() => saveConflict.promise);
     const localProject = createProject({ name: 'Local stale', version: 2 });
     const remoteProject = createProject({ name: 'Remote stale', version: 3 });
-    const { service } = createService({ saveConflict: save });
+    const { service, conflictStorage, syncStateService } = createService({
+      saveConflict: vi.fn(() => saveConflict.promise),
+    });
+    const events: ConflictEvent[] = [];
+    service.onConflict$.subscribe(event => events.push(event));
     let current = true;
 
-    const pending = service.saveConflictSilently(
+    const publishResult = service.publishConflict(
       localProject,
       remoteProject,
-      [],
       'user-1',
-      undefined,
       undefined,
       undefined,
       () => current,
     );
-    expect(save).toHaveBeenCalledOnce();
+
+    expect(conflictStorage.saveConflict).toHaveBeenCalledWith(expect.objectContaining({
+      projectId: 'project-1',
+      ownerUserId: 'user-1',
+      localProject,
+      remoteProject,
+    }));
 
     current = false;
     saveConflict.resolve(true);
+    await publishResult;
 
-    await expect(pending).resolves.toBe(false);
+    expect(syncStateService.setConflict).not.toHaveBeenCalled();
+    expect(events).toHaveLength(0);
   });
 
   it('publishConflict 在冲突隔离区未能持久化时不应发布 active conflict', async () => {
