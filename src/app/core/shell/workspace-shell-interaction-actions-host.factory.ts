@@ -31,7 +31,7 @@ export function createWorkspaceShellInteractionActionsHost(
     },
   });
 
-  return createWorkspaceShellDeferredController<WorkspaceShellActionsInteractionDelegate>(
+  const deferredHost = createWorkspaceShellDeferredController<WorkspaceShellActionsInteractionDelegate>(
     () => resolveActionsHost(options, loadActionsHost),
     {
       actionFailureMessage: '工作区操作执行失败，已跳过本次操作',
@@ -39,6 +39,27 @@ export function createWorkspaceShellInteractionActionsHost(
       warn: options.warn,
     },
   );
+  return new Proxy(deferredHost, {
+    get(target, property, receiver) {
+      if (property === 'openTrashModal') {
+        return () => {
+          const action = Reflect.get(target, property, receiver);
+          if (typeof action !== 'function') return undefined;
+          return Reflect.apply(action, target, [options.modalCoord.captureProjectUiOwner?.()]);
+        };
+      }
+      if (property === 'confirmDeleteProject') {
+        return (projectId: string, projectName: string, event: Event) => {
+          const action = Reflect.get(target, property, receiver);
+          if (typeof action !== 'function') return undefined;
+          const owner = options.projectCoord.captureActiveProjectOwner?.();
+          if (!owner) return undefined;
+          return Reflect.apply(action, target, [projectId, projectName, event, owner]);
+        };
+      }
+      return Reflect.get(target, property, receiver);
+    },
+  });
 }
 
 function resolveActionsHost(

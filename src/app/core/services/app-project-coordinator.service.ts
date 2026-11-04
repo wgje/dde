@@ -1,13 +1,23 @@
-import { Injectable, inject, signal, Injector } from '@angular/core';
+import { DestroyRef, Injectable, inject, signal, Injector } from '@angular/core';
 import { Router } from '@angular/router';
-import { ProjectStateService } from '../../../services/project-state.service';
+import { ProjectStateService, type ActiveProjectOwner } from '../../../services/project-state.service';
 import { ProjectOperationService } from '../../../services/project-operation.service';
 import { UiStateService } from '../../../services/ui-state.service';
 import { ModalService } from '../../../services/modal.service';
 import { ModalLoaderService } from './modal-loader.service';
 import { ToastService } from '../../../services/toast.service';
+import { ProjectSwitchGuardService } from '../../../services/guards/unsaved-changes.guard';
 import { Project } from '../../../models';
 import type { UserSessionService } from '../../../services/user-session.service';
+
+interface ProjectDeleteOwner extends ActiveProjectOwner {
+  sessionToken: number;
+}
+
+interface ProjectDeleteModalRef {
+  close(result?: { confirmed: boolean }): void;
+  result: Promise<{ confirmed: boolean } | undefined>;
+}
 
 /**
  * 应用项目 UI 协调器
@@ -19,12 +29,14 @@ import type { UserSessionService } from '../../../services/user-session.service'
  */
 @Injectable({ providedIn: 'root' })
 export class AppProjectCoordinatorService {
+  private readonly destroyRef = inject(DestroyRef);
   private readonly projectState = inject(ProjectStateService);
   private readonly projectOps = inject(ProjectOperationService);
   private readonly uiState = inject(UiStateService);
   private readonly modal = inject(ModalService);
   private readonly modalLoader = inject(ModalLoaderService);
   private readonly toast = inject(ToastService);
+  private readonly projectSwitchGuard = inject(ProjectSwitchGuardService);
   private readonly router = inject(Router);
   private readonly injector = inject(Injector);
   /** 延迟注入避免循环依赖 */
@@ -47,10 +59,30 @@ export class AppProjectCoordinatorService {
   private originalProjectName = '';
   private renameProjectInFlight: Promise<void> | null = null;
   private readonly projectDetailsSaveFlights = new Map<string, Promise<void>>();
+  private deleteSessionToken = 0;
+  private activeDeleteOwner: ProjectDeleteOwner | null = null;
+  private activeDeleteModal: ProjectDeleteModalRef | null = null;
+  private projectSelectionRequestId = 0;
+  private projectSwitchGuardInFlight: Promise<'proceed' | 'cancel'> | null = null;
+
+  constructor() {
+    const unregisterProjectChange = this.projectState.registerBeforeActiveProjectChange(() => {
+      this.retireDeleteSession();
+    });
+    this.destroyRef.onDestroy(() => {
+      unregisterProjectChange();
+      this.retireDeleteSession();
+    });
+  }
+
+  captureActiveProjectOwner(): ActiveProjectOwner {
+    return this.projectState.captureActiveProjectOwner();
+  }
 
   // ========== 项目选择 ==========
 
   selectProject(id: string, _sidebarOpen: { set: (v: boolean) => void }): void {
+    const requestId = ++this.projectSelectionRequestId;
     if (this.expandedProjectId() === id) {
       if (this.isEditingDescription()) {
         void this.saveProjectDetails(id);
@@ -59,18 +91,7 @@ export class AppProjectCoordinatorService {
       this.isEditingDescription.set(false);
       return;
     }
-    if (this.expandedProjectId() && this.isEditingDescription()) {
-      void this.saveProjectDetails(this.expandedProjectId()!);
-    }
-    // 通过 UserSessionService 切换项目，触发空壳项目按需加载
-    this.userSession.switchActiveProject(id);
-    this.expandedProjectId.set(id);
-    this.ensureProjectDraft(id);
-    this.isEditingDescription.set(false);
-    const currentView = this.uiState.activeView() || 'text';
-    if (this.uiState.isMobile() && currentView === 'flow') {
-      void this.router.navigate(['/projects', id, currentView]);
-    }
+    void this.runSelectProject(id, requestId);
   }
 
   onProjectCardClick(event: MouseEvent, projectId: string): void {
@@ -97,15 +118,8 @@ export class AppProjectCoordinatorService {
   }
 
   enterProject(id: string, sidebarOpen: { set: (v: boolean) => void }): void {
-    // 通过 UserSessionService 切换项目，触发空壳项目按需加载
-    this.userSession.switchActiveProject(id);
-    this.expandedProjectId.set(id);
-    this.ensureProjectDraft(id);
-    const currentView = this.uiState.activeView() || 'text';
-    void this.router.navigate(['/projects', id, currentView]);
-    if (this.uiState.isMobile()) {
-      sidebarOpen.set(false);
-    }
+    const requestId = ++this.projectSelectionRequestId;
+    void this.runEnterProject(id, sidebarOpen, requestId);
   }
 
   handleProjectDoubleClick(id: string, event: MouseEvent, sidebarOpen: { set: (v: boolean) => void }): void {
@@ -113,6 +127,82 @@ export class AppProjectCoordinatorService {
     event.stopPropagation();
     this.isEditingDescription.set(true);
     this.enterProject(id, sidebarOpen);
+  }
+
+  private async runSelectProject(id: string, requestId: number): Promise<void> {
+    const expandedProjectId = this.expandedProjectId();
+    if (expandedProjectId && this.isEditingDescription()) {
+      await this.saveProjectDetails(expandedProjectId);
+      if (!this.isProjectSelectionCurrent(requestId)) return;
+    }
+
+    const currentView = this.uiState.activeView() || 'text';
+    if (this.uiState.isMobile() && currentView === 'flow') {
+      const navigated = await this.navigateToProject(id, currentView, requestId);
+      if (!navigated || !this.isProjectSelectionCurrent(requestId)) return;
+      this.userSession.switchActiveProject(id);
+      this.applyProjectSelection(id);
+      return;
+    }
+
+    if (this.projectState.activeProjectId() !== id) {
+      const decision = await this.requestProjectSwitchDecision();
+      if (!this.isProjectSelectionCurrent(requestId) || decision === 'cancel') return;
+      this.userSession.switchActiveProject(id);
+    }
+
+    if (this.isProjectSelectionCurrent(requestId)) this.applyProjectSelection(id);
+  }
+
+  private async runEnterProject(
+    id: string,
+    sidebarOpen: { set: (v: boolean) => void },
+    requestId: number,
+  ): Promise<void> {
+    const currentView = this.uiState.activeView() || 'text';
+    const navigated = await this.navigateToProject(id, currentView, requestId);
+    if (!navigated || !this.isProjectSelectionCurrent(requestId)) return;
+
+    this.userSession.switchActiveProject(id);
+    this.applyProjectSelection(id);
+    if (this.uiState.isMobile()) sidebarOpen.set(false);
+  }
+
+  private async navigateToProject(id: string, view: string, requestId: number): Promise<boolean> {
+    try {
+      return await this.router.navigate(['/projects', id, view]);
+    } catch {
+      if (this.isProjectSelectionCurrent(requestId)) this.toast.error('项目切换失败');
+      return false;
+    }
+  }
+
+  private requestProjectSwitchDecision(): Promise<'proceed' | 'cancel'> {
+    if (this.projectSwitchGuardInFlight) return this.projectSwitchGuardInFlight;
+
+    const operation = Promise.resolve()
+      .then(() => this.projectSwitchGuard.canSwitchProject())
+      .catch(() => {
+        this.toast.error('项目切换失败');
+        return 'cancel' as const;
+      })
+      .finally(() => {
+        if (this.projectSwitchGuardInFlight === operation) {
+          this.projectSwitchGuardInFlight = null;
+        }
+      });
+    this.projectSwitchGuardInFlight = operation;
+    return operation;
+  }
+
+  private applyProjectSelection(id: string): void {
+    this.expandedProjectId.set(id);
+    this.ensureProjectDraft(id);
+    this.isEditingDescription.set(false);
+  }
+
+  private isProjectSelectionCurrent(requestId: number): boolean {
+    return requestId === this.projectSelectionRequestId;
   }
 
   // ========== 重命名 ==========
@@ -255,28 +345,62 @@ export class AppProjectCoordinatorService {
     }
   }
 
-  async confirmDeleteProject(projectId: string, projectName: string, event: Event): Promise<void> {
+  async confirmDeleteProject(
+    projectId: string,
+    projectName: string,
+    event: Event,
+    projectOwner: ActiveProjectOwner,
+  ): Promise<void> {
     event.stopPropagation();
-    if (this.isDeleting()) return;
-    const modalRef = await this.modalLoader.openDeleteConfirmModal({
+    if (this.isDeleting() || projectOwner.projectId !== projectId
+      || !this.projectState.isActiveProjectOwnerCurrent(projectOwner)) return;
+    this.retireDeleteSession();
+    const owner: ProjectDeleteOwner = {
+      ...projectOwner,
+      sessionToken: ++this.deleteSessionToken,
+    };
+    this.activeDeleteOwner = owner;
+    const modalRef = await this.modalLoader.openDeleteConfirmModal<{ confirmed: boolean } | undefined>({
       title: '删除项目',
       message: '确定要删除项目吗？',
       itemName: projectName,
       warning: '此操作将删除项目及其所有任务，且无法撤销！'
-    });
-    const result = await modalRef.result as { confirmed: boolean } | undefined;
-    if (result?.confirmed) {
-      this.isDeleting.set(true);
-      try {
-        const deleteResult = await this.projectOps.deleteProject(projectId);
-        if (deleteResult.success) {
-          this.expandedProjectId.set(null);
-          this.toast.success('项目已删除', `「${projectName}」已永久删除`);
-        }
-      } finally {
-        this.isDeleting.set(false);
-      }
+    }, () => this.isDeleteOwnerCurrent(owner));
+    if (!modalRef || !this.isDeleteOwnerCurrent(owner)) return;
+    this.activeDeleteModal = modalRef;
+    const result = await modalRef.result;
+    if (!this.isDeleteOwnerCurrent(owner)) return;
+    this.activeDeleteModal = null;
+    if (!result?.confirmed) {
+      this.retireDeleteSession(owner);
+      return;
     }
+
+    this.isDeleting.set(true);
+    try {
+      const deleteResult = await this.projectOps.deleteProject(projectId, {
+        canPublishUi: () => this.isDeleteOwnerCurrent(owner),
+      });
+      if (deleteResult.success && this.isDeleteOwnerCurrent(owner)) {
+        this.expandedProjectId.set(null);
+        this.toast.success('项目已删除', `「${projectName}」已永久删除`);
+      }
+    } finally {
+      this.isDeleting.set(false);
+      this.retireDeleteSession(owner);
+    }
+  }
+
+  private isDeleteOwnerCurrent(owner: ProjectDeleteOwner): boolean {
+    return this.activeDeleteOwner === owner && this.projectState.isActiveProjectOwnerCurrent(owner);
+  }
+
+  private retireDeleteSession(owner?: ProjectDeleteOwner): void {
+    if (owner && this.activeDeleteOwner !== owner) return;
+    this.activeDeleteOwner = null;
+    const modal = this.activeDeleteModal;
+    this.activeDeleteModal = null;
+    modal?.close();
   }
 
   async handleImportComplete(project: Project): Promise<void> {
@@ -300,6 +424,7 @@ export class AppProjectCoordinatorService {
 
   /** 登出时清除所有项目 UI 状态 */
   clearState(): void {
+    this.retireDeleteSession();
     this.expandedProjectId.set(null);
     this.isEditingDescription.set(false);
     this.projectDrafts.set({});

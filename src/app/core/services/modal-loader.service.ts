@@ -440,8 +440,9 @@ export class ModalLoaderService {
     message?: string; 
     itemName: string; 
     warning?: string; 
-  }): Promise<ModalRef<R>> {
+  }, canOpen: () => boolean = () => true): Promise<ModalRef<R> | null> {
     const component = await this.loadDeleteConfirmModal();
+    if (!canOpen()) return null;
     return this.dynamicModal.open(component, { data });
   }
 }

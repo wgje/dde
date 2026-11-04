@@ -13,6 +13,7 @@ import type {
 function createActionsDelegate(): WorkspaceShellActionsInteractionDelegate {
   return {
     closeMigrationModal: vi.fn(),
+    confirmDeleteProject: vi.fn(),
     confirmCreateProject: vi.fn(),
     handleImportComplete: vi.fn(),
     handleLocalModeFromModal: vi.fn(),
@@ -20,6 +21,7 @@ function createActionsDelegate(): WorkspaceShellActionsInteractionDelegate {
     handleMigrationComplete: vi.fn(),
     handleResetPasswordFromModal: vi.fn(),
     handleSignupFromModal: vi.fn(),
+    openTrashModal: vi.fn(),
     setupDocumentClickListener: vi.fn(),
     signOut: vi.fn(),
     teardown: vi.fn(),
@@ -77,6 +79,29 @@ describe('createWorkspaceShellInteractionActionsHost', () => {
     expect(warn).toHaveBeenCalledWith(
       '工作区操作执行失败，已跳过本次操作',
       error,
+    );
+  });
+
+  it('captures the delete owner before lazy loading and relays the clicked owner', async () => {
+    const clickedOwner = Object.freeze({ projectId: 'project-a', generation: 1 });
+    let currentOwner: { projectId: string; generation: number } = clickedOwner;
+    const captureActiveProjectOwner = vi.fn(() => currentOwner);
+    const actions = createActionsDelegate();
+    const event = { stopPropagation: vi.fn() } as unknown as Event;
+    const host = createWorkspaceShellInteractionActionsHost(createOptions({
+      createActionsHost: () => actions,
+      projectCoord: { captureActiveProjectOwner } as never,
+    }));
+
+    const completion = host.confirmDeleteProject('project-a', 'Project A', event);
+    const captureCountBeforeDelegateLoad = captureActiveProjectOwner.mock.calls.length;
+    currentOwner = { projectId: 'project-b', generation: 2 };
+    await completion;
+
+    expect(captureCountBeforeDelegateLoad).toBe(1);
+    expect(captureActiveProjectOwner).toHaveBeenCalledOnce();
+    expect(actions.confirmDeleteProject).toHaveBeenCalledWith(
+      'project-a', 'Project A', event, clickedOwner,
     );
   });
 

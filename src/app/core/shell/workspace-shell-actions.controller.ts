@@ -1,4 +1,5 @@
 import type { ThemeType } from '../../../models';
+import type { ProjectUiOwner } from '../../../services/task-operation-trash-adapter.controller';
 
 import {
   WorkspaceShellAuthActionsController,
@@ -32,7 +33,8 @@ type WorkspaceShellModalCoordinatorLike = {
   openDashboardFromSettings(): Promise<void>;
   openConflictCenterFromDashboard(): void;
   openLoginModal(): Promise<void>;
-  openTrashModal(): Promise<void>;
+  captureProjectUiOwner?(): ProjectUiOwner | null;
+  openTrashModal(owner?: ProjectUiOwner | null): Promise<void>;
   openConfigHelpModal(): Promise<void>;
   openNewProjectModal(): Promise<void>;
   openMigrationModal(): Promise<void>;
@@ -164,8 +166,8 @@ export class WorkspaceShellActionsController extends WorkspaceShellProjectAction
     return this.options.modalCoord.openLoginModal();
   }
 
-  openTrashModal(): Promise<void> {
-    return this.options.modalCoord.openTrashModal();
+  openTrashModal(owner?: ProjectUiOwner | null): Promise<void> {
+    return this.options.modalCoord.openTrashModal(owner);
   }
 
   openConfigHelpModal(): Promise<void> {

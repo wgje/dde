@@ -1,5 +1,79 @@
-import { describe, expect, it, vi } from 'vitest';
+import { TestBed } from '@angular/core/testing';
+import { Router } from '@angular/router';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ModalService } from '../../../services/modal.service';
+import { ProjectOperationService } from '../../../services/project-operation.service';
+import { ProjectStateService, type ActiveProjectOwner } from '../../../services/project-state.service';
+import { ProjectSwitchGuardService } from '../../../services/guards/unsaved-changes.guard';
+import { ToastService } from '../../../services/toast.service';
+import { UiStateService } from '../../../services/ui-state.service';
+import { ModalLoaderService } from './modal-loader.service';
 import { AppProjectCoordinatorService } from './app-project-coordinator.service';
+
+afterEach(() => TestBed.resetTestingModule());
+
+function createDeleteHarness() {
+  let activeProjectId = 'project-a';
+  let generation = 1;
+  const projectChangeListeners = new Set<(
+    previousId: string | null,
+    nextId: string | null,
+  ) => void>();
+  let resolveModal!: (result: { confirmed: boolean } | undefined) => void;
+  let modalRef: { close: ReturnType<typeof vi.fn>; result: Promise<{ confirmed: boolean } | undefined> } | null = null;
+  const deleteProject = vi.fn().mockResolvedValue({ success: true });
+  const openDeleteConfirmModal = vi.fn(async (
+    _data: unknown,
+    canOpen: () => boolean = () => true,
+  ) => {
+    if (!canOpen()) return null;
+    const result = new Promise<{ confirmed: boolean } | undefined>(resolve => {
+      resolveModal = resolve;
+    });
+    modalRef = { close: vi.fn(), result };
+    return modalRef;
+  });
+  const projectState = {
+    activeProjectId: () => activeProjectId,
+    isActiveProjectOwnerCurrent: (owner: ActiveProjectOwner) => (
+      owner.projectId === activeProjectId && owner.generation === generation
+    ),
+    registerBeforeActiveProjectChange: (
+      listener: (previousId: string | null, nextId: string | null) => void,
+    ) => {
+      projectChangeListeners.add(listener);
+      return () => projectChangeListeners.delete(listener);
+    },
+  };
+
+  TestBed.configureTestingModule({ providers: [
+    AppProjectCoordinatorService,
+    { provide: ProjectStateService, useValue: projectState },
+    { provide: ProjectOperationService, useValue: { deleteProject } },
+    { provide: ProjectSwitchGuardService, useValue: { canSwitchProject: vi.fn().mockResolvedValue('proceed') } },
+    { provide: UiStateService, useValue: {} },
+    { provide: ModalService, useValue: {} },
+    { provide: ModalLoaderService, useValue: { openDeleteConfirmModal } },
+    { provide: ToastService, useValue: { success: vi.fn(), error: vi.fn() } },
+    { provide: Router, useValue: {} },
+  ] });
+
+  const service = TestBed.inject(AppProjectCoordinatorService);
+  return {
+    service,
+    deleteProject,
+    openDeleteConfirmModal,
+    get modalRef() { return modalRef; },
+    get resolveModal() { return resolveModal; },
+    owner: (): ActiveProjectOwner => ({ projectId: activeProjectId, generation }),
+    switchTo(nextProjectId: string) {
+      const previousId = activeProjectId;
+      generation += 1;
+      for (const listener of projectChangeListeners) listener(previousId, nextProjectId);
+      activeProjectId = nextProjectId;
+    },
+  };
+}
 
 describe('AppProjectCoordinatorService rename guard', () => {
   it('startRenameProject should coerce null-ish runtime name to empty string', () => {
@@ -163,5 +237,27 @@ describe('AppProjectCoordinatorService rename guard', () => {
     expect(updateProjectMetadata).toHaveBeenNthCalledWith(2, 'proj-1', { description: 'second draft' });
     expect(editing).toBe(false);
     expect(editingValues).toEqual([true, false]);
+  });
+});
+
+describe('AppProjectCoordinatorService delete ownership', () => {
+  it('closes the source-owned modal on project change and ignores its late confirmation', async () => {
+    const harness = createDeleteHarness();
+    const event = { stopPropagation: vi.fn() } as unknown as Event;
+    const confirmation = harness.service.confirmDeleteProject(
+      'project-a', 'Project A', event, harness.owner(),
+    );
+    await vi.waitFor(() => expect(harness.modalRef).not.toBeNull());
+
+    const canOpen = harness.openDeleteConfirmModal.mock.calls[0]?.[1];
+    expect(canOpen?.()).toBe(true);
+    harness.switchTo('project-b');
+    expect(harness.modalRef?.close).toHaveBeenCalledOnce();
+    expect(canOpen?.()).toBe(false);
+
+    harness.resolveModal({ confirmed: true });
+    await confirmation;
+
+    expect(harness.deleteProject).not.toHaveBeenCalled();
   });
 });
