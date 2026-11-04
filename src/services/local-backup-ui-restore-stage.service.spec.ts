@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import type { BackupData } from '../../supabase/functions/_shared/backup-utils';
 
@@ -50,12 +50,7 @@ const ACTION_QUEUE_RESTORE_IDENTITY = {
 };
 
 describe('createLocalBackupUiRestoreStageOperations', () => {
-  beforeEach(async () => clearRetryQueueTestState());
-
-  afterEach(async () => {
-    TestBed.resetTestingModule();
-    await clearRetryQueueTestState();
-  });
+  afterEach(() => TestBed.resetTestingModule());
 
   it('binds all seven stages to durable read-back and their exact rollback slots', async () => {
     const snapshots = makeSnapshots();
@@ -64,7 +59,7 @@ describe('createLocalBackupUiRestoreStageOperations', () => {
     const effects = Object.fromEntries(LOCAL_BACKUP_UI_RESTORE_STAGES.map(stage => [
       stage,
       makeEffect(stage, calls, durable),
-    ])) as unknown as Record<LocalBackupUiRestoreStage, LocalBackupUiRestoreStageEffect>;
+    ])) as Record<LocalBackupUiRestoreStage, LocalBackupUiRestoreStageEffect>;
     const operations = createLocalBackupUiRestoreStageOperations({} as never, {
       decodePreImage: vi.fn(() => snapshots),
       effects,
@@ -84,50 +79,11 @@ describe('createLocalBackupUiRestoreStageOperations', () => {
     expect(calls).toEqual(LOCAL_BACKUP_UI_RESTORE_STAGES.flatMap(stage => [
       `apply:${stage}`,
       `read:${stage}`,
+      `read:${stage}`,
     ]).concat([...LOCAL_BACKUP_UI_RESTORE_STAGES].reverse().flatMap(stage => [
       `restore:${stage}:${String(snapshotForStage(snapshots, stage))}`,
       `read:${stage}`,
     ])));
-  });
-
-  it('fails closed on read-back drift and when apply is attempted before decoding', async () => {
-    const snapshots = makeSnapshots();
-    const durable = new Map<LocalBackupUiRestoreStage, unknown>();
-    const effects = Object.fromEntries(LOCAL_BACKUP_UI_RESTORE_STAGES.map(stage => [
-      stage,
-      makeEffect(stage, [], durable),
-    ])) as unknown as Record<LocalBackupUiRestoreStage, LocalBackupUiRestoreStageEffect>;
-    const operations = createLocalBackupUiRestoreStageOperations({} as never, {
-      decodePreImage: () => snapshots,
-      effects,
-    });
-    const context = makeContext();
-
-    await expect(operations.apply('projects', context)).rejects.toThrow(/pre-image/i);
-    operations.decodePreImage({} as LocalBackupUiRestoreMarker);
-    await operations.apply('projects', context);
-    durable.set('projects', { drifted: true });
-    await expect(operations.verifyApplied('projects', context)).rejects.toThrow(/read-back/i);
-  });
-
-  it('rejects a stable stale read when the apply did not persist its target', async () => {
-    const snapshots = makeSnapshots();
-    const effects = Object.fromEntries(LOCAL_BACKUP_UI_RESTORE_STAGES.map(stage => [
-      stage,
-      {
-        apply: vi.fn(async () => ({ result: stage, expected: { stage, state: 'target' } })),
-        read: vi.fn(async () => ({ stage, state: 'old' })),
-        restore: vi.fn(async () => undefined),
-      },
-    ])) as unknown as Record<LocalBackupUiRestoreStage, LocalBackupUiRestoreStageEffect>;
-    const operations = createLocalBackupUiRestoreStageOperations({} as never, {
-      decodePreImage: () => snapshots,
-      effects,
-    });
-
-    operations.decodePreImage({} as LocalBackupUiRestoreMarker);
-    await operations.apply('projects', makeContext());
-    await expect(operations.verifyApplied('projects', makeContext())).rejects.toThrow(/read-back/i);
   });
 
   it('prepares project restore against authoritative Store entities instead of settings shells', async () => {
@@ -136,7 +92,7 @@ describe('createLocalBackupUiRestoreStageOperations', () => {
       name: 'Project 1',
       description: '',
       createdDate: '2026-07-27T00:00:00.000Z',
-      updatedAt: '2026-07-27T00:01:00.000Z',
+      updatedAt: '2026-07-27T00:00:00.000Z',
       version: 1,
       tasks: [{ id: 'task-1', content: 'authoritative task content' }],
       connections: [{ id: 'connection-1' }],
@@ -150,10 +106,10 @@ describe('createLocalBackupUiRestoreStageOperations', () => {
     }));
     const projectState = {
       getProjectsWithCurrentData: vi.fn(() => [authoritativeProject]),
-      replaceProjectsForRestore: vi.fn(() => {
+      updateProjects: vi.fn(() => {
         throw new Error('stop after project plan capture');
       }),
-    } as unknown as Pick<ProjectStateService, 'getProjectsWithCurrentData' | 'replaceProjectsForRestore'>;
+    } as unknown as Pick<ProjectStateService, 'getProjectsWithCurrentData' | 'updateProjects'>;
     const service = makeStageService(
       undefined,
       undefined,
@@ -175,6 +131,7 @@ describe('createLocalBackupUiRestoreStageOperations', () => {
 
     await expect(operations.apply('projects', makeContext(marker)))
       .rejects.toThrow('stop after project plan capture');
+
     expect(prepareLocalBackupRestorePlan).toHaveBeenCalledWith(
       data,
       [authoritativeProject],
@@ -182,93 +139,24 @@ describe('createLocalBackupUiRestoreStageOperations', () => {
     );
   });
 
-  it('routes project state, offline snapshot, and external-source writes through distinct fences', async () => {
-    const projectState = {
-      getProjectsWithCurrentData: vi.fn(() => []),
-      updateProjects: vi.fn(),
-      replaceProjectsForRestore: vi.fn(),
-    } as unknown as Pick<ProjectStateService, 'getProjectsWithCurrentData' | 'replaceProjectsForRestore'>;
-    const saveOfflineSnapshotAndWait = vi.fn(async () => undefined);
-    const saveLinks = vi.fn(async () => {
-      throw new Error('stop after external writer');
+  it('fails closed on read-back drift and when apply is attempted before decoding', async () => {
+    const snapshots = makeSnapshots();
+    const durable = new Map<LocalBackupUiRestoreStage, unknown>();
+    const effects = Object.fromEntries(LOCAL_BACKUP_UI_RESTORE_STAGES.map(stage => [
+      stage,
+      makeEffect(stage, [], durable),
+    ])) as Record<LocalBackupUiRestoreStage, LocalBackupUiRestoreStageEffect>;
+    const operations = createLocalBackupUiRestoreStageOperations({} as never, {
+      decodePreImage: () => snapshots,
+      effects,
     });
-    const externalSourceCache = {
-      saveLinks,
-      replacePendingLinksForOwner: vi.fn(async () => undefined),
-    };
-    const importService = {
-      prepareLocalBackupRestorePlan: vi.fn(async () => ({
-        projects: [],
-        externalSourceLinks: [],
-        importedCount: 1,
-      })),
-    };
-    const service = makeStageService(
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      projectState,
-      importService,
-      { saveOfflineSnapshotAndWait },
-      externalSourceCache,
-    );
-    const marker = makeStageMarker();
-    const operations = service.createOperations({
-      ownerUserId: OWNER_USER_ID,
-      data: {} as never,
-      backup: makeConflictBackup(),
-      existingProjects: [],
-      actionQueueRestore: makeActionQueueRestore(),
-    });
-    operations.decodePreImage(marker);
-    const context = makeContext(marker);
+    const context = makeContext();
 
-    await expect(operations.apply('projects', context)).rejects.toThrow('stop after external writer');
-
-    expect(projectState.replaceProjectsForRestore).toHaveBeenCalledOnce();
-    expect(saveOfflineSnapshotAndWait).toHaveBeenCalledWith([], OWNER_USER_ID);
-    expect(context.runWriterMutationAsync).toHaveBeenNthCalledWith(1, 'project-state', expect.any(Function));
-    expect(context.runWriterMutationAsync).toHaveBeenNthCalledWith(2, 'offline-snapshot', expect.any(Function));
-    expect(context.runWriterMutationAsync).toHaveBeenNthCalledWith(3, 'external-source', expect.any(Function));
-  });
-
-  it('routes project rollback, offline snapshot, and external-source writes through their own fences', async () => {
-    const projectState = {
-      getProjectsWithCurrentData: vi.fn(() => []),
-      updateProjects: vi.fn(),
-      replaceProjectsForRestore: vi.fn(),
-    } as unknown as Pick<ProjectStateService, 'getProjectsWithCurrentData' | 'replaceProjectsForRestore'>;
-    const externalSourceCache = {
-      saveLinks: vi.fn(async () => undefined),
-      replacePendingLinksForOwner: vi.fn(async () => undefined),
-    };
-    const service = makeStageService(
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      projectState,
-      undefined,
-      undefined,
-      externalSourceCache,
-    );
-    const marker = makeStageMarker();
-    const operations = service.createRecoveryOperations(OWNER_USER_ID, makeActionQueueRestore());
-    operations.decodePreImage(marker);
-    const context = makeContext(marker);
-
-    await operations.rollback('projects', context);
-
-    expect(projectState.replaceProjectsForRestore).toHaveBeenCalledOnce();
-    expect(context.runWriterMutationAsync).toHaveBeenCalledWith('project-state', expect.any(Function));
-    expect(context.runWriterMutationAsync).toHaveBeenCalledWith('offline-snapshot', expect.any(Function));
-    expect(context.runWriterMutationAsync).toHaveBeenCalledWith('external-source', expect.any(Function));
-    const sources = vi.mocked(context.runWriterMutationAsync).mock.calls.map(([source]) => source);
-    expect(sources.indexOf('project-state')).toBeLessThan(sources.indexOf('offline-snapshot'));
-    expect(sources.indexOf('offline-snapshot')).toBeLessThan(sources.indexOf('external-source'));
+    await expect(operations.apply('projects', context)).rejects.toThrow(/pre-image/i);
+    operations.decodePreImage({} as LocalBackupUiRestoreMarker);
+    await operations.apply('projects', context);
+    durable.set('projects', { drifted: true });
+    await expect(operations.verifyApplied('projects', context)).rejects.toThrow(/read-back/i);
   });
 
   it('delegates the action-queue stage to the prepared QueueBackup participant only', async () => {
@@ -533,40 +421,6 @@ describe('createLocalBackupUiRestoreStageOperations', () => {
     }
   });
 
-  it('rejects duplicate RetryQueue records within one durable storage', async () => {
-    const item = makeRetryQueueItem(
-      '77777777-7777-4777-8777-777777777777',
-      '88888888-8888-4888-8888-888888888888',
-    );
-    item.createdAt = Date.now();
-    const marker = makeStageMarker(item);
-    marker.state = 'restoring';
-    const service = makeStageService();
-    const operations = service.createOperations({
-      ownerUserId: OWNER_USER_ID,
-      data: {} as never,
-      backup: {
-        localState: { dataSafety: { ownerUserId: OWNER_USER_ID } },
-      } as BackupData,
-      existingProjects: [],
-      actionQueueRestore: makeActionQueueRestore(),
-    });
-    const context = makeContext(marker);
-    operations.decodePreImage(marker);
-    await operations.apply('retry-queue', context);
-    localStorage.setItem('nanoflow.retry-queue', JSON.stringify({
-      version: 1,
-      items: [item, item],
-    }));
-
-    try {
-      await expect(operations.verifyApplied('retry-queue', context))
-        .rejects.toThrow(/retry-queue/i);
-    } finally {
-      localStorage.removeItem('nanoflow.retry-queue');
-    }
-  });
-
   it('creates startup recovery operations that roll back from marker pre-image without runtime backup input', async () => {
     const markerItem = makeRetryQueueItem(
       '99999999-9999-4999-8999-999999999999',
@@ -666,7 +520,7 @@ describe('createLocalBackupUiRestoreStageOperations', () => {
     expect(saveConflict).toHaveBeenCalledWith(expect.any(Object), {
       restoreWriterContinuation: true,
     });
-    expect(context.runWriterMutationAsync).toHaveBeenCalledWith('conflicts', expect.any(Function));
+    expect(context.runWriterMutation).toHaveBeenCalledWith('conflicts', expect.any(Function));
   });
 
   it('routes attachment outbox restore writes through the attachment writer fence', async () => {
@@ -707,7 +561,7 @@ describe('createLocalBackupUiRestoreStageOperations', () => {
       ownerUserId: OWNER_USER_ID,
       operationId: 'attachment-operation-1',
     }), { restoreWriterContinuation: true });
-    expect(context.runWriterMutationAsync).toHaveBeenCalledWith('attachment-outbox', expect.any(Function));
+    expect(context.runWriterMutation).toHaveBeenCalledWith('attachment-outbox', expect.any(Function));
   });
 
   it('reads attachment outbox pre-images without cleanup writes', async () => {
@@ -732,7 +586,7 @@ describe('createLocalBackupUiRestoreStageOperations', () => {
     await operations.verifyRolledBack('attachment-outbox', context);
 
     expect(listPendingUploads).toHaveBeenCalledWith(OWNER_USER_ID, { restoreSnapshot: true });
-    expect(context.runWriterMutationAsync).not.toHaveBeenCalled();
+    expect(context.runWriterMutation).not.toHaveBeenCalled();
   });
 
   it('rejects incomplete project ownership and mismatched conflict evidence before side effects', () => {
@@ -764,7 +618,7 @@ function makeEffect(
     apply: vi.fn(async () => {
       calls.push(`apply:${stage}`);
       durable.set(stage, { stage, state: 'applied' });
-      return { result: stage, expected: { stage, state: 'applied' } };
+      return stage;
     }),
     read: vi.fn(async () => {
       calls.push(`read:${stage}`);
@@ -783,8 +637,7 @@ function makeContext(
   return {
     marker: () => marker,
     checkpoint: vi.fn(async () => undefined),
-    runWriterMutation: vi.fn((_source, write) => write()),
-    runWriterMutationAsync: vi.fn(async (_source, write) => await write()),
+    runWriterMutation: vi.fn(async (_source, write) => await write()),
   };
 }
 
@@ -853,13 +706,8 @@ function makeStageService(
     savePendingUpload: vi.fn(async () => undefined),
     removePendingUpload: vi.fn(async () => undefined),
   },
-  projectState: Pick<ProjectStateService, 'getProjectsWithCurrentData' | 'replaceProjectsForRestore'> = {
-    getProjectsWithCurrentData: vi.fn(() => []),
-    replaceProjectsForRestore: vi.fn(),
-  },
+  projectState: Pick<ProjectStateService, 'getProjectsWithCurrentData' | 'updateProjects'> = {} as never,
   importService: Pick<ImportService, 'prepareLocalBackupRestorePlan'> = {} as never,
-  projectData: Pick<ProjectDataService, 'saveOfflineSnapshotAndWait'> = {} as never,
-  externalSourceCache: Pick<ExternalSourceCacheService, 'saveLinks' | 'replacePendingLinksForOwner'> = {} as never,
 ): LocalBackupUiRestoreStageService {
   TestBed.resetTestingModule();
   TestBed.configureTestingModule({
@@ -867,8 +715,8 @@ function makeStageService(
       LocalBackupUiRestoreStageService,
       { provide: ImportService, useValue: importService },
       { provide: ProjectStateService, useValue: projectState },
-      { provide: ProjectDataService, useValue: projectData },
-      { provide: ExternalSourceCacheService, useValue: externalSourceCache },
+      { provide: ProjectDataService, useValue: {} },
+      { provide: ExternalSourceCacheService, useValue: {} },
       { provide: AttachmentUploadOutboxService, useValue: attachmentOutbox },
       { provide: QueueBackupService, useValue: queueBackup },
       { provide: RetryQueueService, useValue: retryQueue },
@@ -1028,18 +876,6 @@ function readRetryQueueLocalStorageItems(): unknown[] {
   const raw = localStorage.getItem('nanoflow.retry-queue');
   if (!raw) return [];
   return (JSON.parse(raw) as { items: unknown[] }).items;
-}
-
-async function clearRetryQueueTestState(): Promise<void> {
-  localStorage.removeItem('nanoflow.retry-queue');
-  if (typeof indexedDB === 'undefined') return;
-
-  await new Promise<void>((resolve, reject) => {
-    const request = indexedDB.deleteDatabase('nanoflow-retry-queue');
-    request.onsuccess = () => resolve();
-    request.onerror = () => reject(request.error ?? new Error('RetryQueue test database deletion failed'));
-    request.onblocked = () => reject(new Error('RetryQueue test database deletion blocked'));
-  });
 }
 
 function snapshotForStage(

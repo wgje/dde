@@ -23,9 +23,7 @@ import type {
   LocalBackupUiRestoreStage,
 } from './local-backup-ui-restore-types';
 import { LOCAL_BACKUP_UI_RESTORE_STAGES } from './local-backup-ui-restore-types';
-import { digestQueueBackupPersonalRestoreActions } from './queue-backup-personal-restore-transition.helpers';
 import type { LocalBackupUiRestoreStageOperations } from './local-backup-ui-restore-stage-protocol';
-import type { QueuedAction } from './action-queue.types';
 import type { PreparedLocalBackupUiRestoreWriterQuiescence } from './local-backup-ui-restore-writer-quiescence.service';
 import {
   prepareLocalBackupUiRestoreTransaction,
@@ -127,48 +125,6 @@ describe('prepareLocalBackupUiRestoreTransaction', () => {
     await expect(handle.verifyOwnership()).resolves.toBe(true);
   });
 
-  it('keeps the prepared ActionQueue read-back authorization active across async settlement', async () => {
-    const order: string[] = [];
-    const markerStore = { current: null as unknown };
-    const dependencies = makeDependencies(order, markerStore);
-    const quiescence = makeQuiescence(order);
-    dependencies.prepareQuiescence = vi.fn(async () => quiescence);
-    const handle = await prepareLocalBackupUiRestoreTransaction({
-      ownerUserId: OWNER_USER_ID,
-      source: { kind: 'local-file', reference: null, checksum: SOURCE_DIGEST },
-      touchedProjectIds: [],
-      retryQueueRestoreItems: [],
-      restoredActionQueueItems: [],
-      blackBoxBackup: makeBackup([]),
-    }, dependencies);
-    let releaseReadback!: () => void;
-    const readbackGate = new Promise<void>(resolve => { releaseReadback = resolve; });
-    let readbackSettled = false;
-    expect(() => handle.readbackAuthorization()).toThrow(/final verification checkpoint/i);
-    const run = handle.run({
-      ...makeOperations(),
-      verifyBeforeFinalize: async () => {
-        const authorization = handle.readbackAuthorization();
-        const readback = authorization.runAuthorizedReadback(async () => {
-          await readbackGate;
-          readbackSettled = true;
-          return 'read-back';
-        });
-        await expect(authorization.runAuthorizedReadback(async () => 'duplicate'))
-          .rejects.toBeInstanceOf(Error);
-        await expect(readback).resolves.toBe('read-back');
-      },
-    });
-
-    await vi.waitFor(() => expect(quiescence.runMutationAsync).toHaveBeenCalledOnce());
-    expect(quiescence.runMutationAsync).toHaveBeenCalledWith('action-queue', expect.any(Function));
-    expect(readbackSettled).toBe(false);
-    releaseReadback();
-    await expect(run).resolves.toMatchObject({ status: 'completed' });
-    expect(readbackSettled).toBe(true);
-    expect(() => handle.readbackAuthorization()).toThrow(/final verification checkpoint/i);
-  });
-
   it('clears the restore marker before reopening writers on an owned no-mutation abort', async () => {
     const order: string[] = [];
     const markerStore = { current: null as unknown };
@@ -192,9 +148,9 @@ describe('prepareLocalBackupUiRestoreTransaction', () => {
       'queue-backup.rollback',
       'queue-backup.read-provider',
       'marker-heartbeat.stop',
-      'queue-backup.read-provider',
       'journal.clear',
       'journal.read',
+      'queue-backup.read-provider',
       'quiescence.abort',
     ]);
   });
@@ -215,19 +171,13 @@ describe('prepareLocalBackupUiRestoreTransaction', () => {
 
     await expect(handle.run(makeOperations())).resolves.toMatchObject({ status: 'completed' });
 
-    const finalizingIndex = order.indexOf('quiescence.finalize:completed');
-    const drainIndex = order.lastIndexOf('quiescence.drain');
-    const queueFinalizeIndex = order.indexOf('queue-backup.finalize');
-    const queueReadIndex = order.indexOf('queue-backup.read-queue');
-    const mirrorRefreshIndex = order.indexOf('queue-mirror.refresh');
-    expect(finalizingIndex).toBeGreaterThanOrEqual(0);
-    expect(drainIndex).toBeGreaterThan(finalizingIndex);
-    expect(queueFinalizeIndex).toBeGreaterThan(drainIndex);
-    expect(queueReadIndex).toBeGreaterThanOrEqual(0);
-    expect(queueReadIndex).toBeGreaterThan(queueFinalizeIndex);
-    expect(mirrorRefreshIndex).toBeGreaterThan(queueReadIndex);
-    expect(order.slice(-5)).toEqual([
+    expect(order.slice(-10)).toEqual([
+      'quiescence.finalize:completed',
       'marker-heartbeat.verify',
+      'queue-backup.read-state',
+      'queue-backup.finalize',
+      'queue-backup.read-provider',
+      'queue-backup.read-provider',
       'marker-heartbeat.stop',
       'journal.clear',
       'journal.read',
@@ -235,31 +185,29 @@ describe('prepareLocalBackupUiRestoreTransaction', () => {
     ]);
   });
 
-  it('retains completed restore evidence when the queue mirror cannot be refreshed', async () => {
+  it('retains the marker and writer freeze when terminal read-back evidence changes', async () => {
     const order: string[] = [];
     const markerStore = { current: null as unknown };
     const dependencies = makeDependencies(order, markerStore);
-    dependencies.refreshQueueMirrorForOwnerAfterRestore = vi.fn(() => false);
+    const terminalEvidence = makeProviderEvidence(makeTerminalReceipt('finalize'));
+    dependencies.queueBackup.readPersonalRestoreProviderEvidence = vi.fn()
+      .mockResolvedValueOnce(terminalEvidence)
+      .mockResolvedValueOnce({
+        ...terminalEvidence,
+        snapshotSignature: 'changed-snapshot-signature',
+      } as QueueBackupRestoreProviderResult);
     const handle = await prepareLocalBackupUiRestoreTransaction({
       ownerUserId: OWNER_USER_ID,
       source: { kind: 'local-file', reference: 'backup.json', checksum: SOURCE_DIGEST },
-      touchedProjectIds: ['project-1'],
-      retryQueueRestoreItems: [],
-      restoredActionQueueItems: [],
-      blackBoxBackup: makeBackup([]),
+      touchedProjectIds: ['project-1'], retryQueueRestoreItems: [],
+      restoredActionQueueItems: [], blackBoxBackup: makeBackup([]),
     }, dependencies);
+    order.length = 0;
 
-    await expect(handle.run(makeOperations())).resolves.toMatchObject({
-      status: 'blocked',
-      dataState: 'completed',
-    });
+    await expect(handle.run(makeOperations())).resolves.toMatchObject({ status: 'blocked' });
 
-    expect(markerStore.current).toEqual(expect.objectContaining({
-      state: 'completed',
-      phase: 'finalizing',
-    }));
+    expect(markerStore.current).not.toBeNull();
     expect(order).not.toContain('journal.clear');
-    expect(order).toContain('quiescence.defer');
     expect(order).not.toContain('quiescence.release');
   });
 
@@ -478,7 +426,6 @@ describe('prepareLocalBackupUiRestoreTransaction', () => {
         takeoverQuiescence: (expected, claimed) => quiescence.takeoverExpired(expected, claimed),
         startMarkerHeartbeat: startLocalBackupUiRestoreMarkerHeartbeat,
         queueBackup: makeRecoveryQueueBackupPort(),
-        refreshQueueMirrorForOwnerAfterRestore: vi.fn(() => true),
       },
     );
 
@@ -523,7 +470,6 @@ describe('prepareLocalBackupUiRestoreTransaction', () => {
         }),
         startMarkerHeartbeat: startLocalBackupUiRestoreMarkerHeartbeat,
         queueBackup: makeRecoveryQueueBackupPort(),
-        refreshQueueMirrorForOwnerAfterRestore: vi.fn(() => true),
       },
     )).rejects.toThrow('quiescence adopt failed');
 
@@ -545,7 +491,6 @@ describe('prepareLocalBackupUiRestoreTransaction', () => {
         takeoverQuiescence: (expected, claimed) => quiescence.takeoverExpired(expected, claimed),
         startMarkerHeartbeat: startLocalBackupUiRestoreMarkerHeartbeat,
         queueBackup: makeRecoveryQueueBackupPort(),
-        refreshQueueMirrorForOwnerAfterRestore: vi.fn(() => true),
       },
     );
 
@@ -583,7 +528,6 @@ describe('prepareLocalBackupUiRestoreTransaction', () => {
         takeoverQuiescence: (expected, claimed) => quiescence.takeoverExpired(expected, claimed),
         startMarkerHeartbeat: startLocalBackupUiRestoreMarkerHeartbeat,
         queueBackup: makeRecoveryQueueBackupPort(),
-        refreshQueueMirrorForOwnerAfterRestore: vi.fn(() => true),
       },
     );
 
@@ -628,7 +572,6 @@ function makeDependencies(
 ): LocalBackupUiRestoreTransactionDependencies {
   const quiescence = makeQuiescence(order);
   let terminalReceipt: Record<string, unknown> | null = null;
-  let restoredActions: QueuedAction[] = [];
   return {
     prepareQuiescence: vi.fn(async () => {
       order.push('quiescence.prepare');
@@ -653,14 +596,10 @@ function makeDependencies(
       applyPersonalBackupRestoreTransitionV2: vi.fn(async command => {
         if (command.kind === 'prepare') {
           order.push('queue-backup.prepare');
-          restoredActions = [...command.restoredActions];
           return { status: 'prepared' as const };
         }
         order.push(`queue-backup.${command.kind}`);
-        terminalReceipt = {
-          ...makeTerminalReceipt(command.kind),
-          resultDigest: await digestQueueBackupPersonalRestoreActions('result', restoredActions),
-        };
+        terminalReceipt = makeTerminalReceipt(command.kind);
         return {
           status: command.kind === 'finalize' ? 'finalized' as const : 'rolled-back' as const,
           receipt: terminalReceipt as never,
@@ -690,14 +629,6 @@ function makeDependencies(
           ? makeProviderEvidence(terminalReceipt)
           : { status: 'REJECTED', reason: 'AUTH_UNAVAILABLE' } as const;
       }),
-      restoreQueueSnapshot: vi.fn(async () => {
-        order.push('queue-backup.read-queue');
-        return {
-          recordFound: true,
-          actions: restoredActions,
-          savedAt: '2026-01-01T00:00:00.000Z',
-        };
-      }),
     },
     startMarkerHeartbeat: () => {
       order.push('marker-heartbeat.start');
@@ -713,10 +644,6 @@ function makeDependencies(
         }),
       };
     },
-    refreshQueueMirrorForOwnerAfterRestore: vi.fn(() => {
-      order.push('queue-mirror.refresh');
-      return true;
-    }),
   } as unknown as LocalBackupUiRestoreTransactionDependencies;
 }
 
@@ -776,10 +703,7 @@ function makeRecoveryQueueBackupPort(): LocalBackupUiRestoreTransactionDependenc
       } as const),
     applyPersonalBackupRestoreTransitionV2: vi.fn(async command => {
       if (command.kind === 'prepare') return { status: 'prepared' as const };
-      terminalReceipt = {
-        ...makeTerminalReceipt(command.kind),
-        resultDigest: await digestQueueBackupPersonalRestoreActions('result', []),
-      };
+      terminalReceipt = makeTerminalReceipt(command.kind);
       return {
         status: command.kind === 'finalize' ? 'finalized' as const : 'rolled-back' as const,
         receipt: terminalReceipt as never,
@@ -795,11 +719,6 @@ function makeRecoveryQueueBackupPort(): LocalBackupUiRestoreTransactionDependenc
     readPersonalRestoreProviderEvidence: vi.fn(async () => terminalReceipt
       ? makeProviderEvidence(terminalReceipt)
       : { status: 'REJECTED', reason: 'AUTH_UNAVAILABLE' } as const),
-    restoreQueueSnapshot: vi.fn(async () => ({
-      recordFound: true,
-      actions: [],
-      savedAt: '2026-01-01T00:00:00.000Z',
-    })),
   };
 }
 
@@ -817,20 +736,14 @@ function makeQuiescence(order: string[]): PreparedLocalBackupUiRestoreWriterQuie
       order.push('quiescence.verify');
       return true;
     }),
-    runMutation: vi.fn((_source, write) => write()),
+    runMutation: vi.fn(async (_source, write) => await write()),
     runMutationAsync: vi.fn(async (_source, write) => await write()),
-    runFinalizationMutation: vi.fn(async (_source, write) => await write()),
-    drainWriters: vi.fn(async () => {
-      order.push('quiescence.drain');
-    }),
+    drainWriters: vi.fn(async () => undefined),
     prepareFinalization: vi.fn(async outcome => {
       order.push(`quiescence.finalize:${outcome}`);
     }),
     releaseFinalized: vi.fn(async () => {
       order.push('quiescence.release');
-    }),
-    deferForStartupRecovery: vi.fn(async () => {
-      order.push('quiescence.defer');
     }),
     abortBeforeMutation: vi.fn(async () => {
       order.push('quiescence.abort');

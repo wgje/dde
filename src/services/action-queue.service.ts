@@ -68,7 +68,6 @@ import {
 import { createActionQueueOwnerReloadController } from './action-queue-owner-reload.controller';
 import { localBackupUiRestoreWriterQuiescence } from './local-backup-ui-restore-writer-quiescence.service';
 import { LocalBackupUiRestorePreActionQueueFenceService } from './local-backup-ui-restore-pre-actionqueue-fence.service';
-import type { LocalBackupUiRestoreReadbackAuthorization } from './local-backup-ui-restore-types';
 import {
   QueuedAction,
   EnqueueParams,
@@ -704,19 +703,6 @@ export class ActionQueueService {
   /** 按当前 owner 重新加载持久化队列，避免跨账号会话看到旧队列/死信。 */
   reloadFromStorageForCurrentOwner(): Promise<void> {
     return this.ownerReload.reload();
-  }
-
-  reloadFromStorageForLocalBackupRestoreReadback(
-    authorization: LocalBackupUiRestoreReadbackAuthorization,
-  ): Promise<boolean> {
-    return authorization.runAuthorizedReadback(() => this.ownerReload.reloadForRestoreReadback(
-      (token, isCurrent) => this.preActionQueueFence.runRestoreReadback({
-        ownerUserId: token.ownerUserId,
-        isCurrent,
-        authorization,
-      }),
-      authorization.verifyOwnership,
-    ));
   }
   
   /** 从死信队列重试操作 */

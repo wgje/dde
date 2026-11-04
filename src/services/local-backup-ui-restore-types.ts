@@ -87,22 +87,6 @@ export interface LocalBackupUiRestoreMarker {
   rollbackErrors: LocalBackupUiRestoreRollbackError[];
 }
 
-export type LocalBackupUiRestoreReadbackMarker = Pick<
-  LocalBackupUiRestoreMarker,
-  | 'ownerUserId'
-  | 'runId'
-  | 'restoreRunId'
-  | 'actionQueueRestoreIdentity'
-  | 'createdAt'
-  | 'leaseExpiresAt'
->;
-
-export interface LocalBackupUiRestoreReadbackAuthorization {
-  marker(): LocalBackupUiRestoreReadbackMarker;
-  verifyOwnership(): Promise<boolean>;
-  runAuthorizedReadback<T>(readback: () => Promise<T>): Promise<T>;
-}
-
 export function isLocalBackupUiRestoreQueueStateCompatible(
   marker: LocalBackupUiRestoreMarker,
   state: QueueBackupPersonalRestoreIdentityStateV2,
@@ -214,33 +198,28 @@ export function validateLocalBackupUiRestoreMarker(
   expectedOwnerUserId?: string,
 ): value is LocalBackupUiRestoreMarker {
   if (!isRecordWithExactKeys(value, MARKER_KEYS)) return false;
-  const state = value['state'];
-  const phase = value['phase'];
-  const completedStages = value['completedStages'];
-  const rollbackCompletedStages = value['rollbackCompletedStages'];
-  const rollbackErrors = value['rollbackErrors'];
   if (value['schemaVersion'] !== LOCAL_BACKUP_UI_RESTORE_MARKER_SCHEMA_VERSION) return false;
   if (!isNonEmptyString(value['ownerUserId']) || !isNonEmptyString(value['runId'])) return false;
   if (!isNonEmptyString(value['restoreRunId']) || value['restoreRunId'] === value['runId']) return false;
   if (expectedOwnerUserId !== undefined && value['ownerUserId'] !== expectedOwnerUserId) return false;
   if (!isIsoTimestamp(value['createdAt']) || !isIsoTimestamp(value['leaseExpiresAt'])) return false;
-  if (!isOneOf(state, LOCAL_BACKUP_UI_RESTORE_STATES)) return false;
-  if (!isOneOf(phase, LOCAL_BACKUP_UI_RESTORE_PHASES)) return false;
-  if (!isCanonicalStagePrefix(completedStages)) return false;
+  if (!isOneOf(value['state'], LOCAL_BACKUP_UI_RESTORE_STATES)) return false;
+  if (!isOneOf(value['phase'], LOCAL_BACKUP_UI_RESTORE_PHASES)) return false;
+  if (!isCanonicalStagePrefix(value['completedStages'])) return false;
   if (!isCanonicalStageSubset(
-    rollbackCompletedStages,
+    value['rollbackCompletedStages'],
     [...LOCAL_BACKUP_UI_RESTORE_STAGES].reverse(),
   )) return false;
   if (!validateSource(value['source']) || !validateActionQueueIdentity(value)) return false;
   if (!isUniqueStringArray(value['touchedProjectIds'])) return false;
   if (!validatePreImage(value['preImage'])) return false;
-  if (!validateRollbackErrors(rollbackErrors)) return false;
+  if (!validateRollbackErrors(value['rollbackErrors'])) return false;
   return isProgressConsistent(
-    state,
-    phase,
-    completedStages,
-    rollbackCompletedStages,
-    rollbackErrors,
+    value['state'],
+    value['phase'],
+    value['completedStages'],
+    value['rollbackCompletedStages'],
+    value['rollbackErrors'],
   );
 }
 

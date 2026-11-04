@@ -4,12 +4,7 @@ import type {
   QueueBackupPersonalRestoreIdentityV2,
   QueueBackupPersonalRestoreTerminalReceiptV2,
 } from './action-queue.types';
-import type {
-  LocalBackupUiRestoreMarker,
-  LocalBackupUiRestoreReadbackAuthorization,
-} from './local-backup-ui-restore-types';
-import { LOCAL_BACKUP_UI_RESTORE_STAGES } from './local-backup-ui-restore-types';
-import type { LocalBackupUiRestoreQuiescenceMarker } from './local-backup-ui-restore-writer-quiescence.service';
+import type { LocalBackupUiRestoreMarker } from './local-backup-ui-restore-types';
 import type { QueueBackupRestoreProviderResult } from './queue-backup-restore-provider.helpers';
 import {
   LocalBackupUiRestorePreActionQueueFenceController,
@@ -44,102 +39,6 @@ describe('LocalBackupUiRestorePreActionQueueFenceController', () => {
     expect(context.readMarker).toHaveBeenCalledTimes(2);
     expect(context.readIdentityState).not.toHaveBeenCalled();
     expect(context.readProviderEvidence).not.toHaveBeenCalled();
-  });
-
-  it('allows read-back only at the current transaction final checkpoint and matching quiescence lease', async () => {
-    const marker = makeActiveReadbackMarker();
-    const context = makeContext([marker, marker]);
-    context.readQuiescence.mockResolvedValue(makeQuiescence(marker));
-    context.readIdentityState.mockResolvedValue({
-      status: 'active',
-      transition: makeActiveTransition(),
-    });
-    const verifyOwnership = vi.fn(async () => true);
-    const authorization = makeReadbackAuthorization(marker, verifyOwnership);
-
-    await expect(context.controller.runRestoreReadback({
-      ...currentInput(),
-      authorization,
-    })).resolves.toEqual({
-      status: 'CLEAR',
-      ownerUserId: OWNER_USER_ID,
-      recovered: false,
-      terminalResultDigest: null,
-    });
-
-    expect(context.recover).not.toHaveBeenCalled();
-    expect(context.readProviderEvidence).not.toHaveBeenCalled();
-    expect(context.readIdentityState).toHaveBeenCalledWith(IDENTITY, OWNER_USER_ID);
-    expect(verifyOwnership).toHaveBeenCalled();
-  });
-
-  it('holds read-back when owner, run, queue identity, or lease evidence differs', async () => {
-    const marker = makeActiveReadbackMarker();
-    const changedIdentity = { ...IDENTITY, token: 'stale-token' };
-    const mismatches = [
-      makeReadbackAuthorization({ ...marker, ownerUserId: 'other-owner' }),
-      makeReadbackAuthorization({ ...marker, runId: '44444444-4444-4444-8444-444444444444' }),
-      makeReadbackAuthorization({ ...marker, actionQueueRestoreIdentity: changedIdentity }),
-    ];
-
-    for (const authorization of mismatches) {
-      const context = makeContext([marker]);
-      await expect(context.controller.runRestoreReadback({
-        ...currentInput(),
-        authorization,
-      })).resolves.toMatchObject({ status: 'HOLD', reason: 'RESTORE_READBACK_UNAUTHORIZED' });
-      expect(context.readIdentityState).not.toHaveBeenCalled();
-      expect(context.recover).not.toHaveBeenCalled();
-    }
-
-    const quiescenceMismatch = makeContext([marker]);
-    quiescenceMismatch.readQuiescence.mockResolvedValue(makeQuiescence(marker, {
-      leaseExpiresAt: new Date(Date.now() - 1).toISOString(),
-    }));
-    await expect(quiescenceMismatch.controller.runRestoreReadback({
-      ...currentInput(),
-      authorization: makeReadbackAuthorization(marker),
-    })).resolves.toMatchObject({ status: 'HOLD', reason: 'RESTORE_READBACK_UNAUTHORIZED' });
-    expect(quiescenceMismatch.readIdentityState).not.toHaveBeenCalled();
-    expect(quiescenceMismatch.recover).not.toHaveBeenCalled();
-  });
-
-  it('holds read-back on an expired marker or lost transaction ownership', async () => {
-    const expiredMarker = makeMarker();
-    const expired = makeContext([expiredMarker]);
-    await expect(expired.controller.runRestoreReadback({
-      ...currentInput(),
-      authorization: makeReadbackAuthorization(expiredMarker),
-    })).resolves.toMatchObject({ status: 'HOLD', reason: 'RESTORE_READBACK_UNAUTHORIZED' });
-    expect(expired.readIdentityState).not.toHaveBeenCalled();
-
-    const marker = makeActiveReadbackMarker();
-    const lostOwnership = makeContext([marker]);
-    lostOwnership.readQuiescence.mockResolvedValue(makeQuiescence(marker));
-    const authorization = makeReadbackAuthorization(marker, async () => false);
-    await expect(lostOwnership.controller.runRestoreReadback({
-      ...currentInput(),
-      authorization,
-    })).resolves.toMatchObject({ status: 'HOLD', reason: 'RESTORE_READBACK_UNAUTHORIZED' });
-    expect(lostOwnership.readIdentityState).not.toHaveBeenCalled();
-    expect(lostOwnership.recover).not.toHaveBeenCalled();
-  });
-
-  it('holds read-back until every restore stage has durable completion progress', async () => {
-    const marker = makeActiveReadbackMarker({
-      phase: 'projects',
-      completedStages: [],
-    });
-    const context = makeContext([marker]);
-    context.readQuiescence.mockResolvedValue(makeQuiescence(marker));
-
-    await expect(context.controller.runRestoreReadback({
-      ...currentInput(),
-      authorization: makeReadbackAuthorization(marker),
-    })).resolves.toMatchObject({ status: 'HOLD', reason: 'RESTORE_READBACK_UNAUTHORIZED' });
-
-    expect(context.readIdentityState).not.toHaveBeenCalled();
-    expect(context.recover).not.toHaveBeenCalled();
   });
 
   it('settles an absent prepared participant and verifies exact terminal evidence before CLEAR', async () => {
@@ -294,11 +193,11 @@ describe('LocalBackupUiRestorePreActionQueueFenceController', () => {
         trace.push('first:read');
         await firstRead;
         return null;
-      }), verifyOwnership: vi.fn(async () => true) })
+      }) })
       .mockReturnValueOnce({ read: vi.fn(async () => {
         trace.push('second:read');
         return null;
-      }), verifyOwnership: vi.fn(async () => true) });
+      }) });
     const controller = new LocalBackupUiRestorePreActionQueueFenceController(dependencies);
 
     const first = controller.run(currentInput());
@@ -327,15 +226,11 @@ function makeContext(markers: Array<LocalBackupUiRestoreMarker | null>, trace: s
     trace.push('marker:read');
     return markers.shift() ?? null;
   });
-  const verifyMarkerOwnership = vi.fn(async () => true);
-  dependencies.createJournal.mockReturnValue({ read: readMarker, verifyOwnership: verifyMarkerOwnership });
-  dependencies.readQuiescence.mockResolvedValue(null);
+  dependencies.createJournal.mockReturnValue({ read: readMarker });
   return {
     controller: new LocalBackupUiRestorePreActionQueueFenceController(dependencies),
     readMarker,
-    verifyMarkerOwnership,
     recover: dependencies.recover,
-    readQuiescence: dependencies.readQuiescence,
     readIdentityState: dependencies.readIdentityState,
     readProviderEvidence: dependencies.readProviderEvidence,
   };
@@ -348,7 +243,6 @@ function makeDependencies(trace: string[] = []) {
       trace.push('restore:recover');
       return { status: 'none' } as const;
     }),
-    readQuiescence: vi.fn<LocalBackupUiRestorePreActionQueueFenceDependencies['readQuiescence']>(async () => null),
     readIdentityState: vi.fn<LocalBackupUiRestorePreActionQueueFenceDependencies['readIdentityState']>(async () => {
       trace.push('queue:state');
       return { status: 'unknown', reason: 'storage-unavailable' } as const;
@@ -380,53 +274,6 @@ function makeMarker(
     preImage: {} as never,
     rollbackErrors: [],
     ...overrides,
-  };
-}
-
-function makeActiveReadbackMarker(
-  overrides: Partial<LocalBackupUiRestoreMarker> = {},
-): LocalBackupUiRestoreMarker {
-  const now = Date.now();
-  return makeMarker({
-    createdAt: new Date(now - 1_000).toISOString(),
-    leaseExpiresAt: new Date(now + 60_000).toISOString(),
-    state: 'restoring',
-    phase: 'metadata',
-    completedStages: [...LOCAL_BACKUP_UI_RESTORE_STAGES],
-    ...overrides,
-  });
-}
-
-function makeQuiescence(
-  marker: LocalBackupUiRestoreMarker,
-  overrides: Partial<LocalBackupUiRestoreQuiescenceMarker> = {},
-): LocalBackupUiRestoreQuiescenceMarker {
-  return {
-    schemaVersion: 1,
-    ownerUserId: marker.ownerUserId,
-    runId: marker.runId,
-    createdAt: marker.createdAt,
-    leaseExpiresAt: marker.leaseExpiresAt,
-    state: 'quiesced',
-    ...overrides,
-  };
-}
-
-function makeReadbackAuthorization(
-  marker: LocalBackupUiRestoreMarker,
-  verifyOwnership: () => Promise<boolean> = async () => true,
-): LocalBackupUiRestoreReadbackAuthorization {
-  return {
-    marker: () => ({
-      ownerUserId: marker.ownerUserId,
-      runId: marker.runId,
-      restoreRunId: marker.restoreRunId,
-      actionQueueRestoreIdentity: { ...marker.actionQueueRestoreIdentity },
-      createdAt: marker.createdAt,
-      leaseExpiresAt: marker.leaseExpiresAt,
-    }),
-    verifyOwnership,
-    runAuthorizedReadback: async readback => await readback(),
   };
 }
 

@@ -1,6 +1,5 @@
 import { createSyncOperationId } from '../utils/sync-operation-id';
 import type {
-  QueuedAction,
   QueueBackupPersonalRestoreIdentityV2,
   QueueBackupPersonalRestoreTerminalReceiptV2,
 } from './action-queue.types';
@@ -16,7 +15,6 @@ import {
 import type { PreparedLocalBackupUiRestoreWriterQuiescence } from './local-backup-ui-restore-writer-quiescence.service';
 import type { QueueBackupRestoreProviderResult } from './queue-backup-restore-provider.helpers';
 import type { QueueBackupService } from './queue-backup.service';
-import { digestQueueBackupPersonalRestoreActions } from './queue-backup-personal-restore-transition.helpers';
 
 const QUIESCENCE_SENTINEL_PREFIX = 'nanoflow.local-backup-ui-restore-quiescence';
 const ACTIVE_WRITER_PREFIX = 'nanoflow.local-backup-ui-writer-active';
@@ -31,10 +29,10 @@ export type LocalBackupUiRestoreWriterSource =
   | 'attachment-outbox'
   | 'conflicts'
   | 'retry-queue'
+  | 'external-source'
   | 'project-state'
   | 'offline-snapshot'
   | 'sync-persist'
-  | 'external-source'
   | 'dock-snapshot'
   | 'launch-snapshot'
   | 'parked-task-cache'
@@ -59,8 +57,7 @@ export type LocalBackupUiRestoreQueueBackupPort = Pick<QueueBackupService,
   'applyPersonalBackupRestoreTransitionV2'
   | 'readPersonalRestoreIdentityState'
   | 'abandonPersonalRestoreBeforePrepare'
-  | 'readPersonalRestoreProviderEvidence'
-  | 'restoreQueueSnapshot'>;
+  | 'readPersonalRestoreProviderEvidence'>;
 
 export interface LocalBackupUiRestoreTerminalState {
   closed: boolean;
@@ -72,7 +69,6 @@ export interface LocalBackupUiRestoreTerminalContext {
   quiescence: PreparedLocalBackupUiRestoreWriterQuiescence;
   journal: LocalBackupUiRestoreJournal;
   queueBackup: LocalBackupUiRestoreQueueBackupPort;
-  refreshQueueMirrorForOwnerAfterRestore(ownerUserId: string, queue: QueuedAction[]): boolean;
   verifyOwnership(): Promise<boolean>;
 }
 
@@ -134,69 +130,6 @@ export function runWithLocalBackupUiRestoreWriterAuthorization<T>(
   } finally {
     preparedWriterAuthorizations.delete(key);
   }
-}
-
-export async function runWithLocalBackupUiRestoreWriterAuthorizationAsync<T>(
-  ownerUserId: string,
-  restoreRunId: string,
-  source: LocalBackupUiRestoreWriterSource,
-  write: () => Promise<T>,
-): Promise<T> {
-  assertOwner(ownerUserId);
-  const sentinel = readQuiescenceSentinel(ownerUserId);
-  if (!sentinel || sentinel.runId !== restoreRunId || sentinel.state !== 'quiesced') {
-    throw new LocalBackupUiRestoreWriterPausedError(ownerUserId);
-  }
-  const key = preparedAuthorizationKey(ownerUserId, restoreRunId, source);
-  if (preparedWriterAuthorizations.has(key)) {
-    throw new Error('local backup UI restore writer authorization is already active');
-  }
-  preparedWriterAuthorizations.add(key);
-  try {
-    return await write();
-  } finally {
-    preparedWriterAuthorizations.delete(key);
-  }
-}
-
-export async function runWithLocalBackupUiRestoreFinalizationWriterAuthorizationAsync<T>(
-  ownerUserId: string,
-  restoreRunId: string,
-  source: LocalBackupUiRestoreWriterSource,
-  write: () => Promise<T>,
-): Promise<T> {
-  assertOwner(ownerUserId);
-  const sentinel = readQuiescenceSentinel(ownerUserId);
-  if (source !== 'action-queue'
-    || !sentinel
-    || sentinel.runId !== restoreRunId
-    || sentinel.state !== 'finalizing-completed') {
-    throw new LocalBackupUiRestoreWriterPausedError(ownerUserId);
-  }
-  const key = preparedAuthorizationKey(ownerUserId, restoreRunId, source);
-  if (preparedWriterAuthorizations.has(key)) {
-    throw new Error('local backup UI restore writer authorization is already active');
-  }
-  preparedWriterAuthorizations.add(key);
-  try {
-    return await write();
-  } finally {
-    preparedWriterAuthorizations.delete(key);
-  }
-}
-
-export function runLocalBackupUiRestoreWriterGuardedSync<T>(
-  ownerUserId: string,
-  source: LocalBackupUiRestoreWriterSource,
-  write: () => T,
-): T {
-  assertOwner(ownerUserId);
-  const sentinel = readQuiescenceSentinel(ownerUserId);
-  if (sentinel?.state === 'pausing' && hasLocalActiveWriter(ownerUserId, source)) {
-    return write();
-  }
-  assertWriterMayContinue(ownerUserId, source, false);
-  return write();
 }
 
 class LocalBackupUiRestoreWriterLease {
@@ -533,116 +466,63 @@ export async function finalizeLocalBackupUiRestoreTerminal(
   context: LocalBackupUiRestoreTerminalContext,
   outcome: LocalBackupUiRestoreFinalOutcome,
 ): Promise<void> {
-  try {
-    if (!await context.verifyOwnership()) throw new LocalBackupUiRestoreOwnershipLostError();
-    if (!await context.state.markerHeartbeat.verifyOwnership()) {
-      throw new LocalBackupUiRestoreOwnershipLostError();
-    }
-    const marker = context.state.markerHeartbeat.marker();
-    await context.quiescence.prepareFinalization(outcome);
-    await context.quiescence.drainWriters();
-    if (!await context.verifyOwnership()) throw new LocalBackupUiRestoreOwnershipLostError();
-    const terminal = await settleAndVerifyLocalBackupUiRestoreQueueBackup(
-      marker.actionQueueRestoreIdentity,
-      marker.ownerUserId,
-      context.queueBackup,
-      outcome === 'completed' ? 'finalized' : 'rolled-back',
-    );
-    if (outcome === 'completed') {
-      const snapshot = await context.queueBackup.restoreQueueSnapshot(marker.ownerUserId);
-      if (!snapshot?.recordFound
-        || await digestQueueBackupPersonalRestoreActions('result', snapshot.actions) !== terminal.resultDigest) {
-        throw new Error('local backup UI restore finalized queue snapshot did not match its terminal receipt');
-      }
-      const mirrorRefreshed = await context.quiescence.runFinalizationMutation(
-        'action-queue',
-        async () => context.refreshQueueMirrorForOwnerAfterRestore(marker.ownerUserId, snapshot.actions),
-      );
-      if (!mirrorRefreshed) {
-        throw new Error('local backup UI restore owner queue mirror read-back failed');
-      }
-    }
-    await verifyQueueBackupTerminalReadback(
-      marker.actionQueueRestoreIdentity,
-      marker.ownerUserId,
-      context.queueBackup,
-      terminal,
-    );
-    if (!await context.state.markerHeartbeat.verifyOwnership()) {
-      throw new LocalBackupUiRestoreOwnershipLostError();
-    }
-    await context.state.markerHeartbeat.stop();
-    const finalMarker = context.state.markerHeartbeat.marker();
-    if (!await context.journal.clear(finalMarker)) {
-      throw new LocalBackupUiRestoreOwnershipLostError('restore marker final clear failed');
-    }
-    if (await context.journal.read() !== null) {
-      throw new LocalBackupUiRestoreOwnershipLostError('restore marker final absence read-back failed');
-    }
-    await context.quiescence.releaseFinalized();
-    context.state.closed = true;
-  } catch (error) {
-    await retainLocalBackupUiRestoreEvidenceForStartup(context, error);
-    throw error;
+  if (!await context.verifyOwnership()) throw new LocalBackupUiRestoreOwnershipLostError();
+  await context.quiescence.prepareFinalization(outcome);
+  if (!await context.state.markerHeartbeat.verifyOwnership()) {
+    throw new LocalBackupUiRestoreOwnershipLostError();
   }
+  const marker = context.state.markerHeartbeat.marker();
+  const terminal = await settleAndVerifyLocalBackupUiRestoreQueueBackup(
+    marker.actionQueueRestoreIdentity,
+    marker.ownerUserId,
+    context.queueBackup,
+    outcome === 'completed' ? 'finalized' : 'rolled-back',
+  );
+  await verifyQueueBackupTerminalReadback(
+    marker.actionQueueRestoreIdentity,
+    marker.ownerUserId,
+    context.queueBackup,
+    terminal,
+  );
+  await context.state.markerHeartbeat.stop();
+  if (!await context.journal.clear(marker)) {
+    throw new LocalBackupUiRestoreOwnershipLostError('restore marker final clear failed');
+  }
+  if (await context.journal.read() !== null) {
+    throw new LocalBackupUiRestoreOwnershipLostError('restore marker final absence read-back failed');
+  }
+  await context.quiescence.releaseFinalized();
+  context.state.closed = true;
 }
 
 export async function abortLocalBackupUiRestoreTerminal(
   context: LocalBackupUiRestoreTerminalContext,
 ): Promise<void> {
-  try {
-    if (!await context.verifyOwnership()) {
-      throw new Error('local backup UI restore prepared transaction ownership lost');
-    }
-    const marker = context.state.markerHeartbeat.marker();
-    const terminal = await settleAndVerifyLocalBackupUiRestoreQueueBackup(
-      marker.actionQueueRestoreIdentity,
-      marker.ownerUserId,
-      context.queueBackup,
-      'rolled-back',
-    );
-    await context.state.markerHeartbeat.stop();
-    await verifyQueueBackupTerminalReadback(
-      marker.actionQueueRestoreIdentity,
-      marker.ownerUserId,
-      context.queueBackup,
-      terminal,
-    );
-    if (!await context.journal.clear(marker)) {
-      throw new Error('local backup UI restore prepared marker clear failed');
-    }
-    if (await context.journal.read() !== null) {
-      throw new Error('local backup UI restore prepared marker absence read-back failed');
-    }
-    await context.quiescence.abortBeforeMutation();
-    context.state.closed = true;
-  } catch (error) {
-    await retainLocalBackupUiRestoreEvidenceForStartup(context, error);
-    throw error;
+  if (!await context.verifyOwnership()) {
+    throw new Error('local backup UI restore prepared transaction ownership lost');
   }
-}
-
-async function retainLocalBackupUiRestoreEvidenceForStartup(
-  context: LocalBackupUiRestoreTerminalContext,
-  cause: unknown,
-): Promise<void> {
-  const cleanupErrors: unknown[] = [];
-  try {
-    await context.state.markerHeartbeat.stop();
-  } catch (error) {
-    cleanupErrors.push(error);
+  const marker = context.state.markerHeartbeat.marker();
+  const terminal = await settleAndVerifyLocalBackupUiRestoreQueueBackup(
+    marker.actionQueueRestoreIdentity,
+    marker.ownerUserId,
+    context.queueBackup,
+    'rolled-back',
+  );
+  await context.state.markerHeartbeat.stop();
+  if (!await context.journal.clear(marker)) {
+    throw new Error('local backup UI restore prepared marker clear failed');
   }
-  try {
-    await context.quiescence.deferForStartupRecovery();
-  } catch (error) {
-    cleanupErrors.push(error);
+  if (await context.journal.read() !== null) {
+    throw new Error('local backup UI restore prepared marker absence read-back failed');
   }
-  if (cleanupErrors.length > 0) {
-    throw new AggregateError(
-      [cause, ...cleanupErrors],
-      'local backup UI restore evidence could not be handed off to startup recovery',
-    );
-  }
+  await verifyQueueBackupTerminalReadback(
+    marker.actionQueueRestoreIdentity,
+    marker.ownerUserId,
+    context.queueBackup,
+    terminal,
+  );
+  await context.quiescence.abortBeforeMutation();
+  context.state.closed = true;
 }
 
 interface VerifiedQueueBackupTerminal {
@@ -739,10 +619,10 @@ function isWriterSource(value: unknown): value is LocalBackupUiRestoreWriterSour
     || value === 'attachment-outbox'
     || value === 'conflicts'
     || value === 'retry-queue'
+    || value === 'external-source'
     || value === 'project-state'
     || value === 'offline-snapshot'
     || value === 'sync-persist'
-    || value === 'external-source'
     || value === 'dock-snapshot'
     || value === 'launch-snapshot'
     || value === 'parked-task-cache'

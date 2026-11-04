@@ -184,14 +184,10 @@ async function createMarker(
     }
     writeSentinel(persistedMarker);
   } catch (error) {
-    let cleanupError: unknown;
-    const removed = await journal.clear(marker).catch(error => {
-      cleanupError = error;
-      return false;
-    });
+    const removed = await journal.clear(marker).catch(() => false);
     if (!removed) {
       throw new AggregateError(
-        cleanupError === undefined ? [error] : [error, cleanupError],
+        [error],
         'local backup UI restore marker verification failed and the owned marker could not be removed',
       );
     }
@@ -203,19 +199,10 @@ async function readMarker(
   journal: DataSafetyRestoreMarkerJournal<LocalBackupUiRestoreMarker>,
   ownerUserId: string,
 ): Promise<LocalBackupUiRestoreMarker | null> {
-  const previousSentinel = readSentinelRaw(ownerUserId);
   assertSentinelValidOrAbsent(ownerUserId);
   const marker = await journal.read();
   if (!marker) return null;
   assertMarker(marker, ownerUserId);
-  const currentSentinel = readSentinelRaw(ownerUserId);
-  if ((previousSentinel !== null && !sentinelMatchesMarker(previousSentinel, marker))
-    || (previousSentinel !== null && currentSentinel === null)
-    || (currentSentinel !== null
-      && !sentinelMatchesMarker(currentSentinel, marker)
-      && !(previousSentinel === null && compatibilitySentinelMatchesMarker(currentSentinel, marker)))) {
-    throw new Error('local backup UI restore sentinel identity does not match the durable marker');
-  }
   writeSentinel(marker);
   return marker;
 }
@@ -361,32 +348,10 @@ function hasSentinelIdentity(marker: LocalBackupUiRestoreMarker): boolean {
   const raw = readSentinelRaw(marker.ownerUserId);
   if (typeof localStorage === 'undefined') return true;
   if (raw === null) return false;
-  return sentinelMatchesMarker(raw, marker);
-}
-
-function sentinelMatchesMarker(raw: string, marker: LocalBackupUiRestoreMarker): boolean {
   try {
     const value = JSON.parse(raw) as unknown;
     return validateSentinel(value, marker.ownerUserId)
       && isRecord(value)
-      && value['runId'] === marker.runId
-      && value['createdAt'] === marker.createdAt
-      && value['leaseExpiresAt'] === marker.leaseExpiresAt;
-  } catch {
-    return false;
-  }
-}
-
-function compatibilitySentinelMatchesMarker(raw: string, marker: LocalBackupUiRestoreMarker): boolean {
-  try {
-    const value = JSON.parse(raw) as unknown;
-    if (!isRecord(value)) return false;
-    const keys = Object.keys(value).sort().join(',');
-    return keys === 'markerKind,ownerUserId,runId,schemaVersion,storage'
-      && value['schemaVersion'] === LOCAL_BACKUP_UI_RESTORE_SENTINEL_SCHEMA_VERSION
-      && value['storage'] === 'indexeddb-journal'
-      && value['markerKind'] === LOCAL_BACKUP_UI_RESTORE_MARKER_KIND
-      && value['ownerUserId'] === marker.ownerUserId
       && value['runId'] === marker.runId;
   } catch {
     return false;

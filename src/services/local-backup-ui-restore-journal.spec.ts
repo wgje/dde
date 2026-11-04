@@ -73,39 +73,6 @@ describe('local backup UI restore journal foundation', () => {
     expect(JSON.stringify(sentinel)).not.toContain('touchedProjectIds');
   });
 
-  it('rebuilds an absent rich sentinel only from matching durable marker identity', async () => {
-    const marker = makeMarker();
-    const journal = createLocalBackupUiRestoreJournal(OWNER_USER_ID);
-    await journal.create(marker);
-    localStorage.removeItem(getLocalBackupUiRestoreSentinelStorageKey(OWNER_USER_ID));
-
-    await expect(journal.read()).resolves.toEqual(marker);
-    expect(readSentinel(OWNER_USER_ID)).toEqual(sentinelFor(marker));
-  });
-
-  it.each([
-    ['createdAt', { createdAt: '2026-10-01T00:00:00.000Z' }],
-    ['leaseExpiresAt', { leaseExpiresAt: '2026-10-01T00:00:00.000Z' }],
-  ] as const)(
-    'preserves a rich sentinel when its %s differs from the durable marker',
-    async (_field, drift) => {
-      const marker = makeMarker();
-      const journal = createLocalBackupUiRestoreJournal(OWNER_USER_ID);
-      await journal.create(marker);
-
-      const key = getLocalBackupUiRestoreSentinelStorageKey(OWNER_USER_ID);
-      const mismatchedSentinel = { ...sentinelFor(marker), ...drift };
-      const rawSentinel = JSON.stringify(mismatchedSentinel);
-      localStorage.setItem(key, rawSentinel);
-      const setItem = vi.spyOn(localStorage, 'setItem');
-
-      await expect(journal.read()).rejects.toThrow('sentinel identity');
-      await expect(journal.verifyOwnership(marker)).resolves.toBe(false);
-      expect(localStorage.getItem(key)).toBe(rawSentinel);
-      expect(setItem).not.toHaveBeenCalled();
-    },
-  );
-
   it('validates the complete marker boundary and rejects owner or payload drift', () => {
     const marker = makeMarker();
 

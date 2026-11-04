@@ -651,11 +651,10 @@ describe('SettingsModalComponent', () => {
     ]) as unknown as typeof component.projects;
     mockAttachmentImportService.extractAttachmentsFromZip.mockResolvedValueOnce([itemA, itemB, unmatchedItem]);
     mockAttachmentImportService.importAttachments
-      .mockResolvedValueOnce({ success: true, imported: 1, queued: 1, failed: 0, skipped: 0, errors: [] })
+      .mockResolvedValueOnce({ success: true, imported: 1, failed: 0, skipped: 0, errors: [] })
       .mockResolvedValueOnce({
         success: false,
         imported: 0,
-        queued: 0,
         failed: 1,
         skipped: 2,
         errors: [{ taskId: 'task-b', attachmentName: 'task-b-file.txt', error: 'upload failed' }],
@@ -666,7 +665,7 @@ describe('SettingsModalComponent', () => {
     expect(mockAttachmentImportService.importAttachments).toHaveBeenNthCalledWith(1, 'project-a', [itemA]);
     expect(mockAttachmentImportService.importAttachments).toHaveBeenNthCalledWith(2, 'project-b', [itemB]);
     expect(alertSpy).toHaveBeenCalledWith(
-      '附件导入部分失败，已保存项等待同步。\n本地导入: 1\n待同步: 1\n失败: 1\n跳过: 3\n首个错误: task-b-file.txt: upload failed',
+      '附件导入部分失败。\n成功: 1\n失败: 1\n跳过: 3\n首个错误: task-b-file.txt: upload failed',
     );
     expect(mockLogger.warn).toHaveBeenCalledWith('SettingsModal', '部分附件未匹配到项目，已跳过: 1');
   });

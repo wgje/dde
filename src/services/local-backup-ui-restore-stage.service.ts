@@ -6,7 +6,6 @@ import type { BackupData } from '../../supabase/functions/_shared/backup-utils';
 import type { ExportData } from './export.service';
 import { ProjectStateService } from './project-state.service';
 import { ProjectDataService, RetryQueueService } from '../core-bridge';
-import { normalizeOfflineSnapshotProject } from './project-data-projection.helpers';
 import {
   ExternalSourceCacheService,
 } from '../app/core/external-sources/external-source-cache.service';
@@ -15,18 +14,12 @@ import { ActionQueueStorageService } from './action-queue-storage.service';
 import { ConflictStorageService } from './conflict-storage.service';
 import { blobToBase64 } from './disaster-backup-blob.helpers';
 import {
-  extractBackupActionQueueActions,
-} from './action-queue-restore.helpers';
-import {
   restoreAttachmentUploadOutboxFromBackup,
   restoreAttachmentUploadOutboxItems,
-  deriveAttachmentUploadOutboxRestoreTarget,
   preflightAttachmentUploadOutboxFromBackup,
   decodeConflictsFromBackup,
   restoreConflictsFromBackup,
   restoreDeadLettersFromBackup,
-  deriveDeadLetterRestoreTarget,
-  type DeadLetterRestoreTargetSnapshot,
 } from './import-backup-conversion.helpers';
 import { ImportService } from './import.service';
 import {
@@ -40,13 +33,11 @@ import {
   restoreParkedTaskCacheRestoreSnapshot,
   restoreRetryQueueRestoreSnapshot,
 } from './data-safety-indexeddb-local-state';
-import {
-  projectConflictRestoreSnapshot,
-  readConflictRestoreSnapshot,
-} from './data-safety-conflict-restore.helpers';
+import { readConflictRestoreSnapshot } from './data-safety-conflict-restore.helpers';
 import { BackupDataSafetyMetadataRestoreService } from './backup-data-safety-metadata-restore.service';
 import { buildDataSafetyMetadataRestorePlan } from './import-backup-data-safety-metadata.helpers';
 import type {
+  LocalBackupUiRestoreFinalOutcome,
   LocalBackupUiRestoreStageOperationContext,
   LocalBackupUiRestoreStageOperations,
 } from './local-backup-ui-restore-stage-protocol';
@@ -56,7 +47,6 @@ import {
   type LocalBackupUiRestoreStage,
 } from './local-backup-ui-restore-types';
 import { LocalBackupUiBlackBoxRestoreService } from './local-backup-ui-black-box-restore.service';
-import { canonicalizePersistedValue } from './action-queue-identity.helpers';
 import type {
   LocalBackupUiBlackBoxPersistedEntry,
   LocalBackupUiBlackBoxRestoreSnapshot,
@@ -64,7 +54,6 @@ import type {
 import {
   decodeLocalBackupUiRestoreStageSnapshots,
   deriveLocalBackupUiRestoreRetryQueueRestoredItems,
-  projectLocalBackupUiRestoreRetryQueueItems,
   mergeExternalSourceLinks,
   mergePendingLinks,
   normalizeLocalBackupUiRestoreRetryQueueFootprint,
@@ -89,6 +78,10 @@ export interface LocalBackupUiRestoreStageInput {
   existingProjects: Project[];
   actionQueueRestore: LocalBackupUiRestoreActionQueueParticipant;
   verifyRunContext?: () => void;
+  verifyFinalReadBack?: (
+    outcome: LocalBackupUiRestoreFinalOutcome,
+    context: LocalBackupUiRestoreStageOperationContext,
+  ) => Promise<void>;
 }
 
 export interface LocalBackupUiRestoreActionQueueParticipant {
@@ -96,17 +89,11 @@ export interface LocalBackupUiRestoreActionQueueParticipant {
   rollback(): Promise<void>;
 }
 
-export interface LocalBackupUiRestoreStageApplyResult {
-  result: unknown;
-  expected?: unknown;
-  verify?: (actual: unknown) => boolean | Promise<boolean>;
-}
-
 export interface LocalBackupUiRestoreStageEffect {
   apply(
     context: LocalBackupUiRestoreStageOperationContext,
     snapshots: LocalBackupUiRestoreStageSnapshots,
-  ): Promise<unknown | LocalBackupUiRestoreStageApplyResult>;
+  ): Promise<unknown>;
   read(
     context: LocalBackupUiRestoreStageOperationContext,
     snapshots: LocalBackupUiRestoreStageSnapshots,
@@ -184,23 +171,19 @@ export class LocalBackupUiRestoreStageService {
         (snapshot, context, snapshots) => this.restoreProjects(input.ownerUserId, snapshot, blackBoxFor(snapshots), context),
       ),
       'attachment-outbox': createStageEffect<LocalBackupUiRestoreStageSnapshots['attachmentOutbox']>(
-        (context, snapshots) => this.applyAttachmentOutbox(
-          input.backup,
-          snapshots.attachmentOutbox,
-          context,
-        ),
+        context => this.applyAttachmentOutbox(input.backup, context),
         context => this.readAttachmentOutbox(input.ownerUserId, context),
         (snapshot, context) => this.restoreAttachmentOutbox(input.ownerUserId, snapshot, context),
       ),
       'action-queue': createStageEffect<LocalBackupUiRestoreActionQueuePreImage>(
-        (context, snapshots) => this.applyActionQueue(input, snapshots.actionQueue, context),
+        context => this.applyActionQueue(input, context),
         context => this.readActionQueue(input.ownerUserId, context),
         (_snapshot, context) => this.restoreActionQueue(input.actionQueueRestore, context),
       ),
       'retry-queue': createStageEffect<LocalBackupUiRestoreRetryQueuePreImage>(
         (context, snapshots) => this.applyRetryQueue(
           input.ownerUserId,
-          snapshots.retryQueue,
+          snapshots.retryQueue.restoredItems,
           context,
         ),
         (context, snapshots) => this.readRetryQueue(
@@ -211,12 +194,12 @@ export class LocalBackupUiRestoreStageService {
         (snapshot, context) => this.restoreRetryQueue(input.ownerUserId, snapshot, context),
       ),
       'dead-letters': createStageEffect<LocalBackupUiRestoreDeadLetterPreImage>(
-        (context, snapshots) => this.applyDeadLetters(input, snapshots.deadLetters, context),
+        context => this.applyDeadLetters(input, context),
         context => this.readDeadLetters(input.ownerUserId, context),
         (snapshot, context) => this.restoreDeadLetters(input.ownerUserId, snapshot, context),
       ),
       conflicts: createStageEffect<LocalBackupUiRestoreStageSnapshots['conflicts']>(
-        (context, snapshots) => this.applyConflicts(input, snapshots.conflicts, context),
+        context => this.applyConflicts(input, context),
         context => this.readConflicts(input.ownerUserId, context),
         (snapshot, context) => this.restoreConflicts(input.ownerUserId, snapshot, context),
       ),
@@ -246,7 +229,7 @@ export class LocalBackupUiRestoreStageService {
     preImage: LocalBackupUiRestoreProjectPreImage,
     blackBox: LocalBackupUiBlackBoxRestoreSnapshot,
     context: LocalBackupUiRestoreStageOperationContext,
-  ): Promise<LocalBackupUiRestoreStageApplyResult> {
+  ): Promise<number> {
     const plan = await this.importService.prepareLocalBackupRestorePlan(
       input.data,
       this.projectState.getProjectsWithCurrentData(),
@@ -259,43 +242,24 @@ export class LocalBackupUiRestoreStageService {
     );
     const nextLinks = mergeExternalSourceLinks(preImage.externalSourceLinks, plan.externalSourceLinks);
     const nextPendingLinks = mergePendingLinks(preImage.externalSourcePendingLinks, plan.externalSourceLinks);
-    const restoreOwnerUserId = context.marker().ownerUserId;
-    if (restoreOwnerUserId !== input.ownerUserId) {
-      throw new Error('local backup UI restore project owner mismatch');
-    }
-    await context.checkpoint();
-    const importedCount = await context.runWriterMutationAsync('project-state', async () => {
-      this.projectState.replaceProjectsForRestore(restoreOwnerUserId, nextProjects);
+    await context.runWriterMutation('project-state', async () => {
       await context.checkpoint();
-      return plan.importedCount;
+      this.projectState.updateProjects(() => nextProjects, input.ownerUserId);
+      await context.checkpoint();
     });
-    await context.runWriterMutationAsync('offline-snapshot', async () => {
+    const importedCount = await context.runWriterMutation('external-source', async () => {
+      await context.checkpoint();
       await this.projectData.saveOfflineSnapshotAndWait(nextProjects, input.ownerUserId);
-      await context.checkpoint();
-    });
-    await context.runWriterMutationAsync('external-source', async () => {
       await context.checkpoint();
       await this.externalSourceCache.saveLinks(nextLinks, input.ownerUserId);
       await context.checkpoint();
       await this.externalSourceCache.replacePendingLinksForOwner(nextPendingLinks, input.ownerUserId);
       await context.checkpoint();
+      return plan.importedCount;
     });
     await this.applyProjectLocalState(input, context);
-    await context.runWriterMutationAsync('black-box', () => this.blackBoxRestore.apply(blackBox, context.checkpoint));
-    return {
-      result: importedCount,
-      verify: actual => verifyProjectsReadback(
-        actual,
-        input.ownerUserId,
-        context.marker().touchedProjectIds,
-        nextProjects,
-        nextLinks,
-        nextPendingLinks,
-        buildProjectLocalStateRestoreSnapshot(input.ownerUserId, input.backup.localState),
-        blackBox.target,
-        preImage.offlineSnapshot,
-      ),
-    };
+    await context.runWriterMutation('black-box', () => this.blackBoxRestore.apply(blackBox, context.checkpoint));
+    return importedCount;
   }
 
   private async applyProjectLocalState(
@@ -306,21 +270,21 @@ export class LocalBackupUiRestoreStageService {
       input.ownerUserId,
       input.backup.localState,
     );
-    await context.runWriterMutationAsync('dock-snapshot', async () => {
+    await context.runWriterMutation('dock-snapshot', async () => {
       await restoreDockSnapshotRestoreSnapshot(
         input.ownerUserId,
         nextLocalState.dockSnapshotRestoreSnapshot,
         context.checkpoint,
       );
     });
-    await context.runWriterMutationAsync('launch-snapshot', async () => {
+    await context.runWriterMutation('launch-snapshot', async () => {
       await restoreLaunchSnapshotRestoreSnapshot(
         input.ownerUserId,
         nextLocalState.launchSnapshotRestoreSnapshot,
         context.checkpoint,
       );
     });
-    await context.runWriterMutationAsync('parked-task-cache', async () => {
+    await context.runWriterMutation('parked-task-cache', async () => {
       await restoreParkedTaskCacheRestoreSnapshot(
         input.ownerUserId,
         nextLocalState.parkedTaskCacheRestoreSnapshot,
@@ -383,25 +347,19 @@ export class LocalBackupUiRestoreStageService {
     blackBox: LocalBackupUiBlackBoxRestoreSnapshot,
     context: LocalBackupUiRestoreStageOperationContext,
   ): Promise<void> {
-    await context.runWriterMutationAsync('black-box', () => this.blackBoxRestore.rollback(blackBox, context.checkpoint));
-    if (context.marker().ownerUserId !== ownerUserId) {
-      throw new Error('local backup UI restore rollback owner mismatch');
-    }
+    await context.runWriterMutation('black-box', () => this.blackBoxRestore.rollback(blackBox, context.checkpoint));
     const restoredProjects = restoreTouchedProjects(
       this.projectState.getProjectsWithCurrentData(),
       snapshot,
     );
-    await context.checkpoint();
-    await context.runWriterMutationAsync('project-state', async () => {
-      this.projectState.replaceProjectsForRestore(ownerUserId, restoredProjects);
+    await context.runWriterMutation('project-state', async () => {
+      await context.checkpoint();
+      this.projectState.updateProjects(() => restoredProjects, ownerUserId);
       await context.checkpoint();
     });
-    await context.runWriterMutationAsync('offline-snapshot', async () => {
+    await context.runWriterMutation('external-source', async () => {
+      await context.checkpoint();
       await restoreOfflineProjectRestoreSnapshot(ownerUserId, snapshot.offlineSnapshot, context.checkpoint);
-      await context.checkpoint();
-    });
-    await context.runWriterMutationAsync('external-source', async () => {
-      await context.checkpoint();
       await this.externalSourceCache.saveLinks(snapshot.externalSourceLinks, ownerUserId);
       await context.checkpoint();
       await this.externalSourceCache.replacePendingLinksForOwner(
@@ -410,13 +368,13 @@ export class LocalBackupUiRestoreStageService {
       );
       await context.checkpoint();
     });
-    await context.runWriterMutationAsync('dock-snapshot', async () => {
+    await context.runWriterMutation('dock-snapshot', async () => {
       await restoreDockSnapshotRestoreSnapshot(ownerUserId, snapshot.dockSnapshot, context.checkpoint);
     });
-    await context.runWriterMutationAsync('launch-snapshot', async () => {
+    await context.runWriterMutation('launch-snapshot', async () => {
       await restoreLaunchSnapshotRestoreSnapshot(ownerUserId, snapshot.launchSnapshot, context.checkpoint);
     });
-    await context.runWriterMutationAsync('parked-task-cache', async () => {
+    await context.runWriterMutation('parked-task-cache', async () => {
       await restoreParkedTaskCacheRestoreSnapshot(
         ownerUserId,
         snapshot.parkedTaskCache,
@@ -427,19 +385,12 @@ export class LocalBackupUiRestoreStageService {
 
   private async applyAttachmentOutbox(
     backup: BackupData,
-    preImage: LocalBackupUiRestoreStageSnapshots['attachmentOutbox'],
     context: LocalBackupUiRestoreStageOperationContext,
-  ): Promise<LocalBackupUiRestoreStageApplyResult> {
-    const expected = deriveAttachmentUploadOutboxRestoreTarget(
-      preImage,
-      backup,
-      context.marker().ownerUserId,
-    );
-    const result = await restoreAttachmentUploadOutboxFromBackup(backup, this.attachmentOutbox, {
+  ): Promise<number> {
+    return restoreAttachmentUploadOutboxFromBackup(backup, this.attachmentOutbox, {
       checkpoint: context.checkpoint,
-      runWrite: write => context.runWriterMutationAsync('attachment-outbox', write),
+      runWrite: write => context.runWriterMutation('attachment-outbox', write),
     });
-    return { result, expected };
   }
 
   private async readAttachmentOutbox(
@@ -480,40 +431,27 @@ export class LocalBackupUiRestoreStageService {
     });
     await context.checkpoint();
     for (const upload of current) {
-      await context.runWriterMutationAsync('attachment-outbox', () => (
+      await context.runWriterMutation('attachment-outbox', () => (
         this.attachmentOutbox.removePendingUpload(upload, { restoreWriterContinuation: true })
       ));
       await context.checkpoint();
     }
     await restoreAttachmentUploadOutboxItems(snapshot, this.attachmentOutbox, {
       checkpoint: context.checkpoint,
-      runWrite: write => context.runWriterMutationAsync('attachment-outbox', write),
+      runWrite: write => context.runWriterMutation('attachment-outbox', write),
     });
   }
 
-  private async applyActionQueue(
+  private applyActionQueue(
     input: LocalBackupUiRestoreStageInput,
-    preImage: LocalBackupUiRestoreActionQueuePreImage,
     context: LocalBackupUiRestoreStageOperationContext,
-  ): Promise<LocalBackupUiRestoreStageApplyResult> {
-    const expectedActions = extractBackupActionQueueActions(input.backup.localState?.actionQueue);
-    const preImageActions = preImage.indexedDb?.actions ?? [];
-    const result = await context.runWriterMutationAsync('action-queue', async () => {
+  ): Promise<number> {
+    return context.runWriterMutation('action-queue', async () => {
       await context.checkpoint();
       const restoredCount = await input.actionQueueRestore.confirmPrepared();
       await context.checkpoint();
       return restoredCount;
     });
-    return {
-      result,
-      verify: actual => verifyActionQueueReadback(
-        actual,
-        preImage,
-        preImageActions,
-        expectedActions,
-        context.marker().actionQueueRestoreIdentity,
-      ),
-    };
   }
 
   private async readActionQueue(
@@ -532,43 +470,34 @@ export class LocalBackupUiRestoreStageService {
     participant: LocalBackupUiRestoreActionQueueParticipant,
     context: LocalBackupUiRestoreStageOperationContext,
   ): Promise<void> {
-    return context.runWriterMutationAsync('action-queue', async () => {
+    return context.runWriterMutation('action-queue', async () => {
       await context.checkpoint();
       await participant.rollback();
       await context.checkpoint();
     });
   }
 
-  private async applyRetryQueue(
+  private applyRetryQueue(
     ownerUserId: string,
-    preImage: LocalBackupUiRestoreRetryQueuePreImage,
+    restoredItems: Record<string, unknown>[],
     context: LocalBackupUiRestoreStageOperationContext,
-  ): Promise<LocalBackupUiRestoreStageApplyResult> {
-    const validationNow = Date.now();
-    const currentlyRestorableItems = normalizeLocalBackupUiRestoreRetryQueueFootprint(
-      preImage.restoredItems,
-      ownerUserId,
-      {
-        now: validationNow,
-        maxItemAgeMs: SYNC_CONFIG.MAX_RETRY_ITEM_AGE,
-        maxRetries: this.retryQueue.MAX_RETRIES,
-      },
-    );
-    const result = await context.runWriterMutationAsync('retry-queue', () => (
-      this.retryQueue.restoreFromBackupItems(currentlyRestorableItems, ownerUserId, {
+  ): Promise<number> {
+    return context.runWriterMutation('retry-queue', () => {
+      const validationNow = Date.now();
+      const currentlyRestorableItems = normalizeLocalBackupUiRestoreRetryQueueFootprint(
+        restoredItems,
+        ownerUserId,
+        {
+          now: validationNow,
+          maxItemAgeMs: SYNC_CONFIG.MAX_RETRY_ITEM_AGE,
+          maxRetries: this.retryQueue.MAX_RETRIES,
+        },
+      );
+      return this.retryQueue.restoreFromBackupItems(currentlyRestorableItems, ownerUserId, {
         validationNow,
         terminalEvidence: 'forbid',
-      })
-    ));
-    return {
-      result,
-      verify: actual => verifyRetryQueueReadback(
-        actual,
-        preImage,
-        currentlyRestorableItems,
-        ownerUserId,
-      ),
-    };
+      });
+    });
   }
 
   private async readRetryQueue(
@@ -597,7 +526,7 @@ export class LocalBackupUiRestoreStageService {
     snapshot: LocalBackupUiRestoreRetryQueuePreImage,
     context: LocalBackupUiRestoreStageOperationContext,
   ): Promise<void> {
-    return context.runWriterMutationAsync('retry-queue', () => restoreRetryQueueRestoreSnapshot(
+    return context.runWriterMutation('retry-queue', () => restoreRetryQueueRestoreSnapshot(
       ownerUserId,
       {
         retryQueueIndexedDbItems: snapshot.indexedDb,
@@ -611,15 +540,9 @@ export class LocalBackupUiRestoreStageService {
 
   private async applyDeadLetters(
     input: LocalBackupUiRestoreStageInput,
-    preImage: LocalBackupUiRestoreDeadLetterPreImage,
     context: LocalBackupUiRestoreStageOperationContext,
-  ): Promise<LocalBackupUiRestoreStageApplyResult> {
-    const expected = deriveDeadLetterRestoreTarget(
-      preImage,
-      input.backup,
-      input.ownerUserId,
-    );
-    const result = await context.runWriterMutationAsync('action-queue', async () => {
+  ): Promise<number> {
+    return context.runWriterMutation('action-queue', async () => {
       await context.checkpoint();
       const count = restoreDeadLettersFromBackup(
         input.backup,
@@ -629,10 +552,6 @@ export class LocalBackupUiRestoreStageService {
       await context.checkpoint();
       return count;
     });
-    return {
-      result,
-      verify: actual => verifyDeadLetterReadback(actual, expected, input.ownerUserId),
-    };
   }
 
   private async readDeadLetters(
@@ -652,7 +571,7 @@ export class LocalBackupUiRestoreStageService {
     snapshot: LocalBackupUiRestoreDeadLetterPreImage,
     context: LocalBackupUiRestoreStageOperationContext,
   ): Promise<void> {
-    return context.runWriterMutationAsync('action-queue', () => restoreDeadLetterRestoreSnapshot(
+    return context.runWriterMutation('action-queue', () => restoreDeadLetterRestoreSnapshot(
       ownerUserId,
       {
         deadLetterBackupRecord: snapshot.indexedDb,
@@ -663,23 +582,19 @@ export class LocalBackupUiRestoreStageService {
     ));
   }
 
-  private async applyConflicts(
+  private applyConflicts(
     input: LocalBackupUiRestoreStageInput,
-    preImage: LocalBackupUiRestoreStageSnapshots['conflicts'],
     context: LocalBackupUiRestoreStageOperationContext,
-  ): Promise<LocalBackupUiRestoreStageApplyResult> {
-    const incoming = decodeConflictsFromBackup(input.backup, input.ownerUserId);
-    const expected = projectConflictRestoreSnapshot(preImage, incoming, input.ownerUserId);
-    const result = await restoreConflictsFromBackup(
+  ): Promise<number> {
+    return restoreConflictsFromBackup(
       input.backup,
       input.ownerUserId,
       this.conflictStorage,
       {
         checkpoint: context.checkpoint,
-        runWrite: write => context.runWriterMutationAsync('conflicts', write),
+        runWrite: write => context.runWriterMutation('conflicts', write),
       },
     );
-    return { result, expected };
   }
 
   private async readConflicts(
@@ -696,7 +611,7 @@ export class LocalBackupUiRestoreStageService {
     snapshot: LocalBackupUiRestoreStageSnapshots['conflicts'],
     context: LocalBackupUiRestoreStageOperationContext,
   ): Promise<void> {
-    return context.runWriterMutationAsync('conflicts', () => (
+    return context.runWriterMutation('conflicts', () => (
       restoreConflictRestoreStateSnapshot(ownerUserId, snapshot, context.checkpoint)
     ));
   }
@@ -705,7 +620,7 @@ export class LocalBackupUiRestoreStageService {
     input: LocalBackupUiRestoreStageInput,
     preImage: LocalBackupUiRestoreStageSnapshots['metadata'],
     context: LocalBackupUiRestoreStageOperationContext,
-  ): Promise<LocalBackupUiRestoreStageApplyResult> {
+  ): Promise<unknown> {
     const plan = buildDataSafetyMetadataRestorePlan(input.backup, input.ownerUserId, preImage);
     await this.metadataRestore.replaceAtomically(
       input.ownerUserId,
@@ -714,7 +629,7 @@ export class LocalBackupUiRestoreStageService {
       context.checkpoint,
     );
     await context.checkpoint();
-    return { result: plan.counts, expected: plan.target };
+    return plan.counts;
   }
 
   private async readMetadata(
@@ -764,20 +679,12 @@ function createStageEffect<TSnapshot>(
   };
 }
 
-interface LocalBackupUiRestoreStageReadbackExpectation {
-  expected?: string;
-  verify?: (actual: unknown) => boolean | Promise<boolean>;
-}
-
 export function createLocalBackupUiRestoreStageOperations(
   input: LocalBackupUiRestoreStageInput,
   dependencies: LocalBackupUiRestoreStageOperationDependencies,
 ): LocalBackupUiRestoreStageOperations {
   let snapshots: LocalBackupUiRestoreStageSnapshots | null = null;
-  const appliedReadBack = new Map<
-    LocalBackupUiRestoreStage,
-    LocalBackupUiRestoreStageReadbackExpectation
-  >();
+  const appliedReadBack = new Map<LocalBackupUiRestoreStage, string>();
   const requireSnapshots = (): LocalBackupUiRestoreStageSnapshots => {
     if (!snapshots) throw new Error('local backup UI restore pre-image was not decoded');
     return snapshots;
@@ -799,6 +706,14 @@ export function createLocalBackupUiRestoreStageOperations(
     verifyRolledBack: (stage, context) => verifyRolledBackLocalBackupUiRestoreStage(
       input, dependencies, requireSnapshots, stage, context,
     ),
+    ...(input.verifyFinalReadBack
+      ? {
+        verifyFinalReadBack: (outcome: LocalBackupUiRestoreFinalOutcome,
+          context: LocalBackupUiRestoreStageOperationContext) => (
+          input.verifyFinalReadBack!(outcome, guardOperationContext(input, context))
+        ),
+      }
+      : {}),
   };
 }
 
@@ -806,50 +721,35 @@ async function applyLocalBackupUiRestoreStage(
   input: LocalBackupUiRestoreStageInput,
   dependencies: LocalBackupUiRestoreStageOperationDependencies,
   requireSnapshots: () => LocalBackupUiRestoreStageSnapshots,
-  appliedReadBack: Map<LocalBackupUiRestoreStage, LocalBackupUiRestoreStageReadbackExpectation>,
+  appliedReadBack: Map<LocalBackupUiRestoreStage, string>,
   stage: LocalBackupUiRestoreStage,
   context: LocalBackupUiRestoreStageOperationContext,
 ): Promise<unknown> {
   const decoded = requireSnapshots();
   const guarded = guardOperationContext(input, context);
-  const applied = await dependencies.effects[stage].apply(guarded, decoded);
-  const result = isStageApplyResult(applied) ? applied : null;
-  if (!result
-    || (!result.verify && !Object.prototype.hasOwnProperty.call(result, 'expected'))) {
-    throw new Error(`local backup UI restore ${stage} apply did not provide an independent target`);
-  }
-  appliedReadBack.set(stage, {
-    ...(result.verify ? { verify: result.verify } : {}),
-    ...(Object.prototype.hasOwnProperty.call(result, 'expected')
-      ? { expected: serializeLocalBackupUiRestoreStageSnapshot(stage, result.expected) }
-      : {}),
-  });
-  return result.result;
+  const result = await dependencies.effects[stage].apply(guarded, decoded);
+  appliedReadBack.set(stage, serializeLocalBackupUiRestoreStageSnapshot(
+    stage,
+    await dependencies.effects[stage].read(guarded, decoded),
+  ));
+  return result;
 }
 
 async function verifyAppliedLocalBackupUiRestoreStage(
   input: LocalBackupUiRestoreStageInput,
   dependencies: LocalBackupUiRestoreStageOperationDependencies,
   requireSnapshots: () => LocalBackupUiRestoreStageSnapshots,
-  appliedReadBack: ReadonlyMap<LocalBackupUiRestoreStage, LocalBackupUiRestoreStageReadbackExpectation>,
+  appliedReadBack: ReadonlyMap<LocalBackupUiRestoreStage, string>,
   stage: LocalBackupUiRestoreStage,
   context: LocalBackupUiRestoreStageOperationContext,
 ): Promise<void> {
   const decoded = requireSnapshots();
   const guarded = guardOperationContext(input, context);
-  const expectation = appliedReadBack.get(stage);
-  const actualValue = await dependencies.effects[stage].read(guarded, decoded);
-  if (expectation === undefined) {
-    throw new Error(`local backup UI restore ${stage} durable read-back verification failed`);
-  }
-  if (expectation.verify) {
-    if (!await expectation.verify(actualValue)) {
-      throw new Error(`local backup UI restore ${stage} durable read-back verification failed`);
-    }
-    return;
-  }
-  const expected = expectation.expected;
-  const actual = serializeLocalBackupUiRestoreStageSnapshot(stage, actualValue);
+  const expected = appliedReadBack.get(stage);
+  const actual = serializeLocalBackupUiRestoreStageSnapshot(
+    stage,
+    await dependencies.effects[stage].read(guarded, decoded),
+  );
   if (expected === undefined || actual !== expected) {
     throw new Error(`local backup UI restore ${stage} durable read-back verification failed`);
   }
@@ -889,237 +789,6 @@ async function verifyRolledBackLocalBackupUiRestoreStage(
   }
 }
 
-function isStageApplyResult(value: unknown): value is LocalBackupUiRestoreStageApplyResult {
-  if (!isRecordValue(value) || !Object.prototype.hasOwnProperty.call(value, 'result')) {
-    return false;
-  }
-  return Object.prototype.hasOwnProperty.call(value, 'expected')
-    || typeof value['verify'] === 'function';
-}
-
-function verifyProjectsReadback(
-  actual: unknown,
-  ownerUserId: string,
-  touchedProjectIds: readonly string[],
-  nextProjects: readonly Project[],
-  nextLinks: readonly unknown[],
-  nextPendingLinks: readonly unknown[],
-  localStateTarget: ReturnType<typeof buildProjectLocalStateRestoreSnapshot>,
-  blackBoxTarget: readonly LocalBackupUiBlackBoxPersistedEntry[],
-  preImageOfflineSnapshot?: LocalBackupUiRestoreProjectPreImage['offlineSnapshot'],
-): boolean {
-  if (!isRecordValue(actual)) return false;
-  const projectById = new Map(nextProjects.map(project => [project.id, project]));
-  const expected = {
-    schemaVersion: 1,
-    projects: touchedProjectIds.map(projectId => ({
-      projectId,
-      existed: projectById.has(projectId),
-      project: projectById.get(projectId) ?? null,
-    })),
-    externalSourceLinks: nextLinks,
-    externalSourcePendingLinks: nextPendingLinks,
-    offlineSnapshot: null,
-    dockSnapshot: localStateTarget.dockSnapshotRestoreSnapshot,
-    launchSnapshot: localStateTarget.launchSnapshotRestoreSnapshot,
-    parkedTaskCache: localStateTarget.parkedTaskCacheRestoreSnapshot,
-    blackBox: blackBoxTarget,
-  };
-  const comparableActual = { ...actual, offlineSnapshot: null };
-  if (canonicalizePersistedValue(comparableActual) !== canonicalizePersistedValue(expected)) {
-    return false;
-  }
-  return verifyOfflineSnapshotReadback(
-    actual['offlineSnapshot'],
-    ownerUserId,
-    nextProjects,
-    preImageOfflineSnapshot,
-  );
-}
-
-function verifyOfflineSnapshotReadback(
-  actual: unknown,
-  ownerUserId: string,
-  nextProjects: readonly Project[],
-  preImage?: LocalBackupUiRestoreProjectPreImage['offlineSnapshot'],
-): boolean {
-  if (!isRecordValue(actual)) return false;
-  const expectedProjects = nextProjects.map(project => normalizeOfflineSnapshotProject(project));
-  const verifyPayload = (raw: unknown): boolean => {
-    if (typeof raw !== 'string') return false;
-    try {
-      const parsed = JSON.parse(raw) as Record<string, unknown>;
-      return parsed['ownerUserId'] === ownerUserId
-        && typeof parsed['savedAt'] === 'string'
-        && Array.isArray(parsed['projects'])
-        && canonicalizePersistedValue(parsed['projects'])
-          === canonicalizePersistedValue(expectedProjects);
-    } catch {
-      return false;
-    }
-  };
-  if (!verifyPayload(actual['scopedLocalStorageValue'])) return false;
-  const indexedDb = actual['scopedIndexedDbRecord'];
-  if (indexedDb === null) {
-    return preImage?.scopedIndexedDbRecord === null;
-  }
-  if (!isRecordValue(indexedDb)
-    || indexedDb['id'] !== `offline-snapshot:${ownerUserId}`
-    || indexedDb['ownerUserId'] !== ownerUserId) {
-    return false;
-  }
-  return verifyPayload(indexedDb['data']);
-}
-
-function verifyActionQueueReadback(
-  actual: unknown,
-  preImage: LocalBackupUiRestoreActionQueuePreImage,
-  preImageActions: readonly unknown[],
-  restoredActions: readonly unknown[],
-  identity: LocalBackupUiRestoreMarker['actionQueueRestoreIdentity'],
-): boolean {
-  if (!isRecordValue(actual) || actual['localStorage'] !== preImage.localStorage) return false;
-  const record = actual['indexedDb'];
-  if (!isRecordValue(record)
-    || record['id'] !== identity.recordId
-    || record['ownerUserId'] !== identity.ownerUserId
-    || !Array.isArray(record['actions'])
-    || canonicalizePersistedValue(record['actions'])
-      !== canonicalizePersistedValue([...preImageActions, ...restoredActions])) {
-    return false;
-  }
-  const transition = record['personalRestoreTransition'];
-  const preparedReceipt = isRecordValue(transition)
-    && isRecordValue(transition['preparedReceipt'])
-    ? transition['preparedReceipt']
-    : null;
-  if (!isRecordValue(transition)
-    || transition['state'] !== 'prepared'
-    || transition['id'] !== identity.identityDigest
-    || !preparedReceipt
-    || preparedReceipt['identityDigest'] !== identity.identityDigest
-    || preparedReceipt['ownerUserId'] !== identity.ownerUserId
-    || !Array.isArray(transition['preimage'])
-    || !Array.isArray(transition['restoredActions'])) {
-    return false;
-  }
-  return canonicalizePersistedValue(transition['preimage'])
-      === canonicalizePersistedValue(preImageActions)
-    && canonicalizePersistedValue(transition['restoredActions'])
-      === canonicalizePersistedValue(restoredActions);
-}
-
-function verifyRetryQueueReadback(
-  actual: unknown,
-  preImage: LocalBackupUiRestoreRetryQueuePreImage,
-  restoredItems: readonly Record<string, unknown>[],
-  ownerUserId: string,
-): boolean {
-  if (!isRecordValue(actual) || actual['schemaVersion'] !== 2
-    || !Array.isArray(actual['indexedDb'])
-    || !Array.isArray(actual['restoredItems'])) {
-    return false;
-  }
-  let localItems: unknown[] = [];
-  if (actual['localStorage'] !== null) {
-    if (typeof actual['localStorage'] !== 'string') return false;
-    try {
-      const parsed = JSON.parse(actual['localStorage']) as Record<string, unknown>;
-      if (parsed['version'] !== 1 || !Array.isArray(parsed['items'])) return false;
-      localItems = parsed['items'];
-    } catch {
-      return false;
-    }
-  }
-  const indexedDbItems = actual['indexedDb'] as unknown[];
-  if (!hasUniquePersistedItems(indexedDbItems) || !hasUniquePersistedItems(localItems)) {
-    return false;
-  }
-  let target: unknown[];
-  try {
-    target = projectLocalBackupUiRestoreRetryQueueItems(preImage, restoredItems, ownerUserId);
-  } catch {
-    return false;
-  }
-  let expectedRestoredItems: unknown[];
-  try {
-    expectedRestoredItems = deriveLocalBackupUiRestoreRetryQueueRestoredItems(
-      preImage,
-      { indexedDb: target as Record<string, unknown>[], localStorage: null },
-      ownerUserId,
-    );
-  } catch {
-    return false;
-  }
-  return samePersistedItemSet(
-    [...indexedDbItems, ...localItems],
-    target,
-  ) && samePersistedItemSet(actual['restoredItems'], expectedRestoredItems);
-}
-
-function verifyDeadLetterReadback(
-  actual: unknown,
-  expected: DeadLetterRestoreTargetSnapshot,
-  ownerUserId: string,
-): boolean {
-  if (!isRecordValue(actual)) return false;
-  const actualLocalStorage = actual['localStorage'];
-  if (expected.localStorage === null) {
-    if (actualLocalStorage !== null) return false;
-  } else {
-    if (typeof actualLocalStorage !== 'string') return false;
-    try {
-      if (canonicalizePersistedValue(JSON.parse(actualLocalStorage))
-        !== canonicalizePersistedValue(JSON.parse(expected.localStorage))) return false;
-    } catch {
-      return false;
-    }
-  }
-  const actualIndexedDb = actual['indexedDb'];
-  if (actualIndexedDb === null) return expected.indexedDb === null;
-  if (!isRecordValue(actualIndexedDb)
-    || !Array.isArray(actualIndexedDb['deadLetters'])) {
-    return false;
-  }
-  if (expected.indexedDb) {
-    if (actualIndexedDb['ownerUserId'] !== expected.indexedDb.ownerUserId
-      || actualIndexedDb['id'] !== expected.indexedDb.id) return false;
-  } else if (actualIndexedDb['ownerUserId'] !== ownerUserId
-    || actualIndexedDb['id'] !== `dead-letter-backup:${ownerUserId}`
-    || expected.localStorage === null) {
-    return false;
-  }
-  const expectedQueue = expected.indexedDb?.deadLetters
-    ?? parseDeadLetterItems(expected.localStorage);
-  return canonicalizePersistedValue(actualIndexedDb['deadLetters'])
-    === canonicalizePersistedValue(expectedQueue);
-}
-
-function parseDeadLetterItems(value: string | null): unknown[] {
-  if (value === null) return [];
-  try {
-    const parsed = JSON.parse(value) as unknown;
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
-function samePersistedItemSet(left: readonly unknown[], right: readonly unknown[]): boolean {
-  const leftSet = new Set(left.map(item => canonicalizePersistedValue(item)));
-  const rightSet = new Set(right.map(item => canonicalizePersistedValue(item)));
-  return leftSet.size === rightSet.size && [...leftSet].every(item => rightSet.has(item));
-}
-
-function hasUniquePersistedItems(items: readonly unknown[]): boolean {
-  const identities = new Set(items.map(item => canonicalizePersistedValue(item)));
-  return identities.size === items.length;
-}
-
-function isRecordValue(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === 'object' && !Array.isArray(value);
-}
-
 function guardOperationContext(
   input: LocalBackupUiRestoreStageInput,
   context: LocalBackupUiRestoreStageOperationContext,
@@ -1132,11 +801,7 @@ function guardOperationContext(
   return {
     marker: context.marker,
     checkpoint,
-    runWriterMutation: (source, write) => {
-      input.verifyRunContext?.();
-      return context.runWriterMutation(source, write);
-    },
-    runWriterMutationAsync: (source, write) => context.runWriterMutationAsync(source, async () => {
+    runWriterMutation: (source, write) => context.runWriterMutation(source, async () => {
       await checkpoint();
       return await write();
     }),

@@ -57,6 +57,65 @@ describe('local backup UI restore stage protocol', () => {
     expect(context.order.slice(-2)).toEqual(['transition:completed:finalizing:metadata', 'finalize:completed']);
   });
 
+  it('runs the final read-back before clearing the completed restore journal', async () => {
+    const context = createContext();
+    context.operations.verifyFinalReadBack = vi.fn(async outcome => {
+      context.order.push(`final-read-back:${outcome}`);
+    });
+
+    const result = await runLocalBackupUiRestoreStageProtocol(context.runtime, context.operations);
+
+    expect(result.status).toBe('completed');
+    expect(context.operations.verifyFinalReadBack).toHaveBeenCalledWith('completed', expect.any(Object));
+    expect(context.order.indexOf('final-read-back:completed'))
+      .toBeLessThan(context.order.indexOf('transition:completed:finalizing:metadata'));
+    expect(context.order.at(-1)).toBe('finalize:completed');
+  });
+
+  it('rolls back completed stages when final ActionQueue read-back fails', async () => {
+    const context = createContext();
+    const readBackError = new Error('queue memory read-back mismatch');
+    context.operations.verifyFinalReadBack = vi.fn(async outcome => {
+      context.order.push(`final-read-back:${outcome}`);
+      if (outcome === 'completed') throw readBackError;
+    });
+
+    const result = await runLocalBackupUiRestoreStageProtocol(context.runtime, context.operations);
+
+    expect(result).toMatchObject({ status: 'rolled-back', error: readBackError });
+    expect(context.operations.verifyFinalReadBack).toHaveBeenNthCalledWith(
+      1,
+      'completed',
+      expect.any(Object),
+    );
+    expect(context.operations.verifyFinalReadBack).toHaveBeenNthCalledWith(
+      2,
+      'rolled-back',
+      expect.any(Object),
+    );
+    expect(context.order.filter(entry => entry.startsWith('rollback:'))).toEqual(
+      [...LOCAL_BACKUP_UI_RESTORE_STAGES].reverse().map(stage => `rollback:${stage}`),
+    );
+    expect(context.order.at(-1)).toBe('finalize:rolled-back');
+  });
+
+  it('retains the journal when final ActionQueue read-back still fails after rollback', async () => {
+    const context = createContext('retry-queue');
+    context.operations.verifyFinalReadBack = vi.fn(async outcome => {
+      context.order.push(`final-read-back:${outcome}`);
+      if (outcome === 'rolled-back') throw new Error('restored ActionQueue read-back failed');
+    });
+
+    const result = await runLocalBackupUiRestoreStageProtocol(context.runtime, context.operations);
+
+    expect(result).toMatchObject({ status: 'blocked', dataState: 'partial' });
+    expect(context.runtime.marker()).toMatchObject({
+      state: 'rollback-failed',
+      rollbackErrors: [expect.objectContaining({ message: 'restored ActionQueue read-back failed' })],
+    });
+    expect(context.runtime.finalize).not.toHaveBeenCalled();
+  });
+
   it.each(LOCAL_BACKUP_UI_RESTORE_STAGES)(
     'rolls back the failed %s stage and all completed stages in reverse order',
     async failedStage => {
@@ -83,24 +142,6 @@ describe('local backup UI restore stage protocol', () => {
     },
   );
 
-  it('rolls back every completed stage when final read-back verification fails', async () => {
-    const context = createContext();
-    const verificationError = new Error('ActionQueue read-back failed');
-    context.operations.verifyBeforeFinalize = vi.fn(async () => {
-      context.order.push('verify-before-finalize');
-      throw verificationError;
-    });
-
-    const result = await runLocalBackupUiRestoreStageProtocol(context.runtime, context.operations);
-
-    expect(result).toMatchObject({ status: 'rolled-back', error: verificationError });
-    const verificationIndex = context.order.indexOf('verify-before-finalize');
-    expect(context.order.slice(verificationIndex + 1).filter(entry => entry.startsWith('rollback:')))
-      .toEqual([...LOCAL_BACKUP_UI_RESTORE_STAGES].reverse().map(stage => `rollback:${stage}`));
-    expect(context.order).not.toContain('finalize:completed');
-    expect(context.order.at(-1)).toBe('finalize:rolled-back');
-  });
-
   it('records rollback failure and retains the frozen transaction without finalizing', async () => {
     const context = createContext('retry-queue');
     context.operations.rollback = vi.fn(async stage => {
@@ -124,43 +165,6 @@ describe('local backup UI restore stage protocol', () => {
       'rollback:action-queue',
     ]);
     expect(context.runtime.finalize).not.toHaveBeenCalled();
-  });
-
-  it('retains completed finalization evidence without rolling back when terminal cleanup fails', async () => {
-    const context = createContext();
-    context.runtime.finalize = vi.fn(async () => {
-      context.order.push('finalize:completed');
-      throw new Error('terminal cleanup failed');
-    });
-
-    const result = await runLocalBackupUiRestoreStageProtocol(context.runtime, context.operations);
-
-    expect(result).toMatchObject({ status: 'blocked', ownershipLost: false, dataState: 'completed' });
-    expect(context.runtime.marker()).toMatchObject({ state: 'completed', phase: 'finalizing' });
-    expect(context.operations.rollback).not.toHaveBeenCalled();
-    expect(context.runtime.finalize).toHaveBeenCalledTimes(1);
-  });
-
-  it('retains rolled-back finalization evidence when terminal cleanup fails', async () => {
-    const context = createContext('attachment-outbox');
-    context.runtime.finalize = vi.fn(async () => {
-      context.order.push('finalize:rolled-back');
-      throw new Error('terminal cleanup failed');
-    });
-
-    const result = await runLocalBackupUiRestoreStageProtocol(context.runtime, context.operations);
-
-    expect(result).toMatchObject({ status: 'blocked', ownershipLost: false, dataState: 'rolled-back' });
-    expect(context.runtime.marker()).toMatchObject({
-      state: 'rolled-back',
-      phase: 'finalizing',
-      rollbackErrors: [],
-    });
-    expect(context.runtime.marker().rollbackCompletedStages).toEqual([
-      'attachment-outbox',
-      'projects',
-    ]);
-    expect(context.runtime.finalize).toHaveBeenCalledTimes(1);
   });
 
   it('stops on ownership loss without rolling back, clearing, or reopening writers', async () => {
@@ -282,8 +286,7 @@ function createContext(
       order.push(`transition:${marker.state}:${marker.phase}:${marker.completedStages.at(-1) ?? ''}`);
       return marker;
     }),
-    runWriterMutation: vi.fn((_source, write) => write()),
-    runWriterMutationAsync: vi.fn(async (_source, write) => await write()),
+    runWriterMutation: vi.fn(async (_source, write) => await write()),
     drainWriters: vi.fn(async () => {
       order.push('drain');
     }),

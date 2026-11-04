@@ -40,10 +40,6 @@ export interface LocalBackupUiRestoreProtocolRuntime {
   ): Promise<LocalBackupUiRestoreMarker>;
   runWriterMutation<T>(
     source: LocalBackupUiRestoreWriterSource,
-    write: () => T,
-  ): T;
-  runWriterMutationAsync<T>(
-    source: LocalBackupUiRestoreWriterSource,
     write: () => Promise<T>,
   ): Promise<T>;
   drainWriters(): Promise<void>;
@@ -56,17 +52,16 @@ export interface LocalBackupUiRestoreStageOperationContext {
   checkpoint(): Promise<void>;
   runWriterMutation<T>(
     source: LocalBackupUiRestoreWriterSource,
-    write: () => T,
-  ): T;
-  runWriterMutationAsync<T>(
-    source: LocalBackupUiRestoreWriterSource,
     write: () => Promise<T>,
   ): Promise<T>;
 }
 
 export interface LocalBackupUiRestoreStageOperations {
   decodePreImage(marker: LocalBackupUiRestoreMarker): void;
-  verifyBeforeFinalize?(): Promise<void>;
+  verifyFinalReadBack?(
+    outcome: LocalBackupUiRestoreFinalOutcome,
+    context: LocalBackupUiRestoreStageOperationContext,
+  ): Promise<void>;
   apply(
     stage: LocalBackupUiRestoreStage,
     context: LocalBackupUiRestoreStageOperationContext,
@@ -112,18 +107,13 @@ export async function runLocalBackupUiRestoreStageProtocol(
       await checkpoint(runtime);
       await completeForwardStage(runtime, stage);
     }
-    if (operations.verifyBeforeFinalize) {
-      await checkpoint(runtime);
-      await operations.verifyBeforeFinalize();
-    }
+    await checkpoint(runtime);
+    await operations.verifyFinalReadBack?.('completed', context);
+    await checkpoint(runtime);
     await transitionFinalState(runtime, 'completed');
     await runtime.finalize('completed');
     return { status: 'completed', stageResults };
   } catch (error) {
-    const terminalDataState = getTerminalDataState(runtime.marker());
-    if (terminalDataState !== 'partial') {
-      return blockedResult(error, isOwnershipLost(error), terminalDataState, stageResults);
-    }
     if (isOwnershipLost(error)) {
       return blockedResult(error, true, 'partial', stageResults);
     }
@@ -166,7 +156,6 @@ function createOperationContext(
     marker: () => runtime.marker(),
     checkpoint: () => checkpoint(runtime),
     runWriterMutation: (source, write) => runtime.runWriterMutation(source, write),
-    runWriterMutationAsync: (source, write) => runtime.runWriterMutationAsync(source, write),
   };
 }
 
@@ -220,16 +209,16 @@ async function rollbackStages(
       await checkpoint(runtime);
       await completeRollbackStage(runtime, stage);
     }
+    await checkpoint(runtime);
+    await operations.verifyFinalReadBack?.('rolled-back', context);
+    await checkpoint(runtime);
     await transitionFinalState(runtime, 'rolled-back');
     await runtime.finalize('rolled-back');
     return { status: 'rolled-back', error: originalError, stageResults };
   } catch (rollbackError) {
     const ownershipLost = isOwnershipLost(rollbackError);
-    const terminalDataState = getTerminalDataState(runtime.marker());
-    if (!ownershipLost && terminalDataState === 'partial') {
-      await recordRollbackFailure(runtime, rollbackError).catch(() => undefined);
-    }
-    return blockedResult(rollbackError, ownershipLost, terminalDataState, stageResults);
+    if (!ownershipLost) await recordRollbackFailure(runtime, rollbackError).catch(() => undefined);
+    return blockedResult(rollbackError, ownershipLost, 'partial', stageResults);
   }
 }
 
@@ -288,15 +277,6 @@ async function transitionFinalState(
 ): Promise<void> {
   await checkpoint(runtime);
   await runtime.transition(current => ({ ...current, state, phase: 'finalizing' }));
-}
-
-function getTerminalDataState(
-  marker: LocalBackupUiRestoreMarker,
-): 'partial' | 'completed' | 'rolled-back' {
-  if (marker.phase !== 'finalizing') return 'partial';
-  return marker.state === 'completed' || marker.state === 'rolled-back'
-    ? marker.state
-    : 'partial';
 }
 
 function blockedResult(

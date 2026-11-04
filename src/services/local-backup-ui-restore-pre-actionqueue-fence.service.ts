@@ -4,7 +4,6 @@ import { canonicalizePersistedValue } from './action-queue-identity.helpers';
 import {
   createLocalBackupUiRestoreJournal,
   type LocalBackupUiRestoreJournal,
-  isLocalBackupUiRestoreMarkerActive,
 } from './local-backup-ui-restore-journal';
 import {
   LocalBackupUiRestoreStartupRecoveryService,
@@ -12,15 +11,8 @@ import {
 } from './local-backup-ui-restore-startup-recovery.service';
 import {
   isLocalBackupUiRestoreQueueStateCompatible,
-  LOCAL_BACKUP_UI_RESTORE_STAGES,
   type LocalBackupUiRestoreMarker,
-  type LocalBackupUiRestoreReadbackAuthorization,
-  type LocalBackupUiRestoreReadbackMarker,
 } from './local-backup-ui-restore-types';
-import {
-  localBackupUiRestoreWriterQuiescence,
-  type LocalBackupUiRestoreQuiescenceMarker,
-} from './local-backup-ui-restore-writer-quiescence.service';
 import type { QueueBackupRestoreProviderResult } from './queue-backup-restore-provider.helpers';
 import { QueueBackupService } from './queue-backup.service';
 import type {
@@ -51,14 +43,12 @@ export type LocalBackupUiRestorePreActionQueueFenceResult =
       | 'RECOVERY_BLOCKED'
       | 'RECOVERY_FAILED'
       | 'TERMINAL_EVIDENCE_INVALID'
-      | 'MARKER_NOT_CLEAR'
-      | 'RESTORE_READBACK_UNAUTHORIZED';
+      | 'MARKER_NOT_CLEAR';
   };
 
 export interface LocalBackupUiRestorePreActionQueueFenceDependencies {
-  createJournal(ownerUserId: string): Pick<LocalBackupUiRestoreJournal, 'read' | 'verifyOwnership'>;
+  createJournal(ownerUserId: string): Pick<LocalBackupUiRestoreJournal, 'read'>;
   recover(ownerUserId: string): Promise<LocalBackupUiRestoreStartupRecoveryResult>;
-  readQuiescence(ownerUserId: string): Promise<LocalBackupUiRestoreQuiescenceMarker | null>;
   readIdentityState(
     identity: QueueBackupPersonalRestoreIdentityV2,
     authenticatedOwnerUserId: string | null,
@@ -80,16 +70,6 @@ export class LocalBackupUiRestorePreActionQueueFenceController {
     input: LocalBackupUiRestorePreActionQueueFenceInput,
   ): Promise<LocalBackupUiRestorePreActionQueueFenceResult> {
     const attempt = this.serial.then(() => this.resolve(input));
-    this.serial = attempt.then(() => undefined, () => undefined);
-    return attempt;
-  }
-
-  runRestoreReadback(
-    input: LocalBackupUiRestorePreActionQueueFenceInput & {
-      authorization: LocalBackupUiRestoreReadbackAuthorization;
-    },
-  ): Promise<LocalBackupUiRestorePreActionQueueFenceResult> {
-    const attempt = this.serial.then(() => this.resolveRestoreReadback(input));
     this.serial = attempt.then(() => undefined, () => undefined);
     return attempt;
   }
@@ -164,88 +144,6 @@ export class LocalBackupUiRestorePreActionQueueFenceController {
       terminalResultDigest,
     };
   }
-
-  private async resolveRestoreReadback(
-    input: LocalBackupUiRestorePreActionQueueFenceInput & {
-      authorization: LocalBackupUiRestoreReadbackAuthorization;
-    },
-  ): Promise<LocalBackupUiRestorePreActionQueueFenceResult> {
-    if (!input.isCurrent()) return hold(input, 'OWNER_GENERATION_STALE');
-
-    let expected: LocalBackupUiRestoreReadbackMarker;
-    try {
-      expected = input.authorization.marker();
-    } catch {
-      return hold(input, 'RESTORE_READBACK_UNAUTHORIZED');
-    }
-    if (expected.ownerUserId !== input.ownerUserId) {
-      return hold(input, 'RESTORE_READBACK_UNAUTHORIZED');
-    }
-
-    const journal = this.dependencies.createJournal(input.ownerUserId);
-    let marker: LocalBackupUiRestoreMarker | null;
-    let quiescence: LocalBackupUiRestoreQuiescenceMarker | null;
-    try {
-      marker = await journal.read();
-      quiescence = await this.dependencies.readQuiescence(input.ownerUserId);
-    } catch {
-      return hold(input, 'RESTORE_READBACK_UNAUTHORIZED');
-    }
-    if (!input.isCurrent()) return hold(input, 'OWNER_GENERATION_STALE');
-    if (!marker || !sameValue(toReadbackMarker(marker), expected)
-      || !isAtFinalReadbackCheckpoint(marker)
-      || marker.state === 'completed'
-      || marker.state === 'rolled-back'
-      || !isLocalBackupUiRestoreMarkerActive(marker)
-      || !hasCompatibleActiveQuiescence(marker, quiescence)
-      || !await journal.verifyOwnership(marker)
-      || !await input.authorization.verifyOwnership()) {
-      return hold(input, 'RESTORE_READBACK_UNAUTHORIZED');
-    }
-
-    let queueState: QueueBackupPersonalRestoreIdentityStateV2;
-    try {
-      queueState = await this.dependencies.readIdentityState(
-        marker.actionQueueRestoreIdentity,
-        input.ownerUserId,
-      );
-    } catch {
-      return hold(input, 'QUEUE_STATE_UNKNOWN');
-    }
-    if (!input.isCurrent()) return hold(input, 'OWNER_GENERATION_STALE');
-    if (!isLocalBackupUiRestoreQueueStateCompatible(marker, queueState)
-      || !await input.authorization.verifyOwnership()) {
-      return hold(input, 'RESTORE_READBACK_UNAUTHORIZED');
-    }
-
-    let finalMarker: LocalBackupUiRestoreMarker | null;
-    let finalQuiescence: LocalBackupUiRestoreQuiescenceMarker | null;
-    try {
-      finalMarker = await journal.read();
-      finalQuiescence = await this.dependencies.readQuiescence(input.ownerUserId);
-    } catch {
-      return hold(input, 'RESTORE_READBACK_UNAUTHORIZED');
-    }
-    const latestExpected = input.authorization.marker();
-    if (!input.isCurrent()) return hold(input, 'OWNER_GENERATION_STALE');
-    if (!finalMarker || !sameValue(toReadbackMarker(finalMarker), latestExpected)
-      || !isAtFinalReadbackCheckpoint(finalMarker)
-      || finalMarker.state === 'completed'
-      || finalMarker.state === 'rolled-back'
-      || !isLocalBackupUiRestoreMarkerActive(finalMarker)
-      || !hasCompatibleActiveQuiescence(finalMarker, finalQuiescence)
-      || !await journal.verifyOwnership(finalMarker)
-      || !await input.authorization.verifyOwnership()) {
-      return hold(input, 'RESTORE_READBACK_UNAUTHORIZED');
-    }
-
-    return {
-      status: 'CLEAR',
-      ownerUserId: input.ownerUserId,
-      recovered: false,
-      terminalResultDigest: null,
-    };
-  }
 }
 
 @Injectable({ providedIn: 'root' })
@@ -255,8 +153,6 @@ export class LocalBackupUiRestorePreActionQueueFenceService {
   private readonly controller = new LocalBackupUiRestorePreActionQueueFenceController({
     createJournal: ownerUserId => createLocalBackupUiRestoreJournal(ownerUserId),
     recover: ownerUserId => this.recovery.recover(ownerUserId),
-    readQuiescence: ownerUserId => localBackupUiRestoreWriterQuiescence
-      .readStartupRecoveryEvidence(ownerUserId),
     readIdentityState: (identity, ownerUserId) =>
       this.queueBackup.readPersonalRestoreIdentityState(identity, ownerUserId),
     readProviderEvidence: (identity, ownerUserId) =>
@@ -268,46 +164,6 @@ export class LocalBackupUiRestorePreActionQueueFenceService {
   ): Promise<LocalBackupUiRestorePreActionQueueFenceResult> {
     return this.controller.run(input);
   }
-
-  runRestoreReadback(
-    input: LocalBackupUiRestorePreActionQueueFenceInput & {
-      authorization: LocalBackupUiRestoreReadbackAuthorization;
-    },
-  ): Promise<LocalBackupUiRestorePreActionQueueFenceResult> {
-    return this.controller.runRestoreReadback(input);
-  }
-}
-
-function hasCompatibleActiveQuiescence(
-  marker: LocalBackupUiRestoreMarker,
-  quiescence: LocalBackupUiRestoreQuiescenceMarker | null,
-): quiescence is LocalBackupUiRestoreQuiescenceMarker {
-  return quiescence !== null
-    && quiescence.ownerUserId === marker.ownerUserId
-    && quiescence.runId === marker.runId
-    && quiescence.createdAt === marker.createdAt
-    && quiescence.state === 'quiesced'
-    && Date.parse(quiescence.leaseExpiresAt) > Date.now()
-    && Date.parse(marker.leaseExpiresAt) > Date.now();
-}
-
-function isAtFinalReadbackCheckpoint(marker: LocalBackupUiRestoreMarker): boolean {
-  return marker.state === 'restoring'
-    && marker.phase === 'metadata'
-    && marker.rollbackCompletedStages.length === 0
-    && marker.completedStages.length === LOCAL_BACKUP_UI_RESTORE_STAGES.length
-    && marker.completedStages.every((stage, index) => stage === LOCAL_BACKUP_UI_RESTORE_STAGES[index]);
-}
-
-function toReadbackMarker(marker: LocalBackupUiRestoreMarker): LocalBackupUiRestoreReadbackMarker {
-  return {
-    ownerUserId: marker.ownerUserId,
-    runId: marker.runId,
-    restoreRunId: marker.restoreRunId,
-    actionQueueRestoreIdentity: { ...marker.actionQueueRestoreIdentity },
-    createdAt: marker.createdAt,
-    leaseExpiresAt: marker.leaseExpiresAt,
-  };
 }
 
 function hold(

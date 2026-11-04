@@ -4,16 +4,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createMockDestroyRef } from '../test-setup.mocks';
 import { deleteDataSafetyRestoreMarkerJournalDatabaseForTests } from './data-safety-restore-marker-journal';
 import {
-  getLocalBackupUiRestoreQuiescenceSentinelStorageKey,
   LocalBackupUiRestoreWriterPausedError,
   localBackupUiRestoreWriterQuiescence,
 } from './local-backup-ui-restore-writer-quiescence.service';
-import { readActiveLocalBackupUiRestoreWriters } from './local-backup-ui-restore-writer-quiescence-tracker';
 import type {
   LocalBackupUiRestorePreActionQueueFenceInput,
   LocalBackupUiRestorePreActionQueueFenceResult,
 } from './local-backup-ui-restore-pre-actionqueue-fence.service';
-import type { LocalBackupUiRestoreReadbackAuthorization } from './local-backup-ui-restore-types';
 import { ActionQueueService } from './action-queue.service';
 import { ActionQueueStorageService } from './action-queue-storage.service';
 import type { DeadLetterItem, QueuedAction } from './action-queue.types';
@@ -121,30 +118,6 @@ describe('ActionQueue restore writer quiescence', () => {
 
     await service.reloadFromStorageForCurrentOwner();
 
-    expect(service.getCurrentOwnerStorageLoadState()).toBe('unknown');
-    expect(mockQueueBackupService.restoreQueueSnapshot).not.toHaveBeenCalled();
-    expect(mockQueueBackupService.restoreDeadLetters).not.toHaveBeenCalled();
-    expect(mockRetryQueueService.configureActionQueueSupersessionBridge).not.toHaveBeenCalled();
-    expect(setupNetworkListenersSpy).not.toHaveBeenCalled();
-  });
-
-  it('keeps prepared restore read-back inert when its dedicated fence returns HOLD', async () => {
-    mockLocalBackupUiRestorePreActionQueueFence.runRestoreReadback.mockResolvedValueOnce({
-      status: 'HOLD',
-      ownerUserId: 'test-user',
-      reason: 'RESTORE_READBACK_UNAUTHORIZED',
-    });
-    const authorization: LocalBackupUiRestoreReadbackAuthorization = {
-      marker: () => ({} as never),
-      verifyOwnership: vi.fn(async () => true),
-      runAuthorizedReadback: async readback => await readback(),
-    };
-
-    await expect(service.reloadFromStorageForLocalBackupRestoreReadback(authorization))
-      .resolves.toBe(false);
-
-    expect(mockLocalBackupUiRestorePreActionQueueFence.run).not.toHaveBeenCalled();
-    expect(mockLocalBackupUiRestorePreActionQueueFence.runRestoreReadback).toHaveBeenCalledOnce();
     expect(service.getCurrentOwnerStorageLoadState()).toBe('unknown');
     expect(mockQueueBackupService.restoreQueueSnapshot).not.toHaveBeenCalled();
     expect(mockQueueBackupService.restoreDeadLetters).not.toHaveBeenCalled();
@@ -348,91 +321,6 @@ describe('ActionQueue restore writer quiescence', () => {
     expect(() => service.discardActions(() => true)).toThrow(LocalBackupUiRestoreWriterPausedError);
     expect(service.pendingActions()).toEqual([queuedAction]);
     await handle.abortBeforeMutation();
-  });
-
-  it('blocks direct dead-letter restore before local and IndexedDB writes while the owner is frozen', async () => {
-    await service.reloadFromStorageForCurrentOwner();
-    const existing = createDeadLetter('existing');
-    const restored = createDeadLetter('restored');
-    const storageKey = 'nanoflow.dead-letter-queue.test-user';
-    const existingSnapshot = JSON.stringify([existing]);
-    localStorage.setItem(storageKey, existingSnapshot);
-    service.storage.deadLetterQueue.set([existing]);
-    service.storage.deadLetterSize.set(1);
-
-    const sentinelKey = getLocalBackupUiRestoreQuiescenceSentinelStorageKey('test-user');
-    localStorage.setItem(sentinelKey, JSON.stringify({
-      ownerUserId: 'test-user',
-      runId: 'restore-run',
-      state: 'quiesced',
-    }));
-    const setItem = vi.spyOn(localStorage, 'setItem');
-    mockQueueBackupService.backupDeadLetters.mockClear();
-    try {
-      expect(() => service.storage.restoreDeadLettersFromBackupItems([restored], 'test-user'))
-        .toThrow(LocalBackupUiRestoreWriterPausedError);
-      expect(localStorage.getItem(storageKey)).toBe(existingSnapshot);
-      expect(setItem.mock.calls.filter(([key]) => key === storageKey)).toEqual([]);
-      expect(mockQueueBackupService.backupDeadLetters).not.toHaveBeenCalled();
-      expect(service.deadLetterQueue()).toEqual([existing]);
-      expect(readActiveLocalBackupUiRestoreWriters('test-user')).toEqual([]);
-    } finally {
-      localStorage.removeItem(sentinelKey);
-    }
-  });
-
-  it('blocks beforeunload queue mirror saves once restore quiescence starts', async () => {
-    await service.reloadFromStorageForCurrentOwner();
-    service.pendingActions.set([createQueuedAction('before-unload')]);
-    service.queueSize.set(1);
-    service.storage.deadLetterQueue.set([createDeadLetter('before-unload')]);
-    service.storage.deadLetterSize.set(1);
-
-    const ownerStorage = (service.storage as unknown as { ownerStorage: {
-      saveCurrentQueueToStorage(): void;
-      saveCurrentDeadLettersToStorage(): boolean;
-    } }).ownerStorage;
-    const saveQueue = vi.spyOn(ownerStorage, 'saveCurrentQueueToStorage');
-    const saveDeadLetters = vi.spyOn(ownerStorage, 'saveCurrentDeadLettersToStorage');
-
-    let releaseWriter!: () => void;
-    let markWriterStarted!: () => void;
-    const writerStarted = new Promise<void>(resolve => {
-      markWriterStarted = resolve;
-    });
-    const activeWriter = localBackupUiRestoreWriterQuiescence.runAsync(
-      'test-user',
-      'action-queue',
-      async () => {
-        markWriterStarted();
-        await new Promise<void>(resolve => {
-          releaseWriter = resolve;
-        });
-      },
-    );
-    await writerStarted;
-
-    const preparing = localBackupUiRestoreWriterQuiescence.prepare('test-user');
-    try {
-      await vi.waitFor(() => {
-        const raw = localStorage.getItem(
-          getLocalBackupUiRestoreQuiescenceSentinelStorageKey('test-user'),
-        );
-        expect(raw).toContain('"state":"pausing"');
-      });
-
-      expect(() => service.storage.saveQueueToStorage())
-        .toThrow(LocalBackupUiRestoreWriterPausedError);
-      expect(() => service.storage.saveDeadLetterToStorage())
-        .toThrow(LocalBackupUiRestoreWriterPausedError);
-      expect(saveQueue).not.toHaveBeenCalled();
-      expect(saveDeadLetters).not.toHaveBeenCalled();
-    } finally {
-      releaseWriter();
-      await activeWriter;
-      const handle = await preparing;
-      await handle.abortBeforeMutation();
-    }
   });
 
   it('keeps prepare pending until an asynchronous owner queue restore finishes', async () => {

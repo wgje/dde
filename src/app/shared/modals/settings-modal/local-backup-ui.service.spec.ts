@@ -7,9 +7,9 @@ import { ImportService } from '../../../../services/import.service';
 import { LoggerService } from '../../../../services/logger.service';
 import { AttachmentUploadOutboxService } from '../../../../services/attachment-upload-outbox.service';
 import { QueueBackupService } from '../../../../services/queue-backup.service';
+import { AuthService } from '../../../../services/auth.service';
 import { ActionQueueService } from '../../../../services/action-queue.service';
 import type { DeadLetterItem, QueuedAction } from '../../../../services/action-queue.types';
-import { AuthService } from '../../../../services/auth.service';
 import { RetryQueueService } from '../../../core/services/sync/retry-queue.service';
 import { ActionQueueStorageService } from '../../../../services/action-queue-storage.service';
 import { ConflictStorageService } from '../../../../services/conflict-storage.service';
@@ -17,7 +17,6 @@ import { BackupDataSafetyMetadataRestoreService } from '../../../../services/bac
 import { DisasterBackupService } from '../../../../services/disaster-backup.service';
 import { LocalBackupUiRestoreStageService } from '../../../../services/local-backup-ui-restore-stage.service';
 import { LocalBackupUiRestoreTransactionService } from '../../../../services/local-backup-ui-restore-transaction.service';
-import type { LocalBackupUiRestoreStageOperations } from '../../../../services/local-backup-ui-restore-stage-protocol';
 import { convertBackupDataToExportData } from '../../../../services/import-backup-conversion.helpers';
 import type { BackupData } from '../../../../../supabase/functions/_shared/backup-utils';
 import type { ExportData } from '../../../../services/export.service';
@@ -65,7 +64,6 @@ describe('LocalBackupUIService', () => {
     pendingActions,
     deadLetterQueue,
     reloadFromStorageForCurrentOwner: vi.fn(),
-    reloadFromStorageForLocalBackupRestoreReadback: vi.fn(),
     getCurrentOwnerStorageLoadState: vi.fn(() => ownerStorageLoadState),
     clearCurrentView: vi.fn(() => {
       ownerStorageLoadState = 'unknown';
@@ -151,21 +149,12 @@ describe('LocalBackupUIService', () => {
     actionQueueMock.reloadFromStorageForCurrentOwner.mockImplementation(async () => {
       ownerStorageLoadState = 'loaded';
     });
-    actionQueueMock.reloadFromStorageForLocalBackupRestoreReadback.mockImplementation(async () => {
-      ownerStorageLoadState = 'unknown';
-      return true;
-    });
-    preparedRestoreRun.mockImplementation(async (operations: LocalBackupUiRestoreStageOperations) => {
-      await operations.verifyBeforeFinalize?.();
-      return { status: 'completed', stageResults: { projects: 1 } };
+    preparedRestoreRun.mockResolvedValue({
+      status: 'completed',
+      stageResults: { projects: 1 },
     });
     abortPreparedRestore.mockResolvedValue(undefined);
     restoreTransactionMock.prepare.mockResolvedValue({
-      readbackAuthorization: vi.fn(() => ({
-        marker: () => ({} as never),
-        verifyOwnership: vi.fn(async () => true),
-        runAuthorizedReadback: async (readback: () => Promise<unknown>) => await readback(),
-      })),
       verifyOwnership: vi.fn().mockResolvedValue(true),
       run: preparedRestoreRun,
       abortBeforeMutation: abortPreparedRestore,
@@ -180,8 +169,8 @@ describe('LocalBackupUIService', () => {
         { provide: ImportService, useValue: importServiceMock },
         { provide: AttachmentUploadOutboxService, useValue: attachmentUploadOutboxMock },
         { provide: QueueBackupService, useValue: queueBackupMock },
-        { provide: ActionQueueService, useValue: actionQueueMock },
         { provide: AuthService, useValue: authMock },
+        { provide: ActionQueueService, useValue: actionQueueMock },
         { provide: RetryQueueService, useValue: retryQueueMock },
         { provide: ActionQueueStorageService, useValue: actionQueueStorageMock },
         { provide: ConflictStorageService, useValue: conflictStorageMock },
@@ -489,9 +478,9 @@ describe('LocalBackupUIService', () => {
     importServiceMock.generatePreview.mockResolvedValue({
       projects: [{ taskCount: 0, connectionCount: 0 }],
     });
-    preparedRestoreRun.mockImplementationOnce(async (operations: LocalBackupUiRestoreStageOperations) => {
-      await operations.verifyBeforeFinalize?.();
-      return { status: 'completed', stageResults: { projects: 1, 'attachment-outbox': 1 } };
+    preparedRestoreRun.mockResolvedValueOnce({
+      status: 'completed',
+      stageResults: { projects: 1, 'attachment-outbox': 1 },
     });
     const service = TestBed.inject(LocalBackupUIService);
 
@@ -647,9 +636,9 @@ describe('LocalBackupUIService', () => {
     importServiceMock.generatePreview.mockResolvedValue({
       projects: [{ taskCount: 0, connectionCount: 0 }],
     });
-    preparedRestoreRun.mockImplementationOnce(async (operations: LocalBackupUiRestoreStageOperations) => {
-      await operations.verifyBeforeFinalize?.();
-      return { status: 'completed', stageResults: { projects: 1, metadata: metadataCounts } };
+    preparedRestoreRun.mockResolvedValueOnce({
+      status: 'completed',
+      stageResults: { projects: 1, metadata: metadataCounts },
     });
     const service = TestBed.inject(LocalBackupUIService);
 
@@ -682,9 +671,10 @@ describe('LocalBackupUIService', () => {
     } as unknown as BackupData;
     const exportData = createExportDataForRestore();
     await prepareRestorePreview(backupData, exportData);
-    preparedRestoreRun.mockImplementationOnce(async (operations: LocalBackupUiRestoreStageOperations) => {
-      await operations.verifyBeforeFinalize?.();
-      return { status: 'rolled-back', error: new Error('stage failed'), stageResults: {} };
+    preparedRestoreRun.mockResolvedValueOnce({
+      status: 'rolled-back',
+      error: new Error('stage failed'),
+      stageResults: {},
     });
     const service = TestBed.inject(LocalBackupUIService);
 
