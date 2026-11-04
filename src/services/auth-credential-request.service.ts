@@ -136,10 +136,7 @@ export class AuthCredentialRequestService {
       ? env.canonicalOrigin.trim().replace(/\/+$/, '')
       : '';
 
-    // The generated test/local environment can retain production-shaped defaults while
-    // deploymentTarget still identifies the runtime as local. Redirect policy follows
-    // the explicit deployment target so local tests and preview builds use their origin.
-    const isProduction = env.deploymentTarget === 'production';
+    const isProduction = env.production === true || env.deploymentTarget === 'production';
     if (isProduction) {
       if (canonicalOrigin && /^https:\/\//i.test(canonicalOrigin)) return canonicalOrigin;
       throw new Error('AUTH_REDIRECT_ORIGIN_MUST_USE_HTTPS');

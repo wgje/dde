@@ -13,14 +13,6 @@ describe('AuthCredentialRequestService', () => {
   };
   const originalEnvironment = { ...env };
 
-  beforeEach(() => {
-    Object.assign(env, {
-      production: true,
-      canonicalOrigin: "https://nanoflow.pages.dev",
-      deploymentTarget: "production",
-    });
-  });
-
   afterEach(() => {
     Object.assign(env, originalEnvironment);
     TestBed.resetTestingModule();
@@ -81,6 +73,14 @@ describe('AuthCredentialRequestService', () => {
       signUpIsolated,
       signInWithPassword,
     };
+  }
+
+  function useProductionRedirectEnvironment(): void {
+    Object.assign(env, {
+      production: true,
+      canonicalOrigin: 'https://nanoflow.pages.dev',
+      deploymentTarget: 'production',
+    });
   }
 
   it('clears request timeout handle 0 after a successful sign-in response', async () => {
@@ -145,6 +145,7 @@ describe('AuthCredentialRequestService', () => {
   });
 
   it('issues signup through the isolated request client and forwards both commit fences', async () => {
+    useProductionRedirectEnvironment();
     const { clientAsync, service, signUpIsolated } = createService();
     const canCommit = vi.fn().mockReturnValue(true);
     const afterCommit = vi.fn().mockResolvedValue(true);
@@ -167,6 +168,7 @@ describe('AuthCredentialRequestService', () => {
   });
 
   it('issues password recovery through an isolated request client without touching primary auth', async () => {
+    useProductionRedirectEnvironment();
     const { clientAsync, requestPasswordReset, service } = createService();
 
     await expect(service.resetPassword('recovery@example.com')).resolves.toEqual({
@@ -185,7 +187,7 @@ describe('AuthCredentialRequestService', () => {
     const previous = { ...env };
     const { service, signUpIsolated } = createService();
     env.production = true;
-    env.deploymentTarget = 'production';
+    env.deploymentTarget = 'local';
     env.canonicalOrigin = 'http://insecure.example.com';
 
     try {
