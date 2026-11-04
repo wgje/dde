@@ -1,7 +1,9 @@
 /** ChangeTrackerService - 变更追踪服务，实现增量更新：脏标记 + 项目级聚合 + 变更合并 */
-import { Injectable, inject, signal, computed } from '@angular/core';
+import { Injectable, computed, inject, signal } from '@angular/core';
 import { Task, Connection } from '../models';
 import { SYNC_CONFIG } from '../config';
+import { AUTH_CONFIG } from '../config/auth.config';
+import { AuthService } from './auth.service';
 import { LoggerService } from './logger.service';
 import {
   EntityType,
@@ -44,15 +46,17 @@ export type {
   providedIn: 'root'
 })
 export class ChangeTrackerService {
+  private readonly authService = inject(AuthService);
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('ChangeTracker');
   
   /** 待同步的变更记录，Key: `${projectId}:${entityType}:${entityId}` */
-  private pendingChanges = new Map<string, ChangeRecord>();
+  private readonly pendingChangesState = new Map<string, ChangeRecord>();
   /** 单调递增修订号：区分同一毫秒内的多次本地编辑 */
   private changeRevision = 0;
   /** 字段级操作锁，防止用户操作期间被远程更新覆盖。Key: `${projectId}:${taskId}:${field}` */
-  private fieldLocks = new Map<string, FieldLockValue>();
+  private readonly fieldLocks = new Map<string, FieldLockValue>();
+  private readonly activeOwnerUserId = signal<string | null>(null);
   /** 字段锁超时（30s）- 弱网环境兑底 */
   private static readonly FIELD_LOCK_TIMEOUT_MS = 30000;
   private readonly fieldLockController = new ChangeTrackerFieldLockController({
@@ -62,13 +66,19 @@ export class ChangeTrackerService {
     defaultLockTimeoutMs: ChangeTrackerService.FIELD_LOCK_TIMEOUT_MS,
   });
   private changeCount = signal(0);
-  readonly pendingChangeCount = computed(() => this.changeCount());
+  readonly pendingChangeCount = computed(() =>
+    this.resolveExpectedSyncOwnerUserId() === this.activeOwnerUserId() ? this.changeCount() : 0
+  );
   private lastChangeAt = signal(0);
-  readonly lastChangeTimestamp = computed(() => this.lastChangeAt());
+  readonly lastChangeTimestamp = computed(() =>
+    this.resolveExpectedSyncOwnerUserId() === this.activeOwnerUserId() ? this.lastChangeAt() : 0
+  );
 
-  constructor() {
-    this.restorePendingChanges();
-    this.restoreFieldLocks();
+  constructor() { this.activateOwnerScope(this.resolveExpectedSyncOwnerUserId()); }
+
+  private get pendingChanges(): Map<string, ChangeRecord> {
+    this.ensureExpectedOwnerScope();
+    return this.pendingChangesState;
   }
 
   /** 标记任务创建 */
@@ -375,13 +385,11 @@ export class ChangeTrackerService {
   }
 
   getCurrentChangeRevision(): number {
+    this.ensureExpectedOwnerScope();
     return this.changeRevision;
   }
 
-  /**
-   * 获取单个实体的待同步变更（带保护窗口）
-   * 超过保护窗口的脏记录会自动清理，避免长期偏向本地。
-   */
+  /** 获取单个实体的待同步变更；超龄记录自动清理。 */
   getPendingChange(
     projectId: string,
     entityType: EntityType,
@@ -409,18 +417,16 @@ export class ChangeTrackerService {
     return record;
   }
 
-  /**
-   * 清理超过保护窗口的历史脏记录
-   */
+  /** 清理超龄记录，同时允许 durable queue 认领仍需保护的记录。 */
   pruneExpiredChanges(
     maxAgeMs = SYNC_CONFIG.DIRTY_PROTECTION_WINDOW_MS,
-    shouldRetain?: (record: ChangeRecord) => boolean,
+    preserveExpired: (record: ChangeRecord) => boolean = () => false,
   ): number {
     const now = Date.now();
     let cleaned = 0;
     const keysToDelete: string[] = [];
     this.pendingChanges.forEach((record, key) => {
-      if (now - record.timestamp > maxAgeMs && !shouldRetain?.(record)) {
+      if (now - record.timestamp > maxAgeMs && !preserveExpired(record)) {
         keysToDelete.push(key);
       }
     });
@@ -536,31 +542,37 @@ export class ChangeTrackerService {
 
   /** 锁定任务的特定字段（用户开始操作时调用） */
   lockTaskField(taskId: string, projectId: string, field: string, durationMs?: number): void {
+    this.ensureExpectedOwnerScope();
     this.fieldLockController.lockTaskField(taskId, projectId, field, durationMs);
   }
 
   /** 解锁任务的特定字段 */
   unlockTaskField(taskId: string, projectId: string, field: string): void {
+    this.ensureExpectedOwnerScope();
     this.fieldLockController.unlockTaskField(taskId, projectId, field);
   }
 
   /** 解锁任务的所有字段 */
   unlockAllTaskFields(taskId: string, projectId: string): void {
+    this.ensureExpectedOwnerScope();
     this.fieldLockController.unlockAllTaskFields(taskId, projectId);
   }
 
   /** 检查任务的特定字段是否被锁定（考虑超时自动解锁） */
   isTaskFieldLocked(taskId: string, projectId: string, field: string): boolean {
+    this.ensureExpectedOwnerScope();
     return this.fieldLockController.isTaskFieldLocked(taskId, projectId, field);
   }
 
   /** 获取任务被锁定的字段列表 */
   getLockedFields(taskId: string, projectId: string): string[] {
+    this.ensureExpectedOwnerScope();
     return this.fieldLockController.getLockedFields(taskId, projectId);
   }
 
   /** 清理项目的所有字段锁 */
   clearProjectFieldLocks(projectId: string): void {
+    this.ensureExpectedOwnerScope();
     this.fieldLockController.clearProjectFieldLocks(projectId);
   }
   // ========== 辅助方法 ==========
@@ -577,92 +589,163 @@ export class ChangeTrackerService {
     return this.changeRevision;
   }
 
-  private restorePendingChanges(): void {
+  private resolveExpectedSyncOwnerUserId(): string {
+    return this.authService.currentUserId()?.trim()
+      || this.authService.persistedOwnerHint?.()?.trim()
+      || AUTH_CONFIG.LOCAL_MODE_USER_ID;
+  }
+
+  private ensureExpectedOwnerScope(): string {
+    const ownerUserId = this.resolveExpectedSyncOwnerUserId();
+    this.activateOwnerScope(ownerUserId);
+    return ownerUserId;
+  }
+
+  private activateOwnerScope(ownerUserId: string): void {
+    const previousOwnerUserId = this.activeOwnerUserId();
+    if (previousOwnerUserId === ownerUserId) return;
+    this.reportLegacyOwnerlessSnapshots();
+    if (previousOwnerUserId) {
+      this.persistPendingChangesForOwner(previousOwnerUserId);
+      this.persistFieldLocksForOwner(previousOwnerUserId);
+    }
+    this.pendingChangesState.clear();
+    this.fieldLocks.clear();
+    this.changeRevision = 0;
+    this.activeOwnerUserId.set(ownerUserId);
+    this.restorePendingChanges(ownerUserId);
+    this.restoreFieldLocks(ownerUserId);
+    this.refreshOwnerCountersAfterRestore();
+  }
+
+  private restorePendingChanges(ownerUserId: string): void {
     const storage = this.getLocalStorage();
-    if (!storage) return;
-
-    const raw = storage.getItem(CHANGE_TRACKER_PENDING_CHANGES_STORAGE_KEY);
-    if (!raw) return;
-
+    const storageKey = this.getOwnerStorageKey(CHANGE_TRACKER_PENDING_CHANGES_STORAGE_KEY, ownerUserId);
+    const raw = storage?.getItem(storageKey);
+    if (!storage || !raw) return;
     try {
-      const restored = restorePendingChangeRecords(raw);
-      for (const normalizedRecord of restored.changes) {
-        this.pendingChanges.set(
+      if (!this.validateSnapshotOwner(storage, storageKey, raw, ownerUserId)) return;
+      const { changes, maxRevision } = restorePendingChangeRecords(raw);
+      for (const normalizedRecord of changes) {
+        this.pendingChangesState.set(
           this.makeKey(normalizedRecord.projectId, normalizedRecord.entityType, normalizedRecord.entityId),
           normalizedRecord,
         );
       }
-      this.changeRevision = Math.max(this.changeRevision, restored.maxRevision);
-
-      this.updateCounters();
-      if (restored.changes.length > 0) {
-        this.logger.info('恢复待同步变更记录', { count: restored.changes.length });
+      this.changeRevision = Math.max(this.changeRevision, maxRevision);
+      if (changes.length > 0) {
+        this.logger.info('恢复 owner-scoped 待同步变更记录', { ownerUserId, count: changes.length });
       }
     } catch (error) {
-      this.logger.warn('恢复待同步变更记录失败', { error });
+      this.logger.warn('恢复 owner-scoped 待同步变更记录失败', { ownerUserId, error });
     }
   }
 
-  private restoreFieldLocks(): void {
+  private restoreFieldLocks(ownerUserId: string): void {
     const storage = this.getLocalStorage();
-    if (!storage) return;
-
-    const raw = storage.getItem(CHANGE_TRACKER_FIELD_LOCKS_STORAGE_KEY);
-    if (!raw) return;
-
+    const storageKey = this.getOwnerStorageKey(CHANGE_TRACKER_FIELD_LOCKS_STORAGE_KEY, ownerUserId);
+    const raw = storage?.getItem(storageKey);
+    if (!storage || !raw) return;
     try {
-      const restored = restoreFieldLocks(raw, Date.now(), ChangeTrackerService.FIELD_LOCK_TIMEOUT_MS);
-      for (const [key, lockData] of restored.locks) {
-        this.fieldLocks.set(key, lockData);
-      }
-
-      if (restored.locks.length > 0) {
-        this.logger.info('恢复字段锁记录', { count: restored.locks.length });
+      if (!this.validateSnapshotOwner(storage, storageKey, raw, ownerUserId)) return;
+      const { locks } = restoreFieldLocks(raw, Date.now(), ChangeTrackerService.FIELD_LOCK_TIMEOUT_MS);
+      for (const [key, lockData] of locks) this.fieldLocks.set(key, lockData);
+      if (locks.length > 0) {
+        this.logger.info('恢复 owner-scoped 字段锁记录', { ownerUserId, count: locks.length });
       } else {
-        storage.removeItem(CHANGE_TRACKER_FIELD_LOCKS_STORAGE_KEY);
+        storage.removeItem(storageKey);
       }
     } catch (error) {
-      this.logger.warn('恢复字段锁记录失败', { error });
+      this.logger.warn('恢复 owner-scoped 字段锁记录失败', { ownerUserId, error });
     }
   }
 
-  private persistPendingChanges(): void {
-    const storage = this.getLocalStorage();
+  private persistPendingChangesForOwner(ownerUserId: string): void {
+    const storage = ownerUserId === this.activeOwnerUserId() ? this.getLocalStorage() : null;
     if (!storage) return;
-
+    const storageKey = this.getOwnerStorageKey(CHANGE_TRACKER_PENDING_CHANGES_STORAGE_KEY, ownerUserId);
     try {
-      const changes = this.exportPendingChanges();
+      const changes = Array.from(this.pendingChangesState.values());
       if (changes.length === 0) {
-        storage.removeItem(CHANGE_TRACKER_PENDING_CHANGES_STORAGE_KEY);
+        storage.removeItem(storageKey);
         return;
       }
-
       storage.setItem(
-        CHANGE_TRACKER_PENDING_CHANGES_STORAGE_KEY,
-        serializePendingChanges(changes),
+        storageKey,
+        this.serializeOwnerScopedSnapshot(ownerUserId, serializePendingChanges(changes)),
       );
     } catch (error) {
-      this.logger.warn('待同步变更持久化失败', { error });
+      this.logger.warn('owner-scoped 待同步变更持久化失败', { ownerUserId, error });
     }
   }
 
   private persistFieldLocks(): void {
-    const storage = this.getLocalStorage();
-    if (!storage) return;
+    this.persistFieldLocksForOwner(this.ensureExpectedOwnerScope());
+  }
 
+  private persistFieldLocksForOwner(ownerUserId: string): void {
+    const storage = ownerUserId === this.activeOwnerUserId() ? this.getLocalStorage() : null;
+    if (!storage) return;
+    const storageKey = this.getOwnerStorageKey(CHANGE_TRACKER_FIELD_LOCKS_STORAGE_KEY, ownerUserId);
     try {
       if (this.fieldLocks.size === 0) {
-        storage.removeItem(CHANGE_TRACKER_FIELD_LOCKS_STORAGE_KEY);
+        storage.removeItem(storageKey);
         return;
       }
-
       storage.setItem(
-        CHANGE_TRACKER_FIELD_LOCKS_STORAGE_KEY,
-        serializeFieldLocks(this.fieldLocks, ChangeTrackerService.FIELD_LOCK_TIMEOUT_MS),
+        storageKey,
+        this.serializeOwnerScopedSnapshot(
+          ownerUserId,
+          serializeFieldLocks(this.fieldLocks, ChangeTrackerService.FIELD_LOCK_TIMEOUT_MS),
+        ),
       );
     } catch (error) {
-      this.logger.warn('字段锁持久化失败', { error });
+      this.logger.warn('owner-scoped 字段锁持久化失败', { ownerUserId, error });
     }
+  }
+
+  private getOwnerStorageKey(baseKey: string, ownerUserId: string): string { return `${baseKey}.${ownerUserId}`; }
+
+  private serializeOwnerScopedSnapshot(ownerUserId: string, serializedSnapshot: string): string {
+    return JSON.stringify({ ...(JSON.parse(serializedSnapshot) as Record<string, unknown>), ownerUserId });
+  }
+
+  private validateSnapshotOwner(
+    storage: Storage,
+    storageKey: string,
+    raw: string,
+    expectedOwnerUserId: string,
+  ): boolean {
+    const snapshot = JSON.parse(raw) as { ownerUserId?: unknown };
+    if (snapshot?.ownerUserId === expectedOwnerUserId) return true;
+    this.logger.warn('ChangeTracker owner-scoped 快照 owner 不匹配，保留原始字节并 fail closed', {
+      storageKey,
+      expectedOwnerUserId,
+      actualOwnerUserId: snapshot?.ownerUserId,
+    });
+    return false;
+  }
+
+  private reportLegacyOwnerlessSnapshots(): void {
+    const storage = this.getLocalStorage();
+    if (!storage) return;
+    try {
+      const retainedKeys = [
+        CHANGE_TRACKER_PENDING_CHANGES_STORAGE_KEY,
+        CHANGE_TRACKER_FIELD_LOCKS_STORAGE_KEY,
+      ].filter(storageKey => storage.getItem(storageKey) !== null);
+      if (retainedKeys.length > 0) {
+        this.logger.warn('存在 ownerless ChangeTracker legacy 快照；保留原始字节且不归属给当前 owner', {
+          retainedKeys,
+        });
+      }
+    } catch (error) {
+      this.logger.warn('检查 ownerless ChangeTracker legacy 快照失败', { error });
+    }
+  }
+
+  private refreshOwnerCountersAfterRestore(): void {
+    this.changeCount.set(this.pendingChangesState.size); this.lastChangeAt.set(this.pendingChangesState.size > 0 ? Date.now() : 0);
   }
 
   private getLocalStorage(): Storage | null {
@@ -706,8 +789,9 @@ export class ChangeTrackerService {
   }
   
   private updateCounters(): void {
-    this.changeCount.set(this.pendingChanges.size);
+    const ownerUserId = this.ensureExpectedOwnerScope();
+    this.changeCount.set(this.pendingChangesState.size);
     this.lastChangeAt.set(Date.now());
-    this.persistPendingChanges();
+    this.persistPendingChangesForOwner(ownerUserId);
   }
 }

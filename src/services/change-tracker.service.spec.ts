@@ -1,15 +1,20 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
-import { Injector, runInInjectionContext } from '@angular/core';
+import { Injector, runInInjectionContext, signal } from '@angular/core';
 import { ChangeTrackerService } from './change-tracker.service';
 import {
   CHANGE_TRACKER_FIELD_LOCKS_STORAGE_KEY,
   CHANGE_TRACKER_PENDING_CHANGES_STORAGE_KEY,
 } from './change-tracker-persistence.helpers';
+import { AuthService } from './auth.service';
 import { LoggerService } from './logger.service';
 import { Task, Connection } from '../models';
 
 describe('ChangeTrackerService', () => {
+  const OWNER_A = 'owner-a';
+  const OWNER_B = 'owner-b';
   let service: ChangeTrackerService;
+  let currentUserId = signal<string | null>(OWNER_A);
+  let persistedOwnerHint = signal<string | null>(OWNER_A);
 
   const createService = (): ChangeTrackerService => {
     const mockLogger = {
@@ -18,9 +23,15 @@ describe('ChangeTrackerService', () => {
       warn: vi.fn(),
       error: vi.fn(),
     };
-
     const injector = Injector.create({
       providers: [
+        {
+          provide: AuthService,
+          useValue: {
+            currentUserId,
+            persistedOwnerHint,
+          },
+        },
         {
           provide: LoggerService,
           useValue: {
@@ -34,15 +45,140 @@ describe('ChangeTrackerService', () => {
     return runInInjectionContext(injector, () => new ChangeTrackerService());
   };
 
+  const getOwnerStorageKey = (baseKey: string, ownerUserId: string): string =>
+    `${baseKey}.${ownerUserId}`;
+
+  const removeTestStorage = (): void => {
+    for (const baseKey of [
+      CHANGE_TRACKER_PENDING_CHANGES_STORAGE_KEY,
+      CHANGE_TRACKER_FIELD_LOCKS_STORAGE_KEY,
+    ]) {
+      localStorage.removeItem(baseKey);
+      localStorage.removeItem(getOwnerStorageKey(baseKey, OWNER_A));
+      localStorage.removeItem(getOwnerStorageKey(baseKey, OWNER_B));
+    }
+  };
+
+  const setOwner = (ownerUserId: string | null, ownerHint = ownerUserId): void => {
+    persistedOwnerHint.set(ownerHint);
+    currentUserId.set(ownerUserId);
+  };
+
   beforeEach(() => {
-    localStorage.removeItem(CHANGE_TRACKER_PENDING_CHANGES_STORAGE_KEY);
-    localStorage.removeItem(CHANGE_TRACKER_FIELD_LOCKS_STORAGE_KEY);
+    removeTestStorage();
+    currentUserId = signal<string | null>(OWNER_A);
+    persistedOwnerHint = signal<string | null>(OWNER_A);
     service = createService();
   });
 
   afterEach(() => {
-    localStorage.removeItem(CHANGE_TRACKER_PENDING_CHANGES_STORAGE_KEY);
-    localStorage.removeItem(CHANGE_TRACKER_FIELD_LOCKS_STORAGE_KEY);
+    removeTestStorage();
+  });
+
+  describe('owner-scoped persistence', () => {
+    const projectId = 'project-owner-scope';
+    const taskId = 'task-owner-scope';
+
+    it('应该把待同步变更和字段锁写入带 owner 元数据的 owner-scoped key', () => {
+      service.trackTaskCreate(projectId, { ...createMockTask(), id: taskId });
+      service.lockTaskField(taskId, projectId, 'title', 60_000);
+
+      expect(localStorage.getItem(CHANGE_TRACKER_PENDING_CHANGES_STORAGE_KEY)).toBeNull();
+      expect(localStorage.getItem(CHANGE_TRACKER_FIELD_LOCKS_STORAGE_KEY)).toBeNull();
+
+      const pendingSnapshot = JSON.parse(
+        localStorage.getItem(getOwnerStorageKey(CHANGE_TRACKER_PENDING_CHANGES_STORAGE_KEY, OWNER_A)) ?? 'null',
+      );
+      const fieldLockSnapshot = JSON.parse(
+        localStorage.getItem(getOwnerStorageKey(CHANGE_TRACKER_FIELD_LOCKS_STORAGE_KEY, OWNER_A)) ?? 'null',
+      );
+      expect(pendingSnapshot).toMatchObject({ ownerUserId: OWNER_A });
+      expect(fieldLockSnapshot).toMatchObject({ ownerUserId: OWNER_A });
+    });
+
+    it('认证尚未 settle 时应该按 persisted owner hint 恢复 B，且不读取 A bucket', () => {
+      localStorage.setItem(
+        getOwnerStorageKey(CHANGE_TRACKER_PENDING_CHANGES_STORAGE_KEY, OWNER_A),
+        createOwnerPendingSnapshot(OWNER_A, projectId, 'task-a'),
+      );
+      localStorage.setItem(
+        getOwnerStorageKey(CHANGE_TRACKER_PENDING_CHANGES_STORAGE_KEY, OWNER_B),
+        createOwnerPendingSnapshot(OWNER_B, projectId, 'task-b'),
+      );
+      currentUserId.set(null);
+      persistedOwnerHint.set(OWNER_B);
+
+      const recoveredService = createService();
+
+      expect(recoveredService.exportPendingChanges().map(change => change.entityId)).toEqual(['task-b']);
+    });
+
+    it('A -> B -> A 应隔离内存变更和同 key 字段锁，并恢复各自持久化 bucket', () => {
+      service.trackTaskCreate(projectId, { ...createMockTask(), id: 'task-a' });
+      service.lockTaskField(taskId, projectId, 'title', 60_000);
+
+      setOwner(OWNER_B);
+
+      expect(service.exportPendingChanges()).toEqual([]);
+      expect(service.isTaskFieldLocked(taskId, projectId, 'title')).toBe(false);
+
+      service.trackTaskCreate(projectId, { ...createMockTask(), id: 'task-b' });
+      service.lockTaskField(taskId, projectId, 'title', 60_000);
+      service.clearAllChanges();
+
+      const ownerAPendingSnapshot = JSON.parse(localStorage.getItem(
+        getOwnerStorageKey(CHANGE_TRACKER_PENDING_CHANGES_STORAGE_KEY, OWNER_A),
+      ) ?? 'null') as { ownerUserId?: string; changes?: Array<{ entityId?: string }> };
+      expect(ownerAPendingSnapshot.ownerUserId).toBe(OWNER_A);
+      expect(ownerAPendingSnapshot.changes?.map(change => change.entityId)).toEqual(['task-a']);
+
+      setOwner(OWNER_A);
+
+      expect(service.exportPendingChanges().map(change => change.entityId)).toEqual(['task-a']);
+      expect(service.isTaskFieldLocked(taskId, projectId, 'title')).toBe(true);
+    });
+
+    it('legacy ownerless 快照应保留原始字节且不能归给当前 owner', () => {
+      const pendingSnapshot = createOwnerlessPendingSnapshot(projectId, 'legacy-task');
+      const fieldLockSnapshot = createOwnerlessFieldLockSnapshot(projectId, taskId);
+      localStorage.setItem(
+        CHANGE_TRACKER_PENDING_CHANGES_STORAGE_KEY,
+        pendingSnapshot,
+      );
+      localStorage.setItem(
+        CHANGE_TRACKER_FIELD_LOCKS_STORAGE_KEY,
+        fieldLockSnapshot,
+      );
+
+      const recoveredService = createService();
+
+      expect(recoveredService.exportPendingChanges()).toEqual([]);
+      expect(recoveredService.isTaskFieldLocked(taskId, projectId, 'title')).toBe(false);
+      expect(localStorage.getItem(CHANGE_TRACKER_PENDING_CHANGES_STORAGE_KEY)).toBe(pendingSnapshot);
+      expect(localStorage.getItem(CHANGE_TRACKER_FIELD_LOCKS_STORAGE_KEY)).toBe(fieldLockSnapshot);
+    });
+
+    it('scoped key 中 owner 元数据不匹配时应保留原始字节并 fail closed', () => {
+      const storageKey = getOwnerStorageKey(CHANGE_TRACKER_PENDING_CHANGES_STORAGE_KEY, OWNER_A);
+      const raw = createOwnerPendingSnapshot(OWNER_B, projectId, 'foreign-task');
+      localStorage.setItem(storageKey, raw);
+
+      const recoveredService = createService();
+
+      expect(recoveredService.exportPendingChanges()).toEqual([]);
+      expect(localStorage.getItem(storageKey)).toBe(raw);
+    });
+
+    it('损坏的 scoped 快照应 fail closed 且保留原始字节供诊断', () => {
+      const storageKey = getOwnerStorageKey(CHANGE_TRACKER_PENDING_CHANGES_STORAGE_KEY, OWNER_A);
+      const raw = '{broken-json';
+      localStorage.setItem(storageKey, raw);
+
+      const recoveredService = createService();
+
+      expect(recoveredService.exportPendingChanges()).toEqual([]);
+      expect(localStorage.getItem(storageKey)).toBe(raw);
+    });
   });
 
   describe('任务变更追踪', () => {
@@ -77,31 +213,6 @@ describe('ChangeTrackerService', () => {
       const changes = service.getProjectChanges('project-1');
       expect(changes.tasksToUpdate).toHaveLength(1);
       expect(changes.tasksToUpdate[0].id).toBe('task-1');
-    });
-
-    it('retains expired task changes when a durable action still owns them', () => {
-      vi.useFakeTimers();
-      vi.setSystemTime(new Date('2026-11-04T00:00:00.000Z'));
-      try {
-        const durableTask = { ...mockTask, id: 'task-durable' };
-        const expiredTask = { ...mockTask, id: 'task-expired' };
-        service.trackTaskUpdate('project-1', durableTask, ['title']);
-        service.trackTaskUpdate('project-1', expiredTask, ['content']);
-        vi.advanceTimersByTime(1001);
-
-        const removed = service.pruneExpiredChanges(
-          1000,
-          record => record.entityType === 'task' && record.entityId === 'task-durable',
-        );
-
-        expect(removed).toBe(1);
-        expect(service.getPendingChange('project-1', 'task', 'task-durable', Number.POSITIVE_INFINITY))
-          .toEqual(expect.objectContaining({ entityId: 'task-durable' }));
-        expect(service.getPendingChange('project-1', 'task', 'task-expired', Number.POSITIVE_INFINITY))
-          .toBeUndefined();
-      } finally {
-        vi.useRealTimers();
-      }
     });
 
     it('应该追踪任务删除', () => {
@@ -257,6 +368,31 @@ describe('ChangeTrackerService', () => {
       expect(projectIds).toContain('project-1');
       expect(projectIds).toContain('project-2');
       expect(projectIds).toContain('project-3');
+    });
+  });
+
+  describe('过期变更清理', () => {
+    it('应保留 predicate 认领的 durable 记录并清理其余过期记录', () => {
+      const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1_000);
+      service.trackTaskUpdate('project-1', { ...createMockTask(), id: 'task-durable' }, ['status']);
+      service.trackTaskUpdate('project-1', { ...createMockTask(), id: 'task-expired' }, ['title']);
+      nowSpy.mockReturnValue(2_000);
+
+      try {
+        const tracker = service as unknown as {
+          pruneExpiredChanges(
+            maxAgeMs: number,
+            preserveExpired: (record: { entityId: string }) => boolean,
+          ): number;
+        };
+        const cleaned = tracker.pruneExpiredChanges(500, record => record.entityId === 'task-durable');
+
+        expect(cleaned).toBe(1);
+        expect(service.getProjectChanges('project-1').tasksToUpdate.map(task => task.id))
+          .toEqual(['task-durable']);
+      } finally {
+        nowSpy.mockRestore();
+      }
     });
   });
 
@@ -591,4 +727,48 @@ function createMockTask(): Task {
     hasIncompleteTask: false,
     createdDate: new Date().toISOString()
   };
+}
+
+function createOwnerPendingSnapshot(
+  ownerUserId: string,
+  projectId: string,
+  taskId: string,
+): string {
+  return JSON.stringify({
+    version: 1,
+    ownerUserId,
+    changes: [
+      {
+        entityId: taskId,
+        entityType: 'task',
+        changeType: 'create',
+        projectId,
+        timestamp: Date.now(),
+        revision: Date.now(),
+        data: { ...createMockTask(), id: taskId },
+      },
+    ],
+    savedAt: new Date().toISOString(),
+  });
+}
+
+function createOwnerlessPendingSnapshot(projectId: string, taskId: string): string {
+  const snapshot = JSON.parse(createOwnerPendingSnapshot('legacy-owner', projectId, taskId)) as {
+    ownerUserId?: string;
+  };
+  delete snapshot.ownerUserId;
+  return JSON.stringify(snapshot);
+}
+
+function createOwnerlessFieldLockSnapshot(projectId: string, taskId: string): string {
+  return JSON.stringify({
+    version: 1,
+    locks: [
+      [
+        `${projectId}:${taskId}:title`,
+        { timestamp: Date.now(), duration: 60_000 },
+      ],
+    ],
+    savedAt: new Date().toISOString(),
+  });
 }
