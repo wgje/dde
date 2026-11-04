@@ -24,6 +24,7 @@ import { type ConflictResolutionPlan } from './conflict-resolution.types';
 /* eslint-enable no-restricted-imports */
 import type { StorageEscapeData } from '../app/shared/modals';
 import { ThemeType, Project } from '../models';
+import type { ProjectUiOwner } from './task-operation-trash-adapter.controller';
 
 type ConflictResolutionAction = 'local' | 'remote' | 'merge' | 'plan';
 
@@ -61,6 +62,11 @@ export class WorkspaceModalCoordinatorService {
   private _dashboardModalRef: ModalRef | null = null;
   /** Conflict modal ref */
   private _conflictModalRef: ModalRef | null = null;
+  private _trashModalRef: ModalRef | null = null;
+  private _trashOperationToken: symbol | null = null;
+  private _projectOwnerGeneration = 0;
+  private _ownedProjectId = this.projectState.activeProjectId();
+  private unregisterProjectChange: (() => void) | null = null;
 
   // ── Callbacks ──────────────────────────────────────────────────────
   // These are set by the component via `initCallbacks` so the service
@@ -72,11 +78,23 @@ export class WorkspaceModalCoordinatorService {
   /** One-time initialisation called by the host component */
   initCallbacks(callbacks: ModalCallbacks): void {
     this._callbacks = callbacks;
+    this.unregisterProjectChange ??= this.projectState.registerBeforeActiveProjectChange(
+      (_previousId, nextId) => {
+        this._projectOwnerGeneration += 1;
+        this._ownedProjectId = nextId;
+        this.retireTrashModal();
+      },
+    );
   }
 
   /** 清除回调引用，避免宿主组件销毁后持有过期引用 */
   clearCallbacks(): void {
     this._callbacks = {};
+    this.unregisterProjectChange?.();
+    this.unregisterProjectChange = null;
+    this._projectOwnerGeneration += 1;
+    this._ownedProjectId = this.projectState.activeProjectId();
+    this.retireTrashModal();
   }
 
   // ── Helpers ────────────────────────────────────────────────────────
@@ -260,22 +278,67 @@ export class WorkspaceModalCoordinatorService {
 
   // ── Trash ──────────────────────────────────────────────────────────
 
-  async openTrashModal(): Promise<void> {
-    if (this.isModalLoading('trash')) return;
+  captureProjectUiOwner(): ProjectUiOwner | null {
+    const projectId = this.projectState.activeProjectId();
+    if (projectId !== this._ownedProjectId) {
+      this._projectOwnerGeneration += 1;
+      this._ownedProjectId = projectId;
+      this.retireTrashModal();
+    }
+    return projectId
+      ? Object.freeze({ projectId, generation: this._projectOwnerGeneration })
+      : null;
+  }
+
+  async openTrashModal(owner: ProjectUiOwner | null = this.captureProjectUiOwner()): Promise<void> {
+    if (!owner || !this.canPublishProjectUi(owner)) return;
+    if (this.isModalLoading('trash') || this._trashModalRef) return;
+    const token = Symbol('trash-modal-operation');
+    this._trashOperationToken = token;
     this.setModalLoading('trash', true);
     try {
       const component = await this.modalLoader.loadTrashModal();
-      this.dynamicModal.open(component, {
-        inputs: { show: true },
+      if (!this.canPublishProjectUi(owner) || this._trashOperationToken !== token) return;
+      const modalRef = this.dynamicModal.open(component, {
+        inputs: {
+          show: true,
+          projectOwner: owner,
+          canPublishUi: () => this.canPublishProjectUi(owner),
+        },
         outputs: {
-          close: () => this.dynamicModal.close()
-        }
+          close: () => {
+            if (this._trashOperationToken !== token) return;
+            modalRef.close();
+          },
+        },
+      });
+      this._trashModalRef = modalRef;
+      void modalRef.result.finally(() => {
+        if (this._trashOperationToken !== token || this._trashModalRef !== modalRef) return;
+        this._trashModalRef = null;
+        this._trashOperationToken = null;
       });
     } catch {
-      this.toast.error('回收站加载失败', '请检查网络连接后重试');
+      if (this.canPublishProjectUi(owner) && this._trashOperationToken === token) {
+        this.toast.error('回收站加载失败', '请检查网络连接后重试');
+      }
     } finally {
-      this.setModalLoading('trash', false);
+      if (this._trashOperationToken === token) this.setModalLoading('trash', false);
     }
+  }
+
+  private canPublishProjectUi(owner: ProjectUiOwner): boolean {
+    return this._ownedProjectId === owner.projectId
+      && this._projectOwnerGeneration === owner.generation
+      && this.projectState.activeProjectId() === owner.projectId;
+  }
+
+  private retireTrashModal(): void {
+    this._trashOperationToken = null;
+    const modalRef = this._trashModalRef;
+    this._trashModalRef = null;
+    modalRef?.close();
+    this.setModalLoading('trash', false);
   }
 
   // ── Config help ────────────────────────────────────────────────────

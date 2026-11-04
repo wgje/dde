@@ -6,7 +6,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { WorkspaceModalCoordinatorService } from './workspace-modal-coordinator.service';
 import { ToastService } from './toast.service';
 import { GlobalErrorHandler } from './global-error-handler.service';
-import { DynamicModalService } from './dynamic-modal.service';
+import { DynamicModalService, type ModalConfig } from './dynamic-modal.service';
 import { ModalLoaderService } from '../app/core/services/modal-loader.service';
 import { ProjectStateService } from './project-state.service';
 import { ProjectOperationService } from './project-operation.service';
@@ -44,8 +44,10 @@ const createModalRef = () => {
 };
 
 let lastModalRef: ReturnType<typeof createModalRef> | null = null;
+let lastModalConfig: ModalConfig | undefined;
 const mockDynamicModal = {
-  open: vi.fn(() => {
+  open: vi.fn((_component: typeof FakeComponent, config?: ModalConfig) => {
+    lastModalConfig = config;
     lastModalRef = createModalRef();
     return lastModalRef;
   }),
@@ -65,7 +67,26 @@ const mockModalLoader = {
   loadStorageEscapeModal: vi.fn().mockResolvedValue(FakeComponent),
 };
 
-const mockProjectState = { projects: vi.fn(() => []) };
+type BeforeProjectChange = (previousId: string | null, nextId: string | null) => void;
+let activeProjectId: string | null = 'project-a';
+let beforeProjectChange: BeforeProjectChange | null = null;
+const mockProjectState = {
+  projects: vi.fn(() => []),
+  activeProjectId: vi.fn(() => activeProjectId),
+  registerBeforeActiveProjectChange: vi.fn((listener: BeforeProjectChange) => {
+    beforeProjectChange = listener;
+    return () => {
+      if (beforeProjectChange === listener) beforeProjectChange = null;
+    };
+  }),
+};
+
+function switchActiveProject(nextId: string | null): void {
+  if (activeProjectId === nextId) return;
+  const previousId = activeProjectId;
+  beforeProjectChange?.(previousId, nextId);
+  activeProjectId = nextId;
+}
 const mockProjectOps = {
   resolveConflict: vi.fn().mockResolvedValue(undefined),
   resolveConflictWithPlan: vi.fn().mockResolvedValue(true),
@@ -86,9 +107,12 @@ describe('WorkspaceModalCoordinatorService', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     setInputSpy = vi.fn();
+    lastModalConfig = undefined;
     mockProjectOps.resolveConflict.mockResolvedValue(true);
     mockProjectOps.resolveConflictWithPlan.mockResolvedValue(true);
     lastModalRef = null;
+    activeProjectId = 'project-a';
+    beforeProjectChange = null;
 
     injector = Injector.create({
       providers: [
@@ -225,10 +249,84 @@ describe('WorkspaceModalCoordinatorService', () => {
     expect(mockRouter.navigateByUrl).not.toHaveBeenCalled();
   });
 
+  it('retires stale trash ownership across A -> B -> A while duplicate A stays valid', async () => {
+    service.initCallbacks({});
+    const ownerA = service.captureProjectUiOwner();
+
+    switchActiveProject('project-a');
+    await service.openTrashModal(ownerA);
+    expect(mockDynamicModal.open).toHaveBeenCalledOnce();
+    lastModalRef?.close();
+    await Promise.resolve();
+    vi.clearAllMocks();
+
+    switchActiveProject('project-b');
+    switchActiveProject('project-a');
+    await service.openTrashModal(ownerA);
+
+    expect(mockModalLoader.loadTrashModal).not.toHaveBeenCalled();
+    expect(service.captureProjectUiOwner()).toEqual({ projectId: 'project-a', generation: 2 });
+  });
+
+  it('synchronously closes the owned trash modal before the new project becomes observable', async () => {
+    service.initCallbacks({});
+    const ownerA = service.captureProjectUiOwner();
+    await service.openTrashModal(ownerA);
+    const refA = lastModalRef;
+
+    switchActiveProject('project-b');
+
+    expect(refA?.close).toHaveBeenCalledOnce();
+    expect(service.isModalLoading('trash')).toBe(false);
+  });
+
+  it('does not let a late A modal load open or clear the loading state owned by B', async () => {
+    let resolveA!: (component: typeof FakeComponent) => void;
+    let resolveB!: (component: typeof FakeComponent) => void;
+    mockModalLoader.loadTrashModal
+      .mockReturnValueOnce(new Promise(resolve => { resolveA = resolve; }))
+      .mockReturnValueOnce(new Promise(resolve => { resolveB = resolve; }));
+    service.initCallbacks({});
+    const ownerA = service.captureProjectUiOwner();
+
+    const completionA = service.openTrashModal(ownerA);
+    switchActiveProject('project-b');
+    const ownerB = service.captureProjectUiOwner();
+    const completionB = service.openTrashModal(ownerB);
+
+    resolveA(FakeComponent);
+    await completionA;
+    expect(mockDynamicModal.open).not.toHaveBeenCalled();
+    expect(service.isModalLoading('trash')).toBe(true);
+
+    resolveB(FakeComponent);
+    await completionB;
+    expect(mockDynamicModal.open).toHaveBeenCalledOnce();
+    expect(lastModalConfig?.inputs?.['projectOwner']).toBe(ownerB);
+    expect(service.isModalLoading('trash')).toBe(false);
+  });
+
+  it('clearCallbacks retires ownership and initCallbacks registers a fresh listener', async () => {
+    service.initCallbacks({});
+    const ownerA = service.captureProjectUiOwner();
+    await service.openTrashModal(ownerA);
+    const refA = lastModalRef;
+
+    service.clearCallbacks();
+    expect(refA?.close).toHaveBeenCalledOnce();
+    expect(beforeProjectChange).toBeNull();
+
+    service.initCallbacks({});
+    expect(beforeProjectChange).not.toBeNull();
+    await service.openTrashModal(ownerA);
+    expect(mockModalLoader.loadTrashModal).toHaveBeenCalledOnce();
+  });
+
   // ── openTrashModal ─────────────────────────────────────────
 
   it('should load and open trash modal', async () => {
-    await service.openTrashModal();
+    service.initCallbacks({});
+    await service.openTrashModal(service.captureProjectUiOwner());
 
     expect(mockModalLoader.loadTrashModal).toHaveBeenCalledOnce();
     expect(mockDynamicModal.open).toHaveBeenCalledOnce();
