@@ -10,8 +10,13 @@ import { ProjectSwitchGuardService } from '../../../services/guards/unsaved-chan
 import { Project } from '../../../models';
 import type { UserSessionService } from '../../../services/user-session.service';
 
-interface ProjectDeleteOwner extends ActiveProjectOwner {
+interface ProjectRenameOwner {
+  projectOwner: ActiveProjectOwner;
   sessionToken: number;
+}
+
+interface ProjectDeleteOwner extends ActiveProjectOwner {
+  deleteSessionToken: number;
 }
 
 interface ProjectDeleteModalRef {
@@ -29,7 +34,6 @@ interface ProjectDeleteModalRef {
  */
 @Injectable({ providedIn: 'root' })
 export class AppProjectCoordinatorService {
-  private readonly destroyRef = inject(DestroyRef);
   private readonly projectState = inject(ProjectStateService);
   private readonly projectOps = inject(ProjectOperationService);
   private readonly uiState = inject(UiStateService);
@@ -39,6 +43,7 @@ export class AppProjectCoordinatorService {
   private readonly projectSwitchGuard = inject(ProjectSwitchGuardService);
   private readonly router = inject(Router);
   private readonly injector = inject(Injector);
+  private readonly destroyRef = inject(DestroyRef);
   /** 延迟注入避免循环依赖 */
   private userSessionRef: UserSessionService | null = null;
   private get userSession(): UserSessionService {
@@ -57,26 +62,22 @@ export class AppProjectCoordinatorService {
   readonly renameProjectName = signal('');
   readonly isDeleting = signal(false);
   private originalProjectName = '';
-  private renameProjectInFlight: Promise<void> | null = null;
-  private readonly projectDetailsSaveFlights = new Map<string, Promise<void>>();
+  private renameSessionToken = 0;
+  private activeRenameOwner: ProjectRenameOwner | null = null;
+  private readonly renameSessionFlights = new Map<number, Promise<void>>();
   private deleteSessionToken = 0;
   private activeDeleteOwner: ProjectDeleteOwner | null = null;
   private activeDeleteModal: ProjectDeleteModalRef | null = null;
+  private readonly projectDetailsSaveFlights = new Map<string, Promise<void>>();
   private projectSelectionRequestId = 0;
   private projectSwitchGuardInFlight: Promise<'proceed' | 'cancel'> | null = null;
 
   constructor() {
-    const unregisterProjectChange = this.projectState.registerBeforeActiveProjectChange(() => {
+    const unregister = this.projectState.registerBeforeActiveProjectChange(() => {
+      this.retireRenameSession();
       this.retireDeleteSession();
     });
-    this.destroyRef.onDestroy(() => {
-      unregisterProjectChange();
-      this.retireDeleteSession();
-    });
-  }
-
-  captureActiveProjectOwner(): ActiveProjectOwner {
-    return this.projectState.captureActiveProjectOwner();
+    this.destroyRef.onDestroy(unregister);
   }
 
   // ========== 项目选择 ==========
@@ -91,6 +92,7 @@ export class AppProjectCoordinatorService {
       this.isEditingDescription.set(false);
       return;
     }
+
     void this.runSelectProject(id, requestId);
   }
 
@@ -151,7 +153,9 @@ export class AppProjectCoordinatorService {
       this.userSession.switchActiveProject(id);
     }
 
-    if (this.isProjectSelectionCurrent(requestId)) this.applyProjectSelection(id);
+    if (this.isProjectSelectionCurrent(requestId)) {
+      this.applyProjectSelection(id);
+    }
   }
 
   private async runEnterProject(
@@ -163,22 +167,29 @@ export class AppProjectCoordinatorService {
     const navigated = await this.navigateToProject(id, currentView, requestId);
     if (!navigated || !this.isProjectSelectionCurrent(requestId)) return;
 
+    // 路由 guard 已在旧 active project 上完成 flush；导航成功后再提交项目切换。
     this.userSession.switchActiveProject(id);
     this.applyProjectSelection(id);
-    if (this.uiState.isMobile()) sidebarOpen.set(false);
+    if (this.uiState.isMobile()) {
+      sidebarOpen.set(false);
+    }
   }
 
   private async navigateToProject(id: string, view: string, requestId: number): Promise<boolean> {
     try {
       return await this.router.navigate(['/projects', id, view]);
     } catch {
-      if (this.isProjectSelectionCurrent(requestId)) this.toast.error('项目切换失败');
+      if (this.isProjectSelectionCurrent(requestId)) {
+        this.toast.error('项目切换失败');
+      }
       return false;
     }
   }
 
   private requestProjectSwitchDecision(): Promise<'proceed' | 'cancel'> {
-    if (this.projectSwitchGuardInFlight) return this.projectSwitchGuardInFlight;
+    if (this.projectSwitchGuardInFlight) {
+      return this.projectSwitchGuardInFlight;
+    }
 
     const operation = Promise.resolve()
       .then(() => this.projectSwitchGuard.canSwitchProject())
@@ -209,37 +220,57 @@ export class AppProjectCoordinatorService {
 
   startRenameProject(projectId: string, currentName: string, event: Event): void {
     event.stopPropagation();
+    const projectOwner = this.projectState.captureActiveProjectOwner();
+    if (projectOwner.projectId !== projectId) return;
     const normalizedName = typeof currentName === 'string' ? currentName : '';
+    this.activeRenameOwner = { projectOwner, sessionToken: ++this.renameSessionToken };
     this.renamingProjectId.set(projectId);
     this.renameProjectName.set(normalizedName);
     this.originalProjectName = normalizedName;
   }
 
   async executeRenameProject(): Promise<void> {
-    if (this.renameProjectInFlight) {
-      return this.renameProjectInFlight;
-    }
+    const owner = this.activeRenameOwner;
+    if (!owner || !this.isRenameOwnerCurrent(owner)) return;
+    const existingFlight = this.renameSessionFlights.get(owner.sessionToken);
+    if (existingFlight) return existingFlight;
 
     const renameProjectInFlight = (async () => {
       const projectId = this.renamingProjectId();
       const rawName = this.renameProjectName();
       const newName = (typeof rawName === 'string' ? rawName : '').trim();
-      if (projectId && newName && newName !== this.originalProjectName && await this.projectOps.renameProject(projectId, newName)) {
+      const renamed = !!projectId && newName !== '' && newName !== this.originalProjectName
+        && await this.projectOps.renameProject(projectId, newName);
+      if (!this.isRenameOwnerCurrent(owner)) return;
+      if (renamed) {
         this.toast.success('项目重命名成功');
       }
       this.cancelRenameProject();
     })().finally(() => {
-        if (this.renameProjectInFlight === renameProjectInFlight) {
-          this.renameProjectInFlight = null;
-        }
-      });
-    this.renameProjectInFlight = renameProjectInFlight;
+      if (this.renameSessionFlights.get(owner.sessionToken) === renameProjectInFlight) {
+        this.renameSessionFlights.delete(owner.sessionToken);
+      }
+    });
+    this.renameSessionFlights.set(owner.sessionToken, renameProjectInFlight);
     return renameProjectInFlight;
   }
 
   cancelRenameProject(): void {
+    this.retireRenameSession();
+  }
+
+  private retireRenameSession(): void {
+    this.activeRenameOwner = null;
     this.renamingProjectId.set(null);
     this.renameProjectName.set('');
+  }
+
+  private isRenameOwnerCurrent(owner: ProjectRenameOwner): boolean {
+    const current = this.activeRenameOwner;
+    return !!current && current.sessionToken === owner.sessionToken
+      && current.projectOwner.projectId === owner.projectOwner.projectId
+      && current.projectOwner.generation === owner.projectOwner.generation
+      && this.projectState.isActiveProjectOwnerCurrent(owner.projectOwner);
   }
 
   onRenameKeydown(event: KeyboardEvent): void {
@@ -357,7 +388,7 @@ export class AppProjectCoordinatorService {
     this.retireDeleteSession();
     const owner: ProjectDeleteOwner = {
       ...projectOwner,
-      sessionToken: ++this.deleteSessionToken,
+      deleteSessionToken: ++this.deleteSessionToken,
     };
     this.activeDeleteOwner = owner;
     const modalRef = await this.modalLoader.openDeleteConfirmModal<{ confirmed: boolean } | undefined>({
@@ -405,25 +436,24 @@ export class AppProjectCoordinatorService {
 
   async handleImportComplete(project: Project): Promise<void> {
     const existingProject = this.projectState.getProject(project.id);
-    if (existingProject) {
-      const result = await this.projectOps.upsertImportedProject(project);
-      if (result.success) {
-        this.toast.success('导入成功', `项目 "${project.name}" 已更新`);
-      } else {
-        this.toast.error('导入失败', `无法更新项目 "${project.name}"`);
-      }
-    } else {
-      const result = await this.projectOps.addProject(project);
-      if (result.success) {
-        this.toast.success('导入成功', `项目 "${project.name}" 已导入`);
-      } else {
-        this.toast.error('导入失败', `无法导入项目 "${project.name}"`);
-      }
+    const result = existingProject
+      ? await this.projectOps.upsertImportedProject(project)
+      : await this.projectOps.addProject(project);
+    const action = existingProject ? '更新' : '导入';
+
+    if (!result.success) {
+      const message = `无法${action}项目 "${project.name}"`;
+      this.toast.error('导入失败', message);
+      throw new Error(result.error ?? message);
     }
+
+    const completedAction = existingProject ? '已更新' : '已导入';
+    this.toast.success('导入成功', `项目 "${project.name}" ${completedAction}`);
   }
 
   /** 登出时清除所有项目 UI 状态 */
   clearState(): void {
+    this.retireRenameSession();
     this.retireDeleteSession();
     this.expandedProjectId.set(null);
     this.isEditingDescription.set(false);
