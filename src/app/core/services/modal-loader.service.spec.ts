@@ -17,6 +17,7 @@ describe('ModalLoaderService stale-chunk handling', () => {
   const toastWarn = vi.fn();
   const toastError = vi.fn();
   const captureException = vi.fn();
+  const dynamicModalOpen = vi.fn();
   const loggerStub = {
     debug: vi.fn(),
     warn: vi.fn(),
@@ -32,7 +33,7 @@ describe('ModalLoaderService stale-chunk handling', () => {
         { provide: ModalLoaderService, useClass: ModalLoaderService },
         { provide: LoggerService, useValue: { category: () => loggerStub } },
         { provide: ToastService, useValue: { warning: toastWarn, error: toastError, success: vi.fn(), info: vi.fn() } },
-        { provide: DynamicModalService, useValue: { open: vi.fn(), close: vi.fn() } },
+        { provide: DynamicModalService, useValue: { open: dynamicModalOpen, close: vi.fn() } },
         { provide: SentryLazyLoaderService, useValue: { captureException } },
       ],
     });
@@ -137,5 +138,27 @@ describe('ModalLoaderService stale-chunk handling', () => {
 
     await expect(loadModal('trash', loader)).resolves.toBe(TrashModalStub);
     expect(loader).toHaveBeenCalledTimes(2);
+  });
+
+  it('delete modal rechecks ownership after loading and before creating DOM', async () => {
+    class DeleteModalStub {}
+    let resolveLoader!: (component: typeof DeleteModalStub) => void;
+    const loading = new Promise<typeof DeleteModalStub>(resolve => {
+      resolveLoader = resolve;
+    });
+    vi.spyOn(service, 'loadDeleteConfirmModal').mockReturnValue(loading);
+    let current = true;
+
+    const staleOpen = service.openDeleteConfirmModal({ itemName: 'Project A' }, () => current);
+    current = false;
+    resolveLoader(DeleteModalStub);
+
+    await expect(staleOpen).resolves.toBeNull();
+    expect(dynamicModalOpen).not.toHaveBeenCalled();
+
+    current = true;
+    await expect(service.openDeleteConfirmModal({ itemName: 'Project A' }, () => current))
+      .resolves.not.toBeNull();
+    expect(dynamicModalOpen).toHaveBeenCalledTimes(1);
   });
 });
