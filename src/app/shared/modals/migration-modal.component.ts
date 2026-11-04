@@ -1,4 +1,4 @@
-import { Component, inject, output, signal, ChangeDetectionStrategy } from '@angular/core';
+import { ChangeDetectionStrategy, Component, inject, OnDestroy, output, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { LoggerService } from '../../../services/logger.service';
 import { MigrationService, MigrationStrategy } from '../../../services/migration.service';
@@ -18,7 +18,7 @@ import { ToastService } from '../../../services/toast.service';
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div class="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-fade-in" 
-         (click)="close.emit()">
+         (click)="requestClose()">
       <div class="bg-white dark:bg-stone-900 rounded-2xl shadow-2xl w-full max-w-md overflow-hidden animate-scale-in" 
            (click)="$event.stopPropagation()">
         <!-- 标题 -->
@@ -168,7 +168,7 @@ import { ToastService } from '../../../services/toast.service';
         <!-- 操作按钮 -->
         <div class="px-6 py-4 border-t border-stone-100 dark:border-stone-700 bg-stone-50 dark:bg-stone-800/50 flex justify-end gap-3">
           <button 
-            (click)="close.emit()"
+            (click)="requestClose()"
             [disabled]="isProcessing()"
             class="px-4 py-2 text-sm text-stone-600 dark:text-stone-300 hover:text-stone-800 dark:hover:text-stone-100 hover:bg-stone-100 dark:hover:bg-stone-700 rounded-lg transition-colors disabled:opacity-50">
             稍后处理
@@ -203,27 +203,56 @@ import { ToastService } from '../../../services/toast.service';
     .animate-scale-in { animation: scale-in 0.2s ease-out; }
   `]
 })
-export class MigrationModalComponent {
+export class MigrationModalComponent implements OnDestroy {
   private migrationService = inject(MigrationService);
   private authService = inject(AuthService);
   private toast = inject(ToastService);
   private readonly logger = inject(LoggerService);
   
-  close = output<void>();
-  migrated = output<void>();
+  readonly close = output<void>();
+  readonly migrated = output<void>();
   
   selectedStrategy: MigrationStrategy | null = null;
-  isProcessing = this.migrationService.showMigrationDialog; // 复用loading状态
+  readonly isProcessing = signal(false);
   readonly errorMessage = signal<string | null>(null);
+  private destroyed = false;
+  private migrationRequestId = 0;
+  private closeRequested = false;
   
   readonly summary = this.migrationService.getMigrationSummary.bind(this.migrationService);
   
-  selectStrategy(strategy: MigrationStrategy) {
+  ngOnDestroy(): void {
+    this.destroyed = true;
+    this.migrationRequestId += 1;
+    this.isProcessing.set(false);
+  }
+
+  requestClose(): void {
+    if (this.destroyed || this.closeRequested || this.isProcessing()) {
+      return;
+    }
+    this.emitCloseOnce();
+  }
+
+  selectStrategy(strategy: MigrationStrategy): void {
+    if (this.destroyed || this.closeRequested || this.isProcessing()) {
+      return;
+    }
     this.selectedStrategy = strategy;
   }
   
-  async executeMigration() {
-    if (!this.selectedStrategy) return;
+  async executeMigration(): Promise<void> {
+    if (
+      !this.selectedStrategy ||
+      this.destroyed ||
+      this.closeRequested ||
+      this.isProcessing()
+    ) {
+      return;
+    }
+
+    const strategy = this.selectedStrategy;
+    const requestId = ++this.migrationRequestId;
     
     // 清除之前的错误消息
     this.errorMessage.set(null);
@@ -236,13 +265,19 @@ export class MigrationModalComponent {
       this.toast.error('迁移失败', msg);
       return;
     }
+
+    this.isProcessing.set(true);
     
     try {
-      const result = await this.migrationService.executeMigration(this.selectedStrategy, userId);
+      const result = await this.migrationService.executeMigration(strategy, userId);
+      if (!this.isRequestCurrent(requestId)) {
+        return;
+      }
       
       if (result.success) {
+        this.isProcessing.set(false);
         this.migrated.emit();
-        this.close.emit();
+        this.emitCloseOnce();
       } else {
         // 处理迁移服务返回的失败结果
         const msg = '数据迁移失败，请稍后重试';
@@ -250,11 +285,30 @@ export class MigrationModalComponent {
         this.toast.error('迁移失败', msg);
       }
     } catch (error) {
+      if (!this.isRequestCurrent(requestId)) {
+        return;
+      }
       // 捕获并处理未预期的异常
       const errorMsg = error instanceof Error ? error.message : '未知错误';
       this.errorMessage.set(errorMsg);
       this.toast.error('迁移失败', errorMsg);
       this.logger.error('MigrationModal', '数据迁移异常', error);
+    } finally {
+      if (this.isRequestCurrent(requestId)) {
+        this.isProcessing.set(false);
+      }
     }
+  }
+
+  private isRequestCurrent(requestId: number): boolean {
+    return !this.destroyed && !this.closeRequested && requestId === this.migrationRequestId;
+  }
+
+  private emitCloseOnce(): void {
+    if (this.destroyed || this.closeRequested) {
+      return;
+    }
+    this.closeRequested = true;
+    this.close.emit();
   }
 }
