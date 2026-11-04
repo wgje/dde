@@ -28,6 +28,8 @@ function createOptions(
     cancelPendingLaunchSnapshotPersist: vi.fn(),
     stopSyncRuntime: vi.fn(),
     startSyncRuntime: vi.fn(),
+    reloadActionQueue: vi.fn().mockResolvedValue(undefined),
+    replayActionQueue: vi.fn().mockResolvedValue(undefined),
     clearProjectSubscription: vi.fn(),
     destroySyncPulse: vi.fn(),
     setCurrentUser: vi.fn().mockResolvedValue(undefined),

@@ -40,5 +40,6 @@ export function createWorkspaceShellLifecycleStartupBootstrapOptions<TModalCallb
     signalEffects: options.signalEffects,
     storageEscape: options.storageEscape,
     userSession: options.userSession,
+    warn: options.warn,
   };
 }

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { WorkspaceShellStartupBootstrapController } from './workspace-shell-startup-bootstrap.controller';
 
@@ -44,6 +44,10 @@ function createController(overrides: {
 }
 
 describe('WorkspaceShellStartupBootstrapController', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('runs constructor-stage startup steps in the existing order', () => {
     const { controller, createCallbacks, initCallbacks, record, setSidebarOpen } = createController();
 
@@ -181,5 +185,110 @@ describe('WorkspaceShellStartupBootstrapController', () => {
     await Promise.resolve();
 
     expect(initModalCallbacks).not.toHaveBeenCalled();
+  });
+
+  it('warns and automatically retries async modal callback failures', async () => {
+    vi.useFakeTimers();
+    const error = new Error('modal callbacks failed');
+    const callbacks = { id: 'retry-success' };
+    const warn = vi.fn();
+    const initModalCallbacks = vi.fn();
+    const createModalCallbacks = vi.fn()
+      .mockReturnValueOnce(Promise.reject(error))
+      .mockResolvedValueOnce(callbacks);
+    const controller = new WorkspaceShellStartupBootstrapController({
+      isMobile: () => false,
+      setSidebarOpen: vi.fn(),
+      initializeSwUpdateLifecycle: vi.fn(),
+      setupConflictHandler: vi.fn(),
+      setupSidebarToggleEvent: vi.fn(),
+      setupStorageEscape: vi.fn(),
+      setupBeforeUnload: vi.fn(),
+      createModalCallbacks,
+      initModalCallbacks,
+      initializeAppLifecycle: vi.fn(),
+      prehydrateUserSessionFromSnapshot: vi.fn(),
+      restoreAndroidWidgetState: vi.fn(),
+      setupSignalEffects: vi.fn(),
+      warn,
+    });
+
+    controller.initialize();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // 失败必须可见：通过 warn 通道记录，且不误触发 initCallbacks
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('模态回调懒加载失败'), error);
+    expect(initModalCallbacks).not.toHaveBeenCalled();
+
+    // 生产只初始化一次；失败后 controller 自身必须重新创建回调并成功接线
+    await vi.runOnlyPendingTimersAsync();
+    await Promise.resolve();
+
+    expect(createModalCallbacks).toHaveBeenCalledTimes(2);
+    expect(initModalCallbacks).toHaveBeenCalledWith(callbacks);
+  });
+
+  it('continues modal callback retry when the warning sink throws', async () => {
+    vi.useFakeTimers();
+    const loadError = new Error('modal callbacks failed');
+    const warnError = new Error('warning sink failed');
+    const callbacks = { id: 'retry-success' };
+    const warn = vi.fn(() => {
+      throw warnError;
+    });
+    const initModalCallbacks = vi.fn();
+    const createModalCallbacks = vi.fn()
+      .mockImplementationOnce(() => {
+        throw loadError;
+      })
+      .mockReturnValueOnce(callbacks);
+    const controller = new WorkspaceShellStartupBootstrapController({
+      isMobile: () => false,
+      setSidebarOpen: vi.fn(),
+      initializeSwUpdateLifecycle: vi.fn(),
+      setupConflictHandler: vi.fn(),
+      setupSidebarToggleEvent: vi.fn(),
+      setupStorageEscape: vi.fn(),
+      setupBeforeUnload: vi.fn(),
+      createModalCallbacks,
+      initModalCallbacks,
+      initializeAppLifecycle: vi.fn(),
+      prehydrateUserSessionFromSnapshot: vi.fn(),
+      restoreAndroidWidgetState: vi.fn(),
+      setupSignalEffects: vi.fn(),
+      warn,
+    });
+
+    expect(() => controller.initialize()).not.toThrow();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('模态回调懒加载失败'), loadError);
+
+    await vi.runOnlyPendingTimersAsync();
+
+    expect(createModalCallbacks).toHaveBeenCalledTimes(2);
+    expect(initModalCallbacks).toHaveBeenCalledWith(callbacks);
+  });
+
+  it('does not throw when async modal callbacks fail without a warn channel', async () => {
+    const controller = new WorkspaceShellStartupBootstrapController({
+      isMobile: () => false,
+      setSidebarOpen: vi.fn(),
+      initializeSwUpdateLifecycle: vi.fn(),
+      setupConflictHandler: vi.fn(),
+      setupSidebarToggleEvent: vi.fn(),
+      setupStorageEscape: vi.fn(),
+      setupBeforeUnload: vi.fn(),
+      createModalCallbacks: vi.fn(() => Promise.reject(new Error('no warn channel'))),
+      initModalCallbacks: vi.fn(),
+      initializeAppLifecycle: vi.fn(),
+      prehydrateUserSessionFromSnapshot: vi.fn(),
+      restoreAndroidWidgetState: vi.fn(),
+      setupSignalEffects: vi.fn(),
+    });
+
+    expect(() => controller.initialize()).not.toThrow();
+    await Promise.resolve();
+    await Promise.resolve();
   });
 });

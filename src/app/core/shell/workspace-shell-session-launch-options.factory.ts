@@ -38,6 +38,7 @@ export function createWorkspaceShellSessionLaunchOptions(
   options: WorkspaceShellSessionLaunchOptionsFactoryOptions,
 ): WorkspaceShellSessionLaunchDelegatesOptions {
   return {
+    actionQueue: options.actionQueue,
     authCoord: options.authCoord,
     authService: options.authService,
     eventBus: options.eventBus,

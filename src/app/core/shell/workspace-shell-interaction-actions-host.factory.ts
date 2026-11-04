@@ -42,19 +42,12 @@ export function createWorkspaceShellInteractionActionsHost(
   return new Proxy(deferredHost, {
     get(target, property, receiver) {
       if (property === 'openTrashModal') {
-        return () => {
-          const action = Reflect.get(target, property, receiver);
-          if (typeof action !== 'function') return undefined;
-          return Reflect.apply(action, target, [options.modalCoord.captureProjectUiOwner?.()]);
-        };
+        return () => target.openTrashModal(options.modalCoord.captureProjectUiOwner());
       }
       if (property === 'confirmDeleteProject') {
         return (projectId: string, projectName: string, event: Event) => {
-          const action = Reflect.get(target, property, receiver);
-          if (typeof action !== 'function') return undefined;
-          const owner = options.projectCoord.captureActiveProjectOwner?.();
-          if (!owner) return undefined;
-          return Reflect.apply(action, target, [projectId, projectName, event, owner]);
+          const owner = options.modalCoord.captureProjectUiOwner();
+          return target.confirmDeleteProject(projectId, projectName, event, owner ?? undefined);
         };
       }
       return Reflect.get(target, property, receiver);

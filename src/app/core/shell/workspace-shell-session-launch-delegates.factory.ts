@@ -24,6 +24,10 @@ type SessionSubscription = ReturnType<
 >;
 
 export interface WorkspaceShellSessionLaunchDelegatesOptions {
+  actionQueue: {
+    reloadFromStorageForCurrentOwner(): Promise<void>;
+    processQueue(): Promise<unknown>;
+  };
   authCoord: { isCheckingSession(): boolean };
   authService: {
     completeCrossTabSessionRestore(userId: string): void;
@@ -89,7 +93,15 @@ export function createWorkspaceShellSessionLaunchDelegates(
     options.createSessionLaunchControllers
     ?? createWorkspaceShellSessionLaunchControllers;
 
-  return createControllers({
+  return createControllers(createSessionLaunchControllerOptions(options));
+}
+
+function createSessionLaunchControllerOptions(
+  options: WorkspaceShellSessionLaunchDelegatesOptions,
+): WorkspaceShellSessionLaunchControllersFactoryOptions {
+  return {
+    reloadActionQueue: () => options.actionQueue.reloadFromStorageForCurrentOwner(),
+    replayActionQueue: () => options.actionQueue.processQueue(),
     currentUserId: () => options.userSession.currentUserId(),
     completeCrossTabSessionRestore: userId =>
       options.authService.completeCrossTabSessionRestore(userId),
@@ -131,5 +143,5 @@ export function createWorkspaceShellSessionLaunchDelegates(
     ...(options.createSessionTransitionController
       ? { createSessionTransitionController: options.createSessionTransitionController }
       : {}),
-  });
+  };
 }

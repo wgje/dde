@@ -13,6 +13,8 @@ const SESSION_TRANSITION_SETUP_FAILURE_MESSAGE =
   '会话切换控制器监听初始化失败，会话事件监听暂不可用';
 const SESSION_TRANSITION_TEARDOWN_FAILURE_MESSAGE =
   '会话切换控制器清理失败，已跳过';
+const SESSION_TRANSITION_SETUP_RETRY_DELAY_MS = 1_000;
+const SESSION_TRANSITION_SETUP_MAX_RETRIES = 2;
 
 interface WorkspaceShellSessionTransitionLazyDelegate
   extends WorkspaceShellSessionTransitionControllerLike {
@@ -28,6 +30,8 @@ export class WorkspaceShellSessionTransitionLazyHostController {
   >;
   private readonly loadSessionTransitionController:
     () => Promise<WorkspaceShellSessionTransitionControllerLike>;
+  private setupRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  private tornDown = false;
 
   constructor(private readonly options: WorkspaceShellSessionTransitionLazyHostControllerOptions) {
     this.loadSessionTransitionController =
@@ -41,15 +45,52 @@ export class WorkspaceShellSessionTransitionLazyHostController {
   }
 
   setupSessionHandlers(): void {
-    this.host.run(
-      controller => controller.setupSessionHandlers(),
-      SESSION_TRANSITION_SETUP_FAILURE_MESSAGE,
-      SESSION_TRANSITION_LOAD_FAILURE_MESSAGE,
-    );
+    this.runSetupAttempt(0);
   }
 
   teardown(): void {
+    this.tornDown = true;
+    this.clearSetupRetryTimer();
     this.host.teardown();
+  }
+
+  private runSetupAttempt(retryCount: number): void {
+    void this.host.call(
+      controller => {
+        controller.setupSessionHandlers();
+        return true;
+      },
+      false,
+      SESSION_TRANSITION_SETUP_FAILURE_MESSAGE,
+      SESSION_TRANSITION_LOAD_FAILURE_MESSAGE,
+    ).then(setupSucceeded => {
+      if (setupSucceeded) {
+        this.clearSetupRetryTimer();
+        return;
+      }
+      if (this.tornDown || retryCount >= SESSION_TRANSITION_SETUP_MAX_RETRIES) {
+        return;
+      }
+      this.scheduleSetupRetry(retryCount + 1);
+    });
+  }
+
+  private scheduleSetupRetry(retryCount: number): void {
+    if (this.setupRetryTimer !== null || this.tornDown) {
+      return;
+    }
+    this.setupRetryTimer = setTimeout(() => {
+      this.setupRetryTimer = null;
+      this.runSetupAttempt(retryCount);
+    }, SESSION_TRANSITION_SETUP_RETRY_DELAY_MS);
+  }
+
+  private clearSetupRetryTimer(): void {
+    if (this.setupRetryTimer === null) {
+      return;
+    }
+    clearTimeout(this.setupRetryTimer);
+    this.setupRetryTimer = null;
   }
 
   private createDelegate(): Promise<WorkspaceShellSessionTransitionLazyDelegate> {

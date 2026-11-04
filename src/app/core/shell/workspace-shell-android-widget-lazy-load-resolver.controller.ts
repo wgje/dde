@@ -17,7 +17,7 @@ export interface WorkspaceShellAndroidWidgetLazyLoadLike {
   persistDeferredStartupEntryIntent(startupEntryIntent: StartupEntryIntent | null): void;
   persistPendingBootstrap(request: AndroidWidgetBootstrapRequest | null): void;
   restoreAll(): void;
-  syncProcessing(generation?: number): void;
+  syncProcessing(): void;
   teardown(): void;
   useIntentFallback(): void;
 }
@@ -92,8 +92,8 @@ export class WorkspaceShellAndroidWidgetLazyLoadResolverController {
     this.run(controller => controller.persistDeferredStartupEntryIntent(startupEntryIntent));
   }
 
-  syncProcessing(generation?: number): void {
-    this.run(controller => controller.syncProcessing(generation));
+  syncProcessing(): void {
+    this.run(controller => controller.syncProcessing());
   }
 
   continueManualCallback(): void {

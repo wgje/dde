@@ -7,6 +7,7 @@ import {
 
 describe('WorkspaceShellComponent sidebar resize delegation', () => {
   it('binds resize state and drag startup directly to the sidebar resize controller', () => {
+    // 中文注释：resize 状态绑定在拆分后的侧栏子模板，拖拽入口保留在根模板，用联合视图断言
     const template = readWorkspaceShellTemplates();
 
     expect(template).toContain('template.interaction.sidebarResize.isResizingAny()');

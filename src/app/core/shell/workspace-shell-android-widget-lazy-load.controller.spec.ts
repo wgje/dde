@@ -81,15 +81,13 @@ describe('WorkspaceShellAndroidWidgetLazyLoadController', () => {
     expect(window.sessionStorage.getItem('nanoflow.android-widget-startup-intent')).toBeNull();
     expect(consumeStartupEntryIntent).toHaveBeenCalledTimes(1);
 
-    startWidgetBootstrapAttempt(() => controller.syncProcessing());
+    controller.syncProcessing();
     expect(completeAndroidBootstrap).not.toHaveBeenCalled();
 
     sessionInitialized.set(true);
     currentUserId.set('user-a');
-    startWidgetBootstrapAttempt(() => {
-      controller.syncProcessing();
-      controller.syncProcessing();
-    });
+    controller.syncProcessing();
+    controller.syncProcessing();
 
     expect(completeAndroidBootstrap).toHaveBeenCalledTimes(1);
     expect(completeAndroidBootstrap).toHaveBeenCalledWith({

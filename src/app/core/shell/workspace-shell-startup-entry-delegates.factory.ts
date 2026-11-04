@@ -33,7 +33,14 @@ export type WorkspaceShellStartupEntryDelegatesOptions = Omit<
     };
     sidebarToolsLazyLoad: {
       loadBlackBoxRecorderComponent(): Promise<unknown>;
+      onToolsIntent?(): void;
       preload: WorkspaceShellStartupEntryControllersFactoryOptions['preloadSidebarTools'];
+    };
+    panelToolsIntent?: {
+      readonly register: (
+        handler: () => void,
+      ) => { readonly unregister: () => void };
+      readonly emit: () => void;
     };
     toast: {
       warning: WorkspaceShellStartupEntryControllersFactoryOptions['warningToast'];
@@ -62,6 +69,7 @@ export function createWorkspaceShellStartupEntryDelegates(
     toast,
     userSession,
     widgetGateMutation,
+    panelToolsIntent,
     ...controllerOptions
   } = options;
 
@@ -71,6 +79,14 @@ export function createWorkspaceShellStartupEntryDelegates(
     isBlackBoxEnabled: () => focusPrefs.isBlackBoxEnabled(),
     routeUrl: () => routeState.routeUrl(),
     setSidebarOpen: open => sidebarOpen.set(open),
+    activateSidebarTools: () => {
+      if (panelToolsIntent) {
+        panelToolsIntent.emit();
+        sidebarToolsLazyLoad.onToolsIntent?.();
+        return;
+      }
+      sidebarToolsLazyLoad.onToolsIntent?.();
+    },
     preloadSidebarTools: reason => sidebarToolsLazyLoad.preload(reason),
     loadBlackBoxRecorder: () =>
       sidebarToolsLazyLoad.loadBlackBoxRecorderComponent().then(() => undefined),

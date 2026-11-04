@@ -66,6 +66,19 @@ function readShellSource(fileName: string): string {
 }
 
 describe('createWorkspaceShellStartupEntryIntentController', () => {
+  it('delegates lifecycle facade state to a named controller', () => {
+    const source = readFileSync(
+      join(__dirname, 'workspace-shell-startup-entry-intent.factory.ts'),
+      'utf8',
+    );
+
+    expect(source).toContain('WorkspaceShellStartupEntryIntentLifecycleController');
+    expect(source).toContain('new WorkspaceShellStartupEntryIntentLifecycleController');
+    expect(source).not.toContain('createStartupEntryIntentControllerFacade');
+    expect(source).not.toContain('let isTornDown = false');
+    expect(source).not.toContain('markTornDown');
+  });
+
   it('keeps the startup entry intent lazy-load host behind a named lazy host controller', () => {
     const factorySource = readFileSync(
       join(__dirname, 'workspace-shell-startup-entry-intent.factory.ts'),

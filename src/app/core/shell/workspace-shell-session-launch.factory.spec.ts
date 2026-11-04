@@ -40,6 +40,8 @@ function createOptions(
     schedulePersistDeferred: vi.fn(),
     setCurrentUser: vi.fn().mockResolvedValue(undefined),
     startSyncRuntime: vi.fn(),
+    reloadActionQueue: vi.fn().mockResolvedValue(undefined),
+    replayActionQueue: vi.fn().mockResolvedValue(undefined),
     stopSyncRuntime: vi.fn(),
     subscribeToSessionInvalidated: vi.fn(),
     subscribeToSessionRestored: vi.fn(),
@@ -120,6 +122,10 @@ describe('createWorkspaceShellSessionLaunchDelegates', () => {
         startRuntime: vi.fn(),
       },
     };
+    const actionQueue = {
+      reloadFromStorageForCurrentOwner: vi.fn().mockResolvedValue(undefined),
+      processQueue: vi.fn().mockResolvedValue(undefined),
+    };
     const projectSubscription = {
       clear: vi.fn(),
     };
@@ -137,6 +143,7 @@ describe('createWorkspaceShellSessionLaunchDelegates', () => {
     const routeState = { routeUrl: vi.fn(() => '/projects/project-1/flow') };
 
     createWorkspaceShellSessionLaunchDelegates({
+      actionQueue,
       authCoord: { isCheckingSession: () => false },
       authService,
       eventBus,
@@ -173,6 +180,8 @@ describe('createWorkspaceShellSessionLaunchDelegates', () => {
     mappedOptions.startSyncRuntime();
     mappedOptions.clearProjectSubscription();
     mappedOptions.destroySyncPulse();
+    await mappedOptions.replayActionQueue();
+    await mappedOptions.reloadActionQueue();
     await mappedOptions.setCurrentUser('user-2', { forceLoad: true });
     mappedOptions.subscribeToSessionRestored?.(vi.fn());
     mappedOptions.subscribeToSessionInvalidated?.(vi.fn());
@@ -196,6 +205,8 @@ describe('createWorkspaceShellSessionLaunchDelegates', () => {
     expect(lazyServiceRefs.simpleSync.startRuntime).toHaveBeenCalledTimes(1);
     expect(projectSubscription.clear).toHaveBeenCalledTimes(1);
     expect(syncPulseLifecycle.destroy).toHaveBeenCalledTimes(1);
+    expect(actionQueue.processQueue).toHaveBeenCalledTimes(1);
+    expect(actionQueue.reloadFromStorageForCurrentOwner).toHaveBeenCalledTimes(1);
     expect(userSession.setCurrentUser).toHaveBeenCalledWith('user-2', { forceLoad: true });
     expect(eventBus.onSessionRestored$.subscribe).toHaveBeenCalledTimes(1);
     expect(eventBus.onSessionInvalidated$.subscribe).toHaveBeenCalledTimes(1);

@@ -80,6 +80,7 @@ function createOptions(
     },
     sidebarToolsLazyLoad: {
       loadBlackBoxRecorderComponent: vi.fn().mockResolvedValue(null),
+      onToolsIntent: vi.fn(),
       preload: vi.fn(),
     },
     startupLaunchSnapshot: () => null,
@@ -101,6 +102,34 @@ function createOptions(
 }
 
 describe('createWorkspaceShellStartupEntryDelegates', () => {
+  it('emits the panel tools intent after the lazy sidebar intent', () => {
+    const panelToolsIntent = {
+      register: vi.fn(),
+      emit: vi.fn(),
+    };
+    const sidebarToolsLazyLoad = {
+      loadBlackBoxRecorderComponent: vi.fn().mockResolvedValue(null),
+      onToolsIntent: vi.fn(),
+      preload: vi.fn(),
+    };
+    let controllerOptions!: WorkspaceShellStartupEntryControllersFactoryOptions;
+    const controllers = {} as WorkspaceShellStartupEntryControllers;
+
+    createWorkspaceShellStartupEntryDelegates(createOptions({
+      createStartupEntryControllers: (options) => {
+        controllerOptions = options;
+        return controllers;
+      },
+      panelToolsIntent,
+      sidebarToolsLazyLoad,
+    }));
+
+    controllerOptions.activateSidebarTools?.();
+
+    expect(sidebarToolsLazyLoad.onToolsIntent).toHaveBeenCalledTimes(1);
+    expect(panelToolsIntent.emit).toHaveBeenCalledTimes(1);
+  });
+
   it('adapts mobile root startup navigation through the shared router navigate callback', () => {
     let mobileOptions!: WorkspaceShellMobileRootStartupNavigationControllerOptions;
     const router = {
@@ -139,6 +168,7 @@ describe('createWorkspaceShellStartupEntryDelegates', () => {
     };
     const sidebarToolsLazyLoad = {
       loadBlackBoxRecorderComponent: vi.fn().mockResolvedValue('loaded'),
+      onToolsIntent: vi.fn(),
       preload: vi.fn(),
     };
     const toast = {
@@ -174,6 +204,7 @@ describe('createWorkspaceShellStartupEntryDelegates', () => {
     expect(controllerOptions.currentUserId()).toBe('user-1');
     expect(controllerOptions.isBlackBoxEnabled()).toBe(true);
     controllerOptions.setSidebarOpen(true);
+    controllerOptions.activateSidebarTools?.();
     controllerOptions.preloadSidebarTools('intent');
     await controllerOptions.loadBlackBoxRecorder();
     controllerOptions.applyWidgetGateMutation({ intent: 'mark-gate-read', widgetGateEntryId: null });
@@ -182,6 +213,7 @@ describe('createWorkspaceShellStartupEntryDelegates', () => {
 
     expect(focusPrefs.isBlackBoxEnabled).toHaveBeenCalledTimes(1);
     expect(sidebarOpen.set).toHaveBeenCalledWith(true);
+    expect(sidebarToolsLazyLoad.onToolsIntent).toHaveBeenCalledTimes(1);
     expect(sidebarToolsLazyLoad.preload).toHaveBeenCalledWith('intent');
     expect(sidebarToolsLazyLoad.loadBlackBoxRecorderComponent).toHaveBeenCalledOnce();
     expect(widgetGateMutation.apply).toHaveBeenCalledWith({

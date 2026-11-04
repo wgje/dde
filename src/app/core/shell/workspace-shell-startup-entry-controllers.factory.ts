@@ -1,118 +1,97 @@
 import { signal, type WritableSignal } from '@angular/core';
 
-import type { Project } from '../../../models';
 import type { AndroidWidgetBootstrapCallbackResult } from '../../../services/widget-binding.service';
 import type {
   AndroidWidgetBootstrapRequest,
   StartupEntryIntent,
 } from '../../../utils/startup-entry-intent';
 import {
-  createWorkspaceShellAndroidWidgetLazyLoadController,
-  type WorkspaceShellAndroidWidgetLazyLoadFactoryOptions,
-} from './workspace-shell-android-widget-lazy-load.factory';
-import type { WorkspaceShellAndroidWidgetLazyLoadDelegate } from './workspace-shell-android-widget-lazy-load-delegate.factory';
+  createWorkspaceShellAndroidWidgetLazyLoadControllerHost,
+  createWorkspaceShellMobileRootStartupNavigationControllerHost,
+  createWorkspaceShellStartupEntryIntentControllerHost,
+  type WorkspaceShellStartupEntryControllersFactoryOptions,
+} from './workspace-shell-startup-entry-controller-hosts.factory';
 import {
-  WorkspaceShellMobileRootStartupNavigationController,
-  type WorkspaceShellMobileRootStartupNavigationControllerOptions,
-} from './workspace-shell-mobile-root-startup-navigation.controller';
-import {
-  createWorkspaceShellStartupEntryIntentController,
   createWorkspaceShellStartupEntryIntentResolver,
-  type WorkspaceShellStartupEntryIntentControllerLike,
-  type WorkspaceShellStartupEntryIntentFactoryOptions,
 } from './workspace-shell-startup-entry-intent.factory';
+
+export type {
+  WorkspaceShellStartupEntryControllersFactoryOptions,
+} from './workspace-shell-startup-entry-controller-hosts.factory';
 
 type AndroidWidgetBootstrapSignal = WritableSignal<AndroidWidgetBootstrapRequest | null>;
 type AndroidWidgetCallbackSignal = WritableSignal<AndroidWidgetBootstrapCallbackResult | null>;
 type DeferredStartupEntryIntentSignal = WritableSignal<StartupEntryIntent | null>;
-
-type StartupEntryIntentOptions = Omit<
-  WorkspaceShellStartupEntryIntentFactoryOptions,
-  | 'deferredStartupEntryIntent'
-  | 'createStartupEntryIntentController'
-  | 'navigate'
-  | 'persistDeferredStartupEntryIntent'
-  | 'resolveMobileRootProjectId'
+type StartupEntryIntentController = ReturnType<
+  typeof createWorkspaceShellStartupEntryIntentControllerHost
 >;
-
-type AndroidWidgetOptions = Omit<
-  WorkspaceShellAndroidWidgetLazyLoadFactoryOptions,
-  | 'deferredStartupEntryIntent'
-  | 'navigate'
-  | 'pendingBootstrap'
-  | 'pendingCallback'
-  | 'resolveConsumedStartupEntryNavigation'
->;
-
-type MobileRootNavigationOptions = Omit<
-  WorkspaceShellMobileRootStartupNavigationControllerOptions,
-  'startupEntryIntent'
->;
-
-export interface WorkspaceShellStartupEntryControllersFactoryOptions
-  extends StartupEntryIntentOptions,
-    AndroidWidgetOptions,
-    MobileRootNavigationOptions {
-  navigate: WorkspaceShellAndroidWidgetLazyLoadFactoryOptions['navigate'];
-  createAndroidWidgetLazyLoadController?: (
-    options: WorkspaceShellAndroidWidgetLazyLoadFactoryOptions,
-  ) => WorkspaceShellAndroidWidgetLazyLoadDelegate;
-  createMobileRootStartupNavigation?: (
-    options: WorkspaceShellMobileRootStartupNavigationControllerOptions,
-  ) => WorkspaceShellMobileRootStartupNavigationController;
-  createStartupEntryIntentController?: (
-    options: WorkspaceShellStartupEntryIntentFactoryOptions,
-  ) => WorkspaceShellStartupEntryIntentControllerLike;
-  projects: () => readonly Pick<Project, 'id'>[];
-}
 
 export interface WorkspaceShellStartupEntryControllers {
-  readonly androidWidgetLazyLoad: WorkspaceShellAndroidWidgetLazyLoadDelegate;
+  readonly androidWidgetLazyLoad:
+    ReturnType<typeof createWorkspaceShellAndroidWidgetLazyLoadControllerHost>;
   readonly deferredStartupEntryIntent: DeferredStartupEntryIntentSignal;
-  readonly mobileRootStartupNavigation: WorkspaceShellMobileRootStartupNavigationController;
+  readonly mobileRootStartupNavigation:
+    ReturnType<typeof createWorkspaceShellMobileRootStartupNavigationControllerHost>;
   readonly pendingAndroidWidgetBootstrap: AndroidWidgetBootstrapSignal;
   readonly pendingAndroidWidgetManualCallback: AndroidWidgetCallbackSignal;
-  readonly startupEntryIntentController: WorkspaceShellStartupEntryIntentControllerLike;
+  readonly startupEntryIntentController: StartupEntryIntentController;
   readonly startupEntryIntentResolver: () => StartupEntryIntent | null;
+}
+
+function createStartupEntrySignals(): {
+  deferredStartupEntryIntent: DeferredStartupEntryIntentSignal;
+  pendingAndroidWidgetBootstrap: AndroidWidgetBootstrapSignal;
+  pendingAndroidWidgetManualCallback: AndroidWidgetCallbackSignal;
+} {
+  return {
+    deferredStartupEntryIntent: signal<StartupEntryIntent | null>(null),
+    pendingAndroidWidgetBootstrap: signal<AndroidWidgetBootstrapRequest | null>(null),
+    pendingAndroidWidgetManualCallback: signal<AndroidWidgetBootstrapCallbackResult | null>(null),
+  };
 }
 
 export function createWorkspaceShellStartupEntryControllers(
   options: WorkspaceShellStartupEntryControllersFactoryOptions,
 ): WorkspaceShellStartupEntryControllers {
-  const pendingAndroidWidgetBootstrap = signal<AndroidWidgetBootstrapRequest | null>(null);
-  const pendingAndroidWidgetManualCallback = signal<AndroidWidgetBootstrapCallbackResult | null>(null);
-  const deferredStartupEntryIntent = signal<StartupEntryIntent | null>(null);
-  const startupEntryIntentResolver = createWorkspaceShellStartupEntryIntentResolver({
-    routeUrl: options.routeUrl,
-  });
-  const mobileRootStartupNavigation = createMobileRootStartupNavigation(
-    options,
-    startupEntryIntentResolver,
-  );
-
-  const startupEntryIntentControllerRef: {
-    current: WorkspaceShellStartupEntryIntentControllerLike | null;
-  } = { current: null };
-  const androidWidgetLazyLoad = createAndroidWidgetLazyLoad(options, {
+  const {
     deferredStartupEntryIntent,
     pendingAndroidWidgetBootstrap,
     pendingAndroidWidgetManualCallback,
-    resolveConsumedStartupEntryNavigation: () => {
-      if (!startupEntryIntentControllerRef.current) {
-        throw new Error('Startup entry intent controller is not initialized');
-      }
+  } = createStartupEntrySignals();
+  const startupEntryIntentResolver = createRouteStartupEntryIntentResolver(options);
+  const mobileRootStartupNavigation =
+    createWorkspaceShellMobileRootStartupNavigationControllerHost(
+      options,
+      startupEntryIntentResolver,
+    );
 
-      return startupEntryIntentControllerRef.current.resolveConsumedStartupEntryNavigation();
-    },
-  });
+  const startupEntryIntentControllerRef = createStartupEntryIntentControllerRef();
+  const androidWidgetLazyLoad =
+    createWorkspaceShellAndroidWidgetLazyLoadControllerHost(options, {
+      deferredStartupEntryIntent,
+      pendingAndroidWidgetBootstrap,
+      pendingAndroidWidgetManualCallback,
+      resolveConsumedStartupEntryNavigation: () => {
+        if (!startupEntryIntentControllerRef.current) {
+          throw new Error('Startup entry intent controller is not initialized');
+        }
 
-  const startupEntryIntentController = createStartupEntryIntentController(options, {
-    deferredStartupEntryIntent,
-    persistDeferredStartupEntryIntent: intent =>
-      androidWidgetLazyLoad.persistDeferredStartupEntryIntent(intent),
-    resolveMobileRootProjectId: () =>
-      mobileRootStartupNavigation.resolveMobileRootStartupProjectId(),
-  });
+        return startupEntryIntentControllerRef.current
+          .resolveConsumedStartupEntryNavigation();
+      },
+    });
+
+  const startupEntryIntentController =
+    composeStartupEntryTeardownWithMobileRoot(
+      createWorkspaceShellStartupEntryIntentControllerHost(options, {
+        deferredStartupEntryIntent,
+        persistDeferredStartupEntryIntent: intent =>
+          androidWidgetLazyLoad.persistDeferredStartupEntryIntent(intent),
+        resolveMobileRootProjectId: () =>
+          mobileRootStartupNavigation.resolveMobileRootStartupProjectId(),
+      }),
+      mobileRootStartupNavigation,
+    );
   startupEntryIntentControllerRef.current = startupEntryIntentController;
 
   return {
@@ -126,72 +105,52 @@ export function createWorkspaceShellStartupEntryControllers(
   };
 }
 
-function createMobileRootStartupNavigation(
-  options: WorkspaceShellStartupEntryControllersFactoryOptions,
-  startupEntryIntentResolver: () => StartupEntryIntent | null,
-): WorkspaceShellMobileRootStartupNavigationController {
-  const createController = options.createMobileRootStartupNavigation
-    ?? (controllerOptions =>
-      new WorkspaceShellMobileRootStartupNavigationController(controllerOptions));
-
-  return createController({
-    activeProjectId: options.activeProjectId,
-    isMobile: options.isMobile,
-    navigateToTextProject: options.navigateToTextProject,
-    projects: options.projects,
-    routeUrl: options.routeUrl,
-    startupEntryIntent: startupEntryIntentResolver,
-    startupLaunchSnapshot: options.startupLaunchSnapshot,
-    warn: options.warn,
-  });
+function createStartupEntryIntentControllerRef(): {
+  current: StartupEntryIntentController | null;
+} {
+  return { current: null };
 }
 
-function createAndroidWidgetLazyLoad(
+function createRouteStartupEntryIntentResolver(
   options: WorkspaceShellStartupEntryControllersFactoryOptions,
-  managed: {
-    deferredStartupEntryIntent: DeferredStartupEntryIntentSignal;
-    pendingAndroidWidgetBootstrap: AndroidWidgetBootstrapSignal;
-    pendingAndroidWidgetManualCallback: AndroidWidgetCallbackSignal;
-    resolveConsumedStartupEntryNavigation: () => unknown[];
-  },
-): WorkspaceShellAndroidWidgetLazyLoadDelegate {
-  const createController = options.createAndroidWidgetLazyLoadController
-    ?? createWorkspaceShellAndroidWidgetLazyLoadController;
-
-  return createController({
-    ...options,
-    deferredStartupEntryIntent: managed.deferredStartupEntryIntent,
-    pendingBootstrap: managed.pendingAndroidWidgetBootstrap,
-    pendingCallback: managed.pendingAndroidWidgetManualCallback,
-    resolveConsumedStartupEntryNavigation: managed.resolveConsumedStartupEntryNavigation,
-  });
+): () => StartupEntryIntent | null {
+  return createWorkspaceShellStartupEntryIntentResolver({ routeUrl: options.routeUrl });
 }
 
-function createStartupEntryIntentController(
-  options: WorkspaceShellStartupEntryControllersFactoryOptions,
-  managed: {
-    deferredStartupEntryIntent: DeferredStartupEntryIntentSignal;
-    persistDeferredStartupEntryIntent: (startupEntryIntent: StartupEntryIntent | null) => void;
-    resolveMobileRootProjectId: () => string | null;
-  },
-): WorkspaceShellStartupEntryIntentControllerLike {
-  const createController = options.createStartupEntryIntentController
-    ?? createWorkspaceShellStartupEntryIntentController;
-  const {
-    createAndroidWidgetLazyLoadController,
-    createMobileRootStartupNavigation,
-    createStartupEntryIntentController: createStartupEntryIntent,
-    ...controllerOptions
-  } = options;
+function composeStartupEntryTeardownWithMobileRoot(
+  startupEntryIntentController: StartupEntryIntentController,
+  mobileRootStartupNavigation: ReturnType<
+    typeof createWorkspaceShellMobileRootStartupNavigationControllerHost
+  >,
+): StartupEntryIntentController {
+  let tornDown = false;
 
-  void createAndroidWidgetLazyLoadController;
-  void createMobileRootStartupNavigation;
-  void createStartupEntryIntent;
+  return {
+    flushWidgetWorkspaceGateRecheck: () =>
+      startupEntryIntentController.flushWidgetWorkspaceGateRecheck(),
+    resetPrimeState: () => startupEntryIntentController.resetPrimeState(),
+    resolveConsumedStartupEntryNavigation: () =>
+      startupEntryIntentController.resolveConsumedStartupEntryNavigation(),
+    sync: () => startupEntryIntentController.sync(),
+    teardown: () => {
+      if (tornDown) return;
+      tornDown = true;
 
-  return createController({
-    ...controllerOptions,
-    deferredStartupEntryIntent: managed.deferredStartupEntryIntent,
-    persistDeferredStartupEntryIntent: managed.persistDeferredStartupEntryIntent,
-    resolveMobileRootProjectId: managed.resolveMobileRootProjectId,
-  });
+      const failures: unknown[] = [];
+      try {
+        mobileRootStartupNavigation.destroy();
+      } catch (error) {
+        failures.push(error);
+      }
+
+      try {
+        startupEntryIntentController.teardown();
+      } catch (error) {
+        failures.push(error);
+      }
+
+      if (failures.length === 1) throw failures[0];
+      if (failures.length > 1) throw new AggregateError(failures);
+    },
+  };
 }

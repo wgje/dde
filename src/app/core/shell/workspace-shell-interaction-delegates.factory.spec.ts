@@ -76,6 +76,7 @@ describe('createWorkspaceShellInteractionDelegates', () => {
     const componentSource = readWorkspaceShellSource();
     const graphSource = readWorkspaceShellControllerGraphSource();
     const interactionSurfacesSource = readWorkspaceShellInteractionSurfacesSource();
+    // 中文注释：交互绑定分布在根模板与拆分后的侧栏/覆盖层子模板中，用联合视图断言
     const template = readWorkspaceShellTemplates();
 
     expect(graphSource).toContain('createWorkspaceShellInteractionSurfaces({');

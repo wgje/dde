@@ -44,8 +44,8 @@ export function createWorkspaceShellAndroidWidgetLazyLoadDelegate(
     restoreAll: () => {
       void delegate.restoreAll();
     },
-    syncProcessing: generation => {
-      void delegate.syncProcessing(generation);
+    syncProcessing: () => {
+      void delegate.syncProcessing();
     },
     teardown: () => {
       delegate.teardown();

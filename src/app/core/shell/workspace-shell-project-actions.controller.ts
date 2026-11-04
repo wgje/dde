@@ -13,7 +13,6 @@ export type {
 type SidebarOpenSignal = WorkspaceShellSignalSetter<boolean>;
 
 type WorkspaceShellProjectCoordinatorLike = WorkspaceShellProjectMutationCoordinatorLike & {
-  captureActiveProjectOwner?(): ActiveProjectOwner;
   selectProject(id: string, sidebarOpen: SidebarOpenSignal): void;
   onProjectCardClick(event: MouseEvent, projectId: string): void;
   handleGlobalClick(event: MouseEvent): void;

@@ -79,6 +79,10 @@ describe('workspace shell session launch options', () => {
       cancelPendingPersist: vi.fn(),
       schedulePersistDeferred: vi.fn(),
     };
+    const actionQueue = {
+      reloadFromStorageForCurrentOwner: vi.fn(),
+      processQueue: vi.fn(),
+    };
     const lazyServiceRefs = {
       simpleSync: {
         startRuntime: vi.fn(),
@@ -110,6 +114,7 @@ describe('workspace shell session launch options', () => {
     const warn = vi.fn();
 
     const options = createWorkspaceShellSessionLaunchOptions?.({
+      actionQueue,
       authCoord,
       authService,
       eventBus,
@@ -127,6 +132,7 @@ describe('workspace shell session launch options', () => {
     });
 
     expect(options).toEqual({
+      actionQueue,
       authCoord,
       authService,
       eventBus,
@@ -166,6 +172,10 @@ describe('workspace shell session launch options', () => {
       cancelPendingPersist: vi.fn(),
       schedulePersistDeferred: vi.fn(),
     };
+    const actionQueue = {
+      reloadFromStorageForCurrentOwner: vi.fn(),
+      processQueue: vi.fn(),
+    };
     const lazyServiceRefs = {
       simpleSync: {
         startRuntime: vi.fn(),
@@ -195,6 +205,7 @@ describe('workspace shell session launch options', () => {
     };
 
     const delegate = createWorkspaceShellSessionLaunchDelegate?.({
+      actionQueue,
       authCoord,
       authService,
       eventBus,
@@ -246,8 +257,13 @@ describe('workspace shell session launch options', () => {
       destroy: vi.fn(),
       resetFocusEntrySyncPulse: vi.fn(),
     };
+    const actionQueue = {
+      reloadFromStorageForCurrentOwner: vi.fn(),
+      processQueue: vi.fn(),
+    };
 
     const delegate = createWorkspaceShellSessionLaunchSurface?.({
+      actionQueue,
       authCoord: { isCheckingSession: vi.fn(() => false) },
       authService: {
         completeCrossTabSessionRestore: vi.fn(),
@@ -331,8 +347,13 @@ describe('workspace shell session launch options', () => {
     const controllers = createSessionLaunchControllers();
     const createSessionLaunchSurfaceDelegate = vi.fn()
       .mockResolvedValue(controllers);
+    const actionQueue = {
+      reloadFromStorageForCurrentOwner: vi.fn(),
+      processQueue: vi.fn(),
+    };
 
     const delegate = createWorkspaceShellSessionLaunchSurface?.({
+      actionQueue,
       authCoord: { isCheckingSession: vi.fn(() => false) },
       authService: {
         completeCrossTabSessionRestore: vi.fn(),

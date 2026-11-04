@@ -44,6 +44,18 @@ describe('WorkspaceShellSidebarResizeAsyncDelegateController', () => {
     expect(source).not.toContain('workspace-shell-lazy-delegate-call-host.controller');
   });
 
+  it('reuses the named pending gesture controller for async resize state', () => {
+    const source = readFileSync(
+      join(__dirname, 'workspace-shell-sidebar-resize-async-delegate.controller.ts'),
+      'utf8',
+    );
+
+    expect(source).toContain('WorkspaceShellSidebarResizePendingGestureController');
+    expect(source).toContain('private readonly pendingGesture');
+    expect(source).not.toContain('private active =');
+    expect(source).not.toContain('private gestureId =');
+  });
+
   it('keeps resize active while delegate loading and flushes the latest pending mousemove', async () => {
     const deferred = createWorkspaceShellSidebarResizeDeferred<WorkspaceShellSidebarResizeAsyncDelegate>();
     const delegate = createWorkspaceShellSidebarResizeDelegate();

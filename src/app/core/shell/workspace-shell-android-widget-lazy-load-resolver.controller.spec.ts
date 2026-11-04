@@ -278,30 +278,6 @@ describe('WorkspaceShellAndroidWidgetLazyLoadResolverController', () => {
     await expect(controller.captureFromRoute('/projects?entry=twa')).resolves.toBe(false);
   });
 
-  it('drops a torn-down sync attempt without carrying it into a later resolver', async () => {
-    const staleWidgetController = createAndroidWidgetLazyLoadLike();
-    const deferred = createDeferred<WorkspaceShellAndroidWidgetLazyLoadLike>();
-    const staleResolver = createController({
-      createAndroidWidgetLazyLoad: vi.fn(() => deferred.promise),
-    }).controller;
-
-    staleResolver.syncProcessing(10);
-    staleResolver.teardown();
-    deferred.resolve(staleWidgetController);
-    await flushMicrotasks();
-
-    const currentWidgetController = createAndroidWidgetLazyLoadLike();
-    const currentResolver = createController({
-      createAndroidWidgetLazyLoad: vi.fn().mockResolvedValue(currentWidgetController),
-    }).controller;
-    currentResolver.syncProcessing(11);
-    await flushMicrotasks();
-
-    expect(staleWidgetController.syncProcessing).not.toHaveBeenCalled();
-    expect(staleWidgetController.teardown).toHaveBeenCalledTimes(1);
-    expect(currentWidgetController.syncProcessing).toHaveBeenCalledExactlyOnceWith(11);
-  });
-
   it('does not run cached async widget operations when teardown happens before the continuation', async () => {
     const { androidWidgetLazyLoad, controller } = createController();
     await expect(controller.captureFromRoute('/projects?entry=twa')).resolves.toBe(true);

@@ -5,70 +5,25 @@ import {
   WorkspaceShellAuthActionsController,
   type WorkspaceShellAuthActionsControllerOptions,
 } from './workspace-shell-auth-actions.controller';
-import { readWorkspaceTextInputValue } from './workspace-shell-search.controller';
+import {
+  WorkspaceShellModalActionsController,
+  type WorkspaceShellErrorRecoveryModalInput,
+  type WorkspaceShellModalActionsControllerOptions,
+} from './workspace-shell-modal-actions.controller';
 import {
   WorkspaceShellProjectActionsController,
   type WorkspaceShellProjectActionsControllerOptions,
-  type WorkspaceShellSignalSetter,
 } from './workspace-shell-project-actions.controller';
+import {
+  WorkspaceShellUiActionsController,
+  type WorkspaceShellUiActionsControllerOptions,
+} from './workspace-shell-ui-actions.controller';
 
-type WorkspaceShellErrorRecoveryModalInput = {
-  title: string;
-  message: string;
-  details?: string;
-  options: unknown[];
-  defaultOptionId?: string;
-  autoSelectIn?: number | null;
-  resolve(result: { optionId: string }): void;
-};
-
-type WorkspaceShellModalCoordinatorLike = {
-  resolveConflictLocal(): Promise<void>;
-  resolveConflictRemote(): Promise<void>;
-  resolveConflictMerge(): Promise<void>;
-  cancelConflictResolution(): void;
-  openSettings(): Promise<void>;
-  closeSettings(): void;
-  openDashboard(options?: { initialTab?: string }): Promise<void>;
-  openDashboardFromSettings(): Promise<void>;
-  openConflictCenterFromDashboard(): void;
-  openLoginModal(): Promise<void>;
-  captureProjectUiOwner?(): ProjectUiOwner | null;
-  openTrashModal(owner?: ProjectUiOwner | null): Promise<void>;
-  openConfigHelpModal(): Promise<void>;
-  openNewProjectModal(): Promise<void>;
-  openMigrationModal(): Promise<void>;
-  openErrorRecoveryModal(error: WorkspaceShellErrorRecoveryModalInput): Promise<void>;
-  openStorageEscapeModalImperative(): Promise<void>;
-};
-
-type WorkspaceShellSearchLazyLoadLike = {
-  ensureLoaded(): void;
-};
-
-type WorkspaceShellSearchControllerLike = {
-  update(query: string): void;
-  clear(): void;
-};
-
-type WorkspaceShellUiStateLike = {
-  layoutDirection: WorkspaceShellSignalSetter<'ltr' | 'rtl'>;
-  floatingWindowPref: WorkspaceShellSignalSetter<'auto' | 'fixed'>;
-  filterMode: WorkspaceShellSignalSetter<string>;
-};
-
-export interface WorkspaceShellActionsControllerOptions
-  extends WorkspaceShellProjectActionsControllerOptions,
-    WorkspaceShellAuthActionsControllerOptions {
-  storageEscape: { close(): void };
-  modalCoord: WorkspaceShellModalCoordinatorLike;
-  preferenceService: {
-    setTheme(theme: ThemeType): Promise<unknown> | unknown;
-  };
-  uiState: WorkspaceShellUiStateLike;
-  searchLazyLoad: WorkspaceShellSearchLazyLoadLike;
-  searchController: WorkspaceShellSearchControllerLike;
-}
+export type WorkspaceShellActionsControllerOptions =
+  WorkspaceShellProjectActionsControllerOptions
+  & WorkspaceShellAuthActionsControllerOptions
+  & WorkspaceShellModalActionsControllerOptions
+  & WorkspaceShellUiActionsControllerOptions;
 
 export class WorkspaceShellActionsController extends WorkspaceShellProjectActionsController<
   WorkspaceShellActionsControllerOptions
@@ -76,10 +31,14 @@ export class WorkspaceShellActionsController extends WorkspaceShellProjectAction
   private readonly authActions: WorkspaceShellAuthActionsController<
     WorkspaceShellActionsControllerOptions
   >;
+  private readonly modalActions: WorkspaceShellModalActionsController;
+  private readonly uiActions: WorkspaceShellUiActionsController;
 
   constructor(options: WorkspaceShellActionsControllerOptions) {
     super(options);
     this.authActions = new WorkspaceShellAuthActionsController(options);
+    this.modalActions = new WorkspaceShellModalActionsController(options);
+    this.uiActions = new WorkspaceShellUiActionsController(options);
   }
 
   retryBootstrap(): void {
@@ -119,93 +78,91 @@ export class WorkspaceShellActionsController extends WorkspaceShellProjectAction
   }
 
   closeStorageEscapeModal(): void {
-    this.options.storageEscape.close();
+    this.modalActions.closeStorageEscapeModal();
   }
 
   resolveConflictLocal(): Promise<void> {
-    return this.options.modalCoord.resolveConflictLocal();
+    return this.modalActions.resolveConflictLocal();
   }
 
   resolveConflictRemote(): Promise<void> {
-    return this.options.modalCoord.resolveConflictRemote();
+    return this.modalActions.resolveConflictRemote();
   }
 
   resolveConflictMerge(): Promise<void> {
-    return this.options.modalCoord.resolveConflictMerge();
+    return this.modalActions.resolveConflictMerge();
   }
 
   cancelConflictResolution(): void {
-    this.options.modalCoord.cancelConflictResolution();
+    this.modalActions.cancelConflictResolution();
   }
 
   openSettings(): Promise<void> {
-    return this.options.modalCoord.openSettings();
+    return this.modalActions.openSettings();
   }
 
   closeSettings(): void {
-    this.options.modalCoord.closeSettings();
+    this.modalActions.closeSettings();
   }
 
   openDashboardFromSettings(): Promise<void> {
-    return this.options.modalCoord.openDashboardFromSettings();
+    return this.modalActions.openDashboardFromSettings();
   }
 
   openDashboard(): Promise<void> {
-    return this.options.modalCoord.openDashboard();
+    return this.modalActions.openDashboard();
   }
 
   openDashboardAtConflicts(): Promise<void> {
-    return this.options.modalCoord.openDashboard({ initialTab: 'conflicts' });
+    return this.modalActions.openDashboardAtConflicts();
   }
 
   openConflictCenterFromDashboard(): void {
-    this.options.modalCoord.openConflictCenterFromDashboard();
+    this.modalActions.openConflictCenterFromDashboard();
   }
 
   openLoginModal(): Promise<void> {
-    return this.options.modalCoord.openLoginModal();
+    return this.modalActions.openLoginModal();
   }
 
   openTrashModal(owner?: ProjectUiOwner | null): Promise<void> {
-    return this.options.modalCoord.openTrashModal(owner);
+    return this.modalActions.openTrashModal(owner);
   }
 
   openConfigHelpModal(): Promise<void> {
-    return this.options.modalCoord.openConfigHelpModal();
+    return this.modalActions.openConfigHelpModal();
   }
 
   openNewProjectModal(): Promise<void> {
-    return this.options.modalCoord.openNewProjectModal();
+    return this.modalActions.openNewProjectModal();
   }
 
   openMigrationModal(): Promise<void> {
-    return this.options.modalCoord.openMigrationModal();
+    return this.modalActions.openMigrationModal();
   }
 
   openErrorRecoveryModal(error: WorkspaceShellErrorRecoveryModalInput): Promise<void> {
-    return this.options.modalCoord.openErrorRecoveryModal(error);
+    return this.modalActions.openErrorRecoveryModal(error);
   }
 
   openStorageEscapeModalImperative(): Promise<void> {
-    return this.options.modalCoord.openStorageEscapeModalImperative();
+    return this.modalActions.openStorageEscapeModalImperative();
   }
 
   updateLayoutDirection(event: Event): void {
-    const value = readWorkspaceTextInputValue(event) as 'ltr' | 'rtl';
-    this.options.uiState.layoutDirection.set(value);
+    this.uiActions.updateLayoutDirection(event);
   }
 
   updateFloatPref(event: Event): void {
-    const value = readWorkspaceTextInputValue(event) as 'auto' | 'fixed';
-    this.options.uiState.floatingWindowPref.set(value);
+    this.uiActions.updateFloatPref(event);
   }
 
   updateTheme(theme: ThemeType): void {
-    void this.options.preferenceService.setTheme(theme);
+    this.uiActions.updateTheme(theme);
   }
 
   updateFilter(event: Event): void {
-    this.options.uiState.filterMode.set(readWorkspaceTextInputValue(event));
+    this.uiActions.updateFilter(event);
   }
 
   handleLoginFromModal(data: { email: string; password: string }): Promise<void> {
@@ -237,17 +194,14 @@ export class WorkspaceShellActionsController extends WorkspaceShellProjectAction
   }
 
   onUnifiedSearchInput(event: Event): void {
-    this.onUnifiedSearchChange(readWorkspaceTextInputValue(event));
+    this.uiActions.onUnifiedSearchInput(event);
   }
 
   onUnifiedSearchChange(query: string): void {
-    if (query.trim()) {
-      this.options.searchLazyLoad.ensureLoaded();
-    }
-    this.options.searchController.update(query);
+    this.uiActions.onUnifiedSearchChange(query);
   }
 
   clearUnifiedSearch(): void {
-    this.options.searchController.clear();
+    this.uiActions.clearUnifiedSearch();
   }
 }

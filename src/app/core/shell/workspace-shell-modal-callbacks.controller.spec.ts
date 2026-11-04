@@ -48,6 +48,49 @@ describe('WorkspaceShellModalCallbacksController', () => {
     expect(actions.closeMigrationModal).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps import completion awaitable until the shell action settles', async () => {
+    let resolveAction!: () => void;
+    const actionCompletion = new Promise<void>(resolve => {
+      resolveAction = resolve;
+    });
+    const actions = createActions();
+    actions.handleImportComplete.mockReturnValueOnce(actionCompletion);
+    const callbacks = new WorkspaceShellModalCallbacksController({ actions }).createCallbacks();
+
+    const result = callbacks.handleImportComplete?.({ id: 'project-1' } as never) as unknown;
+
+    expect(result).toBeInstanceOf(Promise);
+    if (!(result instanceof Promise)) return;
+    let settled = false;
+    const pending = result.then(() => { settled = true; });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    resolveAction();
+    await pending;
+
+    expect(settled).toBe(true);
+  });
+
+  it('logs and propagates import failures to the awaited restore workflow', async () => {
+    const error = new Error('project persistence failed');
+    const actions = createActions();
+    actions.handleImportComplete.mockRejectedValueOnce(error);
+    const warn = vi.fn();
+    const callbacks = new WorkspaceShellModalCallbacksController({
+      actions,
+      warn,
+    }).createCallbacks();
+
+    const result = callbacks.handleImportComplete?.({ id: 'project-1' } as never);
+
+    await expect(result).rejects.toBe(error);
+    expect(warn).toHaveBeenCalledWith(
+      'Workspace shell modal callback 执行失败，已跳过本次操作',
+      error,
+    );
+  });
+
   it('contains async action failures from fire-and-forget modal callbacks', async () => {
     const error = new Error('login failed');
     const actions = createActions();

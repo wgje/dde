@@ -32,7 +32,9 @@ export class WorkspaceShellModalCallbacksController {
     return {
       signOut: () => this.runAsyncCallback(() => actions.signOut()),
       updateTheme: theme => actions.updateTheme(theme),
-      handleImportComplete: project => this.runAsyncCallback(() => actions.handleImportComplete(project)),
+      handleImportComplete: project => this.runAwaitableCallback(
+        () => actions.handleImportComplete(project),
+      ),
       handleLoginFromModal: data => this.runAsyncCallback(() => actions.handleLoginFromModal(data)),
       handleSignupFromModal: data => this.runAsyncCallback(() => actions.handleSignupFromModal(data)),
       handleResetPasswordFromModal: email => this.runAsyncCallback(() => actions.handleResetPasswordFromModal(email)),
@@ -43,13 +45,30 @@ export class WorkspaceShellModalCallbacksController {
     };
   }
 
-  private runAsyncCallback(action: () => Promise<void> | void): void {
+  private runAsyncCallback(action: () => Promise<void> | void): Promise<void> {
     try {
-      void Promise.resolve(action()).catch(error => {
-        this.options.warn?.('Workspace shell modal callback 执行失败，已跳过本次操作', error);
+      return Promise.resolve(action()).catch(error => {
+        this.reportCallbackFailure(error);
       });
     } catch (error) {
-      this.options.warn?.('Workspace shell modal callback 执行失败，已跳过本次操作', error);
+      this.reportCallbackFailure(error);
+      return Promise.resolve();
     }
+  }
+
+  private runAwaitableCallback(action: () => Promise<void> | void): Promise<void> {
+    try {
+      return Promise.resolve(action()).catch(error => {
+        this.reportCallbackFailure(error);
+        throw error;
+      });
+    } catch (error) {
+      this.reportCallbackFailure(error);
+      return Promise.reject(error);
+    }
+  }
+
+  private reportCallbackFailure(error: unknown): void {
+    this.options.warn?.('Workspace shell modal callback 执行失败，已跳过本次操作', error);
   }
 }

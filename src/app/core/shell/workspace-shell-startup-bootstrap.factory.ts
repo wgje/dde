@@ -18,6 +18,8 @@ export interface WorkspaceShellStartupBootstrapFactoryOptions<TModalCallbacks> {
   userSession: { prehydrateFromSnapshot(): void };
   androidWidgetLazyLoad: { restoreAll(): void };
   signalEffects: { setup(): void };
+  /** 模态回调懒加载失败告警通道（可选，缺省时保持静默兼容旧调用方） */
+  warn?: (message: string, error: unknown) => void;
 }
 
 export function createWorkspaceShellStartupBootstrapController<TModalCallbacks>(
@@ -39,5 +41,6 @@ export function createWorkspaceShellStartupBootstrapController<TModalCallbacks>(
       options.userSession.prehydrateFromSnapshot(),
     restoreAndroidWidgetState: () => options.androidWidgetLazyLoad.restoreAll(),
     setupSignalEffects: () => options.signalEffects.setup(),
+    warn: options.warn,
   });
 }

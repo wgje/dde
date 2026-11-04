@@ -51,6 +51,7 @@ function createController(
       close: vi.fn(),
     },
     modalCoord: {
+      captureProjectUiOwner: vi.fn(() => null),
       resolveConflictLocal: vi.fn().mockResolvedValue(undefined),
       resolveConflictRemote: vi.fn().mockResolvedValue(undefined),
       resolveConflictMerge: vi.fn().mockResolvedValue(undefined),

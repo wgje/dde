@@ -23,7 +23,7 @@ export interface WorkspaceShellStartupEntryOptionsFactoryOptions {
   sidebarOpen: WorkspaceShellStartupEntryDelegatesOptions['sidebarOpen'];
   toolControllers: Pick<
     WorkspaceShellToolControllers,
-    'sidebarToolsLazyLoad' | 'widgetGateMutation'
+    'sidebarToolsLazyLoad' | 'widgetGateMutation' | 'panelToolsIntent'
   >;
   focusStartupProbe: {
     primeWidgetWorkspaceGateSync:
@@ -94,10 +94,11 @@ export function createWorkspaceShellStartupEntryOptions(
     userSession: options.userSession,
     isApplicationReady: () => options.bootStage.isApplicationReady(),
     focusPrefs: options.focusPrefs,
-    sidebarOpen: options.sidebarOpen,
-    sidebarToolsLazyLoad: options.toolControllers.sidebarToolsLazyLoad,
-    widgetGateMutation: options.toolControllers.widgetGateMutation,
-    primeWidgetWorkspaceGateSync: () =>
+ sidebarOpen: options.sidebarOpen,
+ sidebarToolsLazyLoad: options.toolControllers.sidebarToolsLazyLoad,
+ widgetGateMutation: options.toolControllers.widgetGateMutation,
+ panelToolsIntent: options.toolControllers.panelToolsIntent,
+  primeWidgetWorkspaceGateSync: () =>
       options.focusStartupProbe.primeWidgetWorkspaceGateSync(),
     refreshFocusSessionFromCloud: userId =>
       options.dockEngine.refreshFocusSessionFromCloud(userId),

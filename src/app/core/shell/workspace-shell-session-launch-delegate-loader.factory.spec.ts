@@ -28,6 +28,10 @@ function createOptions(
   overrides: Partial<WorkspaceShellSessionLaunchDelegatesOptions> = {},
 ): WorkspaceShellSessionLaunchDelegatesOptions {
   return {
+    actionQueue: {
+      processQueue: vi.fn().mockResolvedValue(undefined),
+      reloadFromStorageForCurrentOwner: vi.fn().mockResolvedValue(undefined),
+    },
     authCoord: { isCheckingSession: vi.fn(() => false) },
     authService: {
       completeCrossTabSessionRestore: vi.fn(),

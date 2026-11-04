@@ -70,6 +70,7 @@ function createStartupEntryController(): WorkspaceShellStartupEntryIntentControl
 
 function createMobileRootNavigation(): WorkspaceShellMobileRootStartupNavigationController {
   return {
+    destroy: vi.fn(),
     navigateRootStartupToTextProject: vi.fn(),
     resolveMobileRootStartupProjectId: vi.fn(() => 'mobile-root'),
     resolveStartupProjectFallbackId: vi.fn(() => 'fallback-project'),
@@ -178,4 +179,96 @@ describe('createWorkspaceShellStartupEntryControllers', () => {
 
     expect(navigateToTextProject).toHaveBeenCalledWith('project-1');
   });
+
+  it('retires the real mobile root controller through startup-entry teardown', async () => {
+    let resolveFirst!: (value: unknown) => void;
+    const firstNavigation = new Promise<unknown>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const navigateToTextProject = vi.fn().mockReturnValueOnce(firstNavigation);
+    const startupEntryController = createStartupEntryController();
+    const controllers = createWorkspaceShellStartupEntryControllers(createOptions({
+      createAndroidWidgetLazyLoadController: createAndroidWidget,
+      createStartupEntryIntentController: () => startupEntryController,
+      navigateToTextProject,
+      routeUrl: () => '/projects',
+    }));
+
+    controllers.mobileRootStartupNavigation.navigateRootStartupToTextProject('project-a');
+    controllers.mobileRootStartupNavigation.navigateRootStartupToTextProject('project-b');
+    controllers.startupEntryIntentController.teardown();
+    resolveFirst(true);
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(navigateToTextProject).toHaveBeenCalledTimes(1);
+    expect(startupEntryController.teardown).toHaveBeenCalledOnce();
+  });
+
+  it('tears down mobile root first and makes the composed teardown idempotent', () => {
+    const order: string[] = [];
+    const mobileRootNavigation = createMobileRootNavigation();
+    const startupEntryController = createStartupEntryController();
+    vi.mocked(mobileRootNavigation.destroy).mockImplementation(() => order.push('mobile'));
+    vi.mocked(startupEntryController.teardown).mockImplementation(() => order.push('startup'));
+    const controllers = createWorkspaceShellStartupEntryControllers(createOptions({
+      createAndroidWidgetLazyLoadController: createAndroidWidget,
+      createMobileRootStartupNavigation: () => mobileRootNavigation,
+      createStartupEntryIntentController: () => startupEntryController,
+    }));
+
+    controllers.startupEntryIntentController.teardown();
+    controllers.startupEntryIntentController.teardown();
+
+    expect(order).toEqual(['mobile', 'startup']);
+  });
+
+  it.each([
+    { throwingOwners: ['mobile'] },
+    { throwingOwners: ['startup'] },
+    { throwingOwners: ['mobile', 'startup'] },
+  ] as const)(
+    'preserves ordered teardown failures for $throwingOwners',
+    ({ throwingOwners }) => {
+      const order: string[] = [];
+      const mobileFailure = new Error('mobile teardown failed');
+      const startupFailure = new Error('startup teardown failed');
+      const throwing = new Set<string>(throwingOwners);
+      const mobileRootNavigation = createMobileRootNavigation();
+      const startupEntryController = createStartupEntryController();
+      vi.mocked(mobileRootNavigation.destroy).mockImplementation(() => {
+        order.push('mobile');
+        if (throwing.has('mobile')) throw mobileFailure;
+      });
+      vi.mocked(startupEntryController.teardown).mockImplementation(() => {
+        order.push('startup');
+        if (throwing.has('startup')) throw startupFailure;
+      });
+      const controllers = createWorkspaceShellStartupEntryControllers(createOptions({
+        createAndroidWidgetLazyLoadController: createAndroidWidget,
+        createMobileRootStartupNavigation: () => mobileRootNavigation,
+        createStartupEntryIntentController: () => startupEntryController,
+      }));
+
+      let thrown: unknown;
+      try {
+        controllers.startupEntryIntentController.teardown();
+      } catch (error) {
+        thrown = error;
+      }
+
+      const expectedFailures = [mobileFailure, startupFailure]
+        .filter((_, index) => throwing.has(index === 0 ? 'mobile' : 'startup'));
+      if (expectedFailures.length === 1) {
+        expect(thrown).toBe(expectedFailures[0]);
+      } else {
+        expect(thrown).toBeInstanceOf(AggregateError);
+        expect((thrown as AggregateError).errors).toEqual(expectedFailures);
+      }
+      expect(order).toEqual(['mobile', 'startup']);
+      expect(() => controllers.startupEntryIntentController.teardown()).not.toThrow();
+      expect(order).toEqual(['mobile', 'startup']);
+    },
+  );
 });
