@@ -21,6 +21,7 @@ import {
 import { SyncStateService } from '../../core-bridge';
 import { LoggerService } from '../logger.service';
 import { BeforeUnloadManagerService } from '../before-unload-manager.service';
+import { SyncCoordinatorService } from '../sync-coordinator.service';
 
 // ============================================
 // 配置
@@ -44,9 +45,81 @@ export const ROUTE_LEAVE_PROTECTION_CONFIG = {
   
   /** 需要保护的路由模式 */
   PROTECTED_ROUTES: [
-    '/project/',
+    '/projects/',
   ] as readonly string[],
 } as const;
+
+interface PendingChangesFlushDependencies {
+  syncState: Pick<SyncStateService, 'syncState'>;
+  syncCoordinator: Pick<
+    SyncCoordinatorService,
+    'flushPendingPersist'
+      | 'flushPendingPersistToCloud'
+      | 'hasPendingLocalChanges'
+  >;
+}
+
+async function flushPendingChangesAndWait(
+  dependencies: PendingChangesFlushDependencies,
+  reason: string,
+  timeoutMs: number,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  dependencies.syncCoordinator.flushPendingPersist();
+  const cloudFlushCompleted = await waitForPromiseUntilDeadline(
+    Promise.resolve().then(() => dependencies.syncCoordinator.flushPendingPersistToCloud(
+      reason,
+      { force: true },
+    )),
+    deadline,
+  );
+  if (!cloudFlushCompleted) {
+    return false;
+  }
+
+  return waitForSyncStateUntil(dependencies, deadline);
+}
+
+async function waitForPromiseUntilDeadline<T>(operation: Promise<T>, deadline: number): Promise<T> {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) {
+    throw new Error('自动保存超时');
+  }
+
+  let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+  const timeoutPromise = new Promise<T>((_, reject) => {
+    timeoutHandle = setTimeout(() => reject(new Error('自动保存超时')), remaining);
+  });
+
+  try {
+    return await Promise.race([operation, timeoutPromise]);
+  } finally {
+    if (timeoutHandle !== null) {
+      clearTimeout(timeoutHandle);
+    }
+  }
+}
+
+async function waitForSyncStateUntil(
+  dependencies: PendingChangesFlushDependencies,
+  deadline: number,
+): Promise<boolean> {
+  const checkInterval = 100;
+  while (Date.now() < deadline) {
+    const state = dependencies.syncState.syncState();
+    if (
+      state.pendingCount === 0
+      && !state.isSyncing
+      && !dependencies.syncCoordinator.hasPendingLocalChanges()
+    ) {
+      return true;
+    }
+
+    const remaining = deadline - Date.now();
+    await new Promise(resolve => setTimeout(resolve, Math.min(checkInterval, remaining)));
+  }
+  return false;
+}
 
 // ============================================
 // 可离开检查接口
@@ -75,6 +148,7 @@ function hasCanLeave(component: unknown): component is CanLeave {
 })
 export class UnsavedChangesGuard implements CanDeactivate<unknown> {
   private readonly syncService = inject(SyncStateService);
+  private readonly syncCoordinator = inject(SyncCoordinatorService);
   private readonly logger = inject(LoggerService).category('UnsavedChangesGuard');
   
   /**
@@ -144,7 +218,9 @@ export class UnsavedChangesGuard implements CanDeactivate<unknown> {
    */
   hasPendingChanges(): boolean {
     const state = this.syncService.syncState();
-    return state.pendingCount > 0 || state.isSyncing;
+    return state.pendingCount > 0
+      || state.isSyncing
+      || this.syncCoordinator.hasPendingLocalChanges();
   }
   
   /**
@@ -161,45 +237,15 @@ export class UnsavedChangesGuard implements CanDeactivate<unknown> {
    */
   private async tryAutoSave(): Promise<boolean> {
     try {
-      // 创建带超时的保存 Promise
-      const savePromise = this.flushPendingChanges();
-      const timeoutPromise = new Promise<boolean>((_, reject) => {
-        setTimeout(
-          () => reject(new Error('自动保存超时')),
-          ROUTE_LEAVE_PROTECTION_CONFIG.AUTO_SAVE_TIMEOUT
-        );
-      });
-      
-      await Promise.race([savePromise, timeoutPromise]);
-      
-      // 检查是否还有未保存的更改
-      return !this.hasPendingChanges();
+      return await flushPendingChangesAndWait(
+        { syncState: this.syncService, syncCoordinator: this.syncCoordinator },
+        'route-leave',
+        ROUTE_LEAVE_PROTECTION_CONFIG.AUTO_SAVE_TIMEOUT,
+      );
     } catch (error) {
       this.logger.warn('自动保存失败', error);
       return false;
     }
-  }
-  
-  /**
-   * 触发同步服务刷新待处理的更改
-   */
-  private async flushPendingChanges(): Promise<void> {
-    // SimpleSyncService 会在后台自动同步
-    // 这里等待当前同步完成
-    const maxWait = ROUTE_LEAVE_PROTECTION_CONFIG.AUTO_SAVE_TIMEOUT;
-    const checkInterval = 100;
-    let waited = 0;
-    
-    while (waited < maxWait) {
-      const state = this.syncService.syncState();
-      if (state.pendingCount === 0 && !state.isSyncing) {
-        return;
-      }
-      await new Promise(resolve => setTimeout(resolve, checkInterval));
-      waited += checkInterval;
-    }
-    
-    throw new Error('等待同步完成超时');
   }
 }
 
@@ -218,6 +264,7 @@ export class UnsavedChangesGuard implements CanDeactivate<unknown> {
 })
 export class BeforeUnloadGuardService {
   private readonly syncService = inject(SyncStateService);
+  private readonly syncCoordinator = inject(SyncCoordinatorService);
   private readonly logger = inject(LoggerService).category('BeforeUnloadGuard');
   private readonly beforeUnloadManager = inject(BeforeUnloadManagerService);
   
@@ -262,7 +309,9 @@ export class BeforeUnloadGuardService {
    */
   private shouldBlockUnload(): boolean {
     const state = this.syncService.syncState();
-    return state.pendingCount > 0 || state.isSyncing;
+    return state.pendingCount > 0
+      || state.isSyncing
+      || this.syncCoordinator.hasPendingLocalChanges();
   }
 }
 
@@ -280,22 +329,25 @@ export class BeforeUnloadGuardService {
 })
 export class ProjectSwitchGuardService {
   private readonly syncService = inject(SyncStateService);
+  private readonly syncCoordinator = inject(SyncCoordinatorService);
   private readonly logger = inject(LoggerService).category('ProjectSwitchGuard');
   
   /**
    * 检查是否可以切换项目
-   * @returns 'save' | 'discard' | 'cancel'
+   * @returns proceed 表示可继续切换，cancel 表示留在当前项目
    */
   async canSwitchProject(): Promise<'proceed' | 'cancel'> {
     const state = this.syncService.syncState();
+    const hasPendingLocalChanges = this.syncCoordinator.hasPendingLocalChanges();
     
-    if (state.pendingCount === 0 && !state.isSyncing) {
+    if (state.pendingCount === 0 && !state.isSyncing && !hasPendingLocalChanges) {
       return 'proceed';
     }
     
     this.logger.info('检测到未保存的更改，询问用户', {
       pendingCount: state.pendingCount,
       isSyncing: state.isSyncing,
+      hasPendingLocalChanges,
     });
     
     // 先尝试等待同步完成
@@ -310,12 +362,20 @@ export class ProjectSwitchGuardService {
     const confirmed = window.confirm(
       '当前项目有未同步的更改。\n\n' +
       '点击"确定"将尝试保存更改后切换。\n' +
-      '点击"取消"将放弃更改。'
+      '点击"取消"将留在当前项目。'
     );
     
     if (confirmed) {
-      // 等待同步完成
-      const completed = await this.waitForSync(5000);
+      let completed = false;
+      try {
+        completed = await flushPendingChangesAndWait(
+          { syncState: this.syncService, syncCoordinator: this.syncCoordinator },
+          'project-switch',
+          5000,
+        );
+      } catch (error) {
+        this.logger.warn('项目切换前保存失败', error);
+      }
       if (!completed) {
         const forceSwitch = window.confirm('保存超时，是否强制切换（可能丢失数据）？');
         return forceSwitch ? 'proceed' : 'cancel';
@@ -335,7 +395,11 @@ export class ProjectSwitchGuardService {
     
     while (waited < timeout) {
       const state = this.syncService.syncState();
-      if (state.pendingCount === 0 && !state.isSyncing) {
+      if (
+        state.pendingCount === 0
+        && !state.isSyncing
+        && !this.syncCoordinator.hasPendingLocalChanges()
+      ) {
         return true;
       }
       await new Promise(resolve => setTimeout(resolve, checkInterval));
