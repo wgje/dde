@@ -18,7 +18,6 @@ import {
   createProjectDataPagedQuery,
   describe,
   expect,
-  hasTaskContentMissingFromSource,
   it,
   vi,
 } from './project-data.service.spec-context';
@@ -27,7 +26,7 @@ import type { Task } from './project-data.service.spec-context';
 
 export function registerProjectDataTaskRowSpecs(): void {
   describe('task row mapping and legacy schema loading', () => {
-      it('rowToTask 遇到缺失 content 字段时应告警并上报采样监控', () => {
+      it('rowToTask 遇到缺失 content 字段时应告警、上报并拒绝映射', () => {
         const logger = {
           debug: vi.fn(),
           info: vi.fn(),
@@ -94,15 +93,16 @@ export function registerProjectDataTaskRowSpecs(): void {
         const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0.01);
         const service = injector.get(ProjectDataService);
 
-        const task = service.rowToTask({
+        expect(() => service.rowToTask({
           id: 'task-missing-content',
           title: '缺少正文',
           stage: 1,
+          parent_id: null,
+          order: 0,
+          rank: 1000,
+          status: 'active',
           updated_at: '2026-03-29T00:00:00.000Z',
-        } as never);
-
-        expect(task.content).toBe('');
-        expect(hasTaskContentMissingFromSource(task)).toBe(true);
+        } as never)).toThrowError(/missing required fields.*content/i);
         expect(logger.warn).toHaveBeenCalledWith(
           'rowToTask: content 字段缺失，可能导致数据丢失！',
           expect.objectContaining({
@@ -201,6 +201,10 @@ export function registerProjectDataTaskRowSpecs(): void {
           title: '任务',
           content: '内容',
           stage: 1,
+          parent_id: null,
+          order: 0,
+          rank: 1000,
+          status: 'active',
           updated_at: '2026-06-05T00:00:00.000Z',
           attention_meta: attentionMeta,
         } as never);
@@ -270,6 +274,10 @@ export function registerProjectDataTaskRowSpecs(): void {
           title: '任务',
           content: '内容',
           stage: 1,
+          parent_id: null,
+          order: 0,
+          rank: 1000,
+          status: 'active',
           updated_at: '2026-06-05T00:00:00.000Z',
           attention_meta: null,
         } as never);
@@ -528,7 +536,7 @@ export function registerProjectDataTaskRowSpecs(): void {
         expect(tasksQuery.select).toHaveBeenNthCalledWith(3, expect.not.stringContaining('attention_meta'));
       });
 
-      it('pullTasksThrottled materialize tombstone 时应保留缺失 content marker', async () => {
+      it('pullTasksThrottled 在 tombstone 物化前仍应拒绝缺失 content 的任务行', async () => {
         const taskRow = {
           id: 'task-missing-content-tombstone',
           title: '缺失正文但被 tombstone 物化',
@@ -621,13 +629,11 @@ export function registerProjectDataTaskRowSpecs(): void {
         });
 
         const service = injector.get(ProjectDataService);
-        const result = await (service as unknown as {
+        const pullTasks = (service as unknown as {
           pullTasksThrottled: (projectId: string, client: unknown) => Promise<Task[]>;
         }).pullTasksThrottled('project-marker-clone', client);
 
-        expect(result).toHaveLength(1);
-        expect(result[0]?.deletedAt).toBe('2026-04-29T00:00:00.000Z');
-        expect(hasTaskContentMissingFromSource(result[0])).toBe(true);
+        await expect(pullTasks).rejects.toThrowError(/missing required fields.*content/i);
       });
   });
 }

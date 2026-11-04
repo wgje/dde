@@ -1,6 +1,28 @@
 import { describe, expect, it, vi } from 'vitest';
 import { hasTaskContentMissingFromSource } from '../../../../utils/task-content-guard';
-import { mapTaskRowToTask, type TaskRowMappingReporter } from './task-row.mapper';
+import {
+  mapTaskRowToTask,
+  type TaskRowLike,
+  type TaskRowMappingReporter,
+} from './task-row.mapper';
+
+function createCompleteTaskRow(overrides: Partial<TaskRowLike> = {}): TaskRowLike {
+  return {
+    id: 'task-1',
+    title: 'Task',
+    content: '',
+    stage: null,
+    parent_id: null,
+    order: 0,
+    rank: 0,
+    status: 'active',
+    x: 0,
+    y: 0,
+    created_at: '2026-06-01T00:00:00.000Z',
+    updated_at: '2026-06-02T00:00:00.000Z',
+    ...overrides,
+  };
+}
 
 describe('mapTaskRowToTask', () => {
   const reporter: TaskRowMappingReporter = {
@@ -9,8 +31,7 @@ describe('mapTaskRowToTask', () => {
   };
 
   it('maps persisted task fields without dropping content or planning metadata', () => {
-    const task = mapTaskRowToTask({
-      id: 'task-1',
+    const task = mapTaskRowToTask(createCompleteTaskRow({
       title: 'Title',
       content: 'Body',
       stage: 2,
@@ -49,7 +70,7 @@ describe('mapTaskRowToTask', () => {
           updatedAt: '2026-06-01T00:00:00.000Z',
         }],
       },
-    }, reporter);
+    }), reporter);
 
     expect(task).toMatchObject({
       id: 'task-1',
@@ -77,16 +98,14 @@ describe('mapTaskRowToTask', () => {
   });
 
   it('preserves explicit null metadata while keeping omitted legacy columns undefined', () => {
-    const explicitNullTask = mapTaskRowToTask({
+    const explicitNullTask = mapTaskRowToTask(createCompleteTaskRow({
       id: 'task-null-meta',
-      content: '',
       parking_meta: null,
       attention_meta: null,
-    }, reporter);
-    const omittedLegacyTask = mapTaskRowToTask({
+    }), reporter);
+    const omittedLegacyTask = mapTaskRowToTask(createCompleteTaskRow({
       id: 'task-legacy-meta',
-      content: '',
-    }, reporter);
+    }), reporter);
 
     expect(explicitNullTask.parkingMeta).toBeNull();
     expect(explicitNullTask.attentionMeta).toBeNull();
@@ -100,14 +119,17 @@ describe('mapTaskRowToTask', () => {
       captureContentMissing: vi.fn(),
     };
 
-    const task = mapTaskRowToTask({
+    const row = createCompleteTaskRow({
       id: 'task-missing-content',
       title: 'Title',
       updated_at: '2026-06-02T00:00:00.000Z',
-    }, localReporter);
+    });
+    delete row.content;
 
-    expect(task.content).toBe('');
-    expect(hasTaskContentMissingFromSource(task)).toBe(true);
+    expect(() => mapTaskRowToTask(row, localReporter)).toThrowError(
+      /missing required fields.*content/i,
+    );
+
     expect(localReporter.warnContentMissing).toHaveBeenCalledWith(
       expect.objectContaining({ taskId: 'task-missing-content' }),
     );
@@ -116,20 +138,69 @@ describe('mapTaskRowToTask', () => {
     );
   });
 
+  it.each([
+    ['null', null],
+    ['non-string', 42],
+  ])('rejects %s content and reports the incomplete source row', (label, content) => {
+    const localReporter: TaskRowMappingReporter = {
+      warnContentMissing: vi.fn(),
+      captureContentMissing: vi.fn(),
+    };
+    const row = createCompleteTaskRow({ id: `task-${label}-content` });
+    row.content = content as unknown as string;
+
+    expect(() => mapTaskRowToTask(row, localReporter)).toThrowError(
+      /missing required fields.*content/i,
+    );
+    expect(localReporter.warnContentMissing).toHaveBeenCalledWith(
+      expect.objectContaining({ taskId: row.id }),
+    );
+    expect(localReporter.captureContentMissing).toHaveBeenCalledWith(
+      expect.objectContaining({ taskId: row.id }),
+    );
+  });
+
   it('preserves numeric zero values instead of replacing them with defaults', () => {
-    const task = mapTaskRowToTask({
+    const task = mapTaskRowToTask(createCompleteTaskRow({
       id: 'task-zero',
-      content: '',
       order: 0,
       rank: 0,
       x: 0,
       y: 0,
       updated_at: '2026-06-02T00:00:00.000Z',
-    }, reporter);
+    }), reporter);
 
     expect(task.order).toBe(0);
     expect(task.rank).toBe(0);
     expect(task.x).toBe(0);
     expect(task.y).toBe(0);
+  });
+
+  it.each([
+    'content',
+    'stage',
+    'parent_id',
+    'order',
+    'rank',
+    'status',
+    'updated_at',
+  ] as const)('rejects a task row that omits required field %s', (field) => {
+    const row = createCompleteTaskRow({ id: `task-missing-${field}` });
+    delete row[field];
+
+    expect(() => mapTaskRowToTask(row, reporter)).toThrowError(
+      new RegExp(`missing required fields.*${field}`, 'i'),
+    );
+  });
+
+  it('accepts explicit null for nullable structural fields', () => {
+    const task = mapTaskRowToTask(createCompleteTaskRow({
+      stage: null,
+      parent_id: null,
+    }), reporter);
+
+    expect(task.stage).toBeNull();
+    expect(task.parentId).toBeNull();
+    expect(hasTaskContentMissingFromSource(task)).toBe(false);
   });
 });

@@ -1,6 +1,30 @@
 import type { Attachment, Task, TaskAttentionMeta } from '../../../../models';
 import type { TaskParkingMeta } from '../../../../models/parking';
-import { markTaskContentMissingFromSource } from '../../../../utils/task-content-guard';
+
+export const REQUIRED_TASK_ROW_FIELDS = [
+  'content',
+  'stage',
+  'parent_id',
+  'order',
+  'rank',
+  'status',
+  'updated_at',
+] as const;
+
+export type RequiredTaskRowField = typeof REQUIRED_TASK_ROW_FIELDS[number];
+
+export class TaskRowIntegrityError extends Error {
+  readonly code = 'TASK_ROW_INCOMPLETE';
+
+  constructor(
+    readonly taskId: string | null | undefined,
+    readonly missingFields: RequiredTaskRowField[],
+    readonly rowKeys: string[],
+  ) {
+    super(`Task row ${taskId || '<unknown>'} missing required fields: ${missingFields.join(', ')}`);
+    this.name = 'TaskRowIntegrityError';
+  }
+}
 
 export interface TaskRowLike {
   id?: string | null;
@@ -48,6 +72,13 @@ function mapNullableJsonField<T>(row: TaskRowLike, key: keyof TaskRowLike): T | 
 
   const value = row[key];
   return value === null || value === undefined ? null : value as T;
+}
+
+function getMissingRequiredTaskRowFields(row: TaskRowLike): RequiredTaskRowField[] {
+  return REQUIRED_TASK_ROW_FIELDS.filter(field => {
+    if (field === 'content') return typeof row.content !== 'string';
+    return !Object.prototype.hasOwnProperty.call(row, field) || row[field] === undefined;
+  });
 }
 
 function getTaskRowScalarFields(row: TaskRowLike): Pick<
@@ -115,8 +146,7 @@ function getTaskRowMetadataFields(row: TaskRowLike): Pick<
 }
 
 export function mapTaskRowToTask(row: TaskRowLike, reporter: TaskRowMappingReporter): Task {
-  const contentMissingFromSource = !Object.prototype.hasOwnProperty.call(row, 'content')
-    || row.content === undefined;
+  const contentMissingFromSource = typeof row.content !== 'string';
 
   if (contentMissingFromSource) {
     reporter.warnContentMissing({
@@ -130,14 +160,13 @@ export function mapTaskRowToTask(row: TaskRowLike, reporter: TaskRowMappingRepor
     });
   }
 
-  const task: Task = {
+  const missingFields = getMissingRequiredTaskRowFields(row);
+  if (missingFields.length > 0) {
+    throw new TaskRowIntegrityError(row.id, missingFields, Object.keys(row));
+  }
+
+  return {
     ...getTaskRowScalarFields(row),
     ...getTaskRowMetadataFields(row),
   };
-
-  if (contentMissingFromSource) {
-    markTaskContentMissingFromSource(task);
-  }
-
-  return task;
 }
