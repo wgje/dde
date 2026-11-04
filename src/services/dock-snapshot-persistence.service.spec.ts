@@ -16,6 +16,7 @@ import {
 } from './dock-snapshot-persistence-pending.spec-helpers';
 import { registerDockSnapshotKeySpecs } from './dock-snapshot-persistence-key.spec-helpers';
 import { registerDockSnapshotNewerSpecs } from './dock-snapshot-persistence-newer.spec-helpers';
+import { LocalBackupUiRestoreWriterQuiescenceService } from './local-backup-ui-restore-writer-quiescence.service';
 
 vi.mock('idb-keyval', () => ({
   del: vi.fn(),
@@ -132,6 +133,124 @@ describe('DockSnapshotPersistenceService', () => {
       await Promise.resolve();
       await Promise.resolve();
       expect(mockSet).toHaveBeenCalledTimes(2);
+    });
+
+    it('should release the restore writer when snapshot materialization throws', async () => {
+      const quiescence = new LocalBackupUiRestoreWriterQuiescenceService({ pollIntervalMs: 1 });
+
+      expect(() => service.persistImmediateSnapshot(() => {
+        throw new Error('snapshot materialization failed');
+      }, 'restore-owner')).toThrow('snapshot materialization failed');
+
+      const handle = await quiescence.prepare('restore-owner');
+      await handle.abortBeforeMutation();
+      expect(mockSet).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('writer quiescence', () => {
+    it('should wait for pending dock writes and block new writes after freeze', async () => {
+      const snapshot = makeMinimalSnapshot({
+        entries: [makeMinimalEntry({ taskId: 'task-restore', dockedOrder: 1 })],
+        savedAt: '2025-01-15T12:34:56.000Z',
+      }) as unknown as DockSnapshot;
+      const quiescence = new LocalBackupUiRestoreWriterQuiescenceService({ pollIntervalMs: 1 });
+      let releasePersist!: () => void;
+      mockSet.mockImplementation(() => new Promise(resolve => {
+        releasePersist = () => resolve(undefined);
+      }));
+      const localStorageBefore = localStorage.getItem(service.legacyLocalStorageKey('restore-owner'));
+
+      service.scheduleLocalPersist(() => snapshot, 'restore-owner', () => 0);
+      const preparing = quiescence.prepare('restore-owner');
+
+      await vi.waitFor(() => expect(releasePersist).toBeTypeOf('function'));
+      releasePersist();
+      const handle = await preparing;
+
+      expect(() => service.scheduleLocalPersist(() => snapshot, 'restore-owner', () => 0))
+        .toThrow(/paused writers for owner restore-owner/i);
+      expect(() => service.persistImmediateSnapshot(() => snapshot, 'restore-owner'))
+        .toThrow(/paused writers for owner restore-owner/i);
+      expect(localStorage.getItem(service.legacyLocalStorageKey('restore-owner'))).toBe(localStorageBefore);
+      await handle.abortBeforeMutation();
+    });
+
+    it('should release a pending writer when scheduled snapshot materialization throws', async () => {
+      const quiescence = new LocalBackupUiRestoreWriterQuiescenceService({ pollIntervalMs: 1 });
+      let materializationAttempted = false;
+
+      service.scheduleLocalPersist(() => {
+        materializationAttempted = true;
+        throw new Error('snapshot materialization failed');
+      }, 'restore-owner', () => 0);
+
+      await vi.waitFor(() => expect(materializationAttempted).toBe(true));
+      const handle = await quiescence.prepare('restore-owner');
+      await handle.abortBeforeMutation();
+      expect(mockSet).not.toHaveBeenCalled();
+    });
+
+    it('should release a pending writer when cancel snapshot materialization throws', async () => {
+      const quiescence = new LocalBackupUiRestoreWriterQuiescenceService({ pollIntervalMs: 1 });
+
+      service.scheduleLocalPersist(() => {
+        throw new Error('snapshot materialization failed');
+      }, 'restore-owner', () => 0);
+
+      expect(() => service.cancelPendingPersist()).toThrow('snapshot materialization failed');
+      const handle = await quiescence.prepare('restore-owner');
+      await handle.abortBeforeMutation();
+      expect(mockSet).not.toHaveBeenCalled();
+    });
+
+    it('should not promote a dock snapshot after owner restore quiescence is prepared', async () => {
+      const snapshot = makeMinimalSnapshot({
+        savedAt: '2025-01-15T12:34:56.000Z',
+      });
+      const key = service.legacyLocalStorageKey('restore-owner');
+      const rawSnapshot = JSON.stringify(snapshot);
+      localStorage.setItem(key, rawSnapshot);
+      const quiescence = new LocalBackupUiRestoreWriterQuiescenceService({ pollIntervalMs: 1 });
+      const handle = await quiescence.prepare('restore-owner');
+
+      await expect(service.restoreLocalSnapshot('restore-owner', makeNormalizeContext()))
+        .rejects.toThrow(/paused writers for owner restore-owner/i);
+
+      expect(mockSet).not.toHaveBeenCalled();
+      expect(localStorage.getItem(key)).toBe(rawSnapshot);
+      await handle.abortBeforeMutation();
+    });
+
+    it('should wait for an in-progress dock snapshot promotion before preparing owner restore', async () => {
+      const snapshot = makeMinimalSnapshot({
+        savedAt: '2025-01-15T12:34:56.000Z',
+      });
+      localStorage.setItem(
+        service.legacyLocalStorageKey('restore-owner'),
+        JSON.stringify(snapshot),
+      );
+      let releasePromotion!: () => void;
+      mockSet.mockImplementation(() => new Promise(resolve => {
+        releasePromotion = () => resolve(undefined);
+      }));
+      const restoring = service.restoreLocalSnapshot('restore-owner', makeNormalizeContext());
+      await vi.waitFor(() => expect(releasePromotion).toBeTypeOf('function'));
+
+      const quiescence = new LocalBackupUiRestoreWriterQuiescenceService({ pollIntervalMs: 1 });
+      let prepared = false;
+      const preparing = quiescence.prepare('restore-owner').then(handle => {
+        prepared = true;
+        return handle;
+      });
+      await new Promise(resolve => setTimeout(resolve, 10));
+      expect(prepared).toBe(false);
+
+      releasePromotion();
+      await restoring;
+      const handle = await preparing;
+      expect(prepared).toBe(true);
+      await handle.abortBeforeMutation();
     });
   });
 
@@ -485,6 +604,23 @@ describe('DockSnapshotPersistenceService', () => {
       expect(restored?.focusMode).toBe(false);
       expect(restored?.session.focusScrimOn).toBe(false);
       expect(localStorage.getItem(service.legacyLocalStorageKey('user-1'))).toBeNull();
+    });
+
+    it('should retain the legacy source when owner IndexedDB promotion fails', async () => {
+      const snapshot = makeMinimalSnapshot({
+        focusMode: true,
+        savedAt: '2025-01-15T12:34:56.000Z',
+      });
+      const key = service.legacyLocalStorageKey('user-1');
+      const rawSnapshot = JSON.stringify(snapshot);
+      localStorage.setItem(key, rawSnapshot);
+      mockSet.mockRejectedValue(new Error('idb unavailable'));
+
+      const restored = await service.restoreLocalSnapshot('user-1', ctx);
+
+      expect(restored?.focusMode).toBe(true);
+      expect(localStorage.getItem(key)).toBe(rawSnapshot);
+      expect(mockDel).not.toHaveBeenCalled();
     });
 
     it('should migrate legacy anonymous IDB snapshot into local-user bucket on restore', async () => {

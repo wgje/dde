@@ -279,6 +279,24 @@ describe('DisasterBackupService', () => {
     }));
   });
 
+  it('buildLocalPayload should export the current owner dock snapshot', async () => {
+    const snapshot = {
+      savedAt: '2026-11-05T00:00:00.000Z',
+      session: { mainTaskId: 'task-1' },
+    };
+    const rawSnapshot = JSON.stringify(snapshot);
+    localStorage.setItem('nanoflow.dock-snapshot.v3.user-1', rawSnapshot);
+
+    const payload = await createLocalBackupService().buildLocalPayload([createProject()], {
+      autoBackupEnabled: false,
+      autoBackupIntervalMs: 900000,
+    });
+
+    expect(payload.localState?.dockSnapshot).toEqual(expect.objectContaining({
+      localStorage: rawSnapshot,
+    }));
+  });
+
   it('buildLocalBlob preserves ActionQueue replay identity and dead letters', async () => {
     const actionQueue: QueuedAction[] = [{
       id: '88888888-8888-4888-8888-888888888888',

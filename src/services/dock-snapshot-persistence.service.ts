@@ -26,6 +26,10 @@ import { LoggerService } from './logger.service';
 import { del, get, set } from 'idb-keyval';
 import { TimerHandle } from '../utils/timer-handle';
 import { normalizeDockSnapshotEntry } from './dock-snapshot-entry-normalization.helpers';
+import {
+  beginLocalBackupUiRestoreWriter,
+  type LocalBackupUiRestoreWriterHandle,
+} from './local-backup-ui-restore-writer-quiescence-tracker';
 
 const LOCAL_IDB_KEY_PREFIX = 'nanoflow.focus-session.v5';
 // 持久化防抖 500ms（原 120ms 太激进，动画期间信号频繁变化导致
@@ -57,6 +61,7 @@ export class DockSnapshotPersistenceService {
     snapshotFn: () => DockSnapshot;
     userId: string | null;
   } | null = null;
+  private pendingWriter: { ownerUserId: string; handle: LocalBackupUiRestoreWriterHandle } | null = null;
 
   // ─── Local IDB Persistence ───────────────────
 
@@ -65,27 +70,43 @@ export class DockSnapshotPersistenceService {
     userId: string | null,
     getNonCriticalHoldDelay: () => number,
   ): void {
+    this.beginPendingWriter(userId);
     this.pendingLocalPersist = { snapshotFn, userId };
     // M-3 fix: 持久化最大延迟上限，防止动画持续 hold 导致无限延迟
     const deadline = Date.now() + 10_000;
     const runPersist = () => {
-      const holdDelay = getNonCriticalHoldDelay();
+      let holdDelay: number;
+      try {
+        holdDelay = getNonCriticalHoldDelay();
+      } catch (error) {
+        this.pendingLocalPersist = null;
+        this.releasePendingWriter();
+        this.logger.error('Scheduled dock snapshot hold check failed', error);
+        return;
+      }
       if (holdDelay > 0 && Date.now() < deadline) {
         this.localPersistTimer.schedule(runPersist, holdDelay);
         return;
       }
-      const resolved = snapshotFn();
       this.pendingLocalPersist = null;
-      // structuredClone 深拷贝快照，避免后续异步 IDB 写入时引用被外部修改
-      const cloned = structuredClone(resolved);
-      // 串行化写入：前一次未完成时，本次写入排队等待
-      // 链上附加 .catch 防止单次 IDB 写入失败导致整条链断裂（后续所有持久化静默丢失）
-      const key = this.localCacheKey(userId);
-      this.persistChain = this.persistChain.then(async () => {
-        await this.persistToIdb(key, cloned);
-      }).catch(err => {
-        this.logger.error('persistChain: IDB write failed, chain recovered', err);
-      });
+      const pendingWriter = this.takePendingWriter();
+      let queued = false;
+      try {
+        // structuredClone prevents callers from mutating a snapshot queued for IDB.
+        const cloned = structuredClone(snapshotFn());
+        const key = this.localCacheKey(userId);
+        const write = this.persistChain.then(async () => {
+          await this.persistToIdb(key, cloned);
+        }).catch(err => {
+          this.logger.error('persistChain: IDB write failed, chain recovered', err);
+        });
+        this.persistChain = write.finally(() => pendingWriter?.release());
+        queued = true;
+      } catch (error) {
+        this.logger.error('Scheduled dock snapshot persist failed before enqueue', error);
+      } finally {
+        if (!queued) pendingWriter?.release();
+      }
     };
     this.localPersistTimer.schedule(runPersist, LOCAL_PERSIST_DEBOUNCE_MS);
   }
@@ -94,20 +115,27 @@ export class DockSnapshotPersistenceService {
     snapshotFn: () => DockSnapshot,
     userId: string | null,
   ): Promise<boolean> {
-    this.pendingLocalPersist = null;
-    this.localPersistTimer.cancel();
+    const writer = this.beginStandaloneWriter(userId);
+    try {
+      this.pendingLocalPersist = null;
+      this.localPersistTimer.cancel();
+      this.releasePendingWriter();
 
-    const cloned = structuredClone(snapshotFn());
-    this.persistShadowToLocalStorage(cloned, userId);
-    const key = this.localCacheKey(userId);
-    const write = this.persistChain
-      .then(() => this.persistToIdb(key, cloned))
-      .catch(err => {
-        this.logger.error('Immediate dock snapshot persist failed, chain recovered', err);
-        return false;
-      });
-    this.persistChain = write.then(() => undefined);
-    return write;
+      const cloned = structuredClone(snapshotFn());
+      this.persistShadowToLocalStorage(cloned, userId);
+      const key = this.localCacheKey(userId);
+      const write = this.persistChain
+        .then(() => this.persistToIdb(key, cloned))
+        .catch(err => {
+          this.logger.error('Immediate dock snapshot persist failed, chain recovered', err);
+          return false;
+        });
+      this.persistChain = write.then(() => undefined).finally(() => writer?.release());
+      return write;
+    } catch (error) {
+      writer?.release();
+      throw error;
+    }
   }
 
   async restoreLocalSnapshot(
@@ -134,17 +162,23 @@ export class DockSnapshotPersistenceService {
 
     if (!winner) return null;
 
-    await this.promoteRestoreWinner(currentIdbKey, winner);
-    this.reconcileLegacyRestoreShadow(
-      winner,
-      userId,
-      currentLegacyKey,
-      anonymousLegacyKey,
-      currentLegacySnapshot,
-    );
-    await this.cleanupAnonymousIdbFallback(anonymousIdbKey);
+    const writer = this.beginStandaloneWriter(userId);
+    try {
+      const promoted = await this.promoteRestoreWinner(currentIdbKey, winner);
+      if (!promoted) return winner.snapshot;
+      this.reconcileLegacyRestoreShadow(
+        winner,
+        userId,
+        currentLegacyKey,
+        anonymousLegacyKey,
+        currentLegacySnapshot,
+      );
+      await this.cleanupAnonymousIdbFallback(anonymousIdbKey);
 
-    return winner.snapshot;
+      return winner.snapshot;
+    } finally {
+      writer?.release();
+    }
   }
 
   private async collectRestoreCandidates(params: {
@@ -196,15 +230,17 @@ export class DockSnapshotPersistenceService {
   private async promoteRestoreWinner(
     currentIdbKey: string,
     winner: PersistedSnapshotCandidate,
-  ): Promise<void> {
-    if (winner.source === 'idb-current') return;
+  ): Promise<boolean> {
+    if (winner.source === 'idb-current') return true;
     try {
       await set(currentIdbKey, winner.snapshot);
+      return true;
     } catch (err) {
       this.logger.warn('IDB restore failed', {
         code: ErrorCodes.DOCK_IDB_RESTORE_FAILED,
         error: err,
       });
+      return false;
     }
   }
 
@@ -240,17 +276,23 @@ export class DockSnapshotPersistenceService {
   }
 
   cancelPendingPersist(): void {
-    if (this.pendingLocalPersist) {
-      const { snapshotFn, userId } = this.pendingLocalPersist;
-      this.pendingLocalPersist = null;
-      this.persistShadowToLocalStorage(snapshotFn(), userId);
+    const writer = this.takePendingWriter();
+    try {
+      if (this.pendingLocalPersist) {
+        const { snapshotFn, userId } = this.pendingLocalPersist;
+        this.pendingLocalPersist = null;
+        this.persistShadowToLocalStorage(snapshotFn(), userId);
+      }
+    } finally {
+      this.localPersistTimer.cancel();
+      writer?.release();
     }
-    this.localPersistTimer.cancel();
   }
 
   async discardPendingPersist(): Promise<void> {
     this.pendingLocalPersist = null;
     this.localPersistTimer.cancel();
+    this.releasePendingWriter();
 
     try {
       await this.persistChain;
@@ -259,6 +301,36 @@ export class DockSnapshotPersistenceService {
     }
 
     this.persistChain = Promise.resolve();
+  }
+
+  private beginPendingWriter(userId: string | null): void {
+    if (!userId) {
+      this.releasePendingWriter();
+      return;
+    }
+    if (this.pendingWriter?.ownerUserId === userId) {
+      this.pendingWriter.handle.renew();
+      return;
+    }
+    this.releasePendingWriter();
+    this.pendingWriter = {
+      ownerUserId: userId,
+      handle: beginLocalBackupUiRestoreWriter(userId, 'dock-snapshot'),
+    };
+  }
+
+  private beginStandaloneWriter(userId: string | null): LocalBackupUiRestoreWriterHandle | null {
+    return userId ? beginLocalBackupUiRestoreWriter(userId, 'dock-snapshot') : null;
+  }
+
+  private takePendingWriter(): LocalBackupUiRestoreWriterHandle | null {
+    const handle = this.pendingWriter?.handle ?? null;
+    this.pendingWriter = null;
+    return handle;
+  }
+
+  private releasePendingWriter(): void {
+    this.takePendingWriter()?.release();
   }
 
   private persistShadowToLocalStorage(snapshot: DockSnapshot, userId: string | null): boolean {
