@@ -56,6 +56,71 @@ describe('DockDirectWidgetNotifyOutboxService', () => {
     ]);
   });
 
+  it('旧 focus operation 的完成删除不得移除同 session 的新 pending', async () => {
+    vi.spyOn(crypto, 'randomUUID')
+      .mockReturnValueOnce('00000000-0000-4000-8000-000000000311')
+      .mockReturnValueOnce('00000000-0000-4000-8000-000000000312');
+    const oldRecord = await service.enqueueLatest({
+      focusSessionId: 'focus-session-aba',
+      focusActive: true,
+      updatedAt: '2026-06-29T00:00:00.000Z',
+      ownerUserId: 'owner-user-1',
+    });
+    await service.enqueueLatest({
+      focusSessionId: 'focus-session-aba',
+      focusActive: false,
+      updatedAt: '2026-06-29T00:00:05.000Z',
+      ownerUserId: 'owner-user-1',
+    });
+
+    await service.removeRecord(oldRecord);
+
+    expect(await service.listPendingNotifications()).toEqual([
+      expect.objectContaining({
+        operationId: '00000000-0000-4000-8000-000000000312',
+        focusSessionId: 'focus-session-aba',
+        focusActive: false,
+      }),
+    ]);
+  });
+
+  it('旧 focus operation 的 fallback 删除不得移除同 session 的新 pending', async () => {
+    vi.spyOn(crypto, 'randomUUID')
+      .mockReturnValueOnce('00000000-0000-4000-8000-000000000313')
+      .mockReturnValueOnce('00000000-0000-4000-8000-000000000314');
+    const oldRecord = await service.enqueueLatest({
+      focusSessionId: 'focus-session-fallback-aba',
+      focusActive: true,
+      updatedAt: '2026-06-29T00:00:00.000Z',
+      ownerUserId: 'owner-user-1',
+    });
+    const newRecord = await service.enqueueLatest({
+      focusSessionId: 'focus-session-fallback-aba',
+      focusActive: false,
+      updatedAt: '2026-06-29T00:00:05.000Z',
+      ownerUserId: 'owner-user-1',
+    });
+    const { createStore, del } = await import('idb-keyval');
+    await del(
+      'focus-session-fallback-aba',
+      createStore('nanoflow-dock-direct-widget-notify-outbox', 'pending-notifications'),
+    );
+    localStorage.setItem(
+      'nanoflow.dock-direct-widget-notify.focus-session-fallback-aba',
+      JSON.stringify(newRecord),
+    );
+
+    await service.removeRecord(oldRecord);
+
+    expect(await service.listPendingNotifications()).toEqual([
+      expect.objectContaining({
+        operationId: '00000000-0000-4000-8000-000000000314',
+        focusSessionId: 'focus-session-fallback-aba',
+        focusActive: false,
+      }),
+    ]);
+  });
+
   it('flushes pending notifications and deletes them only after widget-notify succeeds', async () => {
     vi.spyOn(crypto, 'randomUUID').mockReturnValue('00000000-0000-4000-8000-000000000303');
     await service.enqueueLatest({
@@ -142,6 +207,94 @@ describe('DockDirectWidgetNotifyOutboxService', () => {
         focusActive: true,
         attemptCount: 1,
         lastError: 'network timeout',
+      }),
+    ]);
+  });
+
+  it('旧 focus operation 的失败回写不得覆盖同 session 的新 pending', async () => {
+    vi.spyOn(crypto, 'randomUUID')
+      .mockReturnValueOnce('00000000-0000-4000-8000-000000000321')
+      .mockReturnValueOnce('00000000-0000-4000-8000-000000000322');
+    await service.enqueueLatest({
+      focusSessionId: 'focus-session-failure-aba',
+      focusActive: true,
+      updatedAt: '2026-06-29T00:00:00.000Z',
+      ownerUserId: 'owner-user-1',
+    });
+    let resolveInvoke!: (value: { data: null; error: { message: string } }) => void;
+    const invoke = vi.fn(() => new Promise<{ data: null; error: { message: string } }>(resolve => {
+      resolveInvoke = resolve;
+    }));
+    const flush = service.flushPendingNotifications(
+      { functions: { invoke } } as unknown as DockDirectWidgetNotifyClient,
+    );
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledTimes(1));
+    await service.enqueueLatest({
+      focusSessionId: 'focus-session-failure-aba',
+      focusActive: false,
+      updatedAt: '2026-06-29T00:00:05.000Z',
+      ownerUserId: 'owner-user-1',
+    });
+
+    resolveInvoke({ data: null, error: { message: 'network timeout' } });
+    await flush;
+
+    expect(await service.listPendingNotifications()).toEqual([
+      expect.objectContaining({
+        operationId: '00000000-0000-4000-8000-000000000322',
+        focusSessionId: 'focus-session-failure-aba',
+        focusActive: false,
+        attemptCount: 0,
+      }),
+    ]);
+  });
+
+  it('旧 focus operation 的 fallback 失败回写不得覆盖同 session 的新 pending', async () => {
+    vi.spyOn(crypto, 'randomUUID')
+      .mockReturnValueOnce('00000000-0000-4000-8000-000000000323')
+      .mockReturnValueOnce('00000000-0000-4000-8000-000000000324');
+    const oldRecord = await service.enqueueLatest({
+      focusSessionId: 'focus-session-fallback-failure-aba',
+      focusActive: true,
+      updatedAt: '2026-06-29T00:00:00.000Z',
+      ownerUserId: 'owner-user-1',
+    });
+    const { createStore, del } = await import('idb-keyval');
+    const store = createStore('nanoflow-dock-direct-widget-notify-outbox', 'pending-notifications');
+    await del('focus-session-fallback-failure-aba', store);
+    localStorage.setItem(
+      'nanoflow.dock-direct-widget-notify.focus-session-fallback-failure-aba',
+      JSON.stringify(oldRecord),
+    );
+    let resolveInvoke!: (value: { data: null; error: { message: string } }) => void;
+    const invoke = vi.fn(() => new Promise<{ data: null; error: { message: string } }>(resolve => {
+      resolveInvoke = resolve;
+    }));
+    const flush = service.flushPendingNotifications(
+      { functions: { invoke } } as unknown as DockDirectWidgetNotifyClient,
+    );
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledTimes(1));
+    const newRecord = await service.enqueueLatest({
+      focusSessionId: 'focus-session-fallback-failure-aba',
+      focusActive: false,
+      updatedAt: '2026-06-29T00:00:05.000Z',
+      ownerUserId: 'owner-user-1',
+    });
+    await del('focus-session-fallback-failure-aba', store);
+    localStorage.setItem(
+      'nanoflow.dock-direct-widget-notify.focus-session-fallback-failure-aba',
+      JSON.stringify(newRecord),
+    );
+
+    resolveInvoke({ data: null, error: { message: 'network timeout' } });
+    await flush;
+
+    expect(await service.listPendingNotifications()).toEqual([
+      expect.objectContaining({
+        operationId: '00000000-0000-4000-8000-000000000324',
+        focusSessionId: 'focus-session-fallback-failure-aba',
+        focusActive: false,
+        attemptCount: 0,
       }),
     ]);
   });
@@ -271,6 +424,37 @@ describe('DockDirectWidgetNotifyOutboxService', () => {
         blackBoxAction: 'complete',
         updatedAt: '2026-06-29T00:00:05.000Z',
         attemptCount: 0,
+      }),
+    ]);
+  });
+
+  it('旧 black-box operation 的完成删除不得移除同 entry/action 的新 pending', async () => {
+    vi.spyOn(crypto, 'randomUUID')
+      .mockReturnValueOnce('00000000-0000-4000-8000-000000000411')
+      .mockReturnValueOnce('00000000-0000-4000-8000-000000000412');
+    const oldRecord = await service.enqueueLatest({
+      kind: 'black-box',
+      entryId: 'black-box-entry-aba',
+      blackBoxAction: 'complete',
+      updatedAt: '2026-06-29T00:00:00.000Z',
+      ownerUserId: 'owner-user-1',
+    });
+    await service.enqueueLatest({
+      kind: 'black-box',
+      entryId: 'black-box-entry-aba',
+      blackBoxAction: 'complete',
+      updatedAt: '2026-06-29T00:00:05.000Z',
+      ownerUserId: 'owner-user-1',
+    });
+
+    await service.removeRecord(oldRecord);
+
+    expect(await service.listPendingNotifications()).toEqual([
+      expect.objectContaining({
+        kind: 'black-box',
+        operationId: '00000000-0000-4000-8000-000000000412',
+        entryId: 'black-box-entry-aba',
+        blackBoxAction: 'complete',
       }),
     ]);
   });

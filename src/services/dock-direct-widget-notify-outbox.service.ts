@@ -1,5 +1,5 @@
 import { Injectable } from '@angular/core';
-import { clear, createStore, del, get, set, values } from 'idb-keyval';
+import { clear, createStore, del, get, promisifyRequest, set, values } from 'idb-keyval';
 import { TIMEOUT_CONFIG } from '../config/timeout.config';
 import {
   extractSupabaseFunctionErrorMessage,
@@ -293,7 +293,8 @@ export class DockDirectWidgetNotifyOutboxService {
   }
 
   async removeRecord(recordOrKey: PendingDockDirectWidgetNotifyRecord | string): Promise<void> {
-    const key = typeof recordOrKey === 'string'
+    const removeUnconditionally = typeof recordOrKey === 'string';
+    const key = removeUnconditionally
       ? recordOrKey.trim()
       : this.getRecordKey(recordOrKey);
     if (!key) {
@@ -301,10 +302,31 @@ export class DockDirectWidgetNotifyOutboxService {
     }
 
     try {
-      await del(key, dockDirectWidgetNotifyStore);
+      if (removeUnconditionally) {
+        await del(key, dockDirectWidgetNotifyStore);
+      } else {
+        await this.removeIndexedDbRecordIfCurrent(key, recordOrKey.operationId);
+      }
     } finally {
-      this.removeFallbackRecord(key);
+      if (removeUnconditionally) {
+        this.removeFallbackRecord(key);
+      } else {
+        this.removeFallbackRecordIfCurrent(key, recordOrKey.operationId);
+      }
     }
+  }
+
+  private async removeIndexedDbRecordIfCurrent(key: string, operationId: string): Promise<void> {
+    await dockDirectWidgetNotifyStore('readwrite', store => {
+      const transactionDone = promisifyRequest(store.transaction);
+      return promisifyRequest<PendingDockDirectWidgetNotifyRecord | undefined>(store.get(key))
+        .then(current => {
+          if (current?.operationId === operationId) {
+            store.delete(key);
+          }
+          return transactionDone;
+        });
+    });
   }
 
   async clearPendingNotificationsForTests(): Promise<void> {
@@ -421,13 +443,68 @@ export class DockDirectWidgetNotifyOutboxService {
   ): Promise<void> {
     const queuedAt = new Date().toISOString();
     for (const record of records) {
-      await this.writeRecord({
-        ...record,
-        queuedAt,
-        attemptCount: record.attemptCount + 1,
-        lastError: error,
-      });
+      await this.markRecordFailedIfCurrent(record, queuedAt, error);
     }
+  }
+
+  private async markRecordFailedIfCurrent(
+    record: PendingDockDirectWidgetNotifyRecord,
+    queuedAt: string,
+    error: string,
+  ): Promise<void> {
+    const key = this.getRecordKey(record);
+    try {
+      const result = await this.updateIndexedDbFailureIfCurrent(key, record.operationId, queuedAt, error);
+      if (result === 'updated') {
+        this.removeFallbackRecord(key);
+      } else if (result === 'missing') {
+        this.updateFallbackFailureIfCurrent(key, record.operationId, queuedAt, error);
+      } else {
+        this.removeFallbackRecordIfCurrent(key, record.operationId);
+      }
+    } catch {
+      this.updateFallbackFailureIfCurrent(key, record.operationId, queuedAt, error);
+    }
+  }
+
+  private async updateIndexedDbFailureIfCurrent(
+    key: string,
+    operationId: string,
+    queuedAt: string,
+    error: string,
+  ): Promise<'updated' | 'missing' | 'mismatch'> {
+    return dockDirectWidgetNotifyStore('readwrite', store => {
+      const transactionDone = promisifyRequest(store.transaction);
+      const updateResult = promisifyRequest<PendingDockDirectWidgetNotifyRecord | undefined>(store.get(key))
+        .then(current => {
+          if (!current) return 'missing' as const;
+          if (current.operationId !== operationId) return 'mismatch' as const;
+          store.put({
+            ...current,
+            queuedAt,
+            attemptCount: current.attemptCount + 1,
+            lastError: error,
+          }, key);
+          return 'updated' as const;
+        });
+      return Promise.all([updateResult, transactionDone]).then(([result]) => result);
+    });
+  }
+
+  private updateFallbackFailureIfCurrent(
+    key: string,
+    operationId: string,
+    queuedAt: string,
+    error: string,
+  ): void {
+    const current = this.loadFallbackRecord(key);
+    if (current?.operationId !== operationId) return;
+    this.saveFallbackRecord({
+      ...current,
+      queuedAt,
+      attemptCount: current.attemptCount + 1,
+      lastError: error,
+    });
   }
 
   private saveFallbackRecord(record: PendingDockDirectWidgetNotifyRecord): void {
@@ -477,6 +554,13 @@ export class DockDirectWidgetNotifyOutboxService {
       return;
     }
     localStorage.removeItem(this.getFallbackKey(key));
+  }
+
+  private removeFallbackRecordIfCurrent(key: string, operationId: string): void {
+    const current = this.loadFallbackRecord(key);
+    if (current?.operationId === operationId) {
+      this.removeFallbackRecord(key);
+    }
   }
 
   private clearFallbackRecords(): void {

@@ -28,7 +28,7 @@ export interface DockDirectWidgetNotifyControllerOptions {
 
 export class DockDirectWidgetNotifyController {
   private notifyRequestId = 0;
-  private readonly activeNotifyKeys = new Set<string>();
+  private readonly activeNotifyKeys = new Map<string, number>();
   private readonly recentNotifyKeys = new Map<string, ReturnType<typeof globalThis.setTimeout>>();
 
   constructor(private readonly options: DockDirectWidgetNotifyControllerOptions) {}
@@ -51,7 +51,6 @@ export class DockDirectWidgetNotifyController {
       return;
     }
 
-    const requestId = ++this.notifyRequestId;
     const context = { userId, focusActive, source: 'focus' };
     if (this.shouldSkipDirectWidgetNotify(context)) {
       return;
@@ -76,11 +75,12 @@ export class DockDirectWidgetNotifyController {
       return;
     }
 
-    this.activeNotifyKeys.add(notifyKey);
+    const requestId = ++this.notifyRequestId;
+    this.activeNotifyKeys.set(notifyKey, requestId);
 
     if (!(await this.hasUsableDirectWidgetNotifySession(context))
       || !this.isCurrentRequest(requestId)) {
-      this.activeNotifyKeys.delete(notifyKey);
+      this.releaseActiveNotifyKey(notifyKey, requestId);
       return;
     }
 
@@ -97,6 +97,12 @@ export class DockDirectWidgetNotifyController {
 
   private isNotifyKeyDeduped(notifyKey: string): boolean {
     return this.activeNotifyKeys.has(notifyKey) || this.recentNotifyKeys.has(notifyKey);
+  }
+
+  private releaseActiveNotifyKey(notifyKey: string, requestId: number): void {
+    if (this.activeNotifyKeys.get(notifyKey) === requestId) {
+      this.activeNotifyKeys.delete(notifyKey);
+    }
   }
 
   private getFocusSessionId(snapshot: DockSnapshot): string | null {
@@ -163,7 +169,7 @@ export class DockDirectWidgetNotifyController {
       const invocation = await this.createWidgetNotifyInvocation(snapshot, focusActive, focusSessionId, userId);
       const client = await this.options.supabase.clientAsync();
       if (!client || !this.isCurrentRequest(requestId)) {
-        this.activeNotifyKeys.delete(notifyKey);
+        this.releaseActiveNotifyKey(notifyKey, requestId);
         return;
       }
 
@@ -171,6 +177,9 @@ export class DockDirectWidgetNotifyController {
         timeout: DIRECT_WIDGET_NOTIFY_TIMEOUT_MS,
         body: invocation.body,
       });
+      if (!this.isCurrentRequest(requestId)) {
+        return;
+      }
       this.markRecentNotify(notifyKey);
       if (error) {
         this.options.logger.debug('direct widget-notify skipped', {
@@ -184,13 +193,16 @@ export class DockDirectWidgetNotifyController {
         await this.options.outbox?.removeRecord(invocation.pendingRecord);
       }
     } catch (error) {
+      if (!this.isCurrentRequest(requestId)) {
+        return;
+      }
       this.options.logger.debug('direct widget-notify threw', {
         userId,
         focusActive,
         message: error instanceof Error ? error.message : String(error),
       });
     } finally {
-      this.activeNotifyKeys.delete(notifyKey);
+      this.releaseActiveNotifyKey(notifyKey, requestId);
     }
   }
 

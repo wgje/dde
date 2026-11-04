@@ -183,6 +183,194 @@ describe('DockDirectWidgetNotifyController', () => {
     }));
   });
 
+  it('较旧直推晚于新状态完成时不得删除新 pending 或留下旧状态去重', async () => {
+    const firstInvoke = deferred<{ error: null }>();
+    const records = [
+      {
+        kind: 'focus' as const,
+        operationId: 'operation-old-on',
+        webhookId: 'pwa-direct-operation-old-on',
+        focusSessionId: 'focus-session-1',
+        focusActive: true,
+        updatedAt: '2026-06-17T00:00:00.000Z',
+        createdAt: '2026-06-17T00:00:00.000Z',
+        queuedAt: '2026-06-17T00:00:00.000Z',
+        attemptCount: 0,
+        ownerUserId: 'user-1',
+      },
+      {
+        kind: 'focus' as const,
+        operationId: 'operation-new-off',
+        webhookId: 'pwa-direct-operation-new-off',
+        focusSessionId: 'focus-session-1',
+        focusActive: false,
+        updatedAt: '2026-06-17T00:00:01.000Z',
+        createdAt: '2026-06-17T00:00:00.000Z',
+        queuedAt: '2026-06-17T00:00:01.000Z',
+        attemptCount: 0,
+        ownerUserId: 'user-1',
+      },
+      {
+        kind: 'focus' as const,
+        operationId: 'operation-retry-on',
+        webhookId: 'pwa-direct-operation-retry-on',
+        focusSessionId: 'focus-session-1',
+        focusActive: true,
+        updatedAt: '2026-06-17T00:00:02.000Z',
+        createdAt: '2026-06-17T00:00:00.000Z',
+        queuedAt: '2026-06-17T00:00:02.000Z',
+        attemptCount: 0,
+        ownerUserId: 'user-1',
+      },
+    ];
+    const outbox = {
+      enqueueLatest: vi.fn()
+        .mockResolvedValueOnce(records[0])
+        .mockResolvedValueOnce(records[1])
+        .mockResolvedValueOnce(records[2]),
+      removeRecord: vi.fn().mockResolvedValue(undefined),
+      buildInvokeBody: vi.fn(record => ({
+        directNotify: true,
+        webhookId: record.webhookId,
+        focusActive: record.focusActive,
+        focusSessionId: record.focusSessionId,
+        updatedAt: record.updatedAt,
+      })),
+    };
+    const invoke = vi.fn()
+      .mockReturnValueOnce(firstInvoke.promise)
+      .mockResolvedValueOnce({ error: { message: 'offline' } })
+      .mockResolvedValueOnce({ error: { message: 'offline' } });
+    const controller = new DockDirectWidgetNotifyController({
+      isDestroyed: () => false,
+      logger: { debug: vi.fn() },
+      outbox,
+      supabase: {
+        getSession: vi.fn().mockResolvedValue({
+          data: { session: { access_token: 'token' } },
+          error: null,
+        }),
+        clientAsync: vi.fn().mockResolvedValue({ functions: { invoke } }),
+      },
+    } as never);
+
+    const oldNotify = controller.notifyFocusChange('user-1', createSnapshot(), true);
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledTimes(1));
+    await controller.notifyFocusChange('user-1', createSnapshot(), false);
+    firstInvoke.resolve({ error: null });
+    await oldNotify;
+
+    expect(outbox.removeRecord).not.toHaveBeenCalled();
+
+    await controller.notifyFocusChange('user-1', createSnapshot(), true);
+
+    expect(invoke).toHaveBeenCalledTimes(3);
+  });
+
+  it('dispose 期间完成的直推不得删除 pending 或重新写入去重状态', async () => {
+    const pendingInvoke = deferred<{ error: null }>();
+    const outbox = {
+      enqueueLatest: vi.fn()
+        .mockResolvedValueOnce({
+          kind: 'focus' as const,
+          operationId: 'operation-before-dispose',
+          webhookId: 'pwa-direct-operation-before-dispose',
+          focusSessionId: 'focus-session-1',
+          focusActive: true,
+          updatedAt: '2026-06-17T00:00:00.000Z',
+          createdAt: '2026-06-17T00:00:00.000Z',
+          queuedAt: '2026-06-17T00:00:00.000Z',
+          attemptCount: 0,
+          ownerUserId: 'user-1',
+        })
+        .mockResolvedValueOnce({
+          kind: 'focus' as const,
+          operationId: 'operation-after-dispose',
+          webhookId: 'pwa-direct-operation-after-dispose',
+          focusSessionId: 'focus-session-1',
+          focusActive: true,
+          updatedAt: '2026-06-17T00:00:01.000Z',
+          createdAt: '2026-06-17T00:00:00.000Z',
+          queuedAt: '2026-06-17T00:00:01.000Z',
+          attemptCount: 0,
+          ownerUserId: 'user-1',
+        }),
+      removeRecord: vi.fn().mockResolvedValue(undefined),
+      buildInvokeBody: vi.fn(record => ({
+        directNotify: true,
+        webhookId: record.webhookId,
+        focusActive: record.focusActive,
+        focusSessionId: record.focusSessionId,
+        updatedAt: record.updatedAt,
+      })),
+    };
+    const invoke = vi.fn()
+      .mockReturnValueOnce(pendingInvoke.promise)
+      .mockResolvedValueOnce({ error: { message: 'offline' } });
+    const controller = new DockDirectWidgetNotifyController({
+      isDestroyed: () => false,
+      logger: { debug: vi.fn() },
+      outbox,
+      supabase: {
+        getSession: vi.fn().mockResolvedValue({
+          data: { session: { access_token: 'token' } },
+          error: null,
+        }),
+        clientAsync: vi.fn().mockResolvedValue({ functions: { invoke } }),
+      },
+    } as never);
+
+    const notify = controller.notifyFocusChange('user-1', createSnapshot(), true);
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledTimes(1));
+    controller.dispose();
+    pendingInvoke.resolve({ error: null });
+    await notify;
+
+    expect(outbox.removeRecord).not.toHaveBeenCalled();
+
+    await controller.notifyFocusChange('user-1', createSnapshot(), true);
+
+    expect(invoke).toHaveBeenCalledTimes(2);
+  });
+
+  it('dispose 后旧请求 finally 不得释放新同 key 请求的去重状态', async () => {
+    const staleInvoke = deferred<{ error: null }>();
+    const currentInvoke = deferred<{ error: null }>();
+    const invoke = vi.fn()
+      .mockReturnValueOnce(staleInvoke.promise)
+      .mockReturnValueOnce(currentInvoke.promise)
+      .mockResolvedValue({ error: { message: 'unexpected duplicate invoke' } });
+    const controller = new DockDirectWidgetNotifyController({
+      isDestroyed: () => false,
+      logger: { debug: vi.fn() },
+      supabase: {
+        getSession: vi.fn().mockResolvedValue({
+          data: { session: { access_token: 'token' } },
+          error: null,
+        }),
+        clientAsync: vi.fn().mockResolvedValue({ functions: { invoke } }),
+      } as never,
+    });
+
+    const staleNotify = controller.notifyFocusChange('user-1', createSnapshot(), true);
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledTimes(1));
+    controller.dispose();
+    const currentNotify = controller.notifyFocusChange('user-1', createSnapshot(), true);
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledTimes(2));
+
+    staleInvoke.resolve({ error: null });
+    await staleNotify;
+    await controller.notifyFocusChange('user-1', createSnapshot(), true);
+
+    expect(invoke).toHaveBeenCalledTimes(2);
+
+    currentInvoke.resolve({ error: null });
+    await currentNotify;
+    await controller.notifyFocusChange('user-1', createSnapshot(), true);
+
+    expect(invoke).toHaveBeenCalledTimes(2);
+  });
+
   it('dispose 应清理直推去重 timer 并释放去重状态', async () => {
     vi.useFakeTimers();
     try {
