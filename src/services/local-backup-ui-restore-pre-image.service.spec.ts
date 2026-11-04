@@ -167,9 +167,10 @@ describe('captureLocalBackupUiRestorePreImage', () => {
       localStorage: '[{"id":"action-1"}]',
     });
     expect(preImage.retryQueue).toEqual({
-      schemaVersion: 2,
+      schemaVersion: 3,
       indexedDb: [{ id: 'retry-1' }],
       localStorage: '{"version":1,"items":[]}',
+      legacyReviewLocalStorageValue: null,
       restoredItems: [RETRY_QUEUE_RESTORE_ITEM],
     });
     expect(preImage.deadLetters).toEqual({
@@ -194,6 +195,40 @@ describe('captureLocalBackupUiRestorePreImage', () => {
       new Set(['project-1', 'project-new']),
     );
     expect(readers.readExternalPendingLinks).toHaveBeenCalledWith(OWNER_USER_ID);
+  });
+
+  it('captures the owner review storage value in the RetryQueue pre-image', async () => {
+    const readers = makeReaders();
+    const current = await readers.readLocalStateSnapshot(OWNER_USER_ID);
+    const readLocalStateSnapshot = vi.spyOn(readers, 'readLocalStateSnapshot');
+    const legacyReviewRaw = JSON.stringify([{
+      item: {
+        id: 'retry-review-1',
+        operationId: 'operation-review-1',
+        sourceUserId: OWNER_USER_ID,
+        type: 'task',
+        operation: 'upsert',
+        data: { id: 'task-review-1', content: 'review only' },
+        retryCount: 3,
+        createdAt: 1781539200000,
+      },
+      reason: 'terminal outcome requires review',
+      quarantinedAt: '2026-06-16T00:00:00.000Z',
+      ownerUserId: OWNER_USER_ID,
+    }]);
+    readLocalStateSnapshot.mockResolvedValue({
+      ...current,
+      legacyRetryReviewLocalStorageValue: legacyReviewRaw,
+    });
+
+    const preImage = await captureLocalBackupUiRestorePreImage({
+      ownerUserId: OWNER_USER_ID,
+      touchedProjectIds: [],
+      retryQueueRestoreItems: [],
+    }, readers, RETRY_QUEUE_POLICY);
+
+    expect((preImage.retryQueue as Record<string, unknown>).legacyReviewLocalStorageValue)
+      .toBe(legacyReviewRaw);
   });
 
   it('binds pending links to the transaction owner across a transient A to B to A auth change', async () => {
@@ -399,6 +434,7 @@ function makeReaders(currentProjects: Project[] = []): LocalBackupUiRestorePreIm
     readLocalStateSnapshot: vi.fn(async () => ({
       retryQueueIndexedDbItems: [{ id: 'retry-1' }],
       retryQueueLocalStorageValue: '{"version":1,"items":[]}',
+      legacyRetryReviewLocalStorageValue: null,
       actionQueueBackupRecord: {
         id: `queue-backup:${OWNER_USER_ID}`,
         ownerUserId: OWNER_USER_ID,

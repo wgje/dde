@@ -14,6 +14,7 @@ import type {
 } from './local-backup-ui-restore-types';
 import { createSyncOperationId, isSyncOperationId } from '../utils/sync-operation-id';
 import { isValidUUID } from '../utils/validation';
+import { parseLegacyRetryReviewStorageValue } from './legacy-retry-review-backup.helpers';
 import {
   normalizeDockSnapshotRestoreSnapshot,
   normalizeLaunchSnapshotRestoreSnapshot,
@@ -48,9 +49,10 @@ export interface LocalBackupUiRestoreActionQueuePreImage {
 }
 
 export interface LocalBackupUiRestoreRetryQueuePreImage {
-  schemaVersion: 2;
+  schemaVersion: 2 | 3;
   indexedDb: UnknownRecord[] | null;
   localStorage: string | null;
+  legacyReviewLocalStorageValue?: string | null;
   restoredItems: UnknownRecord[];
 }
 
@@ -207,6 +209,9 @@ function normalizeRetryQueueStageSnapshot(value: unknown): unknown {
     schemaVersion: snapshot['schemaVersion'],
     indexedDb: snapshot['indexedDb'],
     localStorageItems: readRetryQueueComparableLocalStorageItems(snapshot['localStorage']),
+    ...(snapshot['legacyReviewLocalStorageValue'] === undefined
+      ? {}
+      : { legacyReviewLocalStorageValue: snapshot['legacyReviewLocalStorageValue'] }),
     restoredItems: snapshot['restoredItems'],
   };
 }
@@ -335,17 +340,29 @@ function decodeRetryQueue(
   const record = requireRecord(value, 'retryQueue');
   const indexedDb = record['indexedDb'];
   const restoredItems = record['restoredItems'];
-  if (record['schemaVersion'] !== 2
+  const schemaVersion = record['schemaVersion'];
+  const legacyReviewLocalStorageValue = record['legacyReviewLocalStorageValue'];
+  if ((schemaVersion !== 2 && schemaVersion !== 3)
     || !isNullableString(record['localStorage'])
+    || (schemaVersion === 3 && !isNullableString(legacyReviewLocalStorageValue))
+    || (legacyReviewLocalStorageValue !== undefined && !isNullableString(legacyReviewLocalStorageValue))
     || !Array.isArray(restoredItems)
     || !isValidRetryQueueRestoreItems(restoredItems, ownerUserId)
     || (indexedDb !== null && (!Array.isArray(indexedDb) || !indexedDb.every(isRecord)))) {
     throw invalidSlot('retryQueue');
   }
+  if (legacyReviewLocalStorageValue !== undefined) {
+    try {
+      parseLegacyRetryReviewStorageValue(legacyReviewLocalStorageValue, ownerUserId);
+    } catch {
+      throw invalidSlot('retryQueue');
+    }
+  }
   return {
-    schemaVersion: 2,
+    schemaVersion,
     indexedDb,
     localStorage: record['localStorage'],
+    ...(legacyReviewLocalStorageValue === undefined ? {} : { legacyReviewLocalStorageValue }),
     restoredItems: restoredItems.map(item => ({
       ...item,
       data: { ...(item['data'] as UnknownRecord) },

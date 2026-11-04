@@ -252,6 +252,31 @@ describe('decodeLocalBackupUiRestoreStageSnapshots', () => {
     expect(() => decodeLocalBackupUiRestoreStageSnapshots(malformed)).toThrow(/retryQueue/i);
   });
 
+  it('validates the Legacy Retry Review owner in the RetryQueue pre-image', () => {
+    const marker = makeMarker();
+    marker.preImage.retryQueue = {
+      schemaVersion: 3,
+      indexedDb: [],
+      localStorage: null,
+      legacyReviewLocalStorageValue: JSON.stringify([{
+        item: {
+          id: 'retry-review-1',
+          operationId: 'operation-review-1',
+          sourceUserId: 'foreign-owner',
+          type: 'task',
+          operation: 'upsert',
+          data: { id: 'task-review-1', content: 'review only' },
+        },
+        reason: 'terminal outcome requires review',
+        quarantinedAt: '2026-06-16T00:00:00.000Z',
+        ownerUserId: 'foreign-owner',
+      }]),
+      restoredItems: [makeRetryQueueRestoreItem()],
+    };
+
+    expect(() => decodeLocalBackupUiRestoreStageSnapshots(marker)).toThrow(/retryQueue/i);
+  });
+
   it.each([
     ['queue id', (item: ReturnType<typeof makeRetryQueueRestoreItem>) => ({
       ...item,

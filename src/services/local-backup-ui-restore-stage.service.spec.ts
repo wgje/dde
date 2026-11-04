@@ -337,6 +337,110 @@ describe('createLocalBackupUiRestoreStageOperations', () => {
     }
   });
 
+  it('restores review-only items into the owner bucket and includes them in durable read-back', async () => {
+    const ownerReview = makeLegacyReviewItem('retry-review-current', 'operation-review-current');
+    const backupReview = makeLegacyReviewItem('retry-review-backup', 'operation-review-backup');
+    const foreignReview = makeLegacyReviewItem(
+      'retry-review-foreign',
+      'operation-review-foreign',
+      'other-owner',
+    );
+    const ownerKey = `nanoflow.retry-queue.legacy-review.${OWNER_USER_ID}`;
+    const foreignKey = 'nanoflow.retry-queue.legacy-review.other-owner';
+    localStorage.setItem(ownerKey, JSON.stringify([ownerReview]));
+    localStorage.setItem(foreignKey, JSON.stringify([foreignReview]));
+
+    const restoreFromBackupItems = vi.fn(async () => 0);
+    const service = makeStageService({
+      MAX_RETRIES: Number.MAX_SAFE_INTEGER,
+      restoreFromBackupItems,
+    });
+    const marker = makeStageMarker();
+    marker.state = 'restoring';
+    marker.phase = 'retry-queue';
+    marker.preImage.retryQueue = {
+      schemaVersion: 3,
+      indexedDb: null,
+      localStorage: null,
+      legacyReviewLocalStorageValue: JSON.stringify([ownerReview]),
+      restoredItems: [],
+    };
+    const operations = service.createOperations({
+      ownerUserId: OWNER_USER_ID,
+      data: {} as never,
+      backup: { localState: { retryQueue: [], legacyRetryReview: [backupReview] } } as never,
+      existingProjects: [],
+      actionQueueRestore: makeActionQueueRestore(),
+    });
+    operations.decodePreImage(marker);
+
+    try {
+      await operations.apply('retry-queue', makeContext(marker));
+      await operations.verifyApplied('retry-queue', makeContext(marker));
+
+      expect(restoreFromBackupItems).toHaveBeenCalledWith([], OWNER_USER_ID, expect.any(Object));
+      expect(JSON.parse(localStorage.getItem(ownerKey) ?? '[]'))
+        .toEqual([ownerReview, backupReview]);
+      expect(localStorage.getItem(foreignKey)).toBe(JSON.stringify([foreignReview]));
+      expect(localStorage.getItem('nanoflow.retry-queue')).toBeNull();
+    } finally {
+      localStorage.removeItem(ownerKey);
+      localStorage.removeItem(foreignKey);
+      localStorage.removeItem('nanoflow.retry-queue');
+    }
+  });
+
+  it('fails closed on review owner mismatch and restores the marker review bytes during compensation', async () => {
+    const review = makeLegacyReviewItem('retry-review-owner', 'operation-review-owner');
+    const incoming = makeLegacyReviewItem('retry-review-incoming', 'operation-review-incoming');
+    const foreign = makeLegacyReviewItem(
+      'retry-review-foreign',
+      'operation-review-foreign',
+      'other-owner',
+    );
+    const ownerKey = `nanoflow.retry-queue.legacy-review.${OWNER_USER_ID}`;
+    const foreignKey = 'nanoflow.retry-queue.legacy-review.other-owner';
+    localStorage.setItem(ownerKey, JSON.stringify([review]));
+    localStorage.setItem(foreignKey, JSON.stringify([foreign]));
+    const setItem = vi.spyOn(localStorage, 'setItem');
+    const service = makeStageService();
+
+    expect(() => service.createOperations({
+      ownerUserId: OWNER_USER_ID,
+      data: {} as never,
+      backup: { localState: { retryQueue: [], legacyRetryReview: [foreign] } } as never,
+      existingProjects: [],
+      actionQueueRestore: makeActionQueueRestore(),
+    })).toThrow(/ownerUserId/);
+    expect(setItem).not.toHaveBeenCalled();
+    setItem.mockRestore();
+
+    const marker = makeStageMarker();
+    marker.state = 'restoring';
+    marker.phase = 'retry-queue';
+    marker.preImage.retryQueue = {
+      schemaVersion: 3,
+      indexedDb: null,
+      localStorage: null,
+      legacyReviewLocalStorageValue: JSON.stringify([review]),
+      restoredItems: [],
+    };
+    localStorage.setItem(ownerKey, JSON.stringify([review, incoming]));
+    const recovery = service.createRecoveryOperations(OWNER_USER_ID, makeActionQueueRestore());
+    recovery.decodePreImage(marker);
+
+    try {
+      await recovery.rollback('retry-queue', makeContext(marker));
+
+      expect(JSON.parse(localStorage.getItem(ownerKey) ?? '[]')).toEqual([review]);
+      expect(localStorage.getItem(foreignKey)).toBe(JSON.stringify([foreign]));
+    } finally {
+      localStorage.removeItem(ownerKey);
+      localStorage.removeItem(foreignKey);
+      localStorage.removeItem('nanoflow.retry-queue');
+    }
+  });
+
   it('rechecks retryQueue age at apply before terminal evidence can escape the transaction', async () => {
     const item = makeRetryQueueItem(
       '33333333-3333-4333-8333-333333333333',
@@ -869,6 +973,24 @@ function makeRetryQueueItem(id: string, operationId: string) {
     retryCount: 0,
     createdAt: Date.parse('2026-07-27T00:00:00.000Z'),
     sourceUserId: OWNER_USER_ID,
+  };
+}
+
+function makeLegacyReviewItem(id: string, operationId: string, ownerUserId = OWNER_USER_ID) {
+  return {
+    item: {
+      id,
+      operationId,
+      sourceUserId: ownerUserId,
+      type: 'task',
+      operation: 'upsert',
+      data: { id: `task-${id}`, content: 'manual review' },
+      retryCount: 3,
+      createdAt: Date.parse('2026-06-16T00:00:00.000Z'),
+    },
+    reason: 'terminal outcome requires review',
+    quarantinedAt: '2026-06-16T00:00:00.000Z',
+    ownerUserId,
   };
 }
 

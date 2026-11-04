@@ -223,6 +223,8 @@ export interface BackupLocalState {
   };
   /** Owner-scoped RetryQueue items carry pending unknown-outcome state in lastFailure. */
   retryQueue?: unknown[];
+  /** Owner-scoped RetryQueue items quarantined for manual review, never replay. */
+  legacyRetryReview?: unknown[];
   actionQueue?: unknown;
   deadLetters?: unknown[];
   conflicts?: unknown[];

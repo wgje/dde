@@ -18,6 +18,10 @@ import {
 } from './disaster-backup-browser-storage.helpers';
 import { buildDisasterBackupDataSafetySnapshot } from './disaster-backup-data-safety.helpers';
 import {
+  parseLegacyRetryReviewStorageValue,
+  ownerScopedLegacyRetryReviewStorageKey,
+} from './legacy-retry-review-backup.helpers';
+import {
   filterConnectionTombstonesByVisibleProjects,
   filterTaskTombstonesByVisibleProjects,
   isLaunchSnapshotOwnedByCurrentUser,
@@ -94,6 +98,7 @@ interface DisasterBackupLocalStateParts {
   launchSnapshot: BackupLocalState['launchSnapshot'];
   parkedTaskCache: BackupLocalState['parkedTaskCache'];
   retryQueue: unknown[];
+  legacyRetryReview: unknown[];
   actionQueue: unknown;
   deadLetters: unknown[];
   conflicts: BackupLocalState['conflicts'];
@@ -134,6 +139,7 @@ export class DisasterBackupLocalStateReader {
       launchSnapshot,
       parkedTaskCache,
       retryQueue,
+      legacyRetryReview,
       actionQueue,
       deadLetters,
       conflicts,
@@ -146,6 +152,7 @@ export class DisasterBackupLocalStateReader {
       this.readLaunchSnapshot(snapshotOwnerUserId),
       this.readParkedTaskCache(ownerUserId, visibleProjectIds),
       this.readRetryQueue(ownerUserId),
+      this.readLegacyRetryReview(ownerUserId),
       this.readActionQueue(ownerUserId),
       this.readDeadLetters(ownerUserId),
       this.deps.conflictStorage.getAllConflicts(),
@@ -160,6 +167,7 @@ export class DisasterBackupLocalStateReader {
       launchSnapshot,
       parkedTaskCache,
       retryQueue,
+      legacyRetryReview,
       actionQueue,
       deadLetters,
       conflicts,
@@ -184,6 +192,7 @@ export class DisasterBackupLocalStateReader {
       launchSnapshot: parts.launchSnapshot,
       parkedTaskCache: parts.parkedTaskCache,
       retryQueue: parts.retryQueue,
+      legacyRetryReview: parts.legacyRetryReview,
       actionQueue: parts.actionQueue,
       deadLetters: parts.deadLetters,
       conflicts: parts.conflicts,
@@ -436,6 +445,21 @@ export class DisasterBackupLocalStateReader {
 
     const items = mergeRetryQueueExportItems(indexedDbItems, fallbackItems, ownerUserId);
     return applyRetryQueueUnknownOutcomeFences(items, ownerUserId);
+  }
+
+  private readLegacyRetryReview(ownerUserId: string | null): unknown[] {
+    if (!ownerUserId || typeof localStorage === 'undefined') {
+      return [];
+    }
+
+    const key = ownerScopedLegacyRetryReviewStorageKey(ownerUserId);
+    let raw: string | null;
+    try {
+      raw = localStorage.getItem(key);
+    } catch (error) {
+      throw new Error(`Legacy Retry Review read failed for ${key}: ${formatError(error)}`);
+    }
+    return parseLegacyRetryReviewStorageValue(raw, ownerUserId);
   }
 
   private async readActionQueue(ownerUserId: string | null): Promise<unknown> {

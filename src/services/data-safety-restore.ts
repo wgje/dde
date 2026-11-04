@@ -16,6 +16,7 @@ export interface DataSafetyRestoreAdapter {
 export type DataSafetyRestoreStateKey =
   | 'meta'
   | 'retryQueue'
+  | 'legacyRetryReview'
   | 'actionQueue'
   | 'deadLetters'
   | 'conflicts'
@@ -60,6 +61,7 @@ async function persistRestoreState(
 ): Promise<void> {
   await adapter.saveState('meta', pkg.localData.meta ?? null);
   await adapter.saveState('retryQueue', pkg.localState.retryQueue);
+  await adapter.saveState('legacyRetryReview', pkg.localState.legacyRetryReview ?? []);
   await adapter.saveState('actionQueue', pkg.localState.actionQueue);
   await adapter.saveState('deadLetters', pkg.localState.deadLetters);
   await adapter.saveState('conflicts', pkg.localState.conflicts);

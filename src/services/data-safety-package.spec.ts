@@ -135,6 +135,7 @@ describe('data safety export package', () => {
     expect(pkg.localData.tasks[0]).toMatchObject({ id: 'task-1', content: 'keep content' });
     expect(pkg.localData.syncCursors).toHaveLength(1);
     expect(pkg.localState.retryQueue).toHaveLength(1);
+    expect(pkg.localState.legacyRetryReview).toEqual([]);
     expect(pkg.replayLog[0].lww.decision).toBe('remote-kept');
     expect(pkg.replayPlan.steps.map(step => `${step.source}:${step.operationId}`)).toEqual([
       'auditLog:op-1',
@@ -143,6 +144,46 @@ describe('data safety export package', () => {
     expect(pkg.lastWriteExplain?.lastSyncTime.advanced).toBe(false);
     expect(pkg.integrity.tableCounts).toMatchObject({ tasks: 1, retryQueue: 1 });
     expect(pkg.integrity.checksum).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it('keeps Legacy Retry Review in owner-scoped backup data without making it replayable', () => {
+    const base = makePackage();
+    const reviewItem = {
+      item: {
+        id: 'retry-review-1',
+        operationId: 'operation-review-1',
+        sourceUserId: 'user-1',
+        type: 'task',
+        operation: 'upsert',
+        data: { id: 'task-review-1', content: 'inspect only' },
+        retryCount: 3,
+        createdAt: 1781539200000,
+      },
+      reason: 'terminal outcome requires manual review',
+      quarantinedAt: '2026-06-16T00:00:00.000Z',
+      ownerUserId: 'user-1',
+    };
+    const pkg = buildDataSafetyExportPackage({
+      exportedAt: base.exportedAt,
+      ownerUserId: base.ownerUserId,
+      app: base.app,
+      localData: base.localData,
+      localState: { ...base.localState, legacyRetryReview: [reviewItem] },
+      syncSnapshot: base.syncSnapshot,
+      replayLog: base.replayLog,
+      lastWriteExplain: base.lastWriteExplain,
+    });
+
+    expect(validateDataSafetyExportPackage(pkg).valid).toBe(true);
+    expect(pkg.localState.legacyRetryReview).toEqual([reviewItem]);
+    expect(pkg.integrity.tableCounts.legacyRetryReview).toBe(1);
+    expect(pkg.replayPlan.steps.map(step => step.operationId)).not.toContain('operation-review-1');
+
+    const wrongOwner = structuredClone(pkg);
+    wrongOwner.localState.legacyRetryReview![0]!.ownerUserId = 'user-2';
+    expect(validateDataSafetyExportPackage(wrongOwner).errors).toContain(
+      'localState.legacyRetryReview[0].ownerUserId must match ownerUserId',
+    );
   });
 
   it('rejects invalid import packages before restore', () => {

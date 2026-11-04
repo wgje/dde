@@ -70,6 +70,14 @@ import {
   restoreParkedTaskCacheRestoreSnapshot,
   type ProjectLocalStateRestoreSnapshot,
 } from './data-safety-indexeddb-local-state-snapshot.helpers';
+import {
+  mergeLegacyRetryReviewItems,
+  ownerScopedLegacyRetryReviewStorageKey,
+  parseLegacyRetryReviewStorageValue,
+  readOwnerScopedLegacyRetryReviewStorageValue,
+  restoreOwnerScopedLegacyRetryReviewStorageValue,
+  writeOwnerScopedLegacyRetryReviewItems,
+} from './legacy-retry-review-backup.helpers';
 
 export type UnknownRecord = Record<string, unknown>;
 
@@ -102,6 +110,7 @@ export interface LocalStateRestoreSnapshot extends ProjectLocalStateRestoreSnaps
   retryQueueIndexedDbItems: UnknownRecord[] | null;
   retryQueueLocalStorageValue: string | null;
   retryQueueRestoreItems?: UnknownRecord[];
+  legacyRetryReviewLocalStorageValue?: string | null;
   actionQueueBackupRecord: QueueBackupRecord | null;
   actionQueueLocalStorageValue: string | null;
   deadLetterBackupRecord: DeadLetterBackupRecord | null;
@@ -132,6 +141,26 @@ export async function restoreLocalState(
   retryQueueRestoreItems = prepareRetryQueueRestoreItems(pkg.ownerUserId, pkg.localState.retryQueue),
 ): Promise<void> {
   await restoreRetryQueue(pkg.ownerUserId, retryQueueRestoreItems);
+  const legacyReviewItems = pkg.localState.legacyRetryReview;
+  if (legacyReviewItems !== undefined) {
+    const currentItems = parseLegacyRetryReviewStorageValue(
+      readOwnerScopedLegacyRetryReviewStorageValue(pkg.ownerUserId),
+      pkg.ownerUserId,
+    );
+    const mergedItems = mergeLegacyRetryReviewItems(
+      currentItems,
+      legacyReviewItems,
+      pkg.ownerUserId,
+    );
+    writeOwnerScopedLegacyRetryReviewItems(pkg.ownerUserId, mergedItems);
+    const actual = parseLegacyRetryReviewStorageValue(
+      readOwnerScopedLegacyRetryReviewStorageValue(pkg.ownerUserId),
+      pkg.ownerUserId,
+    );
+    if (JSON.stringify(actual) !== JSON.stringify(mergedItems)) {
+      throw new Error('legacy retry review restore read-back failed');
+    }
+  }
   await restoreActionQueue(pkg.ownerUserId, pkg.localState.actionQueue);
   await restoreDeadLetters(pkg.ownerUserId, pkg.localState.deadLetters);
   restoreTombstones(pkg);
@@ -167,10 +196,15 @@ export async function readLocalStateRestoreSnapshot(
     readProjectLocalStateRestoreSnapshot(ownerUserId),
   ]);
 
+  const legacyReviewStorageKey = ownerScopedLegacyRetryReviewStorageKey(ownerUserId);
+  const legacyRetryReviewLocalStorageValue = readLocalStorageValue(legacyReviewStorageKey);
+  parseLegacyRetryReviewStorageValue(legacyRetryReviewLocalStorageValue, ownerUserId);
+
   return {
     retryQueueIndexedDbItems,
     retryQueueLocalStorageValue: readLocalStorageValue(RETRY_QUEUE_LOCAL_STORAGE_KEY),
     retryQueueRestoreItems,
+    legacyRetryReviewLocalStorageValue,
     actionQueueBackupRecord,
     actionQueueLocalStorageValue: readLocalStorageValue(`${LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY}.${ownerUserId}`),
     deadLetterBackupRecord,
@@ -190,6 +224,13 @@ export async function restoreLocalStateSnapshot(
 ): Promise<void> {
   const errors: string[] = [];
   await restoreRetryQueueLocalStateSnapshot(ownerUserId, snapshot, canContinue, errors);
+  await attemptLocalStateRollback(errors, 'legacyRetryReview localStorage', () => {
+    restoreOwnerScopedLegacyRetryReviewStorageValue(
+      ownerUserId,
+      snapshot.legacyRetryReviewLocalStorageValue,
+    );
+  });
+  assertLocalStateRestoreContinuation(errors, canContinue);
   await restoreQueueBacklogLocalStateSnapshot(ownerUserId, snapshot, canContinue, errors);
   await restoreTombstoneLocalStateSnapshot(snapshot, errors);
   assertLocalStateRestoreContinuation(errors, canContinue);
@@ -556,6 +597,7 @@ function normalizeMarkerQueueRestoreSnapshot(
   | 'retryQueueIndexedDbItems'
   | 'retryQueueLocalStorageValue'
   | 'retryQueueRestoreItems'
+  | 'legacyRetryReviewLocalStorageValue'
   | 'actionQueueBackupRecord'
   | 'actionQueueLocalStorageValue'
   | 'deadLetterBackupRecord'
@@ -563,6 +605,7 @@ function normalizeMarkerQueueRestoreSnapshot(
   | 'auditLocalStorageValue'> | null {
   const retryQueueIndexedDbItems = value['retryQueueIndexedDbItems'];
   const retryQueueRestoreItems = value['retryQueueRestoreItems'];
+  const legacyRetryReviewLocalStorageValue = value['legacyRetryReviewLocalStorageValue'];
   const actionQueueBackupRecord = normalizeMarkerQueueBackupRecord(
     value['actionQueueBackupRecord'],
     ownerUserId,
@@ -574,6 +617,8 @@ function normalizeMarkerQueueRestoreSnapshot(
   if ((retryQueueIndexedDbItems !== null && !isUnknownRecordArray(retryQueueIndexedDbItems))
     || (retryQueueRestoreItems !== undefined && !isUnknownRecordArray(retryQueueRestoreItems))
     || !isNullableString(value['retryQueueLocalStorageValue'])
+    || (legacyRetryReviewLocalStorageValue !== undefined
+      && !isNullableString(legacyRetryReviewLocalStorageValue))
     || (value['actionQueueBackupRecord'] !== null && !actionQueueBackupRecord)
     || !isNullableString(value['actionQueueLocalStorageValue'])
     || (value['deadLetterBackupRecord'] !== null && !deadLetterBackupRecord)
@@ -581,6 +626,15 @@ function normalizeMarkerQueueRestoreSnapshot(
     || !isNullableString(value['auditLocalStorageValue'])) {
     return null;
   }
+  let legacyRetryReviewStorageValid = true;
+  if (legacyRetryReviewLocalStorageValue !== undefined) {
+    try {
+      parseLegacyRetryReviewStorageValue(legacyRetryReviewLocalStorageValue, ownerUserId);
+    } catch {
+      legacyRetryReviewStorageValid = false;
+    }
+  }
+  if (!legacyRetryReviewStorageValid) return null;
   return {
     retryQueueIndexedDbItems: retryQueueIndexedDbItems === null
       ? null
@@ -589,6 +643,9 @@ function normalizeMarkerQueueRestoreSnapshot(
     ...(retryQueueRestoreItems === undefined
       ? {}
       : { retryQueueRestoreItems: [...retryQueueRestoreItems] }),
+    ...(legacyRetryReviewLocalStorageValue === undefined
+      ? {}
+      : { legacyRetryReviewLocalStorageValue }),
     actionQueueBackupRecord,
     actionQueueLocalStorageValue: value['actionQueueLocalStorageValue'],
     deadLetterBackupRecord,

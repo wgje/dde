@@ -882,4 +882,37 @@ describe('DisasterBackupLocalStateReader', () => {
     expect(listPendingUploads).not.toHaveBeenCalled();
     expect(localState.attachmentUploadOutbox).toEqual([]);
   });
+
+  it('exports Legacy Retry Review from only the captured owner bucket', async () => {
+    const ownerRecord = {
+      item: createRetryQueueItem({
+        id: 'retry-review-owner',
+        operationId: 'operation-review-owner',
+        sourceUserId: 'user-1',
+        data: { id: 'task-review-owner', content: 'manual review' },
+      }),
+      reason: 'terminal outcome requires review',
+      quarantinedAt: '2026-06-16T00:00:00.000Z',
+      ownerUserId: 'user-1',
+    };
+    const foreignRecord = {
+      item: createRetryQueueItem({
+        id: 'retry-review-foreign',
+        operationId: 'operation-review-foreign',
+        sourceUserId: 'user-2',
+        data: { id: 'task-review-foreign', content: 'foreign review' },
+      }),
+      reason: 'foreign owner review',
+      quarantinedAt: '2026-06-16T00:00:00.000Z',
+      ownerUserId: 'user-2',
+    };
+    localStorage.setItem('nanoflow.retry-queue.legacy-review.user-1', JSON.stringify([ownerRecord]));
+    localStorage.setItem('nanoflow.retry-queue.legacy-review.user-2', JSON.stringify([foreignRecord]));
+
+    const localState = await createReader().readLocalState('user-1', new Set(['project-1']));
+
+    expect(localState.legacyRetryReview).toEqual([ownerRecord]);
+    expect(localState.dataSafety?.replayPlan.steps.map(step => step.operationId))
+      .not.toContain('operation-review-owner');
+  });
 });

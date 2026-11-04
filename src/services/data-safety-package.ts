@@ -1,6 +1,7 @@
 import type { SyncRpcResult, SyncRpcStatus, TaskWriteIntent } from './sync-rpc-client.service';
 import { buildStoreRestoreOperations } from './data-safety-package-restore-plan.helpers';
 import { validateDataSafetyPackageContents } from './data-safety-package-validation.helpers';
+import type { LegacyRetryReviewBackupItem } from './legacy-retry-review-backup.helpers';
 
 export const DATA_SAFETY_PACKAGE_SCHEMA_VERSION = '1.0.0' as const;
 
@@ -60,6 +61,7 @@ export interface DataSafetyOfflineSnapshotMirrors {
 
 export interface DataSafetyLocalStateSnapshot {
   retryQueue: DataSafetyRetryQueueItem[];
+  legacyRetryReview?: LegacyRetryReviewBackupItem[];
   actionQueue: DataSafetyQueuedAction[];
   deadLetters: DataSafetyDeadLetterItem[];
   conflicts: unknown[];
@@ -177,6 +179,7 @@ export interface DataSafetyIntegritySnapshot {
     connections: number;
     syncCursors: number;
     retryQueue: number;
+    legacyRetryReview?: number;
     actionQueue: number;
     deadLetters: number;
   };
@@ -307,11 +310,15 @@ export interface BuildLastWriteExplainInput {
 }
 
 export function buildDataSafetyExportPackage(input: BuildDataSafetyExportPackageInput): DataSafetyExportPackage {
+  const localState: DataSafetyLocalStateSnapshot = {
+    ...input.localState,
+    legacyRetryReview: input.localState.legacyRetryReview ?? [],
+  };
   const replaySource = {
     schemaVersion: DATA_SAFETY_PACKAGE_SCHEMA_VERSION,
     exportedAt: input.exportedAt,
     ownerUserId: input.ownerUserId,
-    localState: input.localState,
+    localState,
     replayLog: input.replayLog ?? [],
   };
   const packageWithoutChecksum: DataSafetyExportPackage = {
@@ -320,13 +327,13 @@ export function buildDataSafetyExportPackage(input: BuildDataSafetyExportPackage
     ownerUserId: input.ownerUserId,
     app: input.app,
     localData: input.localData,
-    localState: input.localState,
+    localState,
     syncSnapshot: input.syncSnapshot,
     replayLog: input.replayLog ?? [],
     replayPlan: buildReplayPlan(replaySource),
     lastWriteExplain: input.lastWriteExplain ?? null,
     integrity: {
-      tableCounts: buildTableCounts(input.localData, input.localState),
+      tableCounts: buildTableCounts(input.localData, localState),
       checksum: '',
     },
   };
@@ -455,6 +462,7 @@ function buildTableCounts(
   localData: DataSafetyLocalDataSnapshot,
   localState: DataSafetyLocalStateSnapshot,
 ): DataSafetyIntegritySnapshot['tableCounts'] {
+  const legacyRetryReviewCount = (localState.legacyRetryReview ?? []).length;
   return {
     projects: localData.projects.length,
     tasks: localData.tasks.length,
@@ -463,6 +471,7 @@ function buildTableCounts(
     retryQueue: localState.retryQueue.length,
     actionQueue: localState.actionQueue.length,
     deadLetters: localState.deadLetters.length,
+    ...(legacyRetryReviewCount > 0 ? { legacyRetryReview: legacyRetryReviewCount } : {}),
   };
 }
 

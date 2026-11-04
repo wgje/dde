@@ -1,4 +1,8 @@
 import { getUnsafeTaskWriteFields } from '../utils/task-write-payload-integrity';
+import {
+  collectLegacyRetryReviewQueueIdentityOverlapErrors,
+  collectLegacyRetryReviewValidationErrors,
+} from './legacy-retry-review-backup.helpers';
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -35,7 +39,7 @@ function validateDataSafetyPackageSections(
   validateDataSafetyLocalState(value['localState'], value['ownerUserId'], errors);
   validateDataSafetySyncSnapshot(value['syncSnapshot'], errors);
   validateDataSafetyReplayPlan(value['replayPlan'], errors);
-  validateDataSafetyIntegrity(value['integrity'], errors);
+  validateDataSafetyIntegrity(value['integrity'], value['localState'], errors);
 }
 
 function validateDataSafetyLocalData(value: unknown, errors: string[]): void {
@@ -70,6 +74,17 @@ function validateDataSafetyLocalState(
   }
 
   validateDataSafetyRetryQueue(value['retryQueue'], ownerUserId, errors);
+  if (value['legacyRetryReview'] !== undefined) {
+    errors.push(...collectLegacyRetryReviewValidationErrors(
+      value['legacyRetryReview'],
+      ownerUserId,
+      'localState.legacyRetryReview',
+    ));
+    errors.push(...collectLegacyRetryReviewQueueIdentityOverlapErrors(
+      value['retryQueue'],
+      value['legacyRetryReview'],
+    ));
+  }
   validateDataSafetyActionQueue(value['actionQueue'], errors);
   validateArray(value, 'deadLetters', errors);
   validateArray(value, 'conflicts', errors);
@@ -175,7 +190,7 @@ function validateDataSafetySyncSnapshot(value: unknown, errors: string[]): void 
   }
 }
 
-function validateDataSafetyIntegrity(value: unknown, errors: string[]): void {
+function validateDataSafetyIntegrity(value: unknown, localState: unknown, errors: string[]): void {
   if (!isRecord(value)) {
     errors.push('integrity is required');
     return;
@@ -183,6 +198,16 @@ function validateDataSafetyIntegrity(value: unknown, errors: string[]): void {
 
   if (typeof value['checksum'] !== 'string') {
     errors.push('integrity.checksum is required');
+  }
+  if (isRecord(localState) && localState['legacyRetryReview'] !== undefined) {
+    const tableCounts = value['tableCounts'];
+    const reviewItems = localState['legacyRetryReview'];
+    if (!Array.isArray(reviewItems)) {
+      errors.push('integrity.tableCounts.legacyRetryReview must match localState.legacyRetryReview');
+    } else if (reviewItems.length > 0
+      && (!isRecord(tableCounts) || tableCounts['legacyRetryReview'] !== reviewItems.length)) {
+      errors.push('integrity.tableCounts.legacyRetryReview must match localState.legacyRetryReview');
+    }
   }
 }
 

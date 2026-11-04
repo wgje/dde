@@ -229,6 +229,59 @@ describe('data-safety IndexedDB adapter', () => {
       failedAt: '2026-06-16T00:00:00.000Z',
       reason: 'test dead letter',
     };
+    const existingReviewItem = {
+      item: {
+        id: 'retry-review-existing',
+        operationId: 'operation-review-existing',
+        sourceUserId: 'user-1',
+        type: 'task',
+        operation: 'upsert',
+        data: { id: 'task-review-existing', content: 'existing review' },
+        retryCount: 3,
+        createdAt: 1781539100000,
+      },
+      reason: 'existing terminal outcome',
+      quarantinedAt: '2026-06-15T23:58:00.000Z',
+      ownerUserId: 'user-1',
+    };
+    const incomingReviewItem = {
+      item: {
+        id: 'retry-review-backup',
+        operationId: 'operation-review-backup',
+        sourceUserId: 'user-1',
+        type: 'task',
+        operation: 'upsert',
+        data: { id: 'task-review-backup', content: 'backup review' },
+        retryCount: 3,
+        createdAt: 1781539200000,
+      },
+      reason: 'backup terminal outcome',
+      quarantinedAt: '2026-06-16T00:00:00.000Z',
+      ownerUserId: 'user-1',
+    };
+    const foreignReviewItem = {
+      item: {
+        id: 'retry-review-foreign',
+        operationId: 'operation-review-foreign',
+        sourceUserId: 'user-2',
+        type: 'task',
+        operation: 'upsert',
+        data: { id: 'task-review-foreign', content: 'foreign review' },
+        retryCount: 3,
+        createdAt: 1781539200000,
+      },
+      reason: 'foreign owner review',
+      quarantinedAt: '2026-06-16T00:00:00.000Z',
+      ownerUserId: 'user-2',
+    };
+    localStorage.setItem(
+      'nanoflow.retry-queue.legacy-review.user-1',
+      JSON.stringify([existingReviewItem]),
+    );
+    localStorage.setItem(
+      'nanoflow.retry-queue.legacy-review.user-2',
+      JSON.stringify([foreignReviewItem]),
+    );
     const replayEntry: DataSafetyReplayEntry = {
       operationId: 'op-retry-1',
       entityType: 'task',
@@ -269,6 +322,7 @@ describe('data-safety IndexedDB adapter', () => {
       },
       localState: {
         retryQueue: [retryQueueItem],
+        legacyRetryReview: [incomingReviewItem],
         actionQueue: [actionQueueItem],
         deadLetters: [deadLetterItem],
         conflicts: [],
@@ -299,6 +353,10 @@ describe('data-safety IndexedDB adapter', () => {
       version: 1,
       items: [retryQueueItem],
     });
+    expect(JSON.parse(localStorage.getItem('nanoflow.retry-queue.legacy-review.user-1') ?? '[]'))
+      .toEqual([existingReviewItem, incomingReviewItem]);
+    expect(JSON.parse(localStorage.getItem('nanoflow.retry-queue.legacy-review.user-2') ?? '[]'))
+      .toEqual([foreignReviewItem]);
     expect(JSON.parse(localStorage.getItem('nanoflow.action-queue.user-1') ?? '[]')).toEqual([actionQueueItem]);
     queueBackupDb = await openQueueBackupDatabase();
     await expect(getStoreValue(queueBackupDb, 'queue-backup', 'queue-backup:user-1')).resolves.toMatchObject({

@@ -8,6 +8,7 @@ import {
   type DataSafetyDeadLetterItem,
   type DataSafetyExportPackage,
   type DataSafetyLastWriteExplain,
+  type DataSafetyLocalStateSnapshot,
   type DataSafetyOfflineSnapshotMirrors,
   type DataSafetyQueuedAction,
   type DataSafetyReplayEntry,
@@ -64,6 +65,7 @@ export interface IndexedDbDataSafetyExportOptions {
   ownerUserId: string;
   app: DataSafetyAppSnapshot;
   retryQueue?: DataSafetyRetryQueueItem[];
+  legacyRetryReview?: NonNullable<DataSafetyLocalStateSnapshot['legacyRetryReview']>;
   actionQueue?: DataSafetyQueuedAction[];
   deadLetters?: DataSafetyDeadLetterItem[];
   conflicts?: unknown[];
@@ -180,6 +182,7 @@ function buildDataSafetyExportPackageFromRows(
     },
     localState: {
       retryQueue: queues.retryQueue,
+      legacyRetryReview: options.legacyRetryReview ?? [],
       actionQueue: queues.actionQueue,
       deadLetters: queues.deadLetters,
       conflicts: options.conflicts ?? [],

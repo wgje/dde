@@ -47,6 +47,13 @@ import {
   type LocalBackupUiRestoreStage,
 } from './local-backup-ui-restore-types';
 import { LocalBackupUiBlackBoxRestoreService } from './local-backup-ui-black-box-restore.service';
+import {
+  collectLegacyRetryReviewQueueIdentityOverlapErrors,
+  mergeLegacyRetryReviewItems,
+  parseLegacyRetryReviewItems,
+  restoreOwnerScopedLegacyRetryReviewStorageValue,
+  writeOwnerScopedLegacyRetryReviewItems,
+} from './legacy-retry-review-backup.helpers';
 import type {
   LocalBackupUiBlackBoxPersistedEntry,
   LocalBackupUiBlackBoxRestoreSnapshot,
@@ -129,6 +136,7 @@ export class LocalBackupUiRestoreStageService {
 
   createOperations(input: LocalBackupUiRestoreStageInput): LocalBackupUiRestoreStageOperations {
     preflightAttachmentUploadOutboxFromBackup(input.backup, input.ownerUserId);
+    preflightLegacyRetryReviewFromBackup(input.backup, input.ownerUserId);
     decodeConflictsFromBackup(input.backup, input.ownerUserId);
     return createLocalBackupUiRestoreStageOperations(input, {
       decodePreImage: marker => this.decodeStageSnapshots(marker),
@@ -182,8 +190,9 @@ export class LocalBackupUiRestoreStageService {
       ),
       'retry-queue': createStageEffect<LocalBackupUiRestoreRetryQueuePreImage>(
         (context, snapshots) => this.applyRetryQueue(
+          input,
           input.ownerUserId,
-          snapshots.retryQueue.restoredItems,
+          snapshots.retryQueue,
           context,
         ),
         (context, snapshots) => this.readRetryQueue(
@@ -478,14 +487,15 @@ export class LocalBackupUiRestoreStageService {
   }
 
   private applyRetryQueue(
+    input: LocalBackupUiRestoreStageInput,
     ownerUserId: string,
-    restoredItems: Record<string, unknown>[],
+    preImage: LocalBackupUiRestoreRetryQueuePreImage,
     context: LocalBackupUiRestoreStageOperationContext,
   ): Promise<number> {
-    return context.runWriterMutation('retry-queue', () => {
+    return context.runWriterMutation('retry-queue', async () => {
       const validationNow = Date.now();
       const currentlyRestorableItems = normalizeLocalBackupUiRestoreRetryQueueFootprint(
-        restoredItems,
+        preImage.restoredItems,
         ownerUserId,
         {
           now: validationNow,
@@ -493,10 +503,30 @@ export class LocalBackupUiRestoreStageService {
           maxRetries: this.retryQueue.MAX_RETRIES,
         },
       );
-      return this.retryQueue.restoreFromBackupItems(currentlyRestorableItems, ownerUserId, {
+      const restoredCount = await this.retryQueue.restoreFromBackupItems(currentlyRestorableItems, ownerUserId, {
         validationNow,
         terminalEvidence: 'forbid',
       });
+      const previousLegacyReviewItems = preImage.legacyReviewLocalStorageValue === undefined
+        || preImage.legacyReviewLocalStorageValue === null
+        ? []
+        : parseLegacyRetryReviewItems(
+          JSON.parse(preImage.legacyReviewLocalStorageValue) as unknown,
+          ownerUserId,
+          'marker legacyRetryReview',
+        );
+      const incomingLegacyReviewItems = input.backup.localState?.legacyRetryReview;
+      if (incomingLegacyReviewItems !== undefined) {
+        const targetLegacyReviewItems = mergeLegacyRetryReviewItems(
+          previousLegacyReviewItems,
+          incomingLegacyReviewItems,
+          ownerUserId,
+        );
+        await context.checkpoint();
+        writeOwnerScopedLegacyRetryReviewItems(ownerUserId, targetLegacyReviewItems);
+        await context.checkpoint();
+      }
+      return restoredCount;
     });
   }
 
@@ -514,9 +544,12 @@ export class LocalBackupUiRestoreStageService {
       }, ownerUserId)
       : preImage.restoredItems;
     return {
-      schemaVersion: 2,
+      schemaVersion: preImage.schemaVersion,
       indexedDb: snapshot.retryQueueIndexedDbItems,
       localStorage: snapshot.retryQueueLocalStorageValue,
+      ...(preImage.legacyReviewLocalStorageValue === undefined
+        ? {}
+        : { legacyReviewLocalStorageValue: snapshot.legacyRetryReviewLocalStorageValue ?? null }),
       restoredItems,
     };
   }
@@ -526,16 +559,26 @@ export class LocalBackupUiRestoreStageService {
     snapshot: LocalBackupUiRestoreRetryQueuePreImage,
     context: LocalBackupUiRestoreStageOperationContext,
   ): Promise<void> {
-    return context.runWriterMutation('retry-queue', () => restoreRetryQueueRestoreSnapshot(
-      ownerUserId,
-      {
-        retryQueueIndexedDbItems: snapshot.indexedDb,
-        retryQueueLocalStorageValue: snapshot.localStorage,
-      },
-      snapshot.restoredItems,
-      () => true,
-      context.checkpoint,
-    ));
+    return context.runWriterMutation('retry-queue', async () => {
+      await restoreRetryQueueRestoreSnapshot(
+        ownerUserId,
+        {
+          retryQueueIndexedDbItems: snapshot.indexedDb,
+          retryQueueLocalStorageValue: snapshot.localStorage,
+        },
+        snapshot.restoredItems,
+        () => true,
+        context.checkpoint,
+      );
+      if (snapshot.legacyReviewLocalStorageValue !== undefined) {
+        await context.checkpoint();
+        restoreOwnerScopedLegacyRetryReviewStorageValue(
+          ownerUserId,
+          snapshot.legacyReviewLocalStorageValue,
+        );
+        await context.checkpoint();
+      }
+    });
   }
 
   private async applyDeadLetters(
@@ -810,6 +853,20 @@ function guardOperationContext(
 
 function forbidStartupRecoveryForwardApply(stage: LocalBackupUiRestoreStage): never {
   throw new Error(`local backup UI startup recovery must not resume forward ${stage}`);
+}
+
+function preflightLegacyRetryReviewFromBackup(backup: BackupData, ownerUserId: string): void {
+  const items = backup.localState?.legacyRetryReview;
+  if (items === undefined) return;
+  parseLegacyRetryReviewItems(items, ownerUserId, 'backup.localState.legacyRetryReview');
+  const overlapErrors = collectLegacyRetryReviewQueueIdentityOverlapErrors(
+    backup.localState?.retryQueue,
+    items,
+    'backup.localState.legacyRetryReview',
+  );
+  if (overlapErrors.length > 0) {
+    throw new Error(`backup local state has conflicting RetryQueue review identity: ${overlapErrors.join('; ')}`);
+  }
 }
 
 function blackBoxFor(snapshots: LocalBackupUiRestoreStageSnapshots): LocalBackupUiBlackBoxRestoreSnapshot {

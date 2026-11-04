@@ -198,9 +198,10 @@ function buildPreImageCandidate(
       localStorage: localState.actionQueueLocalStorageValue,
     },
     retryQueue: {
-      schemaVersion: 2,
+      schemaVersion: 3,
       indexedDb: localState.retryQueueIndexedDbItems,
       localStorage: localState.retryQueueLocalStorageValue,
+      legacyReviewLocalStorageValue: localState.legacyRetryReviewLocalStorageValue ?? null,
       restoredItems: sources.retryQueueRestoreItems,
     },
     deadLetters: {
