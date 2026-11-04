@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { Task } from '../models';
 import {
   appendUnprocessedRemoteTasks,
+  createTaskTombstoneSnapshot,
   createTaskMergeState,
   keepConservativeLocalTask,
   keepSoftDeletedLocalTask,
@@ -70,6 +71,19 @@ describe('conflict-resolution merge helpers', () => {
 
     expect(skipped).toBe(false);
     expect(state.skippedTombstoneCount).toBe(0);
+  });
+
+  it('skips a local task when its tombstone has no deletion timestamp', () => {
+    const state = createTaskMergeState([]);
+    const localTask = task({ id: 'timestamp-missing' });
+    const tombstones = createTaskTombstoneSnapshot(
+      new Set(['timestamp-missing']),
+      new Map([['other-tombstone', Date.parse('2026-01-02T00:00:00.000Z')]]),
+    );
+
+    expect(skipTombstoneTask(localTask, tombstones, state)).toBe(true);
+    expect(state.skippedTombstoneCount).toBe(1);
+    expect(state.mergedTasks).toEqual([]);
   });
 
   it('preserves local soft-deleted tasks only when the remote task is absent', () => {
