@@ -1,5 +1,8 @@
-import { describe, expect, it } from 'vitest';
-import type { BackupData } from '../../supabase/functions/_shared/backup-utils';
+import { describe, expect, it, vi } from 'vitest';
+import type {
+  BackupData,
+  BackupPendingAttachmentUpload,
+} from '../../supabase/functions/_shared/backup-utils';
 import {
   convertBackupDataToExportData,
   deriveAttachmentUploadOutboxRestoreTarget,
@@ -52,7 +55,7 @@ describe('convertBackupDataToExportData', () => {
         id: 'task-1',
         projectId: 'project-1',
         title: 'Task 1',
-        content: null as unknown as string,
+        content: 'Recovered task content',
         parentId: null,
         stage: null,
         order: undefined,
@@ -145,7 +148,7 @@ describe('convertBackupDataToExportData', () => {
         tasks: [{
           id: 'task-1',
           title: 'Task 1',
-          content: '',
+          content: 'Recovered task content',
           stage: null,
           parentId: null,
           order: 0,
@@ -208,6 +211,7 @@ describe('convertBackupDataToExportData', () => {
         id: 'task-completed',
         projectId: 'project-1',
         title: 'Completed task',
+        content: 'Completed task content',
         status: 'completed',
         completedAt: '2026-06-08T04:00:00.000Z',
         updatedAt: '2026-06-08T05:00:00.000Z',
@@ -231,11 +235,67 @@ describe('convertBackupDataToExportData', () => {
       updatedAt: '2026-06-08T06:00:00.000Z',
     }));
   });
+
+  it.each([
+    ['missing', undefined],
+    ['null', null],
+    ['non-string', 42],
+  ])('rejects backup task content that is %s', (_label, content) => {
+    const tasks = [{
+      id: 'task-without-content',
+      projectId: 'project-1',
+      title: 'Incomplete task row',
+      ...(content === undefined ? {} : { content }),
+    }] as unknown as BackupData['tasks'];
+
+    expect(convertBackupDataToExportData(createBackup({ tasks }))).toBeNull();
+  });
+
+  it('preserves an empty string as valid task content', () => {
+    const exportData = convertBackupDataToExportData(createBackup({
+      tasks: [{
+        id: 'task-empty-content',
+        projectId: 'project-1',
+        title: 'Empty task content',
+        content: '',
+      }],
+    }));
+
+    expect(exportData?.projects[0].tasks[0].content).toBe('');
+  });
 });
 
 describe('restoreAttachmentUploadOutboxFromBackup', () => {
+  const makeUpload = (
+    overrides: Partial<BackupPendingAttachmentUpload> = {},
+  ): BackupPendingAttachmentUpload => ({
+    ownerUserId: 'user-1',
+    operationId: 'attachment:create:attachment-1',
+    attachmentId: 'attachment-1',
+    blobKey: 'attachment-1',
+    fileName: 'offline.txt',
+    mimeType: 'text/plain',
+    size: 2,
+    createdAt: '2026-06-18T00:00:00.000Z',
+    encoding: 'base64',
+    blobBase64: 'TkY=',
+    ...overrides,
+  });
+
+  const makeOutboxBackup = (
+    uploads: BackupPendingAttachmentUpload[],
+    ownerUserId: string | undefined = 'user-1',
+  ): BackupData => ({
+    localState: {
+      ...(ownerUserId ? { dataSafety: { ownerUserId } } : {}),
+      attachmentUploadOutbox: uploads,
+    },
+  } as BackupData);
+
   it('restores pending attachment upload blobs from JSON backup local state', async () => {
     const savedUploads: Array<{
+      ownerUserId: string;
+      operationId: string;
       attachmentId: string;
       blobKey: string;
       fileName: string;
@@ -247,7 +307,12 @@ describe('restoreAttachmentUploadOutboxFromBackup', () => {
 
     const restoredCount = await restoreAttachmentUploadOutboxFromBackup({
       localState: {
+        dataSafety: {
+          ownerUserId: 'user-1',
+        },
         attachmentUploadOutbox: [{
+          ownerUserId: 'user-1',
+          operationId: 'attachment:create:attachment-1',
           attachmentId: 'attachment-1',
           blobKey: 'attachment-1',
           fileName: 'offline.txt',
@@ -267,6 +332,8 @@ describe('restoreAttachmentUploadOutboxFromBackup', () => {
     expect(restoredCount).toBe(1);
     expect(savedUploads).toHaveLength(1);
     expect(savedUploads[0]).toEqual(expect.objectContaining({
+      ownerUserId: 'user-1',
+      operationId: 'attachment:create:attachment-1',
       attachmentId: 'attachment-1',
       blobKey: 'attachment-1',
       fileName: 'offline.txt',
@@ -275,6 +342,82 @@ describe('restoreAttachmentUploadOutboxFromBackup', () => {
       createdAt: '2026-06-18T00:00:00.000Z',
     }));
     expect(Array.from(new Uint8Array(await savedUploads[0].blob.arrayBuffer()))).toEqual([78, 70]);
+  });
+
+  it('rejects mixed owner uploads before writing any row', async () => {
+    const savePendingUpload = vi.fn();
+    const backup = makeOutboxBackup([
+      makeUpload(),
+      makeUpload({ operationId: 'attachment:create:foreign', ownerUserId: 'user-2' }),
+    ]);
+
+    await expect(restoreAttachmentUploadOutboxFromBackup(
+      backup,
+      { savePendingUpload },
+    )).rejects.toThrow(/attachment upload outbox/i);
+    expect(savePendingUpload).not.toHaveBeenCalled();
+  });
+
+  it('rejects ownerless uploads instead of silently dropping them', async () => {
+    const savePendingUpload = vi.fn();
+
+    await expect(restoreAttachmentUploadOutboxFromBackup(
+      makeOutboxBackup([makeUpload({ ownerUserId: undefined })]),
+      { savePendingUpload },
+    )).rejects.toThrow(/attachment upload outbox/i);
+    expect(savePendingUpload).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['invalid base64', { blobBase64: 'not-base64!' }],
+    ['declared size mismatch', { size: 3 }],
+  ])('preflights every upload before writing when the last row has %s', async (_label, overrides) => {
+    const savePendingUpload = vi.fn();
+    const backup = makeOutboxBackup([
+      makeUpload(),
+      makeUpload({
+        operationId: 'attachment:create:attachment-2',
+        blobKey: 'attachment-2',
+        ...overrides,
+      }),
+    ]);
+
+    await expect(restoreAttachmentUploadOutboxFromBackup(
+      backup,
+      { savePendingUpload },
+    )).rejects.toThrow(/attachment upload outbox/i);
+    expect(savePendingUpload).not.toHaveBeenCalled();
+  });
+
+  it('rejects duplicate durable upload identities before writing', async () => {
+    const savePendingUpload = vi.fn();
+    const backup = makeOutboxBackup([
+      makeUpload(),
+      makeUpload({ attachmentId: 'attachment-2', fileName: 'second.txt' }),
+    ]);
+
+    await expect(restoreAttachmentUploadOutboxFromBackup(
+      backup,
+      { savePendingUpload },
+    )).rejects.toThrow(/duplicate/i);
+    expect(savePendingUpload).not.toHaveBeenCalled();
+  });
+
+  it('allows empty outboxes without owner metadata and preserves empty MIME', async () => {
+    const savePendingUpload = vi.fn();
+
+    await expect(restoreAttachmentUploadOutboxFromBackup(
+      { localState: {} } as BackupData,
+      { savePendingUpload },
+    )).resolves.toBe(0);
+    await expect(restoreAttachmentUploadOutboxFromBackup(
+      makeOutboxBackup([], undefined),
+      { savePendingUpload },
+    )).resolves.toBe(0);
+    await expect(restoreAttachmentUploadOutboxFromBackup(
+      makeOutboxBackup([makeUpload({ mimeType: '' })]),
+      { savePendingUpload },
+    )).resolves.toBe(1);
   });
 
   it('projects the complete owner-scoped upsert result from pre-image and backup', async () => {
@@ -590,40 +733,27 @@ describe('restoreConflictsFromBackup', () => {
     };
   }
 
-  it('restores only valid conflict records scoped to the target owner', async () => {
-    const savedConflicts: ConflictRecord[] = [];
-    const ownerConflict = createConflict({ projectId: 'project-owner', ownerUserId: 'user-1' });
-    const crossOwnerConflict = createConflict({ projectId: 'project-other', ownerUserId: 'user-2' });
-
-    const restoredCount = await restoreConflictsFromBackup({
+  function createBackup(
+    conflicts?: unknown,
+    packageOwnerUserId?: unknown,
+    projectOwnerUserId = 'user-1',
+  ): BackupData {
+    return {
+      payloadVersion: '2.0.0',
+      projects: [{ id: 'project-1', userId: projectOwnerUserId, name: 'Project 1' }],
+      tasks: [],
+      connections: [],
       localState: {
-        conflicts: [
-          ownerConflict,
-          crossOwnerConflict,
-          { projectId: 'missing-local-project', ownerUserId: 'user-1' },
-          'invalid-conflict',
-        ],
+        ...(conflicts === undefined ? {} : { conflicts }),
+        ...(packageOwnerUserId === undefined
+          ? {}
+          : { dataSafety: { ownerUserId: packageOwnerUserId } }),
       },
-    } as BackupData, 'user-1', {
-      saveConflict: async (record) => {
-        savedConflicts.push(record);
-        return true;
-      },
-    });
+    } as unknown as BackupData;
+  }
 
-    expect(restoredCount).toBe(1);
-    expect(savedConflicts).toEqual([
-      expect.objectContaining({
-        projectId: 'project-owner',
-        ownerUserId: 'user-1',
-        localProject: expect.objectContaining({ name: 'Local conflict' }),
-      }),
-    ]);
-  });
-
-  it('preserves valid operation-level conflict evidence during restore', async () => {
-    const savedConflicts: ConflictRecord[] = [];
-    const localTask: Task = {
+  function createTask(overrides: Partial<Task> = {}): Task {
+    return {
       id: 'task-1',
       title: 'Local task',
       content: 'local',
@@ -637,13 +767,88 @@ describe('restoreConflictsFromBackup', () => {
       createdDate: '2026-06-18T00:00:00.000Z',
       updatedAt: '2026-06-18T00:01:00.000Z',
       displayId: 'T1',
+      ...overrides,
     };
-    const remoteTask: Task = {
-      ...localTask,
-      title: 'Remote task',
-      content: 'remote',
-      updatedAt: '2026-06-18T00:02:00.000Z',
-    };
+  }
+
+  it('keeps missing and empty payloads compatible and restores unanimous row owners', async () => {
+    const savedConflicts: ConflictRecord[] = [];
+    const saveConflict = vi.fn(async (record: ConflictRecord) => {
+      savedConflicts.push(record);
+      return true;
+    });
+    const legacyConflicts = [
+      createConflict({ projectId: 'project-1' }),
+      createConflict({ projectId: 'project-2' }),
+    ];
+
+    await expect(restoreConflictsFromBackup(createBackup(), 'user-1', { saveConflict })).resolves.toBe(0);
+    await expect(restoreConflictsFromBackup(createBackup([]), 'user-1', { saveConflict })).resolves.toBe(0);
+    await expect(restoreConflictsFromBackup(
+      createBackup(legacyConflicts), 'user-1', { saveConflict },
+    )).resolves.toBe(2);
+    expect(savedConflicts).toEqual(legacyConflicts);
+  });
+
+  it('rejects the whole set before saving when any row is invalid or duplicated', async () => {
+    const valid = createConflict({ projectId: 'valid' });
+    const operationInvalid = createConflict({ projectId: 'operation-invalid' });
+    operationInvalid.operationConflicts = [{ actionType: 'task:update' }] as never;
+    const cases: unknown[][] = [
+      [valid, { ...createConflict({ projectId: 'ownerless' }), ownerUserId: undefined }],
+      [valid, createConflict({ projectId: 'foreign', ownerUserId: 'user-2' })],
+      [valid, { projectId: 'malformed', ownerUserId: 'user-1' }],
+      [valid, operationInvalid],
+      [valid, createConflict({ projectId: 'valid' })],
+    ];
+
+    for (const conflicts of cases) {
+      const saveConflict = vi.fn(async () => true);
+      await expect(restoreConflictsFromBackup(
+        createBackup(conflicts, 'user-1'), 'user-1', { saveConflict },
+      )).rejects.toThrow(/conflict/i);
+      expect(saveConflict).not.toHaveBeenCalled();
+    }
+  });
+
+  it('cross-checks package, row, project, and restore owners', async () => {
+    const conflict = createConflict();
+    const saveConflict = vi.fn(async () => true);
+    await expect(restoreConflictsFromBackup(
+      createBackup([conflict], 'user-1'), 'user-1', { saveConflict },
+    )).resolves.toBe(1);
+
+    const mismatchedBackups = [
+      createBackup([createConflict({ ownerUserId: 'user-2' })], 'user-1', 'user-2'),
+      createBackup([conflict], 'user-1', 'user-2'),
+      createBackup([conflict], ''),
+      createBackup([conflict], '   '),
+      createBackup([conflict], 42),
+    ];
+    saveConflict.mockClear();
+    for (const backup of mismatchedBackups) {
+      expect(convertBackupDataToExportData(backup)).toBeNull();
+      await expect(restoreConflictsFromBackup(
+        backup, 'user-1', { saveConflict },
+      )).rejects.toThrow(/conflict/i);
+      expect(saveConflict).not.toHaveBeenCalled();
+    }
+  });
+
+  it('throws when durable conflict persistence reports false', async () => {
+    await expect(restoreConflictsFromBackup(
+      createBackup([createConflict()], 'user-1'),
+      'user-1',
+      { saveConflict: vi.fn(async () => false) },
+    )).rejects.toThrow(/conflict/i);
+  });
+
+  it('preserves valid operation-level conflict evidence during restore', async () => {
+    const savedConflicts: ConflictRecord[] = [];
+    const localTask = createTask();
+    const remoteTask = createTask({
+      title: 'Remote task', content: 'remote', updatedAt: '2026-06-18T00:02:00.000Z',
+    });
     const conflict = createConflict({
       operationConflicts: [{
         actionType: 'task:update',
@@ -659,36 +864,16 @@ describe('restoreConflictsFromBackup', () => {
       }],
     });
 
-    const restoredCount = await restoreConflictsFromBackup({
-      localState: { conflicts: [conflict] },
-    } as BackupData, 'user-1', {
-      saveConflict: async (record) => {
-        savedConflicts.push(record);
-        return true;
+    const restoredCount = await restoreConflictsFromBackup(
+      createBackup([conflict], 'user-1'), 'user-1', {
+        saveConflict: async (record) => {
+          savedConflicts.push(record);
+          return true;
+        },
       },
-    });
+    );
 
     expect(restoredCount).toBe(1);
-    expect(savedConflicts[0].operationConflicts).toEqual(conflict.operationConflicts);
-  });
-
-  it('skips conflict records whose operation-level evidence is structurally incomplete', async () => {
-    const saveConflict = vi.fn(async () => true);
-    const malformedConflict = createConflict() as unknown as Record<string, unknown>;
-    malformedConflict['operationConflicts'] = [{
-      actionType: 'task:update',
-      entityType: 'task',
-      entityId: 'task-1',
-      projectId: 'project-1',
-      message: 'Missing local entity and reason',
-      conflictedAt: '2026-06-18T00:03:00.000Z',
-    }];
-
-    const restoredCount = await restoreConflictsFromBackup({
-      localState: { conflicts: [malformedConflict] },
-    } as BackupData, 'user-1', { saveConflict });
-
-    expect(restoredCount).toBe(0);
-    expect(saveConflict).not.toHaveBeenCalled();
+    expect(savedConflicts).toEqual([conflict]);
   });
 });
