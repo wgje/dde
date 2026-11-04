@@ -153,12 +153,20 @@ describe('attachment-upload-queue.helpers', () => {
       type: 'document',
       url: 'nanoflow-local-attachment://attachment-1',
     }));
+    expect(result.queuedUpload).toEqual({
+      actionId: 'queued',
+      ownerUserId: 'user-1',
+      blobKey: 'attachment-1',
+      operationId: 'attachment:create:attachment-1',
+    });
     expect(savePendingUpload).toHaveBeenCalledWith(expect.objectContaining({
       attachmentId: 'attachment-1',
       blob: file,
       blobKey: 'attachment-1',
       fileName: 'offline.txt',
       mimeType: 'text/plain',
+      operationId: 'attachment:create:attachment-1',
+      ownerUserId: 'user-1',
       recovery: expect.objectContaining({
         operationId: 'attachment:create:attachment-1',
         payload: expect.objectContaining({
@@ -221,7 +229,11 @@ describe('attachment-upload-queue.helpers', () => {
       success: false,
       error: '附件上传队列持久化失败',
     });
-    expect(removePendingUpload).toHaveBeenCalledWith('attachment-1');
+    expect(removePendingUpload).toHaveBeenCalledWith({
+      ownerUserId: 'user-1',
+      blobKey: 'attachment-1',
+      operationId: 'attachment:create:attachment-1',
+    });
     expect(updateProgress).not.toHaveBeenCalled();
   });
 

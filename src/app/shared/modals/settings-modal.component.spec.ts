@@ -23,8 +23,6 @@ import { DisasterBackupService } from '../../../services/disaster-backup.service
 import { BackupDataSafetyMetadataRestoreService } from '../../../services/backup-data-safety-metadata-restore.service';
 import { LocalBackupUiRestoreStageService } from '../../../services/local-backup-ui-restore-stage.service';
 import { LocalBackupUiRestoreTransactionService } from '../../../services/local-backup-ui-restore-transaction.service';
-import { ActionQueueService } from '../../../services/action-queue.service';
-import { QueueBackupService } from '../../../services/queue-backup.service';
 import { SessionRuntimeResetRegistry } from '../../../services/session-runtime-reset.service';
 import {
   registerSettingsModalSiyuanOwnerGenerationSpecs,
@@ -151,19 +149,6 @@ describe('SettingsModalComponent', () => {
     prepare: vi.fn(),
   };
 
-  const mockActionQueueService = {
-    pendingActions: signal([]),
-    deadLetterQueue: signal([]),
-    reloadFromStorageForCurrentOwner: vi.fn().mockResolvedValue(undefined),
-    getCurrentOwnerStorageLoadState: vi.fn(() => 'loaded'),
-    clearCurrentView: vi.fn(),
-  };
-
-  const mockQueueBackupService = {
-    restoreQueueSnapshot: vi.fn().mockResolvedValue({ recordFound: true, actions: [], savedAt: null }),
-    restoreDeadLetters: vi.fn().mockResolvedValue([]),
-  };
-
   const mockExportService = {
     isExporting: signal(false),
     exportAndDownload: vi.fn(),
@@ -263,8 +248,6 @@ describe('SettingsModalComponent', () => {
         { provide: BackupDataSafetyMetadataRestoreService, useValue: mockMetadataRestoreService },
         { provide: LocalBackupUiRestoreStageService, useValue: mockLocalBackupUiRestoreStageService },
         { provide: LocalBackupUiRestoreTransactionService, useValue: mockLocalBackupUiRestoreTransactionService },
-        { provide: ActionQueueService, useValue: mockActionQueueService },
-        { provide: QueueBackupService, useValue: mockQueueBackupService },
         { provide: ThemeService, useValue: mockThemeService },
         { provide: DockEngineService, useValue: mockDockEngine },
         { provide: FocusPreferenceService, useValue: mockFocusPreferenceService },
@@ -668,10 +651,11 @@ describe('SettingsModalComponent', () => {
     ]) as unknown as typeof component.projects;
     mockAttachmentImportService.extractAttachmentsFromZip.mockResolvedValueOnce([itemA, itemB, unmatchedItem]);
     mockAttachmentImportService.importAttachments
-      .mockResolvedValueOnce({ success: true, imported: 1, failed: 0, skipped: 0, errors: [] })
+      .mockResolvedValueOnce({ success: true, imported: 1, queued: 1, failed: 0, skipped: 0, errors: [] })
       .mockResolvedValueOnce({
         success: false,
         imported: 0,
+        queued: 0,
         failed: 1,
         skipped: 2,
         errors: [{ taskId: 'task-b', attachmentName: 'task-b-file.txt', error: 'upload failed' }],
@@ -682,7 +666,7 @@ describe('SettingsModalComponent', () => {
     expect(mockAttachmentImportService.importAttachments).toHaveBeenNthCalledWith(1, 'project-a', [itemA]);
     expect(mockAttachmentImportService.importAttachments).toHaveBeenNthCalledWith(2, 'project-b', [itemB]);
     expect(alertSpy).toHaveBeenCalledWith(
-      '附件导入部分失败。\n成功: 1\n失败: 1\n跳过: 3\n首个错误: task-b-file.txt: upload failed',
+      '附件导入部分失败，已保存项等待同步。\n本地导入: 1\n待同步: 1\n失败: 1\n跳过: 3\n首个错误: task-b-file.txt: upload failed',
     );
     expect(mockLogger.warn).toHaveBeenCalledWith('SettingsModal', '部分附件未匹配到项目，已跳过: 1');
   });

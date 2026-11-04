@@ -15,7 +15,6 @@ import { Injector, runInInjectionContext } from '@angular/core';
 import { 
   AttachmentImportService, 
   AttachmentImportItem,
-  ATTACHMENT_IMPORT_CONFIG 
 } from './attachment-import.service';
 import { AttachmentService } from './attachment.service';
 import { AuthService } from './auth.service';
@@ -23,7 +22,11 @@ import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
 import { SupabaseClientService } from './supabase-client.service';
 import { TaskOperationAdapterService } from './task-operation-adapter.service';
-import { parseZipEntries, type ParseZipEntriesOptions } from './attachment-import-zip.helpers';
+import { ActionQueueService } from './action-queue.service';
+import type { AttachmentUploadPayload, QueuedAction } from './action-queue.types';
+import { AttachmentUploadOutboxService, type PendingAttachmentUploadIdentity } from './attachment-upload-outbox.service';
+import { ProjectStateService } from './project-state.service';
+import { registerAttachmentImportZipIntegritySpecs } from './attachment-import-zip-integrity.spec-helpers';
 
 describe('AttachmentImportService', () => {
   let service: AttachmentImportService;
@@ -45,6 +48,15 @@ describe('AttachmentImportService', () => {
     addTaskAttachment: ReturnType<typeof vi.fn>;
     addTaskAttachmentToProject: ReturnType<typeof vi.fn>;
   };
+  let mockActionQueue: {
+    pendingActions: ReturnType<typeof vi.fn>;
+    dequeue: ReturnType<typeof vi.fn>;
+    storage: { persistExactQueueMutationForOwner: ReturnType<typeof vi.fn> };
+  };
+  let mockUploadOutbox: { removePendingUpload: ReturnType<typeof vi.fn> };
+  let targetProjects: Array<{ id: string; tasks: Array<{ id: string }> }>;
+  let queuedActions: QueuedAction[];
+  let persistedQueue: QueuedAction[];
   
   const mockLogger = {
     category: () => ({
@@ -70,6 +82,12 @@ describe('AttachmentImportService', () => {
           size: 1024,
           createdAt: new Date().toISOString(),
         },
+        queuedUpload: {
+          actionId: 'action-1',
+          ownerUserId: 'user-1',
+          blobKey: 'att-1',
+          operationId: 'attachment:create:att-1',
+        },
       }),
     };
     
@@ -91,6 +109,27 @@ describe('AttachmentImportService', () => {
       addTaskAttachment: vi.fn(),
       addTaskAttachmentToProject: vi.fn(() => true),
     };
+    targetProjects = [
+      { id: 'project-1', tasks: Array.from({ length: 15 }, (_, index) => ({ id: `task-${index}` })) },
+      { id: 'project-a', tasks: [{ id: 'task-a' }] },
+      { id: 'project-b', tasks: [{ id: 'task-b' }] },
+    ];
+    queuedActions = [];
+    persistedQueue = [];
+    mockActionQueue = {
+      pendingActions: vi.fn(() => queuedActions),
+      dequeue: vi.fn(),
+      storage: {
+        persistExactQueueMutationForOwner: vi.fn(async (
+          _ownerUserId: string,
+          updater: (queue: QueuedAction[]) => QueuedAction[],
+        ) => {
+          persistedQueue = updater(queuedActions);
+          return { status: 'COMMITTED_PUBLISHED', queue: persistedQueue };
+        }),
+      },
+    };
+    mockUploadOutbox = { removePendingUpload: vi.fn().mockResolvedValue(undefined) };
     
     const injector = Injector.create({
       providers: [
@@ -100,6 +139,9 @@ describe('AttachmentImportService', () => {
         { provide: LoggerService, useValue: mockLogger },
         { provide: SupabaseClientService, useValue: mockSupabaseClientService },
         { provide: TaskOperationAdapterService, useValue: mockTaskOpsAdapter },
+        { provide: ActionQueueService, useValue: mockActionQueue },
+        { provide: AttachmentUploadOutboxService, useValue: mockUploadOutbox },
+        { provide: ProjectStateService, useValue: { projects: vi.fn(() => targetProjects) } },
       ],
     });
     
@@ -156,6 +198,7 @@ describe('AttachmentImportService', () => {
       
       expect(result.success).toBe(true);
       expect(result.imported).toBe(1);
+      expect(result.queued).toBe(1);
       expect(mockAttachmentService.uploadFile).toHaveBeenCalledWith(
         'user-1',
         'project-1',
@@ -167,6 +210,8 @@ describe('AttachmentImportService', () => {
         'task-1',
         expect.objectContaining({ id: 'att-1' })
       );
+      expect(mockActionQueue.storage.persistExactQueueMutationForOwner).not.toHaveBeenCalled();
+      expect(mockUploadOutbox.removePendingUpload).not.toHaveBeenCalled();
     });
 
     it('条目带有项目 ID 时应上传到该项目而不是导入入口项目', async () => {
@@ -246,8 +291,8 @@ describe('AttachmentImportService', () => {
       );
     });
 
-    it('目标任务不存在时应标记导入失败，而不是把上传成功计为成功', async () => {
-      mockTaskOpsAdapter.addTaskAttachmentToProject.mockReturnValue(false);
+    it('目标项目或任务在上传前已不存在时不应创建 Blob 或 action', async () => {
+      targetProjects = [{ id: 'project-1', tasks: [] }];
       const items: AttachmentImportItem[] = [
         {
           projectId: 'project-1',
@@ -255,26 +300,51 @@ describe('AttachmentImportService', () => {
           metadata: { id: 'att-1', name: 'missing.txt', size: 4, mimeType: 'text/plain' },
           data: new Blob(['demo'], { type: 'text/plain' }),
         },
+        {
+          projectId: 'missing-project',
+          taskId: 'task-1',
+          metadata: { id: 'att-2', name: 'missing-project.txt', size: 4, mimeType: 'text/plain' },
+          data: new Blob(['demo'], { type: 'text/plain' }),
+        },
       ];
 
       const result = await service.importAttachments('project-1', items);
 
       expect(result.success).toBe(false);
-      expect(result.failed).toBe(1);
+      expect(result.failed).toBe(2);
       expect(result.imported).toBe(0);
-      expect(result.errors[0]).toEqual(expect.objectContaining({
-        taskId: 'missing-task',
-        error: expect.stringContaining('目标任务不存在'),
-      }));
+      expect(mockAttachmentService.uploadFile).not.toHaveBeenCalled();
+      expect(mockTaskOpsAdapter.addTaskAttachmentToProject).not.toHaveBeenCalled();
+      expect(mockActionQueue.storage.persistExactQueueMutationForOwner).not.toHaveBeenCalled();
+      expect(mockUploadOutbox.removePendingUpload).not.toHaveBeenCalled();
     });
 
-    it('异步附件写入持久化失败时应标记导入失败', async () => {
+    it('上传等待期间任务被删除时应精确补偿旧 operation 并保留新代次与其他 owner', async () => {
+      const receipt = {
+        actionId: 'action-old',
+        ownerUserId: 'user-1',
+        blobKey: 'att-1',
+        operationId: 'operation-old',
+      };
+      queuedActions = [
+        createQueuedUploadAction('action-old', 'operation-old', 'user-1'),
+        createQueuedUploadAction('action-new', 'operation-new', 'user-1'),
+        createQueuedUploadAction('action-foreign', 'operation-old', 'user-2'),
+      ];
+      mockAttachmentService.uploadFile.mockImplementation(async () => {
+        targetProjects = [{ id: 'project-1', tasks: [] }];
+        return {
+          success: true,
+          attachment: { id: 'att-1', name: 'late.txt', type: 'file', url: 'pending', createdAt: 'now' },
+          queuedUpload: receipt,
+        };
+      });
       mockTaskOpsAdapter.addTaskAttachmentToProject.mockResolvedValue(false);
       const items: AttachmentImportItem[] = [
         {
           projectId: 'project-1',
           taskId: 'task-1',
-          metadata: { id: 'att-1', name: 'durable-fail.txt', size: 4, mimeType: 'text/plain' },
+          metadata: { id: 'att-1', name: 'late.txt', size: 4, mimeType: 'text/plain' },
           data: new Blob(['demo'], { type: 'text/plain' }),
         },
       ];
@@ -284,10 +354,64 @@ describe('AttachmentImportService', () => {
       expect(result.success).toBe(false);
       expect(result.failed).toBe(1);
       expect(result.imported).toBe(0);
-      expect(result.errors[0]).toEqual(expect.objectContaining({
-        taskId: 'task-1',
-        error: expect.stringContaining('目标任务不存在'),
-      }));
+      expect(persistedQueue.map(action => action.id)).toEqual(['action-new', 'action-foreign']);
+      expect(mockActionQueue.dequeue).not.toHaveBeenCalled();
+      expect(mockUploadOutbox.removePendingUpload).toHaveBeenCalledWith({
+        ownerUserId: 'user-1',
+        blobKey: 'att-1',
+        operationId: 'operation-old',
+      } satisfies PendingAttachmentUploadIdentity);
+    });
+
+    it('action 补偿已提交但 owner 代次变化时应继续精确删除 Blob 且不触碰当前队列', async () => {
+      const receipt = { actionId: 'action-held', ownerUserId: 'user-1', blobKey: 'att-1', operationId: 'operation-held' };
+      queuedActions = [createQueuedUploadAction('action-held', 'operation-held', 'user-1')];
+      mockActionQueue.storage.persistExactQueueMutationForOwner.mockResolvedValue({
+        status: 'COMMITTED_HELD', queue: [],
+      });
+      mockAttachmentService.uploadFile.mockImplementation(async () => {
+        targetProjects = [{ id: 'project-1', tasks: [] }];
+        return {
+          success: true,
+          attachment: { id: 'att-1', name: 'held.txt', type: 'file', url: 'pending', createdAt: 'now' },
+          queuedUpload: receipt,
+        };
+      });
+      mockTaskOpsAdapter.addTaskAttachmentToProject.mockResolvedValue(false);
+
+      await service.importAttachments('project-1', [{
+        projectId: 'project-1', taskId: 'task-1',
+        metadata: { id: 'att-1', name: 'held.txt', size: 4, mimeType: 'text/plain' },
+        data: new Blob(['demo'], { type: 'text/plain' }),
+      }]);
+
+      expect(mockUploadOutbox.removePendingUpload).toHaveBeenCalledWith({
+        ownerUserId: 'user-1', blobKey: 'att-1', operationId: 'operation-held',
+      });
+      expect(mockActionQueue.dequeue).not.toHaveBeenCalled();
+    });
+
+    it('action 补偿未提交时应保留 Blob 且不触碰当前队列', async () => {
+      const receipt = { actionId: 'action-rejected', ownerUserId: 'user-1', blobKey: 'att-1', operationId: 'operation-rejected' };
+      mockActionQueue.storage.persistExactQueueMutationForOwner.mockResolvedValue({ status: 'REJECTED_NO_COMMIT' });
+      mockAttachmentService.uploadFile.mockImplementation(async () => {
+        targetProjects = [{ id: 'project-1', tasks: [] }];
+        return {
+          success: true,
+          attachment: { id: 'att-1', name: 'rejected.txt', type: 'file', url: 'pending', createdAt: 'now' },
+          queuedUpload: receipt,
+        };
+      });
+      mockTaskOpsAdapter.addTaskAttachmentToProject.mockResolvedValue(false);
+
+      await service.importAttachments('project-1', [{
+        projectId: 'project-1', taskId: 'task-1',
+        metadata: { id: 'att-1', name: 'rejected.txt', size: 4, mimeType: 'text/plain' },
+        data: new Blob(['demo'], { type: 'text/plain' }),
+      }]);
+
+      expect(mockUploadOutbox.removePendingUpload).not.toHaveBeenCalled();
+      expect(mockActionQueue.dequeue).not.toHaveBeenCalled();
     });
     
     it('上传失败应记录错误', async () => {
@@ -342,170 +466,9 @@ describe('AttachmentImportService', () => {
     });
   });
 
-  describe('extractAttachmentsFromZip', () => {
-    it('应从 manifest + ZIP 中提取附件数据', async () => {
-      const manifest = {
-        version: '1.0',
-        exportedAt: new Date().toISOString(),
-        totalAttachments: 1,
-        totalSize: 4,
-        successCount: 1,
-        failedCount: 0,
-        skippedCount: 0,
-        attachments: [
-          {
-            id: 'att-1',
-            taskIds: ['task-1'],
-            projectIds: ['project-1'],
-            name: 'a.txt',
-            mimeType: 'text/plain',
-            size: 4,
-            bundlePath: 'attachments/att-1.txt',
-            downloadStatus: 'success',
-          }
-        ]
-      };
-
-      const zipData = createStoredZip([
-        { path: 'manifest.json', text: JSON.stringify(manifest) },
-        { path: 'attachments/att-1.txt', text: 'demo' },
-      ]);
-
-      const items = await service.extractAttachmentsFromZip(zipData, new Map());
-      expect(items).toHaveLength(1);
-      expect(items[0]?.projectId).toBe('project-1');
-      expect(items[0]?.taskId).toBe('task-1');
-      expect(items[0]?.metadata.name).toBe('a.txt');
-      const content = await items[0]!.data!.text();
-      expect(content).toBe('demo');
-    });
-
-    it('应按 manifest 中 taskIds 与 projectIds 的位置保留跨项目引用', async () => {
-      const manifest = {
-        version: '1.0',
-        exportedAt: new Date().toISOString(),
-        totalAttachments: 1,
-        totalSize: 4,
-        successCount: 1,
-        failedCount: 0,
-        skippedCount: 0,
-        attachments: [
-          {
-            id: 'att-shared',
-            taskIds: ['task-a', 'task-b'],
-            projectIds: ['project-a', 'project-b'],
-            name: 'shared.txt',
-            mimeType: 'text/plain',
-            size: 4,
-            bundlePath: 'attachments/att-shared.txt',
-            downloadStatus: 'success',
-          }
-        ]
-      };
-
-      const zipData = createStoredZip([
-        { path: 'manifest.json', text: JSON.stringify(manifest) },
-        { path: 'attachments/att-shared.txt', text: 'demo' },
-      ]);
-
-      const items = await service.extractAttachmentsFromZip(zipData, new Map());
-
-      expect(items).toHaveLength(2);
-      expect(items.map(({ projectId, taskId }) => ({ projectId, taskId }))).toEqual([
-        { projectId: 'project-a', taskId: 'task-a' },
-        { projectId: 'project-b', taskId: 'task-b' },
-      ]);
-    });
-
-    it('无 manifest 时应回退 taskAttachmentMap 路径匹配', async () => {
-      const zipData = createStoredZip([
-        { path: 'attachments/task-1/att-1.txt', text: 'fallback' },
-      ]);
-      const taskMap = new Map([
-        ['task-1', [{ id: 'att-1', name: 'att-1.txt', size: 8, mimeType: 'text/plain' }]]
-      ]);
-
-      const items = await service.extractAttachmentsFromZip(zipData, taskMap);
-      expect(items).toHaveLength(1);
-      expect(items[0]?.taskId).toBe('task-1');
-      expect(items[0]?.zipPath).toBe('attachments/task-1/att-1.txt');
-    });
-
-    it('应拒绝声明解压尺寸超过限制的 ZIP 条目', async () => {
-      const manifest = {
-        attachments: [
-          {
-            id: 'att-oversize',
-            taskIds: ['task-1'],
-            projectIds: ['project-1'],
-            name: 'oversize.txt',
-            mimeType: 'text/plain',
-            size: ATTACHMENT_IMPORT_CONFIG.MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES + 1,
-            bundlePath: 'attachments/att-oversize.txt',
-            downloadStatus: 'success',
-          }
-        ]
-      };
-      const zipData = createStoredZip([
-        { path: 'manifest.json', text: JSON.stringify(manifest) },
-        {
-          path: 'attachments/att-oversize.txt',
-          text: 'x',
-          declaredSize: ATTACHMENT_IMPORT_CONFIG.MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES + 1,
-        },
-      ]);
-
-      await expect(service.extractAttachmentsFromZip(zipData, new Map()))
-        .rejects.toThrow('ZIP 条目解压后大小超过限制');
-    });
-
-    it('应拒绝实际解压总大小超过限制的 ZIP，即使中心目录低报尺寸', async () => {
-      const zipData = createStoredZip(
-        Array.from({ length: 11 }, (_, index) => ({
-          path: `attachments/att-${index}.txt`,
-          text: 'x',
-          declaredSize: 1,
-        })),
-      );
-      const readZipEntryData = vi.fn().mockResolvedValue({
-        data: { byteLength: ATTACHMENT_IMPORT_CONFIG.MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES } as Uint8Array,
-        uncompressedSize: 1,
-        compressionMethod: 0,
-      });
-      const options: ParseZipEntriesOptions = {
-        limits: createZipLimits(),
-        logger: mockLogger.category(),
-        readZipEntryData,
-      };
-
-      await expect(parseZipEntries(zipData, options))
-        .rejects.toThrow('ZIP 解压后总大小超过限制');
-    });
-
-    it('manifest 引用不安全 ZIP 路径时不应导入附件', async () => {
-      const manifest = {
-        attachments: [
-          {
-            id: 'att-escape',
-            taskIds: ['task-1'],
-            projectIds: ['project-1'],
-            name: 'escape.txt',
-            mimeType: 'text/plain',
-            size: 4,
-            bundlePath: '../escape.txt',
-            downloadStatus: 'success',
-          }
-        ]
-      };
-      const zipData = createStoredZip([
-        { path: 'manifest.json', text: JSON.stringify(manifest) },
-        { path: '../escape.txt', text: 'demo' },
-      ]);
-
-      const items = await service.extractAttachmentsFromZip(zipData, new Map());
-
-      expect(items).toHaveLength(0);
-    });
+  registerAttachmentImportZipIntegritySpecs({
+    getService: () => service,
+    getLogger: () => mockLogger.category(),
   });
   
   describe('cancelImport', () => {
@@ -587,116 +550,19 @@ describe('AttachmentImportService', () => {
   });
 });
 
-function createZipLimits() {
+function createQueuedUploadAction(
+  id: string,
+  operationId: string,
+  ownerUserId: string,
+): QueuedAction<AttachmentUploadPayload> {
   return {
-    maxEntries: ATTACHMENT_IMPORT_CONFIG.MAX_ZIP_ENTRIES,
-    maxEntryUncompressedBytes: ATTACHMENT_IMPORT_CONFIG.MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES,
-    maxTotalUncompressedBytes: ATTACHMENT_IMPORT_CONFIG.MAX_ZIP_TOTAL_UNCOMPRESSED_BYTES,
+    id,
+    operationId,
+    type: 'create',
+    entityType: 'attachment',
+    entityId: 'att-1',
+    payload: { blobKey: 'att-1', userId: ownerUserId, sourceUserId: ownerUserId } as AttachmentUploadPayload,
+    timestamp: 0,
+    retryCount: 0,
   };
-}
-
-function createStoredZip(files: Array<{ path: string; text: string; declaredSize?: number }>): ArrayBuffer {
-  const encoder = new TextEncoder();
-  const fileRecords: Array<{
-    nameBytes: Uint8Array;
-    dataBytes: Uint8Array;
-    localHeader: Uint8Array;
-    centralHeader: Uint8Array;
-  }> = [];
-
-  const localParts: Uint8Array[] = [];
-  const centralParts: Uint8Array[] = [];
-  let offset = 0;
-
-  for (const file of files) {
-    const nameBytes = encoder.encode(file.path);
-    const dataBytes = encoder.encode(file.text);
-    const declaredSize = file.declaredSize ?? dataBytes.length;
-    const crc = crc32(dataBytes);
-
-    const localHeader = new Uint8Array(30 + nameBytes.length);
-    const lv = new DataView(localHeader.buffer);
-    lv.setUint32(0, 0x04034b50, true);
-    lv.setUint16(4, 20, true);
-    lv.setUint16(6, 0, true);
-    lv.setUint16(8, 0, true);
-    lv.setUint32(14, crc, true);
-    lv.setUint32(18, dataBytes.length, true);
-    lv.setUint32(22, declaredSize, true);
-    lv.setUint16(26, nameBytes.length, true);
-    lv.setUint16(28, 0, true);
-    localHeader.set(nameBytes, 30);
-
-    const centralHeader = new Uint8Array(46 + nameBytes.length);
-    const cv = new DataView(centralHeader.buffer);
-    cv.setUint32(0, 0x02014b50, true);
-    cv.setUint16(4, 20, true);
-    cv.setUint16(6, 20, true);
-    cv.setUint16(8, 0, true);
-    cv.setUint16(10, 0, true);
-    cv.setUint32(16, crc, true);
-    cv.setUint32(20, dataBytes.length, true);
-    cv.setUint32(24, declaredSize, true);
-    cv.setUint16(28, nameBytes.length, true);
-    cv.setUint16(30, 0, true);
-    cv.setUint16(32, 0, true);
-    cv.setUint16(34, 0, true);
-    cv.setUint16(36, 0, true);
-    cv.setUint32(38, 0, true);
-    cv.setUint32(42, offset, true);
-    centralHeader.set(nameBytes, 46);
-
-    localParts.push(localHeader, dataBytes);
-    centralParts.push(centralHeader);
-    fileRecords.push({ nameBytes, dataBytes, localHeader, centralHeader });
-    offset += localHeader.length + dataBytes.length;
-  }
-
-  const centralOffset = offset;
-  let centralSize = 0;
-  for (const part of centralParts) {
-    centralSize += part.length;
-  }
-
-  const eocd = new Uint8Array(22);
-  const ev = new DataView(eocd.buffer);
-  ev.setUint32(0, 0x06054b50, true);
-  ev.setUint16(4, 0, true);
-  ev.setUint16(6, 0, true);
-  ev.setUint16(8, fileRecords.length, true);
-  ev.setUint16(10, fileRecords.length, true);
-  ev.setUint32(12, centralSize, true);
-  ev.setUint32(16, centralOffset, true);
-  ev.setUint16(20, 0, true);
-
-  const totalLength =
-    localParts.reduce((sum, part) => sum + part.length, 0) +
-    centralSize +
-    eocd.length;
-
-  const output = new Uint8Array(totalLength);
-  let cursor = 0;
-
-  for (const part of localParts) {
-    output.set(part, cursor);
-    cursor += part.length;
-  }
-  for (const part of centralParts) {
-    output.set(part, cursor);
-    cursor += part.length;
-  }
-  output.set(eocd, cursor);
-
-  return output.buffer.slice(output.byteOffset, output.byteOffset + output.byteLength);
-}
-
-function crc32(data: Uint8Array): number {
-  let crc = 0xffffffff;
-  for (let i = 0; i < data.length; i++) {
-    crc ^= data[i];
-    for (let j = 0; j < 8; j++) {
-      crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0);
-    }
-  }
-  return (crc ^ 0xffffffff) >>> 0;
 }

@@ -45,11 +45,11 @@ interface AttachmentBundleManifestItem {
   mimeType: string;
   size: number;
   bundlePath: string;
-  downloadStatus?: 'pending' | 'success' | 'failed' | 'skipped';
 }
 
-interface AttachmentBundleManifest {
-  attachments: AttachmentBundleManifestItem[];
+interface ManifestAttachmentPreflight {
+  attachment: AttachmentBundleManifestItem;
+  fileEntry: ZipEntryData;
 }
 
 const MANIFEST_FILENAME = 'manifest.json';
@@ -65,7 +65,7 @@ export async function extractAttachmentItemsFromZip(
   }
 
   const manifestItems = buildItemsFromManifest(entries, options.logger);
-  if (manifestItems.length > 0) {
+  if (manifestItems !== null) {
     return manifestItems;
   }
 
@@ -125,51 +125,147 @@ export async function parseZipEntries(
 function buildItemsFromManifest(
   entries: Map<string, ZipEntryData>,
   logger: AttachmentImportZipLogger,
-): AttachmentImportItem[] {
+): AttachmentImportItem[] | null {
   const manifestEntry = entries.get(MANIFEST_FILENAME);
-  if (!manifestEntry) return [];
+  if (!manifestEntry) return null;
 
+  const attachments = parseManifestAttachments(manifestEntry, logger);
+  const preflight = preflightManifestAttachments(attachments, entries);
+  return buildItemsFromManifestPreflight(preflight);
+}
+
+function parseManifestAttachments(
+  manifestEntry: ZipEntryData,
+  logger: AttachmentImportZipLogger,
+): AttachmentBundleManifestItem[] {
+  let parsed: unknown;
   try {
-    const manifestText = new TextDecoder().decode(manifestEntry.data);
-    const manifest = JSON.parse(manifestText) as AttachmentBundleManifest;
-    if (!manifest || !Array.isArray(manifest.attachments)) return [];
+    parsed = JSON.parse(new TextDecoder().decode(manifestEntry.data));
+  } catch (error) {
+    logger.warn('解析附件 manifest JSON 失败', { error });
+    throw new Error('附件 manifest JSON 无效');
+  }
 
-    const items: AttachmentImportItem[] = [];
+  if (!isRecord(parsed) || !Array.isArray(parsed['attachments'])) {
+    throw new Error('附件 manifest 结构无效');
+  }
 
-    for (const attachment of manifest.attachments) {
-      const taskIds = Array.isArray(attachment.taskIds) ? attachment.taskIds : [];
-      if (taskIds.length === 0) continue;
-      if (attachment.downloadStatus && attachment.downloadStatus !== 'success') continue;
+  return parsed['attachments'].map((value, index) => parseManifestAttachment(value, index));
+}
 
-      const fileEntry = entries.get(attachment.bundlePath);
-      if (!fileEntry) continue;
+function parseManifestAttachment(
+  value: unknown,
+  index: number,
+): AttachmentBundleManifestItem {
+  if (!isRecord(value)) {
+    throw new Error(`附件 manifest 结构无效: attachments[${index}]`);
+  }
 
-      const mimeType = attachment.mimeType || 'application/octet-stream';
-      const blob = new Blob([fileEntry.data], { type: mimeType });
-      const projectIds = Array.isArray(attachment.projectIds) ? attachment.projectIds : [];
+  const taskIds = readBindingIds(value['taskIds']);
+  const projectIds = readBindingIds(value['projectIds']);
+  if (taskIds.length === 0 || taskIds.length !== projectIds.length) {
+    throw new Error(`附件 manifest 任务与项目绑定无效: attachments[${index}]`);
+  }
 
-      for (const [index, taskId] of taskIds.entries()) {
-        const projectId = projectIds[index] ?? projectIds[0];
-        items.push({
-          projectId,
-          taskId,
-          metadata: {
-            id: attachment.id,
-            name: attachment.name,
-            size: attachment.size || fileEntry.uncompressedSize,
-            mimeType,
-          },
-          data: blob,
-          zipPath: attachment.bundlePath,
-        });
-      }
+  const downloadStatus = value['downloadStatus'];
+  if (downloadStatus !== undefined && downloadStatus !== 'success') {
+    throw new Error(`附件 manifest 下载状态无效: attachments[${index}]`);
+  }
+
+  return {
+    id: readRequiredString(value, 'id', index),
+    taskIds,
+    projectIds,
+    name: readRequiredString(value, 'name', index),
+    mimeType: readString(value, 'mimeType', index),
+    size: readAttachmentSize(value['size'], index),
+    bundlePath: readRequiredString(value, 'bundlePath', index),
+  };
+}
+
+function preflightManifestAttachments(
+  attachments: AttachmentBundleManifestItem[],
+  entries: Map<string, ZipEntryData>,
+): ManifestAttachmentPreflight[] {
+  return attachments.map((attachment, index) => {
+    if (!isSafeZipEntryPath(attachment.bundlePath)) {
+      throw new Error(`附件 manifest 路径无效: attachments[${index}]`);
     }
 
-    return items;
-  } catch (error) {
-    logger.warn('解析附件 manifest 失败，回退到 taskAttachmentMap', { error });
-    return [];
+    const fileEntry = entries.get(attachment.bundlePath);
+    if (!fileEntry) {
+      throw new Error(`附件 manifest 引用的文件缺失: ${attachment.bundlePath}`);
+    }
+    if (attachment.size > 0 && attachment.size !== fileEntry.data.byteLength) {
+      throw new Error(`附件 manifest 声明大小与实际字节不一致: ${attachment.bundlePath}`);
+    }
+
+    return { attachment, fileEntry };
+  });
+}
+
+function buildItemsFromManifestPreflight(
+  preflight: ManifestAttachmentPreflight[],
+): AttachmentImportItem[] {
+  return preflight.flatMap(({ attachment, fileEntry }) => {
+    const mimeType = attachment.mimeType || 'application/octet-stream';
+    const blob = new Blob([fileEntry.data], { type: mimeType });
+    return attachment.taskIds.map((taskId, index) => ({
+      projectId: attachment.projectIds[index],
+      taskId,
+      metadata: {
+        id: attachment.id,
+        name: attachment.name,
+        size: attachment.size || fileEntry.data.byteLength,
+        mimeType,
+      },
+      data: blob,
+      zipPath: attachment.bundlePath,
+    }));
+  });
+}
+
+function readBindingIds(value: unknown): string[] {
+  return Array.isArray(value) && value.every(isNonEmptyString) ? value : [];
+}
+
+function readRequiredString(
+  record: Record<string, unknown>,
+  key: string,
+  index: number,
+): string {
+  const value = record[key];
+  if (!isNonEmptyString(value)) {
+    throw new Error(`附件 manifest 结构无效: attachments[${index}].${key}`);
   }
+  return value;
+}
+
+function readString(
+  record: Record<string, unknown>,
+  key: string,
+  index: number,
+): string {
+  const value = record[key];
+  if (typeof value !== 'string') {
+    throw new Error(`附件 manifest 结构无效: attachments[${index}].${key}`);
+  }
+  return value;
+}
+
+function readAttachmentSize(value: unknown, index: number): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`附件 manifest 结构无效: attachments[${index}].size`);
+  }
+  return value;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0;
 }
 
 function buildItemsFromTaskMap(

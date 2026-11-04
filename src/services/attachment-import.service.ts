@@ -20,6 +20,11 @@ import { AttachmentService } from './attachment.service';
 import { AuthService } from './auth.service';
 import { SupabaseClientService } from './supabase-client.service';
 import { TaskOperationAdapterService } from './task-operation-adapter.service';
+import { ActionQueueService } from './action-queue.service';
+import type { AttachmentUploadPayload, QueuedAction } from './action-queue.types';
+import { AttachmentUploadOutboxService } from './attachment-upload-outbox.service';
+import type { QueuedAttachmentUploadReceipt } from './attachment-upload-queue.helpers';
+import { ProjectStateService } from './project-state.service';
 import { Attachment } from '../models';
 import { ATTACHMENT_CONFIG } from '../config/attachment.config';
 import { extractAttachmentItemsFromZip, type AttachmentImportZipLimits } from './attachment-import-zip.helpers';
@@ -95,6 +100,7 @@ export interface AttachmentImportProgress {
 export interface AttachmentImportResult {
   success: boolean;
   imported: number;
+  queued: number;
   failed: number;
   skipped: number;
   errors: Array<{
@@ -113,7 +119,7 @@ export interface QuotaCheckResult {
 }
 
 interface BatchUploadResult {
-  status: 'success' | 'failed' | 'skipped';
+  status: 'queued' | 'failed' | 'skipped';
   taskId: string;
   attachmentName: string;
   attachment?: Attachment;
@@ -139,6 +145,7 @@ export class AttachmentImportService {
   private readonly attachmentService = inject(AttachmentService);
   private readonly auth = inject(AuthService);
   private readonly supabase = inject(SupabaseClientService);
+  private readonly projectState = inject(ProjectStateService, { optional: true });
   private readonly zipLimits: AttachmentImportZipLimits = {
     maxEntries: ATTACHMENT_IMPORT_CONFIG.MAX_ZIP_ENTRIES,
     maxEntryUncompressedBytes: ATTACHMENT_IMPORT_CONFIG.MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES,
@@ -183,6 +190,7 @@ export class AttachmentImportService {
       return {
         success: false,
         imported: 0,
+        queued: 0,
         failed: 0,
         skipped: 0,
         errors: [{ taskId: '', attachmentName: '', error: '已有导入任务进行中' }]
@@ -194,6 +202,7 @@ export class AttachmentImportService {
       return {
         success: false,
         imported: 0,
+        queued: 0,
         failed: 0,
         skipped: items.length,
         errors: [{ taskId: '', attachmentName: '', error: '未登录' }]
@@ -214,6 +223,7 @@ export class AttachmentImportService {
       this.finishImportRun(run);
       this.logger.info('附件导入完成', {
         imported: run.result.imported,
+        queued: run.result.queued,
         failed: run.result.failed,
         skipped: run.result.skipped,
       });
@@ -236,6 +246,7 @@ export class AttachmentImportService {
       result: {
         success: false,
         imported: 0,
+        queued: 0,
         failed: 0,
         skipped: items.length - validItems.length,
         errors: [],
@@ -310,8 +321,9 @@ export class AttachmentImportService {
     batchResult: BatchUploadResult,
     processedCount: number,
   ): void {
-    if (batchResult.status === 'success') {
+    if (batchResult.status === 'queued') {
       run.result.imported++;
+      run.result.queued++;
     } else if (batchResult.status === 'skipped') {
       run.result.skipped++;
     } else {
@@ -525,10 +537,14 @@ export class AttachmentImportService {
       };
     }
 
+    const targetProjectId = item.projectId ?? projectId;
+    if (!this.hasImportTarget(targetProjectId, item.taskId)) {
+      return this.createMissingTargetResult(item);
+    }
+
     const file = new File([item.data], item.metadata.name, {
       type: item.metadata.mimeType,
     });
-    const targetProjectId = item.projectId ?? projectId;
     const uploadResult = await this.attachmentService.uploadFile(userId, targetProjectId, item.taskId, file);
 
     if (!uploadResult.success) {
@@ -543,20 +559,79 @@ export class AttachmentImportService {
     const restoredAttachment = this.restoreImportedAttachmentId(uploadResult.attachment, item);
     const written = await this.taskOpsAdapter.addTaskAttachmentToProject(targetProjectId, item.taskId, restoredAttachment);
     if (!written) {
-      return {
-        status: 'failed',
-        taskId: item.taskId,
-        attachmentName: item.metadata.name,
-        error: '目标任务不存在，附件未写入项目',
-      };
+      await this.compensateQueuedUpload(uploadResult.queuedUpload);
+      return this.createMissingTargetResult(item);
     }
 
     return {
-      status: 'success',
+      status: 'queued',
       taskId: item.taskId,
       attachmentName: item.metadata.name,
       attachment: restoredAttachment,
     };
+  }
+
+  private hasImportTarget(projectId: string, taskId: string): boolean {
+    if (!this.projectState) return true;
+    return this.projectState.projects().some(project =>
+      project.id === projectId && project.tasks.some(task => task.id === taskId));
+  }
+
+  private createMissingTargetResult(item: AttachmentImportItem): BatchUploadResult {
+    return {
+      status: 'failed',
+      taskId: item.taskId,
+      attachmentName: item.metadata.name,
+      error: '目标任务不存在，附件未写入项目',
+    };
+  }
+
+  private async compensateQueuedUpload(receipt: QueuedAttachmentUploadReceipt): Promise<void> {
+    if (!await this.removeQueuedUploadAction(receipt)) return;
+
+    try {
+      await this.injector.get(AttachmentUploadOutboxService).removePendingUpload({
+        ownerUserId: receipt.ownerUserId,
+        blobKey: receipt.blobKey,
+        operationId: receipt.operationId,
+      });
+    } catch (error) {
+      this.logger.warn('附件导入目标失效后 Blob 补偿失败', { receipt, error });
+    }
+  }
+
+  private async removeQueuedUploadAction(receipt: QueuedAttachmentUploadReceipt): Promise<boolean> {
+    try {
+      const actionQueue = this.injector.get(ActionQueueService);
+      const result = await actionQueue.storage.persistExactQueueMutationForOwner(
+        receipt.ownerUserId,
+        queue => queue.filter(action => !this.matchesQueuedUpload(action, receipt)),
+      );
+      if (result.status === 'REJECTED_NO_COMMIT') {
+        this.logger.warn('附件导入目标失效后 action 补偿持久化失败', { receipt });
+        return false;
+      }
+      return true;
+    } catch (error) {
+      this.logger.warn('附件导入目标失效后 action 补偿异常', { receipt, error });
+      return false;
+    }
+  }
+
+  private matchesQueuedUpload(
+    action: QueuedAction,
+    receipt: QueuedAttachmentUploadReceipt,
+  ): boolean {
+    if (action.id !== receipt.actionId
+      || action.operationId !== receipt.operationId
+      || action.type !== 'create'
+      || action.entityType !== 'attachment'
+      || action.entityId !== receipt.blobKey) {
+      return false;
+    }
+    const payload = action.payload as Partial<AttachmentUploadPayload>;
+    return payload.blobKey === receipt.blobKey
+      && (payload.sourceUserId ?? payload.userId) === receipt.ownerUserId;
   }
 
   private restoreImportedAttachmentId(uploadedAttachment: Attachment, item: AttachmentImportItem): Attachment {

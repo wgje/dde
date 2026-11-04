@@ -16,6 +16,7 @@ export interface AttachmentImportGroups {
 
 export interface AttachmentImportSummary {
   imported: number;
+  queued: number;
   failed: number;
   skipped: number;
   errorMessages: string[];
@@ -77,6 +78,7 @@ export async function importAttachmentGroups(
 ): Promise<AttachmentImportSummary> {
   const summary: AttachmentImportSummary = {
     imported: 0,
+    queued: 0,
     failed: 0,
     skipped: unmatchedCount,
     errorMessages: [],
@@ -85,6 +87,7 @@ export async function importAttachmentGroups(
   for (const [projectId, items] of groupedByProject) {
     const importResult = await importProjectAttachments(projectId, items);
     summary.imported += importResult.imported;
+    summary.queued += importResult.queued;
     summary.failed += importResult.failed;
     summary.skipped += importResult.skipped;
     summary.errorMessages.push(
@@ -124,11 +127,19 @@ export async function runAttachmentImportWorkflow(
 }
 
 export function formatAttachmentImportSummary(summary: AttachmentImportSummary): string {
+  if (summary.failed === 0 && summary.queued > 0) {
+    return `附件已在本地导入，等待同步。\n本地导入: ${summary.imported}\n待同步: ${summary.queued}\n跳过: ${summary.skipped}`;
+  }
+
   if (summary.failed === 0) {
     return `附件导入完成！\n成功: ${summary.imported}\n跳过: ${summary.skipped}`;
   }
 
   const topError = summary.errorMessages[0] ?? '未知错误';
+  if (summary.queued > 0) {
+    return `附件导入部分失败，已保存项等待同步。\n本地导入: ${summary.imported}\n待同步: ${summary.queued}\n失败: ${summary.failed}\n跳过: ${summary.skipped}\n首个错误: ${topError}`;
+  }
+
   return `附件导入部分失败。\n成功: ${summary.imported}\n失败: ${summary.failed}\n跳过: ${summary.skipped}\n首个错误: ${topError}`;
 }
 

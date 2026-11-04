@@ -65,18 +65,20 @@ describe('settings-modal-attachment-import.helpers', () => {
       projectId: string,
       items: AttachmentImportItem[],
     ) => Promise<AttachmentImportResult>>()
-      .mockResolvedValueOnce({
-        success: true,
-        imported: 1,
-        failed: 0,
-        skipped: 0,
-        errors: [],
+       .mockResolvedValueOnce({
+         success: true,
+         imported: 1,
+         queued: 1,
+         failed: 0,
+         skipped: 0,
+         errors: [],
       })
       .mockResolvedValueOnce({
-        success: false,
-        imported: 0,
-        failed: 1,
-        skipped: 2,
+         success: false,
+         imported: 0,
+         queued: 0,
+         failed: 1,
+         skipped: 2,
         errors: [{ taskId: 'task-b', attachmentName: 'task-b-file.txt', error: 'upload failed' }],
       });
 
@@ -91,29 +93,40 @@ describe('settings-modal-attachment-import.helpers', () => {
 
     expect(importer).toHaveBeenNthCalledWith(1, 'project-a', [itemA]);
     expect(importer).toHaveBeenNthCalledWith(2, 'project-b', [itemB]);
-    expect(summary).toEqual({
-      imported: 1,
-      failed: 1,
-      skipped: 3,
-      errorMessages: ['task-b-file.txt: upload failed'],
+     expect(summary).toEqual({
+       imported: 1,
+       queued: 1,
+       failed: 1,
+       skipped: 3,
+       errorMessages: ['task-b-file.txt: upload failed'],
     });
   });
 
-  it('formats summary and unmatched warning text for the modal', () => {
-    expect(formatAttachmentImportSummary({
+  it('formats queued-only imports as local and waiting without claiming success or completion', () => {
+    const message = formatAttachmentImportSummary({
       imported: 2,
+      queued: 2,
       failed: 0,
       skipped: 1,
       errorMessages: [],
-    })).toBe('附件导入完成！\n成功: 2\n跳过: 1');
+    });
 
+    expect(message).toBe('附件已在本地导入，等待同步。\n本地导入: 2\n待同步: 2\n跳过: 1');
+    expect(message).not.toContain('成功');
+    expect(message).not.toContain('完成');
+  });
+
+  it('formats queued and failed imports as partial with both counts', () => {
     expect(formatAttachmentImportSummary({
       imported: 1,
+      queued: 1,
       failed: 1,
       skipped: 3,
       errorMessages: ['task-b-file.txt: upload failed'],
-    })).toBe('附件导入部分失败。\n成功: 1\n失败: 1\n跳过: 3\n首个错误: task-b-file.txt: upload failed');
+    })).toBe('附件导入部分失败，已保存项等待同步。\n本地导入: 1\n待同步: 1\n失败: 1\n跳过: 3\n首个错误: task-b-file.txt: upload failed');
+  });
 
+  it('formats unmatched warning text for the modal', () => {
     expect(formatUnmatchedAttachmentImportWarning(0)).toBeNull();
     expect(formatUnmatchedAttachmentImportWarning(2)).toBe('部分附件未匹配到项目，已跳过: 2');
   });
