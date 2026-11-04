@@ -142,51 +142,19 @@ export class VirusScanService {
     }
 
     try {
-      // 获取扫描状态
       const statusResult = await this.checkScanStatus(fileId);
-      
-      if (!statusResult.success || !statusResult.result) {
-        // 未扫描的文件处理
-        return this.handleUnscannedFile(fileId);
+
+      const resolvedStatus = this.resolveDownloadStatus(fileId, statusResult);
+      if ('success' in resolvedStatus) {
+        return resolvedStatus;
       }
 
-      const { result } = statusResult;
-
-      // 检查是否发现威胁
-      if (result.status === SCAN_STATUS.THREAT_DETECTED) {
-        this.logger.error('文件存在威胁，阻止下载', { fileId, threat: result.threatName });
-        this.toast.error('安全警告', `文件包含恶意内容: ${result.threatName}`);
-        return {
-          success: false,
-          error: `检测到威胁: ${result.threatName}`,
-          errorCode: 'THREAT_DETECTED',
-          result,
-        };
+      const hashMismatchResponse = await this.validateDownloadHash(fileId, storedHash);
+      if (hashMismatchResponse) {
+        return hashMismatchResponse;
       }
 
-      // 检查状态是否过期
-      if (this.isScanStatusExpired(result.scannedAt)) {
-        return this.handleExpiredStatus(fileId, result);
-      }
-
-      // 哈希校验（TOCTOU 防护）
-      if (TOCTOU_PROTECTION.HASH_VERIFICATION && storedHash) {
-        const hashValid = await this.verifyFileHash(fileId, storedHash);
-        if (!hashValid) {
-          this.logger.error('文件哈希不匹配，可能被篡改', { fileId });
-          this.sentryLazyLoader.captureMessage('File hash mismatch - potential TOCTOU attack', {
-            level: 'error',
-            tags: { type: 'security', fileId },
-          });
-          return {
-            success: false,
-            error: '文件完整性校验失败',
-            errorCode: 'HASH_MISMATCH',
-          };
-        }
-      }
-
-      return { success: true, result };
+      return { success: true, result: resolvedStatus };
     } catch (error) {
       this.logger.error('下载前检查失败', { error, fileId });
       // 【P1-09 修复】fail-closed：检查失败时拒绝下载，而非默认允许
@@ -270,6 +238,83 @@ export class VirusScanService {
   }
 
   // ==================== 私有方法 ====================
+
+  /**
+   * 解析下载前扫描状态，并按策略返回可继续处理的结果或最终响应
+   */
+  private resolveDownloadStatus(fileId: string, statusResult: ScanResponse): ScanResponse | ScanResult {
+    if (!statusResult.success || !statusResult.result) {
+      return this.handleUnscannedFile(fileId);
+    }
+
+    const { result } = statusResult;
+    const blockedResponse = this.mapBlockedDownloadStatus(fileId, result);
+    if (blockedResponse) {
+      return blockedResponse;
+    }
+
+    if (this.isScanStatusExpired(result.scannedAt)) {
+      return this.handleExpiredStatus(fileId, result);
+    }
+
+    return result;
+  }
+
+  /**
+   * 将不可下载的扫描状态映射为阻止下载的响应
+   */
+  private mapBlockedDownloadStatus(fileId: string, result: ScanResult): ScanResponse | null {
+    if (result.status === SCAN_STATUS.THREAT_DETECTED) {
+      this.logger.error('文件存在威胁，阻止下载', { fileId, threat: result.threatName });
+      this.toast.error('安全警告', `文件包含恶意内容: ${result.threatName}`);
+      return {
+        success: false,
+        error: `检测到威胁: ${result.threatName}`,
+        errorCode: 'THREAT_DETECTED',
+        result,
+      };
+    }
+
+    if (result.status === SCAN_STATUS.CLEAN || result.status === SCAN_STATUS.SKIPPED) {
+      return null;
+    }
+
+    this.logger.warn('文件扫描尚未处于可下载状态，已阻止下载', {
+      fileId,
+      status: result.status,
+    });
+    return {
+      success: false,
+      error: `文件扫描状态不可下载: ${result.status}`,
+      errorCode: 'CHECK_FAILED',
+      result,
+    };
+  }
+
+  /**
+   * 执行下载前哈希完整性校验
+   */
+  private async validateDownloadHash(fileId: string, storedHash?: string): Promise<ScanResponse | null> {
+    if (!TOCTOU_PROTECTION.HASH_VERIFICATION || !storedHash) {
+      return null;
+    }
+
+    const hashValid = await this.verifyFileHash(fileId, storedHash);
+    if (hashValid) {
+      return null;
+    }
+
+    this.logger.error('文件哈希不匹配，可能被篡改', { fileId });
+    this.sentryLazyLoader.captureMessage('File hash mismatch - potential TOCTOU attack', {
+      level: 'error',
+      tags: { type: 'security', fileId },
+    });
+    return {
+      success: false,
+      error: '文件完整性校验失败',
+      errorCode: 'HASH_MISMATCH',
+    };
+  }
 
   /**
    * 执行实际扫描

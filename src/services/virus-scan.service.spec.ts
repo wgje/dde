@@ -267,6 +267,98 @@ describe('VirusScanService', () => {
   });
 
   describe('checkBeforeDownload', () => {
+    it('下载前检测到威胁时应阻止下载并提示用户', async () => {
+      invokeMock.mockResolvedValue({
+        data: {
+          status: SCAN_STATUS.THREAT_DETECTED,
+          fileId: 'file-threat',
+          scanner: 'clamav',
+          scannedAt: new Date().toISOString(),
+          threatName: 'EICAR-Test-File',
+        },
+        error: null,
+      });
+
+      const result = await service.checkBeforeDownload('file-threat');
+
+      expect(result).toEqual(expect.objectContaining({
+        success: false,
+        errorCode: 'THREAT_DETECTED',
+        error: '检测到威胁: EICAR-Test-File',
+        result: expect.objectContaining({
+          fileId: 'file-threat',
+          threatName: 'EICAR-Test-File',
+        }),
+      }));
+      expect(mockLoggerCategory.error).toHaveBeenCalledWith('文件存在威胁，阻止下载', {
+        fileId: 'file-threat',
+        threat: 'EICAR-Test-File',
+      });
+      expect(toastMock.error).toHaveBeenCalledWith('安全警告', '文件包含恶意内容: EICAR-Test-File');
+    });
+
+    it('下载前哈希校验失败时应 fail closed 并上报安全事件', async () => {
+      invokeMock
+        .mockResolvedValueOnce({
+          data: {
+            status: SCAN_STATUS.CLEAN,
+            fileId: 'file-clean',
+            scanner: 'clamav',
+            scannedAt: new Date().toISOString(),
+          },
+          error: null,
+        })
+        .mockResolvedValueOnce({
+          data: { valid: false },
+          error: null,
+        });
+
+      const result = await service.checkBeforeDownload('file-clean', 'expected-hash');
+
+      expect(result).toEqual({
+        success: false,
+        error: '文件完整性校验失败',
+        errorCode: 'HASH_MISMATCH',
+      });
+      expect(mockLoggerCategory.error).toHaveBeenCalledWith('文件哈希不匹配，可能被篡改', {
+        fileId: 'file-clean',
+      });
+      expect(sentryMock.captureMessage).toHaveBeenCalledWith(
+        'File hash mismatch - potential TOCTOU attack',
+        expect.objectContaining({
+          level: 'error',
+          tags: {
+            type: 'security',
+            fileId: 'file-clean',
+          },
+        }),
+      );
+    });
+
+    it.each([
+      SCAN_STATUS.PENDING,
+      SCAN_STATUS.SCANNING,
+      SCAN_STATUS.FAILED,
+      SCAN_STATUS.QUARANTINED,
+    ])('扫描状态为 %s 时应 fail closed 阻止下载', async status => {
+      invokeMock.mockResolvedValue({
+        data: {
+          status,
+          fileId: `file-${status}`,
+          scanner: 'clamav',
+          scannedAt: new Date().toISOString(),
+        },
+        error: null,
+      });
+
+      const result = await service.checkBeforeDownload(`file-${status}`);
+
+      expect(result).toEqual(expect.objectContaining({
+        success: false,
+        errorCode: 'CHECK_FAILED',
+      }));
+    });
+
     it('扫描状态缺少有效 scannedAt 时应 fail closed 阻止下载', async () => {
       invokeMock.mockResolvedValue({
         data: {
