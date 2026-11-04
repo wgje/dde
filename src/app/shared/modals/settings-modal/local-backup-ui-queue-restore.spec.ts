@@ -18,6 +18,11 @@ import { BackupDataSafetyMetadataRestoreService } from '../../../../services/bac
 import { DisasterBackupService } from '../../../../services/disaster-backup.service';
 import { LocalBackupUiRestoreStageService } from '../../../../services/local-backup-ui-restore-stage.service';
 import { LocalBackupUiRestoreTransactionService } from '../../../../services/local-backup-ui-restore-transaction.service';
+import type {
+  LocalBackupUiRestoreStageOperations,
+  LocalBackupUiRestoreStageProtocolResult,
+} from '../../../../services/local-backup-ui-restore-stage-protocol';
+import type { LocalBackupUiRestoreStage } from '../../../../services/local-backup-ui-restore-types';
 import type { BackupData } from '../../../../../supabase/functions/_shared/backup-utils';
 import type { ExportData } from '../../../../services/export.service';
 import { LOCAL_BACKUP_CONFIG } from '../../../../config/local-backup.config';
@@ -269,12 +274,15 @@ describe('LocalBackupUIService queue restore', () => {
     importServiceMock.generatePreview.mockResolvedValue({
       projects: [{ taskCount: 0, connectionCount: 0 }],
     });
-    preparedRestoreRun.mockImplementationOnce(async () => {
+    preparedRestoreRun.mockImplementationOnce(async (operations: LocalBackupUiRestoreStageOperations) => {
       localStorage.setItem(
         `${LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY}.user-1`,
         JSON.stringify(restoredQueue),
       );
-      return { status: 'completed', stageResults: { projects: 1, 'action-queue': 1 } };
+      return runPreparedRestoreWithFinalVerification(operations, {
+        projects: 1,
+        'action-queue': 1,
+      });
     });
     localStorage.setItem(
       `${LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY}.user-1`,
@@ -360,7 +368,9 @@ describe('LocalBackupUIService queue restore', () => {
     localBackupServiceMock.readBackupFile.mockResolvedValue(new File([JSON.stringify(backupData)], 'backup.json', { type: 'application/json' }));
     importServiceMock.validateFile.mockResolvedValue({ valid: true, data: exportData });
     importServiceMock.generatePreview.mockResolvedValue({ projects: [] });
-    preparedRestoreRun.mockResolvedValueOnce({ status: 'completed', stageResults: { projects: 0, 'action-queue': 1 } });
+    preparedRestoreRun.mockImplementationOnce((operations: LocalBackupUiRestoreStageOperations) => (
+      runPreparedRestoreWithFinalVerification(operations, { projects: 0, 'action-queue': 1 })
+    ));
     const service = TestBed.inject(LocalBackupUIService);
 
     await service.handleRestoreFromLocalBackup();
@@ -371,7 +381,8 @@ describe('LocalBackupUIService queue restore', () => {
     expect(actionQueueMock.reloadFromStorageForCurrentOwner).toHaveBeenCalledOnce();
     expect(service.restoreStep()).toBe('error');
     expect(service.restoreResultMsg()).toBe('');
-    expect(service.restoreError()).toContain('内存与持久化读回不一致');
+    expect(service.restoreError()).toContain('已恢复到写入前状态');
+    expect(service.restoreError()).toContain('pending queue did not match its V2 record');
     expect(actionQueueMock.clearCurrentView).toHaveBeenCalledTimes(2);
     expect(actionQueueMock.getCurrentOwnerStorageLoadState()).toBe('unknown');
   });
@@ -514,25 +525,7 @@ describe('LocalBackupUIService queue restore', () => {
         connections: [],
       }],
     };
-    const deadLetter = {
-      action: {
-        id: 'dead-letter-action',
-        operationId: 'op-dead-letter-action',
-        type: 'update',
-        entityType: 'task',
-        entityId: 'task-dead-letter',
-        payload: {
-          task: { id: 'task-dead-letter', title: 'Dead letter task' },
-          projectId: 'project-1',
-          sourceUserId: 'user-1',
-        },
-        timestamp: 1,
-        retryCount: 5,
-        syncState: 'dead_letter',
-      },
-      failedAt: '2026-06-18T00:00:00.000Z',
-      reason: 'business failure',
-    };
+    const deadLetter = createDeadLetterSnapshot();
     const backupData = {
       payloadVersion: '2.0.0',
       projects: [],
@@ -543,13 +536,16 @@ describe('LocalBackupUIService queue restore', () => {
         deadLetters: [deadLetter],
       },
     } as unknown as BackupData;
-    preparedRestoreRun.mockResolvedValueOnce({
-      status: 'completed',
-      stageResults: { projects: 1, 'dead-letters': 1 },
-    });
-    queueBackupMock.restoreDeadLetters.mockResolvedValueOnce([deadLetter as DeadLetterItem]);
+    preparedRestoreRun.mockImplementationOnce((operations: LocalBackupUiRestoreStageOperations) => (
+      runPreparedRestoreWithFinalVerification(operations, { projects: 1, 'dead-letters': 1 })
+    ));
+    queueBackupMock.restoreDeadLetters.mockResolvedValueOnce([deadLetter]);
+    localStorage.setItem(
+      `${LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY}.user-1`,
+      JSON.stringify([deadLetter]),
+    );
     actionQueueMock.reloadFromStorageForCurrentOwner.mockImplementationOnce(async () => {
-      deadLetterQueue.set([deadLetter as DeadLetterItem]);
+      deadLetterQueue.set([deadLetter]);
       ownerStorageLoadState = 'loaded';
     });
     localBackupServiceMock.listBackupFiles.mockResolvedValue([{ name: 'backup.json', timestamp: 1, size: 1024 }]);
@@ -570,8 +566,69 @@ describe('LocalBackupUIService queue restore', () => {
       backup: backupData,
     }));
     expect(actionQueueStorageMock.restoreDeadLettersFromBackupItems).not.toHaveBeenCalled();
+    expect(queueBackupMock.restoreDeadLetters).toHaveBeenCalledWith('user-1');
     expect(service.restoreResultMsg()).toBe('恢复成功！已导入 1 个项目，已恢复 1 条同步失败记录');
   });
+
+  it.each(['missing durable snapshot', 'in-memory snapshot mismatch'])(
+    'rolls back when dead-letter read-back has a %s',
+    async failureMode => {
+      const exportData: ExportData = {
+        metadata: {
+          exportedAt: '2026-06-18T00:00:00.000Z',
+          version: '2.0.0',
+          appVersion: 'backup-restore',
+          projectCount: 0,
+          taskCount: 0,
+          connectionCount: 0,
+          attachmentCount: 0,
+          checksum: '',
+          exportType: 'full',
+        },
+        projects: [],
+      };
+      const deadLetter = createDeadLetterSnapshot();
+      const backupData = {
+        payloadVersion: '2.0.0',
+        projects: [],
+        tasks: [],
+        connections: [],
+        localState: {
+          dataSafety: { ownerUserId: 'user-1' },
+          deadLetters: [deadLetter],
+        },
+      } as unknown as BackupData;
+      queueBackupMock.restoreDeadLetters.mockResolvedValueOnce(
+        failureMode === 'missing durable snapshot' ? null : [deadLetter],
+      );
+      localStorage.setItem(
+        `${LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY}.user-1`,
+        JSON.stringify([deadLetter]),
+      );
+      actionQueueMock.reloadFromStorageForCurrentOwner.mockImplementationOnce(async () => {
+        deadLetterQueue.set(failureMode === 'in-memory snapshot mismatch' ? [] : [deadLetter]);
+        ownerStorageLoadState = 'loaded';
+      });
+      preparedRestoreRun.mockImplementationOnce((operations: LocalBackupUiRestoreStageOperations) => (
+        runPreparedRestoreWithFinalVerification(operations, { projects: 0, 'dead-letters': 1 })
+      ));
+      localBackupServiceMock.listBackupFiles.mockResolvedValue([{ name: 'backup.json', timestamp: 1, size: 1024 }]);
+      localBackupServiceMock.readBackupFile.mockResolvedValue(new File([JSON.stringify(backupData)], 'backup.json', { type: 'application/json' }));
+      importServiceMock.validateFile.mockResolvedValue({ valid: true, data: exportData });
+      importServiceMock.generatePreview.mockResolvedValue({ projects: [] });
+      const service = TestBed.inject(LocalBackupUIService);
+
+      await service.handleRestoreFromLocalBackup();
+      service.selectRestoreFile(0);
+      await service.loadRestorePreview([]);
+      await service.confirmRestore([]);
+
+      expect(service.restoreStep()).toBe('error');
+      expect(service.restoreResultMsg()).toBe('');
+      expect(service.restoreError()).toContain('已恢复到写入前状态');
+      expect(queueBackupMock.restoreDeadLetters).toHaveBeenCalledWith('user-1');
+    },
+  );
 
   it('routes conflict copies through the prepared restore stage', async () => {
     const exportData: ExportData = {
@@ -647,3 +704,37 @@ describe('LocalBackupUIService queue restore', () => {
     expect(service.restoreResultMsg()).toBe('恢复成功！已导入 1 个项目，已恢复 1 条冲突副本');
   });
 });
+
+function createDeadLetterSnapshot(): DeadLetterItem {
+  return {
+    action: {
+      id: 'dead-letter-action',
+      operationId: 'op-dead-letter-action',
+      type: 'update',
+      entityType: 'task',
+      entityId: 'task-dead-letter',
+      payload: {
+        task: { id: 'task-dead-letter', title: 'Dead letter task' },
+        projectId: 'project-1',
+        sourceUserId: 'user-1',
+      },
+      timestamp: 1,
+      retryCount: 5,
+      syncState: 'dead_letter',
+    },
+    failedAt: '2026-06-18T00:00:00.000Z',
+    reason: 'business failure',
+  } as DeadLetterItem;
+}
+
+async function runPreparedRestoreWithFinalVerification(
+  operations: LocalBackupUiRestoreStageOperations,
+  stageResults: Partial<Record<LocalBackupUiRestoreStage, unknown>>,
+): Promise<LocalBackupUiRestoreStageProtocolResult> {
+  try {
+    await operations.verifyBeforeFinalize?.();
+    return { status: 'completed', stageResults };
+  } catch (error) {
+    return { status: 'rolled-back', error, stageResults: {} };
+  }
+}

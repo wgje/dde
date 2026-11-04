@@ -83,6 +83,24 @@ describe('local backup UI restore stage protocol', () => {
     },
   );
 
+  it('rolls back every completed stage when final read-back verification fails', async () => {
+    const context = createContext();
+    const verificationError = new Error('ActionQueue read-back failed');
+    context.operations.verifyBeforeFinalize = vi.fn(async () => {
+      context.order.push('verify-before-finalize');
+      throw verificationError;
+    });
+
+    const result = await runLocalBackupUiRestoreStageProtocol(context.runtime, context.operations);
+
+    expect(result).toMatchObject({ status: 'rolled-back', error: verificationError });
+    const verificationIndex = context.order.indexOf('verify-before-finalize');
+    expect(context.order.slice(verificationIndex + 1).filter(entry => entry.startsWith('rollback:')))
+      .toEqual([...LOCAL_BACKUP_UI_RESTORE_STAGES].reverse().map(stage => `rollback:${stage}`));
+    expect(context.order).not.toContain('finalize:completed');
+    expect(context.order.at(-1)).toBe('finalize:rolled-back');
+  });
+
   it('records rollback failure and retains the frozen transaction without finalizing', async () => {
     const context = createContext('retry-queue');
     context.operations.rollback = vi.fn(async stage => {

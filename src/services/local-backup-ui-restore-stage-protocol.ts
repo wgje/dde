@@ -66,6 +66,7 @@ export interface LocalBackupUiRestoreStageOperationContext {
 
 export interface LocalBackupUiRestoreStageOperations {
   decodePreImage(marker: LocalBackupUiRestoreMarker): void;
+  verifyBeforeFinalize?(): Promise<void>;
   apply(
     stage: LocalBackupUiRestoreStage,
     context: LocalBackupUiRestoreStageOperationContext,
@@ -110,6 +111,10 @@ export async function runLocalBackupUiRestoreStageProtocol(
       await operations.verifyApplied(stage, context);
       await checkpoint(runtime);
       await completeForwardStage(runtime, stage);
+    }
+    if (operations.verifyBeforeFinalize) {
+      await checkpoint(runtime);
+      await operations.verifyBeforeFinalize();
     }
     await transitionFinalState(runtime, 'completed');
     await runtime.finalize('completed');

@@ -327,12 +327,11 @@ export class LocalBackupUIService {
         verifyRunContext: () => this.requireRestoreContextCurrent(context),
       });
       runStarted = true;
-      const result = await transaction.run(operations);
+      const result = await transaction.run({
+        ...operations,
+        verifyBeforeFinalize: () => this.reloadAndVerifyActionQueue(context),
+      });
       if (!this.isRestoreContextCurrent(context)) return;
-      if (result.status === 'completed') {
-        await this.reloadAndVerifyActionQueue(context);
-        if (!this.isRestoreContextCurrent(context)) return;
-      }
       this.completeRestoreResult(context, result);
     } catch (error: unknown) {
       if (prepared && !runStarted && transaction) {
@@ -349,7 +348,7 @@ export class LocalBackupUIService {
         || !this.isRestoreContextCurrent(context)) return;
       this.logger.error('从本地备份恢复失败', error instanceof Error ? error.message : String(error));
       this.restoreError.set(error instanceof ActionQueueRestoreReadbackError
-        ? '恢复数据已写入，但队列内存与持久化读回不一致。请刷新页面后继续操作。'
+        ? '队列持久化读回校验失败，恢复状态待确认。请刷新页面后检查队列状态。'
         : '恢复过程中发生错误');
       this.restoreStep.set('error');
     } finally {
@@ -564,9 +563,14 @@ export class LocalBackupUIService {
         throw new ActionQueueRestoreReadbackError('pending queue did not match its V2 record');
       }
 
-      const expectedDeadLetters = deadLetters ?? readOwnerDeadLetterSnapshot(context.ownerUserId);
-      if (!expectedDeadLetters
-        || stableSerialize(this.actionQueue.deadLetterQueue()) !== stableSerialize(expectedDeadLetters)) {
+      if (!deadLetters) {
+        throw new ActionQueueRestoreReadbackError('durable dead-letter snapshot could not be read');
+      }
+      const mirrorDeadLetters = readOwnerDeadLetterSnapshot(context.ownerUserId);
+      if (!mirrorDeadLetters || stableSerialize(mirrorDeadLetters) !== stableSerialize(deadLetters)) {
+        throw new ActionQueueRestoreReadbackError('owner-scoped dead-letter mirror did not match its durable record');
+      }
+      if (stableSerialize(this.actionQueue.deadLetterQueue()) !== stableSerialize(deadLetters)) {
         throw new ActionQueueRestoreReadbackError('dead-letter queue did not match durable storage');
       }
     } catch (error) {
