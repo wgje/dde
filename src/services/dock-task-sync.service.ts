@@ -177,14 +177,16 @@ export class DockTaskSyncService {
     );
   }
 
-  syncInlineCompletion(entry: DockEntry): void {
-    if (entry.sourceKind !== 'dock-created') return;
+  async syncInlineCompletion(entry: DockEntry): Promise<boolean> {
+    if (entry.sourceKind !== 'dock-created') return true;
     const blackBoxEntryId = entry.sourceBlackBoxEntryId ?? null;
-    if (!blackBoxEntryId) return;
+    if (!blackBoxEntryId) return false;
 
-    if (this.blackBoxService.getEntry(blackBoxEntryId)?.isCompleted) return;
+    if (this.blackBoxService.getEntry(blackBoxEntryId)?.isCompleted) return true;
 
-    void this.monitorBlackBoxMutation(
+    const expectedUserId = this.authService.currentUserId();
+    const expectedAuthFence = this.authService.captureAuthIdentityFence();
+    const completed = await this.monitorBlackBoxMutation(
       this.blackBoxService.markAsCompletedDurably(blackBoxEntryId),
       'Inline dock completion failed to mark source black-box entry completed',
       {
@@ -192,12 +194,15 @@ export class DockTaskSyncService {
         blackBoxEntryId,
       },
     );
+    return completed
+      && this.authService.currentUserId() === expectedUserId
+      && this.authService.captureAuthIdentityFence() === expectedAuthFence;
   }
 
   syncCompletedInlineEntries(entries: readonly DockEntry[]): void {
     for (const entry of entries) {
       if (entry.status === 'completed') {
-        this.syncInlineCompletion(entry);
+        void this.syncInlineCompletion(entry);
       }
     }
   }
@@ -223,6 +228,7 @@ export class DockTaskSyncService {
       this.logger.warn('跨项目任务补丁缺少当前用户，未提交本地 UI 更新', { taskId, projectId });
       return false;
     }
+    const authIdentityFence = this.authService.captureAuthIdentityFence();
 
     if (ownerUserId !== AUTH_CONFIG.LOCAL_MODE_USER_ID) {
       const actionId = await this.actionQueue.enqueueDurablyForOwner(ownerUserId, {
@@ -242,6 +248,16 @@ export class DockTaskSyncService {
       }
     }
 
+    if (
+      this.authService.currentUserId() !== ownerUserId
+      || this.authService.captureAuthIdentityFence() !== authIdentityFence
+    ) return false;
+
+    this.publishCrossProjectTaskPatch(taskId, projectId, updatedTask);
+    return true;
+  }
+
+  private publishCrossProjectTaskPatch(taskId: string, projectId: string, updatedTask: Task): void {
     this.taskStore.setTask(updatedTask, projectId);
     this.projectState.updateProjects(projects =>
       projects.map(project =>
@@ -253,7 +269,6 @@ export class DockTaskSyncService {
           : project,
       ),
     );
-    return true;
   }
 
   /**

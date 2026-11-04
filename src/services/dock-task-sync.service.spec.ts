@@ -103,6 +103,7 @@ const mockActionQueue = {
 
 const mockAuthService = {
   currentUserId: vi.fn(),
+  captureAuthIdentityFence: vi.fn(),
 };
 
 const projectsSignal = signal<Project[]>([]);
@@ -139,6 +140,7 @@ describe('DockTaskSyncService', () => {
     mockTaskOps.updateTaskPlannerFields.mockResolvedValue(true);
     mockActionQueue.enqueueDurablyForOwner.mockResolvedValue('action-1');
     mockAuthService.currentUserId.mockReturnValue('user-1');
+    mockAuthService.captureAuthIdentityFence.mockReturnValue('fence-a');
 
     const injector = Injector.create({
       providers: [
@@ -455,39 +457,39 @@ describe('DockTaskSyncService', () => {
   });
 
   describe('syncInlineCompletion', () => {
-    it('should mark the source black-box entry completed for dock-created entries', () => {
+    it('should mark the source black-box entry completed for dock-created entries', async () => {
       const entry = createMockDockEntry({
         taskId: 'inline-task',
         sourceKind: 'dock-created',
         sourceBlackBoxEntryId: 'bb-inline-task',
       });
 
-      service.syncInlineCompletion(entry);
+      await expect(service.syncInlineCompletion(entry)).resolves.toBe(true);
 
       expect(mockBlackBoxService.markAsCompletedDurably).toHaveBeenCalledWith('bb-inline-task');
       expect(mockBlackBoxService.markAsCompleted).not.toHaveBeenCalled();
     });
 
-    it('should no-op when a dock-created entry has no source black-box entry', () => {
+    it('should fail closed when a dock-created entry has no source black-box entry', async () => {
       const entry = createMockDockEntry({
         sourceKind: 'dock-created',
         sourceBlackBoxEntryId: null,
       });
 
-      service.syncInlineCompletion(entry);
+      await expect(service.syncInlineCompletion(entry)).resolves.toBe(false);
 
       expect(mockBlackBoxService.markAsCompletedDurably).not.toHaveBeenCalled();
       expect(mockBlackBoxService.markAsCompleted).not.toHaveBeenCalled();
     });
 
-    it('should skip source black-box entries that are already completed', () => {
+    it('should skip source black-box entries that are already completed', async () => {
       mockBlackBoxService.getEntry.mockReturnValue({ isCompleted: true });
       const entry = createMockDockEntry({
         sourceKind: 'dock-created',
         sourceBlackBoxEntryId: 'bb-completed',
       });
 
-      service.syncInlineCompletion(entry);
+      await expect(service.syncInlineCompletion(entry)).resolves.toBe(true);
 
       expect(mockBlackBoxService.markAsCompletedDurably).not.toHaveBeenCalled();
       expect(mockBlackBoxService.markAsCompleted).not.toHaveBeenCalled();
@@ -523,6 +525,60 @@ describe('DockTaskSyncService', () => {
   // ==================== applyCrossProjectTaskPatch ====================
 
   describe('applyCrossProjectTaskPatch', () => {
+    it.each([
+      {
+        name: 'A to B',
+        transition: () => {
+          mockAuthService.currentUserId.mockReturnValue('user-2');
+          mockAuthService.captureAuthIdentityFence.mockReturnValue('fence-b');
+        },
+      },
+      {
+        name: 'A to B to A',
+        transition: () => {
+          mockAuthService.currentUserId.mockReturnValue('user-2');
+          mockAuthService.captureAuthIdentityFence.mockReturnValue('fence-b');
+          mockAuthService.currentUserId.mockReturnValue('user-1');
+          mockAuthService.captureAuthIdentityFence.mockReturnValue('fence-c');
+        },
+      },
+      {
+        name: 'same-owner relogin',
+        transition: () => {
+          mockAuthService.captureAuthIdentityFence.mockReturnValue('fence-relogin');
+        },
+      },
+    ])('should retain the durable A action without local publication after $name', async ({ transition }) => {
+      let resolveEnqueue!: (actionId: string) => void;
+      mockActionQueue.enqueueDurablyForOwner.mockReturnValueOnce(new Promise<string>(resolve => {
+        resolveEnqueue = resolve;
+      }));
+      const task = createMockTask({ id: 'task-1', content: 'old' });
+      mockTaskStore.getTask.mockReturnValue(task);
+      projectsSignal.set([createMockProject({ id: 'proj-other', tasks: [task] })]);
+
+      const mutation = service.applyCrossProjectTaskPatch('task-1', 'proj-other', { content: 'new' });
+      expect(mockActionQueue.enqueueDurablyForOwner).toHaveBeenCalledWith(
+        'user-1',
+        expect.objectContaining({
+          entityId: 'task-1',
+          payload: expect.objectContaining({
+            projectId: 'proj-other',
+            sourceUserId: 'user-1',
+            task: expect.objectContaining({ id: 'task-1', content: 'new' }),
+          }),
+        }),
+      );
+
+      transition();
+      resolveEnqueue('action-a');
+
+      await expect(mutation).resolves.toBe(false);
+      expect(mockActionQueue.enqueueDurablyForOwner).toHaveBeenCalledTimes(1);
+      expect(mockTaskStore.setTask).not.toHaveBeenCalled();
+      expect(mockProjectState.updateProjects).not.toHaveBeenCalled();
+    });
+
     it('should call taskStore.setTask and projectState.updateProjects after durable enqueue succeeds', async () => {
       const task = createMockTask({ id: 'task-1', content: 'old' });
       mockTaskStore.getTask.mockReturnValue(task);
