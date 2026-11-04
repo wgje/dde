@@ -17,6 +17,10 @@ import {
 
 export interface WorkspaceShellControllerGraph extends WorkspaceShellLifecycleGraph {}
 
+type WorkspaceShellLegacySignupAuthCoordinator = WorkspaceShellGraphContext['authCoord'] & {
+  handleSignup(event?: Event): Promise<void>;
+};
+
 export function createWorkspaceShellControllerGraphFromContext(
   context: WorkspaceShellGraphContext,
 ): WorkspaceShellControllerGraph {
@@ -27,10 +31,13 @@ export function createWorkspaceShellControllerGraphFromContext(
     ...base,
     startupEntryControllers: startupEntryRegistry.startupEntryControllers,
   });
+  // The interaction surface only awaits completion; retain the coordinator's boolean result at runtime.
+  const authCoord = context.authCoord as WorkspaceShellLegacySignupAuthCoordinator;
   const interaction = createWorkspaceShellInteractionSurfaces({
     ...context,
     ...base,
     ...sessionRouting,
+    authCoord,
     startupEntryControllers: startupEntryRegistry.startupEntryControllers,
   });
   const startupTemplate = createWorkspaceShellStartupTemplateSurfaces({

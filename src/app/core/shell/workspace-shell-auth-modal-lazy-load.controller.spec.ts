@@ -90,7 +90,7 @@ describe('WorkspaceShellAuthModalLazyLoadController', () => {
     expect(lazyHostSource).toContain('createWorkspaceShellAuthModalControllerLoader');
   });
 
-  it('loads the auth modal controller once while login submissions are in flight', async () => {
+  it('loads the auth modal controller once and drops a concurrent login submission', async () => {
     const authModal = createAuthModalControllerLike();
     const createAuthModalController = vi.fn().mockResolvedValue(authModal);
     const { controller } = createController({ createAuthModalController });
@@ -103,8 +103,9 @@ describe('WorkspaceShellAuthModalLazyLoadController', () => {
     ]);
 
     expect(createAuthModalController).toHaveBeenCalledTimes(1);
+    expect(authModal.handleLoginFromModal).toHaveBeenCalledTimes(1);
     expect(authModal.handleLoginFromModal).toHaveBeenCalledWith(first);
-    expect(authModal.handleLoginFromModal).toHaveBeenCalledWith(second);
+    expect(authModal.handleLoginFromModal).not.toHaveBeenCalledWith(second);
   });
 
   it('delegates signup, reset password, and local mode through the cached controller', async () => {

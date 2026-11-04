@@ -38,15 +38,6 @@ import {
   waitForPromiseOrTimeout,
 } from './app-auth-coordinator.helpers';
 
-/**
- * 应用认证协调器
- *
- * 统一管理认证相关的状态和操作：
- * - 登录/注册/密码重置
- * - 会话引导（bootstrap）
- * - 本地模式切换
- * - 迁移检查
- */
 @Injectable({ providedIn: 'root' })
 export class AppAuthCoordinatorService {
   /** 启动阶段等待用户数据加载的最大时长（超时后转后台继续） */
@@ -66,7 +57,6 @@ export class AppAuthCoordinatorService {
   private readonly widgetBinding = inject(WidgetBindingService);
   private readonly eventBus = inject(EventBusService);
   private readonly syncState = inject(SyncStateService);
-
   private readonly attachmentServiceLazy = createAppAuthLazyServiceSlot<AttachmentService>();
   private readonly migrationServiceLazy = createAppAuthLazyServiceSlot<MigrationService>();
   private readonly projectDataServiceLazy = createAppAuthLazyServiceSlot<ProjectDataService>();
@@ -135,8 +125,7 @@ export class AppAuthCoordinatorService {
 
   /** 设置页认证表单是否可见 */
   readonly showSettingsAuthForm = computed(() =>
-    shouldShowSettingsAuthForm(this.userSession.currentUserId(), this.isReloginMode())
-  );
+    shouldShowSettingsAuthForm(this.userSession.currentUserId(), this.isReloginMode()));
 
   /** 会话引导任务是否已调度 */
   private bootstrapScheduled = false;
@@ -152,8 +141,9 @@ export class AppAuthCoordinatorService {
   private authLoadGeneration = 0;
   /** 登录后迁移探测的会话代次；每次登录/登出切换都会递增以作废旧探测 */
   private migrationCheckGeneration = 0;
+  /** 登录表单提交代次；与数据加载代次独立，防止迟到认证结果提交旧 owner。 */
   private authSubmissionGeneration = 0;
-  private activeAuthSubmissionGeneration: number | null = null;
+  private activeLoginSubmissionGeneration: number | null = null;
   private destroyed = false;
 
   constructor() {
@@ -292,9 +282,7 @@ export class AppAuthCoordinatorService {
       currentUserId: this.auth.currentUserId(),
     });
     const isSilent = this.coldBootSilent;
-    if (!isSilent) {
-      this.isCheckingSession.set(true);
-    }
+    if (!isSilent) this.isCheckingSession.set(true);
     this.bootstrapFailed.set(false);
     this.bootstrapErrorMessage.set(null);
     return { totalStartTime: Date.now(), isSilent };
@@ -419,24 +407,15 @@ export class AppAuthCoordinatorService {
     this.coldBootSilent = false;
   }
 
-  // ========== 登录/注册/重置 ==========
-
   async handleLogin(
     event?: Event,
-    opts?: { closeSettings?: boolean; skipPostAuthNavigation?: boolean },
+    opts?: { closeSettings?: boolean; skipPostAuthNavigation?: boolean; onOutcome?: (authenticated: boolean) => void },
   ): Promise<void> {
     event?.preventDefault();
-    if (this.isAuthLoading()) return;
-    const preflightError = getAuthCredentialPreflightError('login',
-      { isConfigured: this.auth.isConfigured, email: this.authEmail(), password: this.authPassword() });
-    if (preflightError) {
-      this.authError.set(preflightError);
-      return;
-    }
-    this.authError.set(null);
-    this.isAuthLoading.set(true);
-    const previousUserIdHint = this.capturePreviousUserIdHint();
-    const submissionGeneration = this.beginAuthSubmission();
+    let authenticated = false;
+    const submission = this.prepareLoginSubmission();
+    if (!submission) return;
+    const { previousUserIdHint, submissionGeneration } = submission;
     try {
       const result = await this.auth.signIn(
         this.authEmail(),
@@ -451,35 +430,58 @@ export class AppAuthCoordinatorService {
       }
       disableLocalMode();
       this.sessionEmail.set(this.auth.sessionEmail());
-      // 【P0 修复 2026-02-08】从 signIn 结果中获取 userId，而非从 signal 读取
-      // signIn() 不再提前设置 currentUserId，由 setCurrentUser 统一管理
       const userId = result.value.userId ?? null;
       if (!userId) {
         this.logger.warn('[Login] 登录成功但未返回 userId，无法安全初始化会话');
         throw new Error('登录成功，但会话初始化失败，请重新登录。');
       }
-
+      const loginOptions = { ...opts, markAuthenticated: () => { authenticated = true; } };
       await this.postLoginController.initializeSuccessfulLoginSession(
         userId,
         previousUserIdHint,
         submissionGeneration,
-        opts,
+        loginOptions,
       );
     } catch (e: unknown) {
       if (this.isAuthSubmissionCurrent(submissionGeneration)) {
         this.authError.set(getAuthFlowErrorMessage(e));
       }
     } finally {
-      if (this.activeAuthSubmissionGeneration === submissionGeneration) {
-        this.activeAuthSubmissionGeneration = null;
+      if (this.activeLoginSubmissionGeneration === submissionGeneration) {
+        this.activeLoginSubmissionGeneration = null;
         this.isAuthLoading.set(false);
         this.isCheckingSession.set(false);
       }
+      opts?.onOutcome?.(authenticated);
     }
   }
 
-  async handleSignup(event?: Event): Promise<void> {
+  private prepareLoginSubmission(): {
+    previousUserIdHint: string | null;
+    submissionGeneration: number;
+  } | null {
+    if (this.isAuthLoading()) return null;
+    const preflightError = getAuthCredentialPreflightError('login', {
+      isConfigured: this.auth.isConfigured,
+      email: this.authEmail(),
+      password: this.authPassword(),
+    });
+    if (preflightError) {
+      this.authError.set(preflightError);
+      return null;
+    }
+    this.authError.set(null);
+    this.isAuthLoading.set(true);
+    return {
+      previousUserIdHint: this.capturePreviousUserIdHint(),
+      submissionGeneration: this.beginAuthSubmission(),
+    };
+  }
+
+  // eslint-disable-next-line max-lines-per-function -- signup submission, modal, and owner fences are one ordered flow
+  async handleSignup(event?: Event, canCommitContext: () => boolean = () => true): Promise<boolean> {
     event?.preventDefault();
+    if (this.isAuthLoading()) return false;
     const preflightError = getAuthCredentialPreflightError('signup', {
       isConfigured: this.auth.isConfigured,
       email: this.authEmail(),
@@ -488,41 +490,59 @@ export class AppAuthCoordinatorService {
     });
     if (preflightError) {
       this.authError.set(preflightError);
-      return;
+      return false;
     }
     this.authError.set(null);
     this.isAuthLoading.set(true);
     const previousUserIdHint = this.capturePreviousUserIdHint();
+    const submissionGeneration = this.beginAuthSubmission();
+    const isCurrent = (allowed?: readonly (string | null)[]) =>
+      canCommitContext() && this.isAuthSubmissionCurrent(submissionGeneration, allowed);
     try {
-      const result = await this.auth.signUp(this.authEmail(), this.authPassword());
+      const result = await this.auth.signUp(
+        this.authEmail(),
+        this.authPassword(),
+        () => isCurrent([previousUserIdHint]),
+      );
+      if (!isCurrent([previousUserIdHint])) return false;
       if (isFailure(result)) {
         throw new Error(getAuthFailureMessage(result.error));
       }
-      const signedUpUserId = result.value.userId ?? this.auth.currentUserId();
-      const signedUpEmail = result.value.email ?? this.auth.sessionEmail();
+      const signedUpUserId = result.value.userId ?? null;
+      const signedUpEmail = result.value.email ?? null;
       if (result.value.needsConfirmation) {
         this.authError.set('注册成功！请查收邮件并点击验证链接完成注册。');
+        return false;
       } else if (signedUpUserId) {
         disableLocalMode();
         this.sessionEmail.set(signedUpEmail);
         await this.loadPostAuthUserDataWithTimeout(signedUpUserId, '[Signup]', previousUserIdHint);
+        if (!isCurrent([previousUserIdHint, signedUpUserId])) return false;
         this.toast.success('注册成功', '欢迎使用');
         this.modal.closeByType('login', { success: true, userId: signedUpUserId });
         this.isSignupMode.set(false);
+        return true;
       } else {
         this.logger.warn('[Signup] 注册成功但未返回 userId，无法安全初始化会话');
         this.authError.set('注册成功，但会话初始化失败，请重新登录。');
+        return false;
       }
     } catch (e: unknown) {
-      this.authError.set(getAuthFlowErrorMessage(e));
+      if (isCurrent()) {
+        this.authError.set(getAuthFlowErrorMessage(e));
+      }
+      return false;
     } finally {
-      this.isAuthLoading.set(false);
+      if (this.activeLoginSubmissionGeneration === submissionGeneration) {
+        this.activeLoginSubmissionGeneration = null;
+        this.isAuthLoading.set(false);
+      }
     }
   }
 
   private finishSuccessfulLogin(
     userId: string,
-    opts?: { closeSettings?: boolean; skipPostAuthNavigation?: boolean },
+    opts?: { closeSettings?: boolean; skipPostAuthNavigation?: boolean; markAuthenticated?: () => void },
   ): void {
     const completionPlan = buildSuccessfulLoginCompletionPlan({
       rawLoginData: this.modal.getData('login'),
@@ -533,10 +553,10 @@ export class AppAuthCoordinatorService {
     if (completionPlan.closeSettings) {
       this.modal.closeByType('settings');
     }
-
     if (completionPlan.navigationUrl) {
       void this.router.navigateByUrl(completionPlan.navigationUrl);
     }
+    opts?.markAuthenticated?.();
   }
 
   private capturePreviousUserIdHint(): string | null {
@@ -570,6 +590,8 @@ export class AppAuthCoordinatorService {
 
   async handleResetPassword(event?: Event): Promise<void> {
     event?.preventDefault();
+    // 并发守卫：认证请求进行中时忽略重复提交，防止连点触发第二次 resetPassword
+    if (this.isAuthLoading()) return;
     const preflightError = getAuthCredentialPreflightError('reset-password',
       { isConfigured: this.auth.isConfigured, email: this.authEmail() });
     if (preflightError) {
@@ -590,8 +612,6 @@ export class AppAuthCoordinatorService {
       this.isAuthLoading.set(false);
     }
   }
-
-  // ========== 模式切换 ==========
 
   switchToSignup(): void {
     this.applyAuthFormStatePatch(getAuthFormModePatch('signup'));
@@ -687,20 +707,22 @@ export class AppAuthCoordinatorService {
   private resetAuthFormStateAfterSignOut(): void {
     this.applyAuthFormStatePatch(getAuthFormModePatch('signed-out'));
   }
-
-  // ========== 模态框事件处理 ==========
-
-  async handleLoginFromModal(data: { email: string; password: string }): Promise<void> {
+  async handleLoginFromModal(data: { email: string; password: string }): Promise<boolean> {
+    let authenticated = false;
     this.authEmail.set(data.email);
     this.authPassword.set(data.password);
-    await this.handleLogin(undefined, { skipPostAuthNavigation: true });
+    await this.handleLogin(undefined, {
+      skipPostAuthNavigation: true,
+      onOutcome: outcome => { authenticated = outcome; },
+    });
+    return authenticated;
   }
 
-  async handleSignupFromModal(data: { email: string; password: string; confirmPassword: string }): Promise<void> {
+  async handleSignupFromModal(data: { email: string; password: string; confirmPassword: string }, canCommitModal: () => boolean = () => true): Promise<boolean> {
     this.authEmail.set(data.email);
     this.authPassword.set(data.password);
     this.authConfirmPassword.set(data.confirmPassword);
-    await this.handleSignup();
+    return await this.handleSignup(undefined, canCommitModal);
   }
 
   async handleResetPasswordFromModal(email: string): Promise<void> {
@@ -738,7 +760,7 @@ export class AppAuthCoordinatorService {
 
   private beginAuthSubmission(): number {
     this.authSubmissionGeneration += 1;
-    this.activeAuthSubmissionGeneration = this.authSubmissionGeneration;
+    this.activeLoginSubmissionGeneration = this.authSubmissionGeneration;
     return this.authSubmissionGeneration;
   }
 

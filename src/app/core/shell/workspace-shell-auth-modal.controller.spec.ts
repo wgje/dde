@@ -22,8 +22,8 @@ function createController(options: {
     authError: vi.fn(() => options.authError ?? null),
     resetPasswordSent: vi.fn(() => options.resetPasswordSent ?? false),
     resolveSafePostAuthNavigationUrl: vi.fn(() => options.resolvedNavigationUrl ?? null),
-    handleLoginFromModal: vi.fn().mockResolvedValue(undefined),
-    handleSignupFromModal: vi.fn().mockResolvedValue(undefined),
+    handleLoginFromModal: vi.fn().mockResolvedValue(true),
+    handleSignupFromModal: vi.fn().mockResolvedValue(true),
     handleResetPasswordFromModal: vi.fn().mockResolvedValue(undefined),
     handleLocalModeFromModal: vi.fn().mockResolvedValue(undefined),
   };
@@ -153,9 +153,10 @@ describe('WorkspaceShellAuthModalController', () => {
   });
 
   it('keeps login modal open and restores inputs after login failure', async () => {
-    const { controller, loginModalRef, modalCoord, navigateByUrl } = createController({
+    const { authCoord, controller, loginModalRef, modalCoord, navigateByUrl } = createController({
       authError: 'Invalid password',
     });
+    authCoord.handleLoginFromModal.mockResolvedValueOnce(false);
 
     await controller.handleLoginFromModal({ email: 'a@example.com', password: 'bad' });
 
@@ -163,6 +164,18 @@ describe('WorkspaceShellAuthModalController', () => {
     expect(navigateByUrl).not.toHaveBeenCalled();
     expect(loginModalRef.componentRef.setInput).toHaveBeenCalledWith('isLoading', false);
     expect(loginModalRef.componentRef.setInput).toHaveBeenCalledWith('authError', 'Invalid password');
+  });
+
+  it('keeps login input visible when the owned operation returns false without an auth error', async () => {
+    const { authCoord, controller, loginModalRef, modalCoord, navigateByUrl } = createController();
+    authCoord.handleLoginFromModal.mockResolvedValueOnce(false);
+
+    await controller.handleLoginFromModal({ email: 'a@example.com', password: 'secret' });
+
+    expect(modalCoord.closeLoginModal).not.toHaveBeenCalled();
+    expect(navigateByUrl).not.toHaveBeenCalled();
+    expect(loginModalRef.componentRef.setInput).toHaveBeenCalledWith('isLoading', false);
+    expect(loginModalRef.componentRef.setInput).toHaveBeenCalledWith('authError', null);
   });
 
   it('restores login modal inputs when login submit throws', async () => {
@@ -180,10 +193,8 @@ describe('WorkspaceShellAuthModalController', () => {
     expect(loginModalRef.componentRef.setInput).toHaveBeenCalledWith('authError', 'Network unavailable');
   });
 
-  it('closes signup modal only after signup creates an authenticated user', async () => {
-    const { controller, modalCoord } = createController({
-      currentUserId: 'user-1',
-    });
+  it('closes signup modal only for its operation-owned authenticated outcome', async () => {
+    const { controller, modalCoord } = createController();
 
     await controller.handleSignupFromModal({
       email: 'a@example.com',
@@ -192,6 +203,20 @@ describe('WorkspaceShellAuthModalController', () => {
     });
 
     expect(modalCoord.closeLoginModal).toHaveBeenCalled();
+  });
+
+  it('keeps signup input visible when ambient same-owner auth outlives a rejected attempt', async () => {
+    const { authCoord, controller, loginModalRef, modalCoord } = createController({
+      currentUserId: 'user-1',
+    });
+    authCoord.handleSignupFromModal.mockResolvedValueOnce(false);
+
+    await controller.handleSignupFromModal({
+      email: 'stale@example.com', password: 'secret', confirmPassword: 'secret',
+    });
+
+    expect(modalCoord.closeLoginModal).not.toHaveBeenCalled();
+    expect(loginModalRef.componentRef.setInput).toHaveBeenCalledWith('isLoading', false);
   });
 
   it('restores signup modal inputs when signup submit throws', async () => {
@@ -207,6 +232,32 @@ describe('WorkspaceShellAuthModalController', () => {
     expect(modalCoord.closeLoginModal).not.toHaveBeenCalled();
     expect(loginModalRef.componentRef.setInput).toHaveBeenCalledWith('isLoading', false);
     expect(loginModalRef.componentRef.setInput).toHaveBeenCalledWith('authError', 'Email already exists');
+  });
+
+  it('does not apply a stale signup completion to a replacement modal instance', async () => {
+    const { authCoord, controller, modalCoord } = createController();
+    let resolveSignup!: (authenticated: boolean) => void;
+    authCoord.handleSignupFromModal.mockReturnValueOnce(new Promise<boolean>(resolve => {
+      resolveSignup = resolve;
+    }));
+    const signupPromise = controller.handleSignupFromModal({
+      email: 'a@example.com',
+      password: 'secret',
+      confirmPassword: 'secret',
+    });
+    const modalCommitFence = authCoord.handleSignupFromModal.mock.calls[0]?.[1] as
+      | (() => boolean)
+      | undefined;
+    expect(modalCommitFence?.()).toBe(true);
+    const replacementModalRef = createLoginModalRef();
+    modalCoord.loginModalRef = replacementModalRef;
+    expect(modalCommitFence?.()).toBe(false);
+
+    resolveSignup(false);
+    await signupPromise;
+
+    expect(replacementModalRef.componentRef.setInput).not.toHaveBeenCalled();
+    expect(modalCoord.closeLoginModal).not.toHaveBeenCalled();
   });
 
   it('reflects reset-password completion state back into the login modal', async () => {

@@ -26,8 +26,8 @@ function createDelegateOptions(
       authError: vi.fn(() => null),
       resetPasswordSent: vi.fn(() => false),
       resolveSafePostAuthNavigationUrl: vi.fn((returnUrl: string | null) => returnUrl),
-      handleLoginFromModal: vi.fn(async () => undefined),
-      handleSignupFromModal: vi.fn(async () => undefined),
+      handleLoginFromModal: vi.fn(async () => true),
+      handleSignupFromModal: vi.fn(async () => true),
       handleResetPasswordFromModal: vi.fn(async () => undefined),
       handleLocalModeFromModal: vi.fn(async () => undefined),
     },
@@ -105,7 +105,7 @@ describe('createWorkspaceShellAuthModalLazyLoadDelegate', () => {
     expect(authModal.handleLoginFromModal).toHaveBeenCalledWith(data);
   });
 
-  it('shares one host load while concurrent modal actions are in flight', async () => {
+  it('loads one host and drops a concurrent modal action while the first action is in flight', async () => {
     const authModal = createAuthModalHost();
     const createAuthModalHostDelegate = vi.fn().mockResolvedValue(authModal);
     const delegate = createWorkspaceShellAuthModalLazyLoadDelegate(createDelegateOptions({
@@ -123,7 +123,7 @@ describe('createWorkspaceShellAuthModalLazyLoadDelegate', () => {
       email: 'one@example.com',
       password: 'pw1',
     });
-    expect(authModal.handleResetPasswordFromModal).toHaveBeenCalledWith('two@example.com');
+    expect(authModal.handleResetPasswordFromModal).not.toHaveBeenCalled();
   });
 
   it('warns and allows retry when the auth modal host chunk fails', async () => {

@@ -5,6 +5,16 @@ import {
   type WorkspaceShellAuthModalLazyActionDelegate,
 } from './workspace-shell-auth-modal-lazy-action-host.controller';
 
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, reject, resolve };
+}
+
 function createDelegate(): WorkspaceShellAuthModalLazyActionDelegate {
   return {
     handleLoginFromModal: vi.fn().mockResolvedValue(undefined),
@@ -37,9 +47,12 @@ function createHost(options: {
 }
 
 describe('WorkspaceShellAuthModalLazyActionHostController', () => {
-  it('loads one delegate for concurrent auth modal actions', async () => {
+  it('keeps the first auth action and drops later actions while the lazy delegate is loading', async () => {
     const delegate = createDelegate();
-    const createDelegateFn = vi.fn().mockResolvedValue(delegate);
+    let resolveDelegate!: (delegate: WorkspaceShellAuthModalLazyActionDelegate) => void;
+    const createDelegateFn = vi.fn(() => new Promise<WorkspaceShellAuthModalLazyActionDelegate>(resolve => {
+      resolveDelegate = resolve;
+    }));
     const { host } = createHost({ createDelegate: createDelegateFn });
     const loginData = { email: 'one@example.com', password: 'pw1' };
     const signupData = {
@@ -48,18 +61,44 @@ describe('WorkspaceShellAuthModalLazyActionHostController', () => {
       confirmPassword: 'pw2',
     };
 
-    await Promise.all([
+    const actions = Promise.all([
       host.handleLoginFromModal(loginData),
       host.handleSignupFromModal(signupData),
       host.handleResetPasswordFromModal('reset@example.com'),
       host.handleLocalModeFromModal(),
     ]);
+    resolveDelegate(delegate);
+    await actions;
 
     expect(createDelegateFn).toHaveBeenCalledTimes(1);
     expect(delegate.handleLoginFromModal).toHaveBeenCalledWith(loginData);
-    expect(delegate.handleSignupFromModal).toHaveBeenCalledWith(signupData);
-    expect(delegate.handleResetPasswordFromModal).toHaveBeenCalledWith('reset@example.com');
-    expect(delegate.handleLocalModeFromModal).toHaveBeenCalledOnce();
+    expect(delegate.handleSignupFromModal).not.toHaveBeenCalled();
+    expect(delegate.handleResetPasswordFromModal).not.toHaveBeenCalled();
+    expect(delegate.handleLocalModeFromModal).not.toHaveBeenCalled();
+  });
+
+  it('does not replay rapid duplicate or local-mode actions after the first action completes', async () => {
+    const loginAction = createDeferred<void>();
+    const delegate = createDelegate();
+    vi.mocked(delegate.handleLoginFromModal).mockReturnValue(loginAction.promise);
+    const { host } = createHost({
+      createDelegate: vi.fn().mockResolvedValue(delegate),
+    });
+    const loginData = { email: 'one@example.com', password: 'pw1' };
+
+    const firstLogin = host.handleLoginFromModal(loginData);
+    await Promise.resolve();
+    const duplicateLogin = host.handleLoginFromModal(loginData);
+    const localMode = host.handleLocalModeFromModal();
+
+    loginAction.resolve();
+    await Promise.all([firstLogin, duplicateLogin, localMode]);
+
+    expect(delegate.handleLoginFromModal).toHaveBeenCalledTimes(1);
+    expect(delegate.handleLocalModeFromModal).not.toHaveBeenCalled();
+
+    await host.handleLocalModeFromModal();
+    expect(delegate.handleLocalModeFromModal).toHaveBeenCalledTimes(1);
   });
 
   it('warns with operation failure and resolves action calls', async () => {
@@ -105,16 +144,20 @@ describe('WorkspaceShellAuthModalLazyActionHostController', () => {
       }));
     const { host } = createHost({ createDelegate: createDelegateFn });
 
-    const login = host.handleLoginFromModal({
+    const actions = Promise.all([
+      host.handleLoginFromModal({
       email: 'late@example.com',
       password: 'pw',
-    });
+      }),
+      host.handleLocalModeFromModal(),
+    ]);
     host.teardown();
     host.teardown();
     resolveDelegate(delegate);
-    await login;
+    await actions;
 
     expect(delegate.handleLoginFromModal).not.toHaveBeenCalled();
+    expect(delegate.handleLocalModeFromModal).not.toHaveBeenCalled();
     expect(delegate.teardown).toHaveBeenCalledTimes(1);
   });
 });

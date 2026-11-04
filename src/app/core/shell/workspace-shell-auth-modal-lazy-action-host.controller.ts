@@ -32,8 +32,9 @@ export interface WorkspaceShellAuthModalLazyActionHostOptions<
 export class WorkspaceShellAuthModalLazyActionHostController<
   TDelegate extends WorkspaceShellAuthModalLazyActionDelegate =
     WorkspaceShellAuthModalLazyActionDelegate,
-> {
+  > {
   private readonly host: WorkspaceShellLazyDelegateCallHostController<TDelegate>;
+  private actionInFlight: Promise<void | undefined> | null = null;
 
   constructor(options: WorkspaceShellAuthModalLazyActionHostOptions<TDelegate>) {
     this.host = new WorkspaceShellLazyDelegateCallHostController({
@@ -66,17 +67,29 @@ export class WorkspaceShellAuthModalLazyActionHostController<
   }
 
   teardown(): void {
+    this.actionInFlight = null;
     this.host.teardown();
   }
 
   private call(
     action: (authModal: TDelegate) => Promise<void>,
   ): Promise<void | undefined> {
-    return this.host.call(
+    if (this.actionInFlight) {
+      return Promise.resolve(undefined);
+    }
+
+    const actionPromise = this.host.call(
       action,
       undefined,
       this.operationFailureMessage,
       this.loadFailureMessage,
     );
+    const inFlightPromise = actionPromise.finally(() => {
+      if (this.actionInFlight === inFlightPromise) {
+        this.actionInFlight = null;
+      }
+    });
+    this.actionInFlight = inFlightPromise;
+    return inFlightPromise;
   }
 }

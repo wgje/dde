@@ -8,12 +8,12 @@ interface WorkspaceShellAuthModalAuthCoord {
   authError: () => string | null;
   resetPasswordSent: () => boolean;
   resolveSafePostAuthNavigationUrl: (returnUrl: string | null) => string | null;
-  handleLoginFromModal: (data: { email: string; password: string }) => Promise<void>;
+  handleLoginFromModal: (data: { email: string; password: string }) => Promise<boolean>;
   handleSignupFromModal: (data: {
     email: string;
     password: string;
     confirmPassword: string;
-  }) => Promise<void>;
+  }, canCommitModal?: () => boolean) => Promise<boolean>;
   handleResetPasswordFromModal: (email: string) => Promise<void>;
   handleLocalModeFromModal: () => Promise<void>;
 }
@@ -33,20 +33,26 @@ export interface WorkspaceShellAuthModalControllerOptions {
 }
 
 export class WorkspaceShellAuthModalController {
+  private operationEpoch = 0;
+
   constructor(private readonly options: WorkspaceShellAuthModalControllerOptions) {}
 
   async handleLoginFromModal(data: { email: string; password: string }): Promise<void> {
+    const operation = this.beginOperation();
     this.setLoginModalInput('isLoading', true);
     this.setLoginModalInput('authError', null);
+    let authenticated = false;
 
     try {
-      await this.options.authCoord.handleLoginFromModal(data);
+      authenticated = await this.options.authCoord.handleLoginFromModal(data);
     } catch (error) {
+      if (!this.isOperationCurrent(operation)) return;
       this.completeAuthModalFailure(error);
       return;
     }
+    if (!this.isOperationCurrent(operation)) return;
 
-    if (!this.options.authCoord.authError()) {
+    if (authenticated) {
       this.completeAuthModalSuccess();
       return;
     }
@@ -60,17 +66,23 @@ export class WorkspaceShellAuthModalController {
     password: string;
     confirmPassword: string;
   }): Promise<void> {
+    const operation = this.beginOperation();
     this.setLoginModalInput('isLoading', true);
     this.setLoginModalInput('authError', null);
+    let authenticated = false;
 
     try {
-      await this.options.authCoord.handleSignupFromModal(data);
+      authenticated = await this.options.authCoord.handleSignupFromModal(
+        data, () => this.isOperationCurrent(operation),
+      );
     } catch (error) {
+      if (!this.isOperationCurrent(operation)) return;
       this.completeAuthModalFailure(error);
       return;
     }
+    if (!this.isOperationCurrent(operation)) return;
 
-    if (!this.options.authCoord.authError() && this.options.currentUserId()) {
+    if (authenticated) {
       this.completeAuthModalSuccess();
       return;
     }
@@ -80,16 +92,19 @@ export class WorkspaceShellAuthModalController {
   }
 
   async handleResetPasswordFromModal(email: string): Promise<void> {
+    const operation = this.beginOperation();
     this.setLoginModalInput('isLoading', true);
     this.setLoginModalInput('authError', null);
 
     try {
       await this.options.authCoord.handleResetPasswordFromModal(email);
     } catch (error) {
+      if (!this.isOperationCurrent(operation)) return;
       this.completeAuthModalFailure(error);
       this.setLoginModalInput('resetPasswordSent', this.options.authCoord.resetPasswordSent());
       return;
     }
+    if (!this.isOperationCurrent(operation)) return;
 
     this.setLoginModalInput('isLoading', false);
     this.setLoginModalInput('authError', this.options.authCoord.authError());
@@ -97,8 +112,25 @@ export class WorkspaceShellAuthModalController {
   }
 
   async handleLocalModeFromModal(): Promise<void> {
+    const operation = this.beginOperation();
     await this.options.authCoord.handleLocalModeFromModal();
+    if (!this.isOperationCurrent(operation)) return;
     this.completeAuthModalSuccess('/projects');
+  }
+
+  private beginOperation() {
+    return {
+      epoch: ++this.operationEpoch,
+      modalRef: this.options.modalCoord.loginModalRef ?? null,
+    };
+  }
+
+  private isOperationCurrent(operation: {
+    epoch: number;
+    modalRef: WorkspaceShellLoginModalRef | null;
+  }): boolean {
+    return operation.epoch === this.operationEpoch
+      && operation.modalRef === (this.options.modalCoord.loginModalRef ?? null);
   }
 
   private completeAuthModalSuccess(fallbackUrl: string | null = null): void {
