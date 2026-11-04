@@ -67,19 +67,30 @@ function createMutablePagedConnectionQueries(rows: Array<Record<string, unknown>
   let pageRequests = 0;
 
   const readPage = (
-    cursorId: string | null,
+    cursor: { updatedAt: string | null; id: string } | null,
     from: number,
     to: number,
   ) => {
     const ordered = rows
       .filter((row) => {
-        if (!cursorId) return true;
+        if (!cursor) return true;
+        const updatedAt = typeof row['updated_at'] === 'string' ? row['updated_at'] : null;
         const id = String(row['id'] ?? '');
-        return id > cursorId;
+        if (cursor.updatedAt === null) return updatedAt === null && id > cursor.id;
+        if (updatedAt === null) return true;
+        return updatedAt > cursor.updatedAt
+          || updatedAt === cursor.updatedAt && id > cursor.id;
       })
       .slice()
       .sort((left, right) => {
-        return String(left['id']).localeCompare(String(right['id']));
+        const leftUpdatedAt = typeof left['updated_at'] === 'string' ? left['updated_at'] : null;
+        const rightUpdatedAt = typeof right['updated_at'] === 'string' ? right['updated_at'] : null;
+        if (leftUpdatedAt === null && rightUpdatedAt !== null) return 1;
+        if (rightUpdatedAt === null && leftUpdatedAt !== null) return -1;
+        const updatedOrder = (leftUpdatedAt ?? '').localeCompare(rightUpdatedAt ?? '');
+        return updatedOrder !== 0
+          ? updatedOrder
+          : String(left['id']).localeCompare(String(right['id']));
       });
     const page = ordered.slice(from, to + 1);
     if (pageRequests++ === 0) {
@@ -89,22 +100,33 @@ function createMutablePagedConnectionQueries(rows: Array<Record<string, unknown>
   };
 
   const createQuery = () => {
-    let cursorId: string | null = null;
+    let cursor: { updatedAt: string | null; id: string } | null = null;
     const query = {
       select: vi.fn(() => query),
       eq: vi.fn(() => query),
       order: vi.fn(() => query),
+      is: vi.fn((column: string, value: unknown) => {
+        if (column === 'updated_at' && value === null) cursor = { updatedAt: null, id: '' };
+        return query;
+      }),
       gt: vi.fn((column: string, value: string) => {
-        if (column === 'id') cursorId = value;
+        if (column === 'id' && cursor?.updatedAt === null) {
+          cursor = { updatedAt: null, id: value };
+        }
+        return query;
+      }),
+      or: vi.fn((filters: string) => {
+        const match = /^updated_at\.gt\.(.*),and\(updated_at\.eq\.(.*),id\.gt\.(.*)\),updated_at\.is\.null$/.exec(filters);
+        if (match) cursor = { updatedAt: match[2], id: match[3] };
         return query;
       }),
       limit: vi.fn((count: number) => {
-        limitCursors.push(cursorId);
-        return readPage(cursorId, 0, count - 1);
+        limitCursors.push(cursor ? `${cursor.updatedAt ?? 'null'}|${cursor.id}` : null);
+        return readPage(cursor, 0, count - 1);
       }),
       range: vi.fn((from: number, to: number) => {
         rangeStarts.push(from);
-        return readPage(cursorId, from, to);
+        return readPage(cursor, from, to);
       }),
     };
     return query;
@@ -232,7 +254,7 @@ describe('ProjectDetailLoaderService owner/auth boundaries', () => {
     expect(withAuthRetry).toHaveBeenCalledWith('loadFullProject.connections', expect.any(Function));
   });
 
-  it('connections ID keyset 应在更新时间为空或变化时不漏行或重复', async () => {
+  it('connections keyset 在行跨页移动和更新时间为空时不漏行或重复', async () => {
     const baseTime = Date.parse('2026-07-14T00:00:00.000Z');
     const rows = Array.from({ length: 2001 }, (_, index) => ({
       id: `conn-${index.toString().padStart(4, '0')}`,
@@ -266,7 +288,8 @@ describe('ProjectDetailLoaderService owner/auth boundaries', () => {
     expect(connectionIds).toHaveLength(2001);
     expect(new Set(connectionIds).size).toBe(2001);
     expect(connectionIds).toContain('conn-2000');
-    expect(paged.limitCursors).toEqual([null, 'conn-0999', 'conn-1999']);
+    expect(paged.limitCursors).toHaveLength(3);
+    expect(paged.limitCursors[2]).toMatch(/^null\|conn-/);
     expect(paged.rangeStarts).toEqual([]);
   });
 

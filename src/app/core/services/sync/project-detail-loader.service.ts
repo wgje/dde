@@ -14,7 +14,10 @@ import {
   isBrowserNetworkSuspendedError,
   isBrowserNetworkSuspendedWindow,
 } from '../../../../utils/browser-network-suspension';
-import { fetchAllSupabaseKeysetPagesByCursor } from '../../../../utils/supabase-pagination';
+import {
+  buildSupabaseKeysetOrFilter,
+  fetchAllSupabaseKeysetPagesByCursor,
+} from '../../../../utils/supabase-pagination';
 import { supabaseErrorToError } from '../../../../utils/supabase-error';
 import { ProjectTaskDataService } from './project-task-data.service';
 
@@ -39,6 +42,7 @@ interface FullProjectSequentialData {
 }
 
 interface ConnectionPageCursor {
+  updatedAt: string | null;
   id: string;
 }
 
@@ -200,12 +204,30 @@ export class ProjectDetailLoaderService {
         .from('connections')
         .select(FIELD_SELECT_CONFIG.CONNECTION_FIELDS)
         .eq('project_id', projectId);
-      if (cursor) query = query.gt('id', cursor.id);
-      return query.order('id', { ascending: true });
+      if (cursor) {
+        query = cursor.updatedAt === null
+          ? query.is('updated_at', null).gt('id', cursor.id)
+          : query.or(`${buildSupabaseKeysetOrFilter({
+            updatedAt: cursor.updatedAt,
+            id: cursor.id,
+          })},updated_at.is.null`);
+      }
+      return query
+        .order('updated_at', { ascending: true })
+        .order('id', { ascending: true });
     }, {
       readCursor: row => this.readConnectionPageCursor(row),
-      cursorKey: cursor => cursor.id,
-      isCursorAfter: (previous, next) => next.id > previous.id,
+      cursorKey: cursor => `${cursor.updatedAt ?? 'null'}:${cursor.id}`,
+      isCursorAfter: (previous, next) => {
+        if (previous.updatedAt === null) {
+          return next.updatedAt === null && next.id > previous.id;
+        }
+        if (next.updatedAt === null) return true;
+        if (next.updatedAt !== previous.updatedAt) {
+          return next.updatedAt > previous.updatedAt;
+        }
+        return next.id > previous.id;
+      },
     });
 
     if (!error) {
@@ -224,7 +246,11 @@ export class ProjectDetailLoaderService {
 
   private readConnectionPageCursor(row: Record<string, unknown>): ConnectionPageCursor | null {
     const id = typeof row['id'] === 'string' ? row['id'] : null;
-    return id ? { id } : null;
+    if (!id) return null;
+    if (row['updated_at'] === null) return { updatedAt: null, id };
+    const updatedAt = typeof row['updated_at'] === 'string' ? row['updated_at'] : null;
+    if (!updatedAt || Number.isNaN(Date.parse(updatedAt))) return null;
+    return { updatedAt, id };
   }
 
   private deduplicateConnectionRows(
