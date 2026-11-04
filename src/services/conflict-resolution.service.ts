@@ -351,7 +351,12 @@ export class ConflictResolutionService {
       this.mergeSmartLocalTask(localTask, remoteTaskMap, local.id, tombstoneIds, tombstoneQueryFailed, state);
     }
 
-    this.appendUnprocessedRemoteTasks(collections.remoteTasks, state, remoteTask => !remoteTask.deletedAt);
+    this.appendUnprocessedRemoteTasks(
+      collections.remoteTasks,
+      state,
+      remoteTask => !remoteTask.deletedAt
+        && !this.skipTombstoneTask(remoteTask, tombstoneIds, state, 'smartMerge'),
+    );
     this.recordSmartMergeSummary(local.id, state);
     const mergedProject = this.buildValidatedMergedProject(
       local,

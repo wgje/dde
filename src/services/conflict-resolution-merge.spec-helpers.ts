@@ -62,6 +62,50 @@ export function registerConflictResolutionMergeSpecs(context: ConflictResolution
         expect(result.project.tasks.find(t => t.id === 'task-new-remote')).toBeDefined();
       });
 
+      it('不应该复活 tombstone 晚于远端版本的远端独有任务', () => {
+        const taskId = 'task-remote-tombstoned';
+        const localProject = createTestProject({ tasks: [] });
+        const remoteProject = createTestProject({
+          tasks: [createTestTask({
+            id: taskId,
+            deletedAt: null,
+            updatedAt: '2026-01-01T00:00:00.000Z',
+          })],
+        });
+        const tombstones = {
+          ids: new Set([taskId]),
+          deletedAtByTaskId: new Map([
+            [taskId, Date.parse('2026-01-02T00:00:00.000Z')],
+          ]),
+        };
+
+        const result = service.smartMerge(localProject, remoteProject, tombstones);
+
+        expect(result.project.tasks.map(task => task.id)).not.toContain(taskId);
+      });
+
+      it('应该保留更新时间晚于 tombstone 的远端独有恢复任务', () => {
+        const taskId = 'task-remote-restored';
+        const localProject = createTestProject({ tasks: [] });
+        const remoteProject = createTestProject({
+          tasks: [createTestTask({
+            id: taskId,
+            deletedAt: null,
+            updatedAt: '2026-01-03T00:00:00.000Z',
+          })],
+        });
+        const tombstones = {
+          ids: new Set([taskId]),
+          deletedAtByTaskId: new Map([
+            [taskId, Date.parse('2026-01-02T00:00:00.000Z')],
+          ]),
+        };
+
+        const result = service.smartMerge(localProject, remoteProject, tombstones);
+
+        expect(result.project.tasks.map(task => task.id)).toContain(taskId);
+      });
+
       it('旧的远端 tombstone 不应该删除更新的本地恢复任务', () => {
         const localProject = createTestProject({
           tasks: [createTestTask({
