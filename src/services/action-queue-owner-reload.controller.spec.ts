@@ -39,6 +39,134 @@ describe('ActionQueueOwnerReloadController', () => {
     expect(harness.complete).toHaveBeenCalledWith(harness.token, 'failed');
   });
 
+  it('publishes a restore read-back without loading or activating the queue', async () => {
+    const events: string[] = [];
+    const preimage = createState('old');
+    const staged = createState('restored');
+    const harness = createHarness(preimage, staged, events);
+    const preflight = vi.fn(async (_token: ActionQueueOwnerReloadToken, isCurrent: () => boolean) => {
+      expect(isCurrent()).toBe(true);
+      return { status: 'CLEAR' as const };
+    });
+
+    await expect(new ActionQueueOwnerReloadController(harness.dependencies)
+      .reloadForRestoreReadback(preflight, async () => true)).resolves.toBe(true);
+
+    expect(harness.readState()).toBe(staged);
+    expect(harness.complete).toHaveBeenCalledWith(harness.token, 'failed');
+    expect(harness.activate).not.toHaveBeenCalled();
+    expect(events).toContain('unknown');
+    expect(events).not.toContain('loaded');
+  });
+
+  it('does not publish restore read-back after transaction ownership is lost', async () => {
+    const preimage = createState('old');
+    const harness = createHarness(preimage, createState('restored'), []);
+    const preflight = vi.fn(async () => ({ status: 'CLEAR' as const }));
+
+    await expect(new ActionQueueOwnerReloadController(harness.dependencies)
+      .reloadForRestoreReadback(preflight, async () => false)).resolves.toBe(false);
+
+    expect(harness.readState()).toBe(preimage);
+    expect(harness.stage).not.toHaveBeenCalled();
+    expect(harness.publish).not.toHaveBeenCalled();
+    expect(harness.activate).not.toHaveBeenCalled();
+    expect(harness.complete).toHaveBeenCalledWith(harness.token, 'stale');
+  });
+
+  it('does not publish staged state when the owner changes during readback verification', async () => {
+    const preimage = createState('old');
+    const staged = createState('restored');
+    const nextOwnerState = createState('owner-b');
+    const harness = createHarness(preimage, staged, []);
+    let releaseVerification!: () => void;
+    const verificationGate = new Promise<void>(resolve => { releaseVerification = resolve; });
+    let verificationCount = 0;
+    const verifyOwnership = vi.fn(async () => {
+      verificationCount += 1;
+      if (verificationCount === 2) await verificationGate;
+      return true;
+    });
+    const preflight = vi.fn(async () => ({ status: 'CLEAR' as const }));
+
+    const reload = new ActionQueueOwnerReloadController(harness.dependencies)
+      .reloadForRestoreReadback(preflight, verifyOwnership);
+    await vi.waitFor(() => expect(verifyOwnership).toHaveBeenCalledTimes(2));
+
+    harness.setCurrent(false);
+    harness.replaceState(nextOwnerState);
+    releaseVerification();
+
+    await expect(reload).resolves.toBe(false);
+
+    expect(harness.readState()).toBe(nextOwnerState);
+    expect(harness.publish).not.toHaveBeenCalled();
+    expect(harness.invalidateLoaded).not.toHaveBeenCalled();
+    expect(harness.complete).toHaveBeenCalledWith(harness.token, 'stale');
+  });
+
+  it('does not restore an old preimage after the owner changes during post-publication verification', async () => {
+    const preimage = createState('old');
+    const staged = createState('restored');
+    const nextOwnerState = createState('owner-b');
+    const harness = createHarness(preimage, staged, []);
+    harness.dependencies.statesMatch = () => false;
+    let releaseVerification!: () => void;
+    const verificationGate = new Promise<void>(resolve => { releaseVerification = resolve; });
+    let verificationCount = 0;
+    const verifyOwnership = vi.fn(async () => {
+      verificationCount += 1;
+      if (verificationCount === 3) await verificationGate;
+      return true;
+    });
+    const preflight = vi.fn(async () => ({ status: 'CLEAR' as const }));
+
+    const reload = new ActionQueueOwnerReloadController(harness.dependencies)
+      .reloadForRestoreReadback(preflight, verifyOwnership);
+    await vi.waitFor(() => expect(verifyOwnership).toHaveBeenCalledTimes(3));
+
+    harness.setCurrent(false);
+    harness.replaceState(nextOwnerState);
+    releaseVerification();
+
+    await expect(reload).resolves.toBe(false);
+
+    expect(harness.readState()).toBe(nextOwnerState);
+    expect(harness.publish).toHaveBeenCalledOnce();
+    expect(harness.publish).toHaveBeenCalledWith(staged);
+    expect(harness.invalidateLoaded).not.toHaveBeenCalled();
+    expect(harness.complete).toHaveBeenCalledWith(harness.token, 'stale');
+  });
+
+  it('does not accept published state that drifts during ownership verification', async () => {
+    const preimage = createState('old');
+    const staged = createState('restored');
+    const unexpected = createState('unexpected');
+    const harness = createHarness(preimage, staged, []);
+    let releaseVerification!: () => void;
+    const verificationGate = new Promise<void>(resolve => { releaseVerification = resolve; });
+    let verificationCount = 0;
+    const verifyOwnership = vi.fn(async () => {
+      verificationCount += 1;
+      if (verificationCount === 3) await verificationGate;
+      return true;
+    });
+    const preflight = vi.fn(async () => ({ status: 'CLEAR' as const }));
+
+    const reload = new ActionQueueOwnerReloadController(harness.dependencies)
+      .reloadForRestoreReadback(preflight, verifyOwnership);
+    await vi.waitFor(() => expect(verifyOwnership).toHaveBeenCalledTimes(3));
+
+    harness.replaceState(unexpected);
+    releaseVerification();
+
+    await expect(reload).resolves.toBe(false);
+
+    expect(harness.readState()).toBe(preimage);
+    expect(harness.publish).toHaveBeenLastCalledWith(preimage);
+    expect(harness.complete).toHaveBeenCalledWith(harness.token, 'stale');
+  });
+
   it('keeps the exact preimage and unknown state when staging fails', async () => {
     const preimage = createState('old');
     const harness = createHarness(preimage, createState('unused'), []);
@@ -71,18 +199,23 @@ describe('ActionQueueOwnerReloadController', () => {
     );
   });
 
-  it('rolls back publication when the owner generation changes before loaded', async () => {
+  it('does not restore a stale owner view over the next owner generation', async () => {
     const preimage = createState('owner-a');
-    const staged = createState('owner-b');
+    const staged = createState('restored-owner-a');
+    const nextOwnerState = createState('owner-b');
     const harness = createHarness(preimage, staged, []);
     harness.publish.mockImplementationOnce(state => {
       harness.replaceState(state);
       harness.setCurrent(false);
+      harness.replaceState(nextOwnerState);
     });
 
     await new ActionQueueOwnerReloadController(harness.dependencies).reload();
 
-    expect(harness.readState()).toBe(preimage);
+    expect(harness.readState()).toBe(nextOwnerState);
+    expect(harness.publish).toHaveBeenCalledOnce();
+    expect(harness.publish).toHaveBeenCalledWith(staged);
+    expect(harness.invalidateLoaded).not.toHaveBeenCalled();
     expect(harness.complete).toHaveBeenCalledWith(harness.token, 'stale');
   });
 

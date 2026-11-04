@@ -22,6 +22,8 @@ import {
   validateLocalBackupUiRestoreMarker,
   type LocalBackupUiRestoreMarker,
   type LocalBackupUiRestorePreImage,
+  type LocalBackupUiRestoreReadbackAuthorization,
+  type LocalBackupUiRestoreReadbackMarker,
   type LocalBackupUiRestoreSource,
 } from './local-backup-ui-restore-types';
 import {
@@ -66,6 +68,7 @@ export interface PrepareLocalBackupUiRestoreTransactionInput {
 
 export interface PreparedLocalBackupUiRestoreTransaction {
   marker(): LocalBackupUiRestoreMarker;
+  readbackAuthorization(): LocalBackupUiRestoreReadbackAuthorization;
   actionQueueRestore: LocalBackupUiRestoreActionQueueParticipant;
   verifyOwnership(): Promise<boolean>;
   run(operations: LocalBackupUiRestoreStageOperations): Promise<LocalBackupUiRestoreStageProtocolResult>;
@@ -360,6 +363,9 @@ function createPreparedHandle(
   const state: PreparedRestoreHandleState = {
     closed: false,
     running: false,
+    readbackCheckpointActive: false,
+    readbackAuthorizationIssued: false,
+    readbackAuthorizationUsed: false,
     markerHeartbeat: initialHeartbeat,
   };
   const verifyOwnership = (): Promise<boolean> => verifyPreparedOwnership(state, quiescence);
@@ -390,6 +396,35 @@ function createPreparedHandle(
   };
   return {
     marker: () => state.markerHeartbeat.marker(),
+    readbackAuthorization: () => {
+      if (!state.readbackCheckpointActive || state.readbackAuthorizationIssued) {
+        throw new LocalBackupUiRestoreOwnershipLostError(
+          'ActionQueue read-back authorization is outside its final verification checkpoint',
+        );
+      }
+      state.readbackAuthorizationIssued = true;
+      return {
+        marker: () => toReadbackMarker(state.markerHeartbeat.marker()),
+        verifyOwnership: async () => state.readbackCheckpointActive && await verifyOwnership(),
+        runAuthorizedReadback: async <T>(readback: () => Promise<T>): Promise<T> => {
+          if (!state.readbackCheckpointActive || state.readbackAuthorizationUsed) {
+            throw new LocalBackupUiRestoreOwnershipLostError();
+          }
+          state.readbackAuthorizationUsed = true;
+          if (!await verifyOwnership()) throw new LocalBackupUiRestoreOwnershipLostError();
+          return await quiescence.runMutationAsync('action-queue', async () => {
+            if (!state.readbackCheckpointActive || !await verifyOwnership()) {
+              throw new LocalBackupUiRestoreOwnershipLostError();
+            }
+            const result = await readback();
+            if (!state.readbackCheckpointActive || !await verifyOwnership()) {
+              throw new LocalBackupUiRestoreOwnershipLostError();
+            }
+            return result;
+          });
+        },
+      };
+    },
     actionQueueRestore,
     verifyOwnership,
     run: async operations => {
@@ -397,7 +432,19 @@ function createPreparedHandle(
         throw new Error('local backup UI restore prepared transaction is no longer runnable');
       }
       state.running = true;
-      return await runLocalBackupUiRestoreStageProtocol(runtime, operations);
+      return await runLocalBackupUiRestoreStageProtocol(runtime, {
+        ...operations,
+        verifyBeforeFinalize: operations.verifyBeforeFinalize
+          ? async () => {
+            state.readbackCheckpointActive = true;
+            try {
+              await operations.verifyBeforeFinalize?.();
+            } finally {
+              state.readbackCheckpointActive = false;
+            }
+          }
+          : undefined,
+      });
     },
     runStartupRollback: async operations => {
       if (state.running || state.closed) {
@@ -413,6 +460,17 @@ function createPreparedHandle(
       await finalizeLocalBackupUiRestoreTerminal(terminalContext, outcome);
     },
     abortBeforeMutation,
+  };
+}
+
+function toReadbackMarker(marker: LocalBackupUiRestoreMarker): LocalBackupUiRestoreReadbackMarker {
+  return {
+    ownerUserId: marker.ownerUserId,
+    runId: marker.runId,
+    restoreRunId: marker.restoreRunId,
+    actionQueueRestoreIdentity: { ...marker.actionQueueRestoreIdentity },
+    createdAt: marker.createdAt,
+    leaseExpiresAt: marker.leaseExpiresAt,
   };
 }
 
@@ -454,6 +512,9 @@ function createActionQueueParticipant(
 
 interface PreparedRestoreHandleState extends LocalBackupUiRestoreTerminalState {
   running: boolean;
+  readbackCheckpointActive: boolean;
+  readbackAuthorizationIssued: boolean;
+  readbackAuthorizationUsed: boolean;
 }
 
 async function verifyPreparedOwnership(

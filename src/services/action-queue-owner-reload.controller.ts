@@ -24,6 +24,11 @@ export type ActionQueueOwnerReloadPreflightResult =
   | { status: 'CLEAR' }
   | { status: 'HOLD'; reason: string };
 
+export type ActionQueueOwnerReloadPreflight = (
+  token: ActionQueueOwnerReloadToken,
+  isCurrent: () => boolean,
+) => Promise<ActionQueueOwnerReloadPreflightResult>;
+
 export interface ActionQueueOwnerReloadDependencies<TQueue, TDeadLetter> {
   beginLoad: () => ActionQueueOwnerReloadToken;
   isLoadCurrent: (token: ActionQueueOwnerReloadToken) => boolean;
@@ -90,16 +95,51 @@ export class ActionQueueOwnerReloadController<TQueue, TDeadLetter> {
   constructor(private readonly dependencies: ActionQueueOwnerReloadDependencies<TQueue, TDeadLetter>) {}
 
   async reload(): Promise<void> {
+    await this.reloadWith(
+      token => this.dependencies.preflight(token),
+      true,
+    );
+  }
+
+  reloadForRestoreReadback(
+    preflight: ActionQueueOwnerReloadPreflight,
+    verifyOwnership: () => Promise<boolean>,
+  ): Promise<boolean> {
+    return this.reloadWith(preflight, false, verifyOwnership);
+  }
+
+  private async reloadWith(
+    preflight: ActionQueueOwnerReloadPreflight,
+    activateAfterPublication: boolean,
+    verifyReadbackOwnership?: () => Promise<boolean>,
+  ): Promise<boolean> {
     const token = this.dependencies.beginLoad();
+    const hasReadbackOwnership = async (): Promise<boolean> => {
+      if (!verifyReadbackOwnership) return true;
+      try {
+        return await verifyReadbackOwnership();
+      } catch {
+        return false;
+      }
+    };
     try {
-      const preflight = await this.dependencies.preflight(token);
-      if (preflight.status !== 'CLEAR') {
-        this.finishWithoutPublication(token, 'failed', 'preflight', preflight.reason);
-        return;
+      const preflightResult = await preflight(
+        token,
+        () => this.dependencies.isLoadCurrent(token),
+      );
+      if (preflightResult.status !== 'CLEAR') {
+        this.finishWithoutPublication(token, 'failed', 'preflight', preflightResult.reason);
+        return false;
       }
     } catch (error) {
       this.finishWithoutPublication(token, 'failed', 'preflight', error);
-      return;
+      return false;
+    }
+    if (!this.dependencies.isLoadCurrent(token)
+      || (verifyReadbackOwnership && !await hasReadbackOwnership())
+      || !this.dependencies.isLoadCurrent(token)) {
+      this.dependencies.completeLoad(token, 'stale');
+      return false;
     }
     const preimage = this.dependencies.captureState();
     let staged: ActionQueueOwnerReloadStage<TQueue, TDeadLetter>;
@@ -107,32 +147,41 @@ export class ActionQueueOwnerReloadController<TQueue, TDeadLetter> {
       staged = await this.dependencies.stage(token);
     } catch (error) {
       this.finishWithoutPublication(token, 'failed', 'staging', error);
-      return;
+      return false;
     }
     if (staged.outcome !== 'ready' || !staged.state) {
       this.dependencies.completeLoad(token, staged.outcome);
-      return;
+      return false;
     }
-    if (!this.dependencies.isLoadCurrent(token)) {
+    if (!this.dependencies.isLoadCurrent(token)
+      || (verifyReadbackOwnership && !await hasReadbackOwnership())
+      || !this.dependencies.isLoadCurrent(token)) {
       this.dependencies.completeLoad(token, 'stale');
-      return;
+      return false;
     }
     try {
       this.dependencies.publishState(staged.state);
-      const current = this.dependencies.captureState();
       if (!this.dependencies.isLoadCurrent(token)
-        || !this.dependencies.statesMatch(staged.state, current)) {
+        || (verifyReadbackOwnership && !await hasReadbackOwnership())
+        || !this.dependencies.isLoadCurrent(token)
+        || !this.dependencies.statesMatch(staged.state, this.dependencies.captureState())) {
         throw new StaleOwnerStoragePublicationError();
       }
-      this.dependencies.completeLoad(token, 'ready');
-      if (!this.dependencies.isLoadedCurrent(token)) {
-        throw new StaleOwnerStoragePublicationError();
+      if (activateAfterPublication) {
+        this.dependencies.completeLoad(token, 'ready');
+        if (!this.dependencies.isLoadedCurrent(token)) {
+          throw new StaleOwnerStoragePublicationError();
+        }
+        this.dependencies.activate(token);
+      } else {
+        this.dependencies.completeLoad(token, 'failed');
       }
-      this.dependencies.activate(token);
+      return true;
     } catch (error) {
-      const stale = error instanceof StaleOwnerStoragePublicationError;
-      const rollbackVerified = this.restorePreimage(preimage);
-      this.dependencies.invalidateLoaded(token);
+      const tokenIsCurrent = this.dependencies.isLoadCurrent(token);
+      const stale = error instanceof StaleOwnerStoragePublicationError || !tokenIsCurrent;
+      const rollbackVerified = tokenIsCurrent ? this.restorePreimage(preimage) : false;
+      if (tokenIsCurrent) this.dependencies.invalidateLoaded(token);
       this.dependencies.completeLoad(token, stale ? 'stale' : 'failed');
       this.dependencies.warn('ActionQueue owner storage publication failed', {
         ownerUserId: token.ownerUserId,
@@ -140,6 +189,7 @@ export class ActionQueueOwnerReloadController<TQueue, TDeadLetter> {
         rollbackVerified,
         error,
       });
+      return false;
     }
   }
 

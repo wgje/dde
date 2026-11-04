@@ -87,6 +87,22 @@ export interface LocalBackupUiRestoreMarker {
   rollbackErrors: LocalBackupUiRestoreRollbackError[];
 }
 
+export type LocalBackupUiRestoreReadbackMarker = Pick<
+  LocalBackupUiRestoreMarker,
+  | 'ownerUserId'
+  | 'runId'
+  | 'restoreRunId'
+  | 'actionQueueRestoreIdentity'
+  | 'createdAt'
+  | 'leaseExpiresAt'
+>;
+
+export interface LocalBackupUiRestoreReadbackAuthorization {
+  marker(): LocalBackupUiRestoreReadbackMarker;
+  verifyOwnership(): Promise<boolean>;
+  runAuthorizedReadback<T>(readback: () => Promise<T>): Promise<T>;
+}
+
 export function isLocalBackupUiRestoreQueueStateCompatible(
   marker: LocalBackupUiRestoreMarker,
   state: QueueBackupPersonalRestoreIdentityStateV2,

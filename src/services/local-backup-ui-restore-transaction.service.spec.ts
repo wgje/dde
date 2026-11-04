@@ -127,6 +127,48 @@ describe('prepareLocalBackupUiRestoreTransaction', () => {
     await expect(handle.verifyOwnership()).resolves.toBe(true);
   });
 
+  it('keeps the prepared ActionQueue read-back authorization active across async settlement', async () => {
+    const order: string[] = [];
+    const markerStore = { current: null as unknown };
+    const dependencies = makeDependencies(order, markerStore);
+    const quiescence = makeQuiescence(order);
+    dependencies.prepareQuiescence = vi.fn(async () => quiescence);
+    const handle = await prepareLocalBackupUiRestoreTransaction({
+      ownerUserId: OWNER_USER_ID,
+      source: { kind: 'local-file', reference: null, checksum: SOURCE_DIGEST },
+      touchedProjectIds: [],
+      retryQueueRestoreItems: [],
+      restoredActionQueueItems: [],
+      blackBoxBackup: makeBackup([]),
+    }, dependencies);
+    let releaseReadback!: () => void;
+    const readbackGate = new Promise<void>(resolve => { releaseReadback = resolve; });
+    let readbackSettled = false;
+    expect(() => handle.readbackAuthorization()).toThrow(/final verification checkpoint/i);
+    const run = handle.run({
+      ...makeOperations(),
+      verifyBeforeFinalize: async () => {
+        const authorization = handle.readbackAuthorization();
+        const readback = authorization.runAuthorizedReadback(async () => {
+          await readbackGate;
+          readbackSettled = true;
+          return 'read-back';
+        });
+        await expect(authorization.runAuthorizedReadback(async () => 'duplicate'))
+          .rejects.toBeInstanceOf(Error);
+        await expect(readback).resolves.toBe('read-back');
+      },
+    });
+
+    await vi.waitFor(() => expect(quiescence.runMutationAsync).toHaveBeenCalledOnce());
+    expect(quiescence.runMutationAsync).toHaveBeenCalledWith('action-queue', expect.any(Function));
+    expect(readbackSettled).toBe(false);
+    releaseReadback();
+    await expect(run).resolves.toMatchObject({ status: 'completed' });
+    expect(readbackSettled).toBe(true);
+    expect(() => handle.readbackAuthorization()).toThrow(/final verification checkpoint/i);
+  });
+
   it('clears the restore marker before reopening writers on an owned no-mutation abort', async () => {
     const order: string[] = [];
     const markerStore = { current: null as unknown };

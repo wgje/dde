@@ -54,6 +54,7 @@ describe('LocalBackupUIService restore race boundaries', () => {
     pendingActions,
     deadLetterQueue,
     reloadFromStorageForCurrentOwner: vi.fn(),
+    reloadFromStorageForLocalBackupRestoreReadback: vi.fn(),
     getCurrentOwnerStorageLoadState: vi.fn(() => ownerStorageLoadState),
     clearCurrentView: vi.fn(() => {
       ownerStorageLoadState = 'unknown';
@@ -121,9 +122,21 @@ describe('LocalBackupUIService restore race boundaries', () => {
       taskTombstones: 0,
       connectionTombstones: 0,
     });
-    preparedRestoreRun.mockResolvedValue({ status: 'completed', stageResults: { projects: 1 } });
+    actionQueue.reloadFromStorageForLocalBackupRestoreReadback.mockImplementation(async () => {
+      ownerStorageLoadState = 'unknown';
+      return true;
+    });
+    preparedRestoreRun.mockImplementation(async (operations: LocalBackupUiRestoreStageOperations) => {
+      await operations.verifyBeforeFinalize?.();
+      return { status: 'completed', stageResults: { projects: 1 } };
+    });
     restoreTransaction.prepare.mockResolvedValue({
       verifyOwnership: vi.fn().mockResolvedValue(true),
+      readbackAuthorization: vi.fn(() => ({
+        marker: () => ({} as never),
+        verifyOwnership: vi.fn(async () => true),
+        runAuthorizedReadback: async (readback: () => Promise<unknown>) => await readback(),
+      })),
       run: preparedRestoreRun,
       abortBeforeMutation: vi.fn().mockResolvedValue(undefined),
       actionQueueRestore,
@@ -273,6 +286,11 @@ describe('LocalBackupUIService restore race boundaries', () => {
     };
     restoreTransaction.prepare.mockResolvedValueOnce({
       actionQueueRestore,
+      readbackAuthorization: vi.fn(() => ({
+        marker: () => ({} as never),
+        verifyOwnership: vi.fn(async () => true),
+        runAuthorizedReadback: async (readback: () => Promise<unknown>) => await readback(),
+      })),
       abortBeforeMutation: vi.fn(async () => undefined),
       run: async (operations: LocalBackupUiRestoreStageOperations) => {
         return await runLocalBackupUiRestoreStageProtocol(runtime, operations);
@@ -303,7 +321,10 @@ describe('LocalBackupUIService restore race boundaries', () => {
     const backup = createAttachmentBackup();
     await preparePreview(service, backup);
     const protocolResult = deferred<LocalBackupUiRestoreStageProtocolResult>();
-    preparedRestoreRun.mockReturnValueOnce(protocolResult.promise);
+    preparedRestoreRun.mockImplementationOnce(async (operations: LocalBackupUiRestoreStageOperations) => {
+      await operations.verifyBeforeFinalize?.();
+      return await protocolResult.promise;
+    });
 
     const first = service.confirmRestore([]);
     await vi.waitFor(() => expect(preparedRestoreRun).toHaveBeenCalledTimes(1));

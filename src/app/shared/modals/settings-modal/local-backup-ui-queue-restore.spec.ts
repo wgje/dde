@@ -68,6 +68,7 @@ describe('LocalBackupUIService queue restore', () => {
     pendingActions,
     deadLetterQueue,
     reloadFromStorageForCurrentOwner: vi.fn(),
+    reloadFromStorageForLocalBackupRestoreReadback: vi.fn(),
     getCurrentOwnerStorageLoadState: vi.fn(() => ownerStorageLoadState),
     clearCurrentView: vi.fn(() => {
       ownerStorageLoadState = 'unknown';
@@ -150,8 +151,19 @@ describe('LocalBackupUIService queue restore', () => {
     actionQueueMock.reloadFromStorageForCurrentOwner.mockImplementation(async () => {
       ownerStorageLoadState = 'loaded';
     });
-    preparedRestoreRun.mockResolvedValue({ status: 'completed', stageResults: { projects: 1 } });
+    actionQueueMock.reloadFromStorageForLocalBackupRestoreReadback.mockImplementation(async () => {
+      ownerStorageLoadState = 'unknown';
+      return true;
+    });
+    preparedRestoreRun.mockImplementation(async (operations: LocalBackupUiRestoreStageOperations) => (
+      runPreparedRestoreWithFinalVerification(operations, { projects: 1 })
+    ));
     restoreTransactionMock.prepare.mockResolvedValue({
+      readbackAuthorization: vi.fn(() => ({
+        marker: () => ({} as never),
+        verifyOwnership: vi.fn(async () => true),
+        runAuthorizedReadback: async (readback: () => Promise<unknown>) => await readback(),
+      })),
       verifyOwnership: vi.fn().mockResolvedValue(true),
       run: preparedRestoreRun,
       abortBeforeMutation: vi.fn().mockResolvedValue(undefined),
@@ -261,9 +273,10 @@ describe('LocalBackupUIService queue restore', () => {
         savedAt: '2026-06-18T00:00:00.000Z',
       };
     });
-    actionQueueMock.reloadFromStorageForCurrentOwner.mockImplementationOnce(async () => {
+    actionQueueMock.reloadFromStorageForLocalBackupRestoreReadback.mockImplementationOnce(async () => {
       pendingActions.set(restoredQueue);
-      ownerStorageLoadState = 'loaded';
+      ownerStorageLoadState = 'unknown';
+      return true;
     });
     queueBackupMock.updateQueue.mockImplementation(async (_ownerUserId, updater) =>
       updater([existingAction], { recordFound: true })
@@ -306,6 +319,7 @@ describe('LocalBackupUIService queue restore', () => {
       })],
     }));
     expect(queueBackupMock.updateQueue).not.toHaveBeenCalled();
+    expect(actionQueueMock.reloadFromStorageForLocalBackupRestoreReadback).toHaveBeenCalledOnce();
     expect(actionQueueMock.reloadFromStorageForCurrentOwner).toHaveBeenCalledOnce();
     expect(JSON.parse(localStorage.getItem(`${LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY}.user-1`) ?? 'null'))
       .toEqual(restoredQueue);
@@ -313,7 +327,7 @@ describe('LocalBackupUIService queue restore', () => {
     expect(service.restoreResultMsg()).toBe('恢复成功！已导入 1 个项目，已恢复 1 个待同步操作');
   });
 
-  it('does not report success when the reloaded in-memory queue differs from the durable V2 record', async () => {
+  it('does not report success when post-rollback ActionQueue activation fails', async () => {
     const exportData: ExportData = {
       metadata: {
         exportedAt: '2026-06-18T00:00:00.000Z',
@@ -361,9 +375,13 @@ describe('LocalBackupUIService queue restore', () => {
       `${LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY}.user-1`,
       JSON.stringify([action]),
     );
-    actionQueueMock.reloadFromStorageForCurrentOwner.mockImplementationOnce(async () => {
-      ownerStorageLoadState = 'loaded';
+    actionQueueMock.reloadFromStorageForLocalBackupRestoreReadback.mockImplementationOnce(async () => {
+      ownerStorageLoadState = 'unknown';
+      return true;
     });
+    actionQueueMock.reloadFromStorageForCurrentOwner.mockRejectedValueOnce(
+      new Error('post-rollback ActionQueue reload failed'),
+    );
     localBackupServiceMock.listBackupFiles.mockResolvedValue([{ name: 'backup.json', timestamp: 1, size: 1024 }]);
     localBackupServiceMock.readBackupFile.mockResolvedValue(new File([JSON.stringify(backupData)], 'backup.json', { type: 'application/json' }));
     importServiceMock.validateFile.mockResolvedValue({ valid: true, data: exportData });
@@ -378,13 +396,16 @@ describe('LocalBackupUIService queue restore', () => {
     await service.loadRestorePreview([]);
     await service.confirmRestore([]);
 
+    expect(actionQueueMock.reloadFromStorageForLocalBackupRestoreReadback).toHaveBeenCalledOnce();
     expect(actionQueueMock.reloadFromStorageForCurrentOwner).toHaveBeenCalledOnce();
     expect(service.restoreStep()).toBe('error');
     expect(service.restoreResultMsg()).toBe('');
-    expect(service.restoreError()).toContain('已恢复到写入前状态');
+    expect(service.restoreError()).toContain('数据已回滚');
     expect(service.restoreError()).toContain('pending queue did not match its V2 record');
-    expect(actionQueueMock.clearCurrentView).toHaveBeenCalledTimes(2);
-    expect(actionQueueMock.getCurrentOwnerStorageLoadState()).toBe('unknown');
+    expect(actionQueueMock.clearCurrentView).toHaveBeenCalledOnce();
+    expect(actionQueueMock.getCurrentOwnerStorageLoadState())
+      .toBe('unknown');
+    expect(service.restoreError()).toContain('ActionQueue 激活失败');
   });
 
   it('rejects an ActionQueue operationId that would be remapped before preparing the transaction', async () => {
@@ -479,10 +500,9 @@ describe('LocalBackupUIService queue restore', () => {
         retryQueue: [retryQueueItem],
       },
     } as unknown as BackupData;
-    preparedRestoreRun.mockResolvedValueOnce({
-      status: 'completed',
-      stageResults: { projects: 1, 'retry-queue': 1 },
-    });
+    preparedRestoreRun.mockImplementationOnce((operations: LocalBackupUiRestoreStageOperations) => (
+      runPreparedRestoreWithFinalVerification(operations, { projects: 1, 'retry-queue': 1 })
+    ));
     localBackupServiceMock.listBackupFiles.mockResolvedValue([{ name: 'backup.json', timestamp: 1, size: 1024 }]);
     localBackupServiceMock.readBackupFile.mockResolvedValue(new File([JSON.stringify(backupData)], 'backup.json', { type: 'application/json' }));
     importServiceMock.validateFile.mockResolvedValue({ valid: true, data: exportData });
@@ -544,9 +564,10 @@ describe('LocalBackupUIService queue restore', () => {
       `${LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY}.user-1`,
       JSON.stringify([deadLetter]),
     );
-    actionQueueMock.reloadFromStorageForCurrentOwner.mockImplementationOnce(async () => {
+    actionQueueMock.reloadFromStorageForLocalBackupRestoreReadback.mockImplementationOnce(async () => {
       deadLetterQueue.set([deadLetter]);
-      ownerStorageLoadState = 'loaded';
+      ownerStorageLoadState = 'unknown';
+      return true;
     });
     localBackupServiceMock.listBackupFiles.mockResolvedValue([{ name: 'backup.json', timestamp: 1, size: 1024 }]);
     localBackupServiceMock.readBackupFile.mockResolvedValue(new File([JSON.stringify(backupData)], 'backup.json', { type: 'application/json' }));
@@ -605,9 +626,10 @@ describe('LocalBackupUIService queue restore', () => {
         `${LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY}.user-1`,
         JSON.stringify([deadLetter]),
       );
-      actionQueueMock.reloadFromStorageForCurrentOwner.mockImplementationOnce(async () => {
+      actionQueueMock.reloadFromStorageForLocalBackupRestoreReadback.mockImplementation(async () => {
         deadLetterQueue.set(failureMode === 'in-memory snapshot mismatch' ? [] : [deadLetter]);
-        ownerStorageLoadState = 'loaded';
+        ownerStorageLoadState = 'unknown';
+        return true;
       });
       preparedRestoreRun.mockImplementationOnce((operations: LocalBackupUiRestoreStageOperations) => (
         runPreparedRestoreWithFinalVerification(operations, { projects: 0, 'dead-letters': 1 })
@@ -627,6 +649,13 @@ describe('LocalBackupUIService queue restore', () => {
       expect(service.restoreResultMsg()).toBe('');
       expect(service.restoreError()).toContain('已恢复到写入前状态');
       expect(queueBackupMock.restoreDeadLetters).toHaveBeenCalledWith('user-1');
+      expect(actionQueueMock.reloadFromStorageForCurrentOwner).toHaveBeenCalledOnce();
+      if (failureMode === 'missing durable snapshot') {
+        expect(actionQueueMock.reloadFromStorageForLocalBackupRestoreReadback).not.toHaveBeenCalled();
+      } else {
+        expect(actionQueueMock.reloadFromStorageForLocalBackupRestoreReadback).toHaveBeenCalledOnce();
+        expect(service.restoreError()).toContain('dead-letter queue did not match durable storage');
+      }
     },
   );
 
@@ -685,10 +714,9 @@ describe('LocalBackupUIService queue restore', () => {
     importServiceMock.generatePreview.mockResolvedValue({
       projects: [{ taskCount: 0, connectionCount: 0 }],
     });
-    preparedRestoreRun.mockResolvedValueOnce({
-      status: 'completed',
-      stageResults: { projects: 1, conflicts: 1 },
-    });
+    preparedRestoreRun.mockImplementationOnce((operations: LocalBackupUiRestoreStageOperations) => (
+      runPreparedRestoreWithFinalVerification(operations, { projects: 1, conflicts: 1 })
+    ));
     const service = TestBed.inject(LocalBackupUIService);
 
     await service.handleRestoreFromLocalBackup();

@@ -11,7 +11,7 @@ import {
   haveSameQueuedActionRestoreSnapshots,
 } from '../../../../services/action-queue-restore.helpers';
 import { ActionQueueService } from '../../../../services/action-queue.service';
-import type { QueuedAction } from '../../../../services/action-queue.types';
+import type { DeadLetterItem, QueuedAction } from '../../../../services/action-queue.types';
 import { LOCAL_QUEUE_CONFIG } from '../../../../services/action-queue-storage.helpers';
 import { QueueBackupService } from '../../../../services/queue-backup.service';
 import {
@@ -65,6 +65,11 @@ interface PendingRestoreContext extends RestoreRunContext {
   data: ExportData;
   rawBackupData: BackupData;
   source: LocalBackupUiRestoreSource;
+}
+
+interface VerifiedActionQueueRestoreReadback {
+  queue: QueuedAction[];
+  deadLetters: DeadLetterItem[];
 }
 
 class RestoreContextChangedError extends Error {}
@@ -326,12 +331,40 @@ export class LocalBackupUIService {
         actionQueueRestore: transaction.actionQueueRestore,
         verifyRunContext: () => this.requireRestoreContextCurrent(context),
       });
+      const preparedTransaction = transaction;
+      let queueReadback: VerifiedActionQueueRestoreReadback | null = null;
       runStarted = true;
-      const result = await transaction.run({
+      const result = await preparedTransaction.run({
         ...operations,
-        verifyBeforeFinalize: () => this.reloadAndVerifyActionQueue(context),
+        verifyBeforeFinalize: async () => {
+          queueReadback = await this.reloadAndVerifyActionQueue(context, preparedTransaction);
+        },
       });
       if (!this.isRestoreContextCurrent(context)) return;
+
+      if (result.status === 'completed' || result.status === 'rolled-back') {
+        if (result.status === 'completed' && !queueReadback) {
+          this.setRestoreError('事务终结前缺少 ActionQueue 持久化读回，恢复状态待检查。');
+          return;
+        }
+        try {
+          await this.activateActionQueueAfterRestoreFinalization(context);
+        } catch (error) {
+          this.logger.error(
+            '本地恢复结束后 ActionQueue 激活失败',
+            error instanceof Error ? error.message : String(error),
+          );
+          if (result.status === 'completed') {
+            this.restoreResultMsg.set('');
+            this.setRestoreError('备份数据已提交，但 ActionQueue 激活失败。请刷新页面后检查队列状态。');
+          } else {
+            this.setRestoreError(
+              `恢复失败，数据已回滚；ActionQueue 激活失败，请刷新页面检查。${formatRestoreError(result.error)}`,
+            );
+          }
+          return;
+        }
+      }
       this.completeRestoreResult(context, result);
     } catch (error: unknown) {
       if (prepared && !runStarted && transaction) {
@@ -529,7 +562,10 @@ export class LocalBackupUIService {
     this.restoreStep.set('done');
   }
 
-  private async reloadAndVerifyActionQueue(context: PendingRestoreContext): Promise<void> {
+  private async reloadAndVerifyActionQueue(
+    context: PendingRestoreContext,
+    transaction: Awaited<ReturnType<LocalBackupUiRestoreTransactionService['prepare']>>,
+  ): Promise<VerifiedActionQueueRestoreReadback> {
     try {
       this.requireRestoreContextCurrent(context);
       this.actionQueue.clearCurrentView();
@@ -548,10 +584,23 @@ export class LocalBackupUIService {
         throw new ActionQueueRestoreReadbackError('owner-scoped queue mirror did not match its V2 record');
       }
 
-      await this.actionQueue.reloadFromStorageForCurrentOwner();
+      if (!deadLetters) {
+        throw new ActionQueueRestoreReadbackError('durable dead-letter snapshot could not be read');
+      }
+      const mirrorDeadLetters = readOwnerDeadLetterSnapshot(context.ownerUserId);
+      if (!mirrorDeadLetters || stableSerialize(mirrorDeadLetters) !== stableSerialize(deadLetters)) {
+        throw new ActionQueueRestoreReadbackError('owner-scoped dead-letter mirror did not match its durable record');
+      }
+
+      const published = await this.actionQueue.reloadFromStorageForLocalBackupRestoreReadback(
+        transaction.readbackAuthorization(),
+      );
       this.requireRestoreContextCurrent(context);
-      if (this.actionQueue.getCurrentOwnerStorageLoadState() !== 'loaded') {
-        throw new ActionQueueRestoreReadbackError('owner storage reload did not reach loaded state');
+      if (!published) {
+        throw new ActionQueueRestoreReadbackError('prepared restore read-back was held by the ActionQueue fence');
+      }
+      if (this.actionQueue.getCurrentOwnerStorageLoadState() !== 'unknown') {
+        throw new ActionQueueRestoreReadbackError('restore read-back activated ActionQueue before finalization');
       }
 
       const memoryQueue = this.actionQueue.pendingActions();
@@ -563,16 +612,10 @@ export class LocalBackupUIService {
         throw new ActionQueueRestoreReadbackError('pending queue did not match its V2 record');
       }
 
-      if (!deadLetters) {
-        throw new ActionQueueRestoreReadbackError('durable dead-letter snapshot could not be read');
-      }
-      const mirrorDeadLetters = readOwnerDeadLetterSnapshot(context.ownerUserId);
-      if (!mirrorDeadLetters || stableSerialize(mirrorDeadLetters) !== stableSerialize(deadLetters)) {
-        throw new ActionQueueRestoreReadbackError('owner-scoped dead-letter mirror did not match its durable record');
-      }
       if (stableSerialize(this.actionQueue.deadLetterQueue()) !== stableSerialize(deadLetters)) {
         throw new ActionQueueRestoreReadbackError('dead-letter queue did not match durable storage');
       }
+      return { queue: durableQueue, deadLetters };
     } catch (error) {
       if (error instanceof RestoreContextChangedError) throw error;
       if (this.isRestoreContextCurrent(context)) {
@@ -587,6 +630,17 @@ export class LocalBackupUIService {
       }
       if (error instanceof ActionQueueRestoreReadbackError) throw error;
       throw new ActionQueueRestoreReadbackError('owner ActionQueue reload failed');
+    }
+  }
+
+  private async activateActionQueueAfterRestoreFinalization(
+    context: PendingRestoreContext,
+  ): Promise<void> {
+    this.requireRestoreContextCurrent(context);
+    await this.actionQueue.reloadFromStorageForCurrentOwner();
+    this.requireRestoreContextCurrent(context);
+    if (this.actionQueue.getCurrentOwnerStorageLoadState() !== 'loaded') {
+      throw new ActionQueueRestoreReadbackError('ActionQueue activation did not reach loaded state');
     }
   }
 

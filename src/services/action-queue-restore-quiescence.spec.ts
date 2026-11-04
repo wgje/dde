@@ -13,6 +13,7 @@ import type {
   LocalBackupUiRestorePreActionQueueFenceInput,
   LocalBackupUiRestorePreActionQueueFenceResult,
 } from './local-backup-ui-restore-pre-actionqueue-fence.service';
+import type { LocalBackupUiRestoreReadbackAuthorization } from './local-backup-ui-restore-types';
 import { ActionQueueService } from './action-queue.service';
 import { ActionQueueStorageService } from './action-queue-storage.service';
 import type { DeadLetterItem, QueuedAction } from './action-queue.types';
@@ -120,6 +121,30 @@ describe('ActionQueue restore writer quiescence', () => {
 
     await service.reloadFromStorageForCurrentOwner();
 
+    expect(service.getCurrentOwnerStorageLoadState()).toBe('unknown');
+    expect(mockQueueBackupService.restoreQueueSnapshot).not.toHaveBeenCalled();
+    expect(mockQueueBackupService.restoreDeadLetters).not.toHaveBeenCalled();
+    expect(mockRetryQueueService.configureActionQueueSupersessionBridge).not.toHaveBeenCalled();
+    expect(setupNetworkListenersSpy).not.toHaveBeenCalled();
+  });
+
+  it('keeps prepared restore read-back inert when its dedicated fence returns HOLD', async () => {
+    mockLocalBackupUiRestorePreActionQueueFence.runRestoreReadback.mockResolvedValueOnce({
+      status: 'HOLD',
+      ownerUserId: 'test-user',
+      reason: 'RESTORE_READBACK_UNAUTHORIZED',
+    });
+    const authorization: LocalBackupUiRestoreReadbackAuthorization = {
+      marker: () => ({} as never),
+      verifyOwnership: vi.fn(async () => true),
+      runAuthorizedReadback: async readback => await readback(),
+    };
+
+    await expect(service.reloadFromStorageForLocalBackupRestoreReadback(authorization))
+      .resolves.toBe(false);
+
+    expect(mockLocalBackupUiRestorePreActionQueueFence.run).not.toHaveBeenCalled();
+    expect(mockLocalBackupUiRestorePreActionQueueFence.runRestoreReadback).toHaveBeenCalledOnce();
     expect(service.getCurrentOwnerStorageLoadState()).toBe('unknown');
     expect(mockQueueBackupService.restoreQueueSnapshot).not.toHaveBeenCalled();
     expect(mockQueueBackupService.restoreDeadLetters).not.toHaveBeenCalled();

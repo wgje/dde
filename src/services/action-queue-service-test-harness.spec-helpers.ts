@@ -195,6 +195,14 @@ export const mockLocalBackupUiRestorePreActionQueueFence = {
     recovered: false,
     terminalResultDigest: null,
   })),
+  runRestoreReadback: vi.fn<(
+    input: Parameters<LocalBackupUiRestorePreActionQueueFenceService['runRestoreReadback']>[0],
+  ) => Promise<LocalBackupUiRestorePreActionQueueFenceResult>>(async input => ({
+    status: 'CLEAR' as const,
+    ownerUserId: input.ownerUserId,
+    recovered: false,
+    terminalResultDigest: null,
+  })),
 };
 
 export const mockWriteGuardService = {
@@ -227,6 +235,13 @@ export function resetActionQueueServiceMocks(): void {
   mockRetryQueueService.configureActionQueueSupersessionBridge.mockReset();
   mockLocalBackupUiRestorePreActionQueueFence.run.mockReset();
   mockLocalBackupUiRestorePreActionQueueFence.run.mockImplementation(async input => ({
+    status: 'CLEAR' as const,
+    ownerUserId: input.ownerUserId,
+    recovered: false,
+    terminalResultDigest: null,
+  }));
+  mockLocalBackupUiRestorePreActionQueueFence.runRestoreReadback.mockReset();
+  mockLocalBackupUiRestorePreActionQueueFence.runRestoreReadback.mockImplementation(async input => ({
     status: 'CLEAR' as const,
     ownerUserId: input.ownerUserId,
     recovered: false,
