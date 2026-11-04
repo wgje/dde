@@ -77,6 +77,28 @@ describe('task-operation-durable-field.helpers', () => {
     );
   });
 
+  it('durable mutation 抛出异常时应转换为 false 并记录异常上下文', async () => {
+    const runtime = {
+      blockLocalMutation: vi.fn(() => false),
+      markContentEditing: vi.fn(),
+      warn: vi.fn(),
+    };
+    const mutationError = new Error('indexeddb write rejected');
+
+    const saved = await runTaskDurableFieldMutation({
+      actionLabel: '更新任务标题',
+      failureMessage: '任务标题本地持久化失败，未提交 UI 更新',
+      failureData: { taskId: 'task-1' },
+      mutate: vi.fn().mockRejectedValue(mutationError),
+    }, runtime);
+
+    expect(saved).toBe(false);
+    expect(runtime.warn).toHaveBeenCalledWith(
+      '任务标题本地持久化失败，未提交 UI 更新',
+      { taskId: 'task-1', error: mutationError },
+    );
+  });
+
   it('TaskOperationAdapterService 的待办写入复用 durable field helper', () => {
     const source = readTaskOperationAdapterSource();
     const addTodoItem = findAdapterMethodSource(source, 'addTodoItem');

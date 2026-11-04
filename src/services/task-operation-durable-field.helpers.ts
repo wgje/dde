@@ -20,7 +20,16 @@ export async function runTaskDurableFieldMutation(
   }
 
   runtime.markContentEditing();
-  const saved = await options.mutate();
+  let saved: boolean;
+  try {
+    saved = await options.mutate();
+  } catch (error) {
+    runtime.warn(options.failureMessage, {
+      ...options.failureData,
+      error,
+    });
+    return false;
+  }
   if (!saved) {
     runtime.warn(options.failureMessage, options.failureData);
   }
