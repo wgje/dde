@@ -1,5 +1,5 @@
 import { TestBed } from '@angular/core/testing';
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { ActivatedRouteSnapshot, RouterStateSnapshot } from '@angular/router';
 import { Router } from '@angular/router';
 import { projectExistsGuard } from './project.guard';
@@ -22,6 +22,9 @@ describe('projectExistsGuard', () => {
     canAuthoritativelyRejectProjectRoute: ReturnType<typeof vi.fn>;
     isProjectAuthoritativelyAccessible: ReturnType<typeof vi.fn>;
     startupProjectCatalogStage: ReturnType<typeof vi.fn>;
+    currentUserId: ReturnType<typeof vi.fn>;
+    getCurrentSessionGeneration: ReturnType<typeof vi.fn>;
+    isSessionContextCurrent: ReturnType<typeof vi.fn>;
   };
   let routerMock: {
     navigate: ReturnType<typeof vi.fn>;
@@ -30,8 +33,12 @@ describe('projectExistsGuard', () => {
     error: ReturnType<typeof vi.fn>;
     info: ReturnType<typeof vi.fn>;
   };
+  let currentUserId: string | null;
+  let sessionGeneration: number;
 
   beforeEach(() => {
+    currentUserId = 'owner-a';
+    sessionGeneration = 1;
     projectStateMock = {
       projects: vi.fn().mockReturnValue([]),
       getProject: vi.fn().mockReturnValue(null),
@@ -47,6 +54,11 @@ describe('projectExistsGuard', () => {
       canAuthoritativelyRejectProjectRoute: vi.fn().mockReturnValue(true),
       isProjectAuthoritativelyAccessible: vi.fn().mockReturnValue(true),
       startupProjectCatalogStage: vi.fn().mockReturnValue('resolved'),
+      currentUserId: vi.fn(() => currentUserId),
+      getCurrentSessionGeneration: vi.fn(() => sessionGeneration),
+      isSessionContextCurrent: vi.fn((generation: number, userId: string | null) => (
+        generation === sessionGeneration && userId === currentUserId
+      )),
     };
 
     routerMock = {
@@ -68,6 +80,8 @@ describe('projectExistsGuard', () => {
       ],
     });
   });
+
+  afterEach(() => vi.useRealTimers());
 
   it('应先用启动快照预填充项目，避免文本深链被远端加载阻塞', async () => {
     let projects: Array<{ id: string }> = [];
@@ -177,5 +191,72 @@ describe('projectExistsGuard', () => {
       '项目不存在',
       '请求的项目可能已被删除或您没有访问权限',
     );
+  });
+
+  it('首次加载无项目时静默返回项目列表，不显示删除或权限错误', async () => {
+    vi.useFakeTimers();
+    projectStateMock.projects.mockReturnValue([]);
+    userSessionMock.prehydrateFromSnapshot.mockReturnValue(false);
+    userSessionMock.loadProjects.mockResolvedValue(undefined);
+    syncCoordinatorMock.isLoadingRemote.mockReturnValue(false);
+
+    const route = { params: { projectId: 'project-9' } } as unknown as ActivatedRouteSnapshot;
+    const state = { url: '/projects/project-9' } as RouterStateSnapshot;
+    const guardResult = TestBed.runInInjectionContext(() => projectExistsGuard(route, state));
+    await vi.runAllTimersAsync();
+
+    await expect(guardResult).resolves.toBe(false);
+    expect(routerMock.navigate).toHaveBeenCalledWith(['/projects']);
+    expect(toastMock.error).not.toHaveBeenCalled();
+  });
+
+  it('初始数据等待期间 A 切到 B 后旧 guard 不读取 B 项目或产生路由副作用', async () => {
+    vi.useFakeTimers();
+    projectStateMock.projects.mockImplementation(() => (
+      currentUserId === 'owner-a' ? [] : [{ id: 'project-b' }]
+    ));
+    projectStateMock.getProject.mockImplementation((projectId: string) => (
+      currentUserId === 'owner-b' && projectId === 'project-b' ? { id: projectId } : null
+    ));
+    const route = { params: { projectId: 'project-b' } } as unknown as ActivatedRouteSnapshot;
+    const state = { url: '/projects/project-b' } as RouterStateSnapshot;
+
+    const guardResult = TestBed.runInInjectionContext(() => projectExistsGuard(route, state));
+    currentUserId = 'owner-b';
+    sessionGeneration = 2;
+    await vi.advanceTimersByTimeAsync(50);
+
+    await expect(guardResult).resolves.toBe(false);
+    expect(projectStateMock.getProject).not.toHaveBeenCalled();
+    expect(routerMock.navigate).not.toHaveBeenCalled();
+    expect(toastMock.error).not.toHaveBeenCalled();
+  });
+
+  it('远端等待期间 A-B-A 后旧 generation 不得按新 A 状态放行', async () => {
+    vi.useFakeTimers();
+    projectStateMock.projects
+      .mockReturnValueOnce([{ id: 'other-project' }])
+      .mockReturnValueOnce([])
+      .mockReturnValue([{ id: 'project-a' }]);
+    projectStateMock.getProject
+      .mockReturnValueOnce(null)
+      .mockReturnValue({ id: 'project-a' });
+    syncCoordinatorMock.isLoadingRemote.mockReturnValue(true);
+    const route = { params: { projectId: 'project-a' } } as unknown as ActivatedRouteSnapshot;
+    const state = { url: '/projects/project-a' } as RouterStateSnapshot;
+
+    const guardResult = TestBed.runInInjectionContext(() => projectExistsGuard(route, state));
+    await Promise.resolve();
+    expect(projectStateMock.getProject).toHaveBeenCalledTimes(1);
+    currentUserId = 'owner-b';
+    sessionGeneration = 2;
+    currentUserId = 'owner-a';
+    sessionGeneration = 3;
+    await vi.advanceTimersByTimeAsync(1000);
+
+    await expect(guardResult).resolves.toBe(false);
+    expect(projectStateMock.getProject).toHaveBeenCalledTimes(1);
+    expect(routerMock.navigate).not.toHaveBeenCalled();
+    expect(toastMock.error).not.toHaveBeenCalled();
   });
 });
