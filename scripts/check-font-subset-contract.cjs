@@ -12,10 +12,40 @@ const path = require('path');
 const ROOT = path.join(__dirname, '..');
 const FONT_CSS_PATH = path.join(ROOT, 'public', 'fonts', 'lxgw-wenkai-screen.css');
 const MAIN_TS_PATH = path.join(ROOT, 'main.ts');
+const FONT_ARTIFACTS = [
+  'public/fonts/lxgwwenkaiscreen-subset-117.woff2',
+  'public/fonts/lxgwwenkaiscreen-subset-118.woff2',
+];
+const WOFF2_HEADER_BYTES = 48;
 
 function fail(message) {
   console.error(`[check-font-subset-contract] ❌ ${message}`);
   process.exit(1);
+}
+
+function validateFontArtifact(relativePath) {
+  const absolutePath = path.join(ROOT, relativePath);
+  let stats;
+  try {
+    stats = fs.lstatSync(absolutePath);
+  } catch {
+    fail(`font-subset-evidence-unavailable:${relativePath}`);
+  }
+  if (!stats.isFile()) {
+    fail(`font-subset-evidence-not-regular:${relativePath}`);
+  }
+  let buffer;
+  try {
+    buffer = fs.readFileSync(absolutePath);
+  } catch {
+    fail(`font-subset-evidence-unreadable:${relativePath}`);
+  }
+  if (buffer.length < WOFF2_HEADER_BYTES) {
+    fail(`font-subset-evidence-header-short:${relativePath}`);
+  }
+  if (!buffer.subarray(0, 4).equals(Buffer.from([0x77, 0x4f, 0x46, 0x32]))) {
+    fail(`font-subset-evidence-magic-invalid:${relativePath}`);
+  }
 }
 
 if (!fs.existsSync(FONT_CSS_PATH)) {
@@ -40,6 +70,10 @@ if (missingSubsets.length > 0) {
 const hasNonScreenFont = /(["'])LXGW WenKai\1/.test(mainTs) || /LXGW WenKai(?!\s+Screen)/.test(mainTs);
 if (hasNonScreenFont) {
   fail('main.ts 检测到非统一字体名 "LXGW WenKai"，请改为 "LXGW WenKai Screen"');
+}
+
+for (const relativePath of FONT_ARTIFACTS) {
+  validateFontArtifact(relativePath);
 }
 
 console.log('[check-font-subset-contract] ✅ 通过：subset-117/118 声明完整，main.ts 字体命名统一');
