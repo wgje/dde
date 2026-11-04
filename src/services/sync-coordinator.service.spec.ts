@@ -194,7 +194,6 @@ const mockRetryQueueService = {
   length: 0,
   getItems: vi.fn().mockReturnValue([]),
   getProjectPendingWriteState: vi.fn().mockReturnValue('clear'),
-  subscribeToPendingWriteStateChanges: vi.fn(() => () => {}),
   removeByEntities: vi.fn().mockReturnValue([]),
   removeConnectionsReferencingTasks: vi.fn().mockReturnValue([]),
   pressureEvents: 0,
@@ -586,6 +585,56 @@ describe('SyncCoordinatorService', () => {
     expect(mockRetryQueueService.clear).not.toHaveBeenCalled();
   });
 
+  it('ActionQueue 已结算但 RetryQueue 仍有项目写入时应继续判定本地有待同步修改', () => {
+    const projectId = 'project-retry-only-pending';
+    mockActionQueueService.getPendingActionsForProject.mockReturnValueOnce([]);
+    mockRetryQueueService.getProjectPendingWriteState.mockReturnValueOnce('pending');
+
+    expect(service.hasPendingChangesForProject(projectId)).toBe(true);
+  });
+
+  it('RetryQueue owner 状态未知时应阻止 hydration 把项目误判为无本地写入', () => {
+    const projectId = 'project-retry-load-unknown';
+    mockActionQueueService.getPendingActionsForProject.mockReturnValueOnce([]);
+    mockRetryQueueService.getProjectPendingWriteState.mockReturnValueOnce('unknown');
+
+    expect(service.hasPendingChangesForProject(projectId)).toBe(true);
+  });
+
+  it('ActionQueue owner 状态未知时应阻止 hydration 把项目误判为无本地写入', () => {
+    const projectId = 'project-action-queue-load-unknown';
+    mockActionQueueService.getProjectPendingWriteState.mockReturnValueOnce('unknown');
+    mockRetryQueueService.getProjectPendingWriteState.mockReturnValueOnce('clear');
+
+    expect(service.hasPendingChangesForProject(projectId)).toBe(true);
+  });
+
+  it('完整项目加载失败时不得应用远端状态、写离线快照或推进项目游标', async () => {
+    const localProject = createTestProject({ id: 'project-integrity-guard' });
+    mockProjectStateService.projects.set([localProject]);
+    mockProjectStateService.activeProject.set(localProject);
+    mockProjectStateService.activeProjectId.set(localProject.id);
+    mockSyncService.getAccessibleProjectProbe.mockResolvedValueOnce(null);
+    mockSyncService.getProjectSyncWatermark.mockResolvedValueOnce(null);
+    mockSyncService.loadFullProjectOptimized.mockResolvedValueOnce(null);
+    mockProjectStateService.updateProjects.mockClear();
+    mockSyncService.saveOfflineSnapshotAndWait.mockClear();
+    mockSyncService.commitProjectSyncCursor.mockClear();
+    mockSyncService.commitProjectSyncTimestamp.mockClear();
+
+    const result = await service.refreshActiveProjectSilent('task-row-integrity-failure');
+
+    expect(result).toEqual({
+      refreshed: false,
+      skippedReason: 'remote-project-missing',
+    });
+    expect(mockProjectStateService.updateProjects).not.toHaveBeenCalled();
+    expect(mockSyncService.saveOfflineSnapshotAndWait).not.toHaveBeenCalled();
+    expect(mockSyncService.commitProjectSyncCursor).not.toHaveBeenCalled();
+    expect(mockSyncService.commitProjectSyncTimestamp).not.toHaveBeenCalled();
+    expect(mockProjectStateService.projects()).toEqual([localProject]);
+  });
+
   it('owner A→B→A during autosave should not let the old A completion clear dirty state', async () => {
     const project = createTestProject({
       id: 'project-owner-aba',
@@ -623,7 +672,7 @@ describe('SyncCoordinatorService', () => {
     expect(mockChangeTrackerService.clearProjectChanges).not.toHaveBeenCalled();
   });
 
-  it('softDeleteTasksBatch 应将 operationId 转发到任务同步服务', async () => {
+  it('forwards operationId to task sync operations for batched task deletion', async () => {
     const projectId = 'project-delete-operation';
     const taskIds = ['task-delete-operation'];
     const tombstoneTimestamps = { [taskIds[0]]: '2026-11-01T00:00:00.000Z' };

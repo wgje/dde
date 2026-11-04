@@ -16,7 +16,6 @@
  * - 数据流像电路板上的走线一样清晰，互不干扰
  */
 import { Injectable, inject, computed, DestroyRef } from '@angular/core';
-import { AUTH_CONFIG } from '../config/auth.config';
 import { SimpleSyncService, RetryQueueService, SyncStateService, ProjectDataService, RealtimePollingService, TaskSyncOperationsService, ProjectSaveFlightCoordinatorService } from '../core-bridge';
 import { ActionQueueService } from './action-queue.service';
 import { ActionQueueProcessorsService } from './action-queue-processors.service';
@@ -24,6 +23,7 @@ import { DeltaSyncCoordinatorService } from './delta-sync-coordinator.service';
 import { ProjectSyncOperationsService } from './project-sync-operations.service';
 import { type ConflictResolutionPlan } from './conflict-resolution.types';
 import { AuthService } from './auth.service';
+import { AUTH_CONFIG } from '../config/auth.config';
 import { LoggerService } from './logger.service';
 // Sprint 4 技术债务修复：提取的子服务
 import { PersistSchedulerService } from './persist-scheduler.service';
@@ -36,6 +36,7 @@ import { SyncCoordinatorConflictService } from './sync-coordinator-conflicts.ser
 import { SyncCoordinatorPersistService } from './sync-coordinator-persist.service';
 import { SyncCoordinatorProjectRefreshService } from './sync-coordinator-project-refresh.service';
 import { SyncCoordinatorRuntimeService } from './sync-coordinator-runtime.service';
+import { executeSyncByDirection } from './sync-coordinator-direction.helpers';
 import type { TaskDeleteBaseUpdatedAtMap } from './action-queue.types';
 import {
   createTaskTombstoneSnapshot,
@@ -228,40 +229,14 @@ export class SyncCoordinatorService {
    */
   private setupSyncModeCallback(): void {
     this.syncModeService.setSyncCallback(async (direction: SyncDirection) => {
-      await this.executeSyncByDirection(direction);
+      await executeSyncByDirection(direction, {
+        getCurrentUserId: () => this.authService.currentUserId(),
+        upload: () => this.persistCoordinator.persistActiveProject(),
+        download: userId => this.downloadAndMerge(userId),
+      });
     });
   }
 
-  /**
-   * 根据方向执行同步（简化版）
-   */
-  private async executeSyncByDirection(direction: SyncDirection): Promise<void> {
-    const userId = this.authService.currentUserId();
-    if (!userId) return;
-    
-    switch (direction) {
-      case 'upload':
-        // 仅上传：保存活动项目到云端
-        await this.persistCoordinator.persistActiveProject();
-        break;
-        
-      case 'download':
-        // 仅下载：从云端加载最新数据并智能合并
-        await this.downloadAndMerge(userId);
-        break;
-        
-      case 'both':
-        // 双向同步：先上传本地变更，再下载远程变更并合并
-        await this.persistCoordinator.persistActiveProject();
-        await this.downloadAndMerge(userId);
-        break;
-    }
-  }
-  
-  /**
-   * 下载云端数据并智能合并到本地
-   * 确保本地的软删除状态不会被远程数据覆盖
-   */
   private async downloadAndMerge(userId: string): Promise<void> {
     await this.projectRefreshCoordinator.downloadAndMerge(userId);
   }
@@ -536,13 +511,14 @@ export class SyncCoordinatorService {
   /**
    * 安全批量软删除任务（服务端防护）
    * 
-   * 【P0 熔断层】使用 safe_delete_tasks RPC 确保批量删除不会超过限制：
+   * 【P0 熔断层】使用带 operation ID/CAS 的 sync_delete_tasks RPC；服务端内部
+   * 复用 safe_delete_tasks helper，确保批量删除不会超过限制：
    * - 单次删除不能超过 50% 或 50 条任务
    * - 项目任务数 > 10 时，不允许删到 0
    * 
    * @param projectId 项目 ID
    * @param taskIds 要删除的任务 ID 列表
-   * @returns 实际删除的任务数量，-1 表示被服务端拒绝
+   * @returns 已应用或已耐久入队的任务数量；-1 表示冲突、拒绝或入队失败
    */
   async softDeleteTasksBatch(
     projectId: string,
