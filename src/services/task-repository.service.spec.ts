@@ -2,13 +2,18 @@
  * TaskRepositoryService 单元测试
  * 使用 Injector 隔离模式，无需 TestBed
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Injector, runInInjectionContext } from '@angular/core';
 import { TaskRepositoryService } from './task-repository.service';
 import { TaskRepositoryBatchService } from './task-repository-batch.service';
 import { SupabaseClientService } from './supabase-client.service';
 import { LoggerService } from './logger.service';
 import type { Task, Connection } from '../models';
+import {
+  createTaskRepositoryWithFrom,
+  createTaskTombstoneKeysetQuery,
+  registerTaskRepositoryPagedReadSpecs,
+} from './task-repository-paged-reads.spec-helpers';
 
 const mockLoggerCategory = {
   info: vi.fn(),
@@ -92,71 +97,6 @@ function createSupabaseMock() {
   return { mockSupabaseClientService, from, upsert, update, del, rpc };
 }
 
-describe('TaskRepositoryBatchService.saveTasksIncremental tombstone-wins', () => {
-  let service: TaskRepositoryBatchService;
-  let supabaseMock: ReturnType<typeof createSupabaseMock>;
-  let consoleLogSpy: ReturnType<typeof vi.spyOn> | undefined;
-  let consoleInfoSpy: ReturnType<typeof vi.spyOn> | undefined;
-  let consoleDebugSpy: ReturnType<typeof vi.spyOn> | undefined;
-
-  beforeEach(() => {
-    vi.clearAllMocks();
-    // 测试默认静默：避免实现细节日志写入 stdout。
-    consoleLogSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-    consoleInfoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
-    consoleDebugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {});
-    supabaseMock = createSupabaseMock();
-    const injector = Injector.create({
-      providers: [
-        TaskRepositoryService,
-        { provide: LoggerService, useValue: mockLoggerService },
-        { provide: SupabaseClientService, useValue: supabaseMock.mockSupabaseClientService },
-      ],
-    });
-    service = runInInjectionContext(injector, () => new TaskRepositoryBatchService());
-  });
-
-  afterEach(() => {
-    consoleLogSpy?.mockRestore();
-    consoleInfoSpy?.mockRestore();
-    consoleDebugSpy?.mockRestore();
-  });
-
-  it('does not send deleted_at when deletedAt is null and not explicitly changed', async () => {
-    const task = createTask({ id: 'task-1', deletedAt: null });
-
-    await service.saveTasksIncremental('project-1', [], [task], [], { 'task-1': ['title'] });
-
-    expect(supabaseMock.from).toHaveBeenCalledWith('tasks');
-    expect(supabaseMock.upsert).toHaveBeenCalledTimes(1);
-
-    const payload = supabaseMock.upsert.mock.calls[0][0] as Array<Record<string, unknown>>;
-    expect(payload).toHaveLength(1);
-    expect(Object.prototype.hasOwnProperty.call(payload[0], 'deleted_at')).toBe(false);
-  });
-
-  it('sends deleted_at null when deletedAt is null but explicitly changed (restore)', async () => {
-    const task = createTask({ id: 'task-2', deletedAt: null });
-
-    await service.saveTasksIncremental('project-1', [], [task], [], { 'task-2': ['deletedAt'] });
-
-    const payload = supabaseMock.upsert.mock.calls[0][0] as Array<Record<string, unknown>>;
-    expect(payload).toHaveLength(1);
-    expect(payload[0]).toHaveProperty('deleted_at', null);
-  });
-
-  it('always sends deleted_at when deletedAt is set (tombstone)', async () => {
-    const ts = new Date().toISOString();
-    const task = createTask({ id: 'task-3', deletedAt: ts });
-
-    await service.saveTasksIncremental('project-1', [], [task], [], { 'task-3': ['title'] });
-
-    const payload = supabaseMock.upsert.mock.calls[0][0] as Array<Record<string, unknown>>;
-    expect(payload).toHaveLength(1);
-    expect(payload[0]).toHaveProperty('deleted_at', ts);
-  });
-});
-
 describe('TaskRepositoryBatchService.saveTasksIncremental delete behavior', () => {
   let service: TaskRepositoryBatchService;
   let supabaseMock: ReturnType<typeof createSupabaseMock>;
@@ -173,24 +113,26 @@ describe('TaskRepositoryBatchService.saveTasksIncremental delete behavior', () =
     service = runInInjectionContext(injector, () => new TaskRepositoryBatchService());
   });
 
-  it('prefers purge_tasks RPC and does not call physical delete', async () => {
-    await service.saveTasksIncremental('project-1', [], [], ['task-1'], {});
+  it('fails closed without RPC, update, or physical delete', async () => {
+    const result = await service.saveTasksIncremental('project-1', [], [], ['task-1'], {});
 
-    expect(supabaseMock.rpc).toHaveBeenCalledWith('purge_tasks_v2', { p_project_id: 'project-1', p_task_ids: ['task-1'] });
+    expect(result).toMatchObject({
+      success: false,
+      error: expect.stringContaining('sync_delete_tasks'),
+    });
+    expect(supabaseMock.rpc).not.toHaveBeenCalled();
     expect(supabaseMock.del).not.toHaveBeenCalled();
-    // purge 成功时也不应降级 update
     expect(supabaseMock.update).not.toHaveBeenCalled();
   });
 
-  it('falls back to soft delete when purge_tasks RPC fails', async () => {
-    // v2 不存在
-    supabaseMock.rpc.mockResolvedValueOnce({ data: null, error: { message: 'rpc missing' } });
-    // 旧版也不存在/失败
+  it('does not revive the retired direct-update fallback when RPC mocks fail', async () => {
     supabaseMock.rpc.mockResolvedValueOnce({ data: null, error: { message: 'rpc missing' } });
 
-    await service.saveTasksIncremental('project-1', [], [], ['task-1'], {});
+    const result = await service.saveTasksIncremental('project-1', [], [], ['task-1'], {});
 
-    expect(supabaseMock.update).toHaveBeenCalledTimes(1);
+    expect(result.success).toBe(false);
+    expect(supabaseMock.rpc).not.toHaveBeenCalled();
+    expect(supabaseMock.update).not.toHaveBeenCalled();
     expect(supabaseMock.del).not.toHaveBeenCalled();
   });
 });
@@ -228,18 +170,14 @@ describe('TaskRepositoryService.loadTasks promotion on deleted parent', () => {
     const tasksQuery = {
       select: vi.fn(() => tasksQuery),
       eq: vi.fn(() => tasksQuery),
+      or: vi.fn(() => tasksQuery),
       order: vi.fn(() => tasksQuery),
-      range: vi.fn().mockResolvedValue({ data: [taskRow], error: null }),
+      limit: vi.fn().mockResolvedValue({ data: [taskRow], error: null }),
     } as any;
-    const tombstonesQuery = {
-      select: vi.fn(() => tombstonesQuery),
-      eq: vi.fn(() => tombstonesQuery),
-      order: vi.fn(() => tombstonesQuery),
-      range: vi.fn().mockResolvedValue({ data: [], error: null }),
-    } as any;
+    const tombstonesPaged = createTaskTombstoneKeysetQuery([]);
     const from = vi.fn((table: string) => {
       if (table === 'tasks') return tasksQuery;
-      if (table === 'task_tombstones') return tombstonesQuery;
+      if (table === 'task_tombstones') return tombstonesPaged.createQuery();
       return {} as any;
     });
     const injector = Injector.create({
@@ -304,25 +242,21 @@ describe('TaskRepositoryService.loadTasks promotion on deleted parent', () => {
       },
     ];
 
-    const tombstonesData: Array<{ task_id: string }> = [];
+    const tombstonesData: Array<{ task_id: string; deleted_at: string }> = [];
 
     const tasksQuery = {
       select: vi.fn(() => tasksQuery),
       eq: vi.fn(() => tasksQuery),
+      or: vi.fn(() => tasksQuery),
       order: vi.fn(() => tasksQuery),
-      range: vi.fn().mockResolvedValue({ data: tasksData, error: null }),
+      limit: vi.fn().mockResolvedValue({ data: tasksData, error: null }),
     } as any;
 
-    const tombstonesQuery = {
-      select: vi.fn(() => tombstonesQuery),
-      eq: vi.fn(() => tombstonesQuery),
-      order: vi.fn(() => tombstonesQuery),
-      range: vi.fn().mockResolvedValue({ data: tombstonesData, error: null }),
-    } as any;
+    const tombstonesPaged = createTaskTombstoneKeysetQuery(tombstonesData);
 
     const from = vi.fn((table: string) => {
       if (table === 'tasks') return tasksQuery;
-      if (table === 'task_tombstones') return tombstonesQuery;
+      if (table === 'task_tombstones') return tombstonesPaged.createQuery();
       return {} as any;
     });
 
@@ -356,257 +290,185 @@ describe('TaskRepositoryService.loadTasks promotion on deleted parent', () => {
   });
 });
 
-describe('TaskRepositoryService paged reads', () => {
-  it('loadTasks fetches all Supabase REST pages before mapping and filtering', async () => {
-    const rows = Array.from({ length: 1001 }, (_, index) => taskRow(index));
-    const ranges: Array<[number, number]> = [];
-    const from = vi.fn((table: string) => {
-      if (table === 'tasks') return createPagedQuery(rows, ranges);
-      if (table === 'task_tombstones') {
-        return createPagedQuery([], []);
-      }
-      return {} as any;
-    });
-    const service = createTaskRepositoryWithFrom(from);
+registerTaskRepositoryPagedReadSpecs({ loggerService: mockLoggerService });
 
-    const loaded = await service.loadTasks('project-1');
+describe('TaskRepositoryService.hasTaskUpdates', () => {
+  it.each([
+    { name: 'returns true for the first matching row', rows: [{ id: 'task-1' }], expected: true },
+    { name: 'returns false when no matching row exists', rows: [], expected: false },
+  ])('$name', async ({ rows, expected }) => {
+    const limit = vi.fn().mockResolvedValue({ data: rows, error: null });
+    const gt = vi.fn(() => ({ limit }));
+    const eq = vi.fn(() => ({ gt }));
+    const select = vi.fn(() => ({ eq }));
+    const from = vi.fn(() => ({ select }));
+    const service = createTaskRepositoryWithFrom(from, mockLoggerService);
 
-    expect(loaded).toHaveLength(1001);
-    expect(loaded[0].id).toBe('task-0000');
-    expect(loaded[1000].id).toBe('task-1000');
-    expect(ranges).toEqual([
-      [0, 999],
-      [1000, 1999],
-    ]);
+    const result = await service.hasTaskUpdates(
+      'project-1',
+      '2026-06-09T00:00:00.000Z',
+    );
+
+    expect(result).toBe(expected);
+    expect(select).toHaveBeenCalledWith('id');
+    expect(eq).toHaveBeenCalledWith('project_id', 'project-1');
+    expect(gt).toHaveBeenCalledWith('updated_at', '2026-06-09T00:00:00.000Z');
+    expect(limit).toHaveBeenCalledWith(1);
   });
 
-  it('loadConnections fetches all Supabase REST pages', async () => {
-    const rows = Array.from({ length: 1001 }, (_, index) => connectionRow(index));
-    const ranges: Array<[number, number]> = [];
-    const from = vi.fn((table: string) => {
-      if (table === 'connections') return createPagedQuery(rows, ranges);
-      return {} as any;
-    });
-    const service = createTaskRepositoryWithFrom(from);
+  it('returns false when the existence probe fails', async () => {
+    const error = { message: 'query failed' };
+    const limit = vi.fn().mockResolvedValue({ data: null, error });
+    const gt = vi.fn(() => ({ limit }));
+    const eq = vi.fn(() => ({ gt }));
+    const select = vi.fn(() => ({ eq }));
+    const service = createTaskRepositoryWithFrom(
+      vi.fn(() => ({ select })),
+      mockLoggerService,
+    );
 
-    const loaded = await service.loadConnections('project-1');
-
-    expect(loaded).toHaveLength(1001);
-    expect(loaded[0].id).toBe('connection-0000');
-    expect(loaded[1000].id).toBe('connection-1000');
-    expect(ranges).toEqual([
-      [0, 999],
-      [1000, 1999],
-    ]);
-  });
-
-  it('loadTasks fetches all task tombstone pages before filtering', async () => {
-    const rows = [taskRow(0), taskRow(1000)];
-    const taskRanges: Array<[number, number]> = [];
-    const tombstoneRows = Array.from({ length: 1001 }, (_, index) => ({
-      task_id: index === 1000 ? 'task-1000' : `deleted-${index.toString().padStart(4, '0')}`,
-    }));
-    const tombstoneRanges: Array<[number, number]> = [];
-    const from = vi.fn((table: string) => {
-      if (table === 'tasks') return createPagedQuery(rows, taskRanges);
-      if (table === 'task_tombstones') return createPagedQuery(tombstoneRows, tombstoneRanges);
-      return {} as any;
-    });
-    const service = createTaskRepositoryWithFrom(from);
-
-    const loaded = await service.loadTasks('project-1');
-
-    expect(loaded.map(task => task.id)).toEqual(['task-0000']);
-    expect(tombstoneRanges).toEqual([
-      [0, 999],
-      [1000, 1999],
-    ]);
-  });
-
-  it('getUpdatedTasks fetches all Supabase REST pages', async () => {
-    const rows = Array.from({ length: 1001 }, (_, index) => taskRow(index));
-    const ranges: Array<[number, number]> = [];
-    const from = vi.fn((table: string) => {
-      if (table === 'tasks') return createPagedQuery(rows, ranges);
-      return {} as any;
-    });
-    const service = createTaskRepositoryWithFrom(from);
-
-    const loaded = await service.getUpdatedTasks('project-1', '2026-06-09T00:00:00.000Z');
-
-    expect(loaded).toHaveLength(1001);
-    expect(loaded[1000].id).toBe('task-1000');
-    expect(ranges).toEqual([
-      [0, 999],
-      [1000, 1999],
-    ]);
-  });
-});
-
-describe('TaskRepositoryService.saveConnection', () => {
-  it('should persist both title and description fields', async () => {
-    const supabaseMock = createSupabaseMock();
-    const injector = Injector.create({
-      providers: [
-        TaskRepositoryService,
-        { provide: LoggerService, useValue: mockLoggerService },
-        { provide: SupabaseClientService, useValue: supabaseMock.mockSupabaseClientService },
-      ],
-    });
-    const service = runInInjectionContext(injector, () => injector.get(TaskRepositoryService));
-
-    const result = await service.saveConnection('project-1', createConnection({
-      title: '关联标题',
-      description: '关联描述',
-    }));
-
-    expect(result).toEqual({ success: true });
-    expect(supabaseMock.upsert).toHaveBeenCalledWith(
-      expect.objectContaining({
-        id: 'connection-1',
-        project_id: 'project-1',
-        source_id: 'task-1',
-        target_id: 'task-2',
-        title: '关联标题',
-        description: '关联描述',
-        deleted_at: null,
-      }),
-      { onConflict: 'id' }
+    await expect(service.hasTaskUpdates(
+      'project-1',
+      '2026-06-09T00:00:00.000Z',
+    )).resolves.toBe(false);
+    expect(mockLoggerCategory.error).toHaveBeenCalledWith(
+      'Failed to check task updates',
+      error,
     );
   });
 });
 
-describe('TaskRepositoryService.removeAttachment', () => {
-  it('uses updated_at optimistic lock in read-modify-write fallback', async () => {
-    const attachment = { id: 'attachment-1', name: 'a.txt', type: 'text/plain', size: 1, url: 'u' };
-    const fetchedUpdatedAt = '2026-06-09T00:00:00.000Z';
-
-    const maybeSingle = vi.fn().mockResolvedValue({
-      data: {
-        attachments: [attachment],
-        updated_at: fetchedUpdatedAt,
-      },
-      error: null,
-    });
-    const fetchEq = vi.fn(() => ({ maybeSingle }));
-    const select = vi.fn(() => ({ eq: fetchEq }));
-
-    const updateEq = vi.fn(() => updateQuery);
+describe('TaskRepositoryService legacy direct mutations', () => {
+  it.each([
+    {
+      name: 'saveTask',
+      expectedRpc: 'sync_upsert_task',
+      invoke: (service: TaskRepositoryService) => service.saveTask('project-1', createTask()),
+    },
+    {
+      name: 'softDeleteTask',
+      expectedRpc: 'sync_delete_tasks',
+      invoke: (service: TaskRepositoryService) => service.softDeleteTask('task-1'),
+    },
+    {
+      name: 'restoreTask',
+      expectedRpc: 'sync_upsert_task',
+      invoke: (service: TaskRepositoryService) => service.restoreTask('task-1'),
+    },
+    {
+      name: 'updateTaskField',
+      expectedRpc: 'sync_upsert_task',
+      invoke: (service: TaskRepositoryService) => service.updateTaskField('task-1', 'title', 'Updated'),
+    },
+    {
+      name: 'updateTaskFields',
+      expectedRpc: 'sync_upsert_task',
+      invoke: (service: TaskRepositoryService) => service.updateTaskFields('task-1', { title: 'Updated' }),
+    },
+    {
+      name: 'saveConnection',
+      expectedRpc: 'sync_upsert_connection',
+      invoke: (service: TaskRepositoryService) => service.saveConnection(
+        'project-1',
+        createConnection({ title: '关联标题', description: '关联描述' }),
+      ),
+    },
+    {
+      name: 'deleteConnection',
+      expectedRpc: 'sync_upsert_connection',
+      invoke: (service: TaskRepositoryService) => service.deleteConnection(
+        'project-1',
+        'task-1',
+        'task-2',
+      ),
+    },
+  ])('$name fails closed without direct table access', async ({ expectedRpc, invoke }) => {
     const updateQuery = {
-      eq: updateEq,
-      then: (resolve: (value: { error: null }) => unknown) => Promise.resolve({ error: null }).then(resolve),
+      eq: vi.fn(() => updateQuery),
+      then: (resolve: (value: { error: null }) => unknown) =>
+        Promise.resolve({ error: null }).then(resolve),
     };
     const update = vi.fn(() => updateQuery);
-
-    const from = vi.fn((table: string) => {
-      if (table === 'tasks') {
-        return { select, update } as any;
-      }
-      return {} as any;
-    });
-    const rpc = vi.fn().mockResolvedValue({ data: null, error: { message: 'rpc missing' } });
-
+    const upsert = vi.fn().mockResolvedValue({ error: null });
+    const from = vi.fn(() => ({ update, upsert }));
     const injector = Injector.create({
       providers: [
-        { provide: SupabaseClientService, useValue: { isConfigured: true, client: () => ({ from, rpc }) } },
+        {
+          provide: SupabaseClientService,
+          useValue: { isConfigured: true, client: () => ({ from }) },
+        },
         { provide: LoggerService, useValue: mockLoggerService },
       ],
     });
 
     const service = runInInjectionContext(injector, () => new TaskRepositoryService());
-    const result = await service.removeAttachment('task-1', 'attachment-1');
+    const result = await invoke(service);
 
-    expect(result).toEqual({ success: true });
-    expect(select).toHaveBeenCalledWith('attachments, updated_at');
-    expect(updateEq).toHaveBeenCalledWith('id', 'task-1');
-    expect(updateEq).toHaveBeenCalledWith('updated_at', fetchedUpdatedAt);
+    expect(result).toEqual({
+      success: false,
+      error: expect.stringContaining(expectedRpc),
+    });
+    expect(from).not.toHaveBeenCalled();
   });
 });
 
-function createTaskRepositoryWithFrom(from: ReturnType<typeof vi.fn>): TaskRepositoryService {
-  const injector = Injector.create({
-    providers: [
-      { provide: SupabaseClientService, useValue: { isConfigured: true, client: () => ({ from }) } },
-      { provide: LoggerService, useValue: mockLoggerService },
-    ],
+describe('TaskRepositoryService legacy attachment mutations', () => {
+  it.each([
+    {
+      name: 'addAttachment',
+      invoke: (service: TaskRepositoryService) => service.addAttachment(
+        'task-1',
+        {
+          id: 'attachment-1',
+          name: 'a.txt',
+          type: 'file',
+          mimeType: 'text/plain',
+          size: 1,
+          url: 'u',
+          createdAt: '2026-07-15T00:00:00.000Z',
+        },
+      ),
+    },
+    {
+      name: 'removeAttachment',
+      invoke: (service: TaskRepositoryService) => service.removeAttachment(
+        'task-1',
+        'attachment-1',
+      ),
+    },
+  ])('$name fails closed without RPC or direct table access', async ({ invoke }) => {
+    const from = vi.fn();
+    const rpc = vi.fn().mockResolvedValue({ data: true, error: null });
+    const injector = Injector.create({
+      providers: [
+        {
+          provide: SupabaseClientService,
+          useValue: { isConfigured: true, client: () => ({ from, rpc }) },
+        },
+        { provide: LoggerService, useValue: mockLoggerService },
+      ],
+    });
+
+    const service = runInInjectionContext(injector, () => new TaskRepositoryService());
+    const result = await invoke(service);
+
+    expect(result).toEqual({
+      success: false,
+      error: expect.stringContaining('sync_upsert_task'),
+    });
+    expect(rpc).not.toHaveBeenCalled();
+    expect(from).not.toHaveBeenCalled();
   });
-  return runInInjectionContext(injector, () => new TaskRepositoryService());
-}
-
-function createPagedQuery<Row>(rows: Row[], ranges: Array<[number, number]>) {
-  const query = {
-    select: vi.fn(() => query),
-    eq: vi.fn(() => query),
-    gt: vi.fn(() => query),
-    is: vi.fn(() => query),
-    order: vi.fn(() => query),
-    range: vi.fn(async (from: number, to: number) => {
-      ranges.push([from, to]);
-      return { data: rows.slice(from, to + 1), error: null };
-    }),
-  };
-  return query;
-}
-
-function taskRow(index: number) {
-  const id = `task-${index.toString().padStart(4, '0')}`;
-  return {
-    id,
-    project_id: 'project-1',
-    parent_id: null,
-    title: `Task ${index}`,
-    content: `Content ${index}`,
-    stage: 1,
-    order: index,
-    rank: 10000 + index,
-    status: 'active',
-    x: 0,
-    y: 0,
-    short_id: null,
-    priority: null,
-    due_date: null,
-    expected_minutes: null,
-    cognitive_load: null,
-    wait_minutes: null,
-    tags: [],
-    attachments: [],
-    deleted_at: null,
-    created_at: '2026-06-09T00:00:00.000Z',
-    updated_at: new Date(Date.UTC(2026, 5, 9, 0, 1, index)).toISOString(),
-    completed_at: null,
-    parking_meta: null,
-    attention_meta: null,
-  };
-}
-
-function connectionRow(index: number) {
-  const id = `connection-${index.toString().padStart(4, '0')}`;
-  return {
-    id,
-    project_id: 'project-1',
-    source_id: 'task-0000',
-    target_id: `task-${index.toString().padStart(4, '0')}`,
-    title: '',
-    description: '',
-    deleted_at: null,
-    updated_at: new Date(Date.UTC(2026, 5, 9, 0, 2, index)).toISOString(),
-  };
-}
+});
 
 describe('TaskRepositoryService.deleteTask', () => {
-  it('prefers purge_tasks_v2 and no longer calls legacy purge_tasks', async () => {
+  it('fails closed without RPC or direct table writes after the legacy delete path is retired', async () => {
     const maybeSingle = vi.fn().mockResolvedValue({ data: { project_id: 'project-1' }, error: null });
-    const eq = vi.fn(() => ({ maybeSingle }));
-    const select = vi.fn(() => ({ eq }));
-    const from = vi.fn((table: string) => {
-      if (table === 'tasks') {
-        return {
-          select,
-          update: vi.fn(() => ({ eq: vi.fn().mockResolvedValue({ error: null }) })),
-        } as any;
-      }
-      return {} as any;
-    });
+    const selectEq = vi.fn(() => ({ maybeSingle }));
+    const select = vi.fn(() => ({ eq: selectEq }));
+    const updateEq = vi.fn().mockResolvedValue({ error: null });
+    const update = vi.fn(() => ({ eq: updateEq }));
+    const from = vi.fn(() => ({ select, update }));
     const rpc = vi.fn().mockResolvedValue({ data: 1, error: null });
 
     const injector = Injector.create({
@@ -619,11 +481,11 @@ describe('TaskRepositoryService.deleteTask', () => {
     const service = runInInjectionContext(injector, () => new TaskRepositoryService());
     const result = await service.deleteTask('task-1');
 
-    expect(result.success).toBe(true);
-    expect(rpc).toHaveBeenCalledTimes(1);
-    expect(rpc).toHaveBeenCalledWith('purge_tasks_v2', {
-      p_project_id: 'project-1',
-      p_task_ids: ['task-1'],
+    expect(result).toEqual({
+      success: false,
+      error: expect.stringContaining('sync_delete_tasks'),
     });
+    expect(rpc).not.toHaveBeenCalled();
+    expect(from).not.toHaveBeenCalled();
   });
 });
