@@ -111,7 +111,7 @@ export function registerAnalyzeCodegraphMcpLogCurrentWrapperSpecs(): void {
     const configPath = makeCodexMcpConfig({
       root: 'D:/Code/dde',
       wrapperScriptPath: script.path,
-      codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+      codegraphTarget: '@colbymchenry/codegraph@1.6.2',
       env: {
         NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '30000',
         NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE: '0',
@@ -145,7 +145,7 @@ export function registerAnalyzeCodegraphMcpLogCurrentWrapperSpecs(): void {
       requestId: 'old-host-context',
       responseTs: '2026-06-13T18:01:01.000Z',
       codegraphTarget: '@colbymchenry/codegraph@1.1.1',
-      configuredCodegraphTarget: '@colbymchenry/codegraph@1.5.0',
+      configuredCodegraphTarget: '@colbymchenry/codegraph@1.6.2',
       configuredContextResponseObserved: false,
       trustBlockers: expect.arrayContaining([
         'codegraph-target-mismatch',
@@ -173,12 +173,12 @@ export function registerAnalyzeCodegraphMcpLogCurrentWrapperSpecs(): void {
     const configPath = makeCodexMcpConfig({
       root: 'D:/Code/dde',
       wrapperScriptPath: script.path,
-      codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+      codegraphTarget: '@colbymchenry/codegraph@1.6.2',
       env: configuredEnv,
     });
     const logPath = makeLog([
       wrapperStartEvent('current-host-run', script, {
-        codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+        codegraphTarget: '@colbymchenry/codegraph@1.6.2',
         env: configuredEnv,
       }),
       contextResponseEvent('current-host-run', 'current-host-context', {
@@ -199,8 +199,8 @@ export function registerAnalyzeCodegraphMcpLogCurrentWrapperSpecs(): void {
       trustedForAdapterJudgment: true,
       runId: 'current-host-run',
       requestId: 'current-host-context',
-      codegraphTarget: '@colbymchenry/codegraph@1.5.0',
-      configuredCodegraphTarget: '@colbymchenry/codegraph@1.5.0',
+      codegraphTarget: '@colbymchenry/codegraph@1.6.2',
+      configuredCodegraphTarget: '@colbymchenry/codegraph@1.6.2',
       configuredContextResponseObserved: true,
       trustBlockers: [],
     }));
@@ -215,7 +215,7 @@ export function registerAnalyzeCodegraphMcpLogCurrentWrapperSpecs(): void {
     const configPath = makeCodexMcpConfig({
       root: 'D:/Code/dde',
       wrapperScriptPath: script.path,
-      codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+      codegraphTarget: '@colbymchenry/codegraph@1.6.2',
       env: configuredEnv,
     });
     const logPath = makeLog([
@@ -228,7 +228,7 @@ export function registerAnalyzeCodegraphMcpLogCurrentWrapperSpecs(): void {
           alignmentMode: 'adapter-fallback',
           mismatches: [{
             field: 'codegraphTarget',
-            expected: '@colbymchenry/codegraph@1.5.0',
+            expected: '@colbymchenry/codegraph@1.6.2',
             actual: '@colbymchenry/codegraph@next',
           }],
           mismatchCount: 1,

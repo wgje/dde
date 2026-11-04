@@ -124,7 +124,7 @@ export function registerAnalyzeCodegraphMcpLogActiveWrapperSpecs(): void {
     const configPath = makeCodexMcpConfig({
       root: path.dirname(logPath),
       wrapperScriptPath: script.path,
-      codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+      codegraphTarget: '@colbymchenry/codegraph@1.6.2',
       env: {
         NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '30000',
         NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE: '0',
@@ -140,7 +140,7 @@ export function registerAnalyzeCodegraphMcpLogActiveWrapperSpecs(): void {
     expect(summary.codexMcpConfig).toEqual(expect.objectContaining({
       exists: true,
       codegraphServerConfigured: true,
-      expectedCodegraphTarget: '@colbymchenry/codegraph@1.5.0',
+      expectedCodegraphTarget: '@colbymchenry/codegraph@1.6.2',
       mismatch: true,
       rootCause: expect.objectContaining({
         failureBoundary: 'mcp-host-config',
@@ -148,7 +148,7 @@ export function registerAnalyzeCodegraphMcpLogActiveWrapperSpecs(): void {
       }),
     }));
     expect(summary.codexMcpConfig.currentWrapperTarget).toEqual(expect.objectContaining({
-      expected: '@colbymchenry/codegraph@1.5.0',
+      expected: '@colbymchenry/codegraph@1.6.2',
       actual: '@colbymchenry/codegraph@1.1.1',
       matches: false,
     }));
@@ -168,14 +168,14 @@ export function registerAnalyzeCodegraphMcpLogActiveWrapperSpecs(): void {
         'mcp-host-env-mismatch',
       ]),
       observed: expect.objectContaining({
-        expectedCodegraphTarget: '@colbymchenry/codegraph@1.5.0',
+        expectedCodegraphTarget: '@colbymchenry/codegraph@1.6.2',
         currentWrapperTarget: '@colbymchenry/codegraph@1.1.1',
         currentWrapperEnvMismatchedKeys: ['NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS'],
         hostConfigMismatches: expect.arrayContaining([
           expect.objectContaining({
             scope: 'currentWrapper',
             field: 'codegraphTarget',
-            expected: '@colbymchenry/codegraph@1.5.0',
+            expected: '@colbymchenry/codegraph@1.6.2',
             actual: '@colbymchenry/codegraph@1.1.1',
           }),
           expect.objectContaining({
@@ -193,7 +193,7 @@ export function registerAnalyzeCodegraphMcpLogActiveWrapperSpecs(): void {
     }));
     expect(summary.diagnosticTriage.primaryEvidence).toEqual(expect.objectContaining({
       currentWrapperTargetComparison: expect.objectContaining({
-        expected: '@colbymchenry/codegraph@1.5.0',
+        expected: '@colbymchenry/codegraph@1.6.2',
         actual: '@colbymchenry/codegraph@1.1.1',
         matches: false,
       }),
@@ -211,7 +211,7 @@ export function registerAnalyzeCodegraphMcpLogActiveWrapperSpecs(): void {
         expect.objectContaining({
           scope: 'currentWrapper',
           field: 'codegraphTarget',
-          expected: '@colbymchenry/codegraph@1.5.0',
+          expected: '@colbymchenry/codegraph@1.6.2',
           actual: '@colbymchenry/codegraph@1.1.1',
         }),
         expect.objectContaining({
@@ -232,7 +232,7 @@ export function registerAnalyzeCodegraphMcpLogActiveWrapperSpecs(): void {
     const script = makeScriptFile('module.exports = { version: "fresh-adapter-fallback" };\n');
     const logPath = makeLog([
       wrapperStartEvent('adapter-fallback-run', script, {
-        codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+        codegraphTarget: '@colbymchenry/codegraph@1.6.2',
         env: {
           NANOFLOW_CODEGRAPH_CONFIG_ALIGNMENT_MODE: 'adapter-fallback',
           NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '15000',
@@ -243,14 +243,14 @@ export function registerAnalyzeCodegraphMcpLogActiveWrapperSpecs(): void {
           reason: 'wrapper-config-alignment-intentional-override',
           alignmentMode: 'adapter-fallback',
           expected: {
-            codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+            codegraphTarget: '@colbymchenry/codegraph@1.6.2',
             env: {
               NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '30000',
               NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE: '0',
             },
           },
           actual: {
-            codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+            codegraphTarget: '@colbymchenry/codegraph@1.6.2',
             env: {
               NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '15000',
               NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE: '0',
@@ -271,7 +271,7 @@ export function registerAnalyzeCodegraphMcpLogActiveWrapperSpecs(): void {
     const configPath = makeCodexMcpConfig({
       root: path.dirname(logPath),
       wrapperScriptPath: script.path,
-      codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+      codegraphTarget: '@colbymchenry/codegraph@1.6.2',
       env: {
         NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '30000',
         NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE: '0',
@@ -347,7 +347,7 @@ export function registerAnalyzeCodegraphMcpLogActiveWrapperSpecs(): void {
         'command = "node"',
         'args = [',
         `  ${JSON.stringify(script.path)},`,
-        '  "@colbymchenry/codegraph@1.5.0",',
+        '  "@colbymchenry/codegraph@1.6.2",',
         '  "serve",',
         '  "--mcp",',
         '  "--path",',
@@ -361,18 +361,18 @@ export function registerAnalyzeCodegraphMcpLogActiveWrapperSpecs(): void {
       ].join('\n'));
       const logPath = makeLog([
         wrapperStartEvent('gate-smoke-run', script, {
-          codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+          codegraphTarget: '@colbymchenry/codegraph@1.6.2',
           env: smokeEnv,
           codexConfigAlignment: {
             status: 'override',
             reason: 'wrapper-config-alignment-intentional-override',
             alignmentMode: 'smoke',
             expected: {
-              codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+              codegraphTarget: '@colbymchenry/codegraph@1.6.2',
               env: configuredEnv,
             },
             actual: {
-              codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+              codegraphTarget: '@colbymchenry/codegraph@1.6.2',
               env: smokeEnv,
             },
             mismatchCount: 1,
@@ -393,7 +393,7 @@ export function registerAnalyzeCodegraphMcpLogActiveWrapperSpecs(): void {
         root: projectRoot,
         scope: 'project',
         codegraphServerConfigured: true,
-        expectedCodegraphTarget: '@colbymchenry/codegraph@1.5.0',
+        expectedCodegraphTarget: '@colbymchenry/codegraph@1.6.2',
       }));
       expect(summary.directMcpResponseEvidence).toEqual(expect.objectContaining({
         status: 'response-trusted-adapter-probe-only',
@@ -427,7 +427,7 @@ export function registerAnalyzeCodegraphMcpLogActiveWrapperSpecs(): void {
     const configPath = makeCodexMcpConfig({
       root: path.dirname(logPath),
       wrapperScriptPath: script.path,
-      codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+      codegraphTarget: '@colbymchenry/codegraph@1.6.2',
       env: {
         NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '30000',
         NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE: '0',
@@ -462,7 +462,7 @@ export function registerAnalyzeCodegraphMcpLogActiveWrapperSpecs(): void {
         'mcp-host-wrapper-not-started',
       ]),
       observed: expect.objectContaining({
-        expectedCodegraphTarget: '@colbymchenry/codegraph@1.5.0',
+        expectedCodegraphTarget: '@colbymchenry/codegraph@1.6.2',
         currentWrapperTarget: null,
         activeWrapperCount: 0,
         latestLogAgeMs: 2_640_000,
@@ -707,7 +707,7 @@ export function registerAnalyzeCodegraphMcpLogActiveWrapperSpecs(): void {
     const configPath = makeCodexMcpConfig({
       root: path.dirname(logPath),
       wrapperScriptPath: script.path,
-      codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+      codegraphTarget: '@colbymchenry/codegraph@1.6.2',
       env: {
         NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '30000',
         NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE: '0',

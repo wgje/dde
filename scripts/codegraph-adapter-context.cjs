@@ -25,6 +25,7 @@ const REQUIRED_FRESH_FALLBACK_ENV = {
 };
 const DEFAULT_QUERY = 'ProjectShellComponent';
 const DEFAULT_TIMEOUT_MS = 60_000;
+const MCP_PROTOCOL_VERSION = '2025-06-18';
 const WRAPPER_TIMEOUT_HEADROOM_MIN_MS = 2_500;
 const WRAPPER_TIMEOUT_HEADROOM_MAX_MS = 5_000;
 const TOOLING_TRIAGE_WRAPPER_TIMEOUT_RATIO = 0.75;
@@ -653,7 +654,65 @@ function createMcpClient(child, timeoutMs, options = {}) {
     });
   }
 
-  return { request, stderrTail: () => stderr };
+  function notify(message) {
+    if (terminalState) {
+      throw buildWrapperTerminalError('notification', terminalState);
+    }
+    return new Promise((resolve, reject) => {
+      const payload = `${JSON.stringify(message)}\n`;
+      try {
+        child.stdin.write(payload, error => {
+          if (error) {
+            reject(buildWrapperTerminalError('notification', {
+              event: 'stdin-write-error',
+              error,
+              stderrTail: stderr,
+              logPath: options.logPath,
+            }));
+            return;
+          }
+          resolve();
+        });
+      } catch (error) {
+        reject(buildWrapperTerminalError('notification', {
+          event: 'stdin-write-throw',
+          error,
+          stderrTail: stderr,
+          logPath: options.logPath,
+        }));
+      }
+    });
+  }
+
+  return { request, notify, stderrTail: () => stderr };
+}
+
+async function initializeMcpClient(client, nextId) {
+  const response = await client.request({
+    jsonrpc: '2.0',
+    id: nextId(),
+    method: 'initialize',
+    params: {
+      protocolVersion: MCP_PROTOCOL_VERSION,
+      capabilities: {},
+      clientInfo: { name: 'nanoflow-codegraph-adapter-context', version: '1.0.0' },
+    },
+  }, 'initialize');
+  const result = response?.result;
+  if (
+    typeof result?.protocolVersion !== 'string'
+    || !result.capabilities
+    || typeof result.capabilities !== 'object'
+    || typeof result.serverInfo?.name !== 'string'
+    || typeof result.serverInfo?.version !== 'string'
+  ) {
+    const error = response?.error;
+    const detail = error
+      ? `error ${error.code ?? 'unknown'}: ${error.message ?? 'unknown error'}`
+      : 'invalid initialize result';
+    throw new Error(`MCP initialize failed (${detail})`);
+  }
+  await client.notify({ jsonrpc: '2.0', method: 'notifications/initialized' });
 }
 
 function buildWrapperTerminalError(label, state) {
@@ -1489,6 +1548,7 @@ async function main() {
   const nextId = () => nextRequestId++;
 
   try {
+    await initializeMcpClient(client, nextId);
     const tools = await client.request(
       { jsonrpc: '2.0', id: nextId(), method: 'tools/list' },
       'tools/list',

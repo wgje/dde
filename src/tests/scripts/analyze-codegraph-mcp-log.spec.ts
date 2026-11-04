@@ -149,7 +149,7 @@ describe('analyze-codegraph-mcp-log', () => {
           reason: 'current-wrapper-differs-from-codex-config',
           mismatchCount: 2,
           mismatches: [
-            { field: 'codegraphTarget', expected: '@colbymchenry/codegraph@1.5.0', actual: '@colbymchenry/codegraph@1.1.1' },
+            { field: 'codegraphTarget', expected: '@colbymchenry/codegraph@1.6.2', actual: '@colbymchenry/codegraph@1.1.1' },
             { field: 'env.NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS', expected: '30000', actual: '60000' },
           ],
         },
@@ -286,7 +286,7 @@ describe('analyze-codegraph-mcp-log', () => {
     const configPath = makeCodexMcpConfig({
       root: projectRoot,
       wrapperScriptPath: script.path,
-      codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+      codegraphTarget: '@colbymchenry/codegraph@1.6.2',
       env: {
         CODEGRAPH_NO_DAEMON: '0',
         CODEGRAPH_NO_WATCH: '0',
@@ -314,11 +314,11 @@ describe('analyze-codegraph-mcp-log', () => {
     expect(result.stdout).toContain('diagnosticTriage.failureClasses=');
     expect(result.stdout).toContain('mcp-host-config-drift');
     expect(result.stdout).toContain('diagnosticTriage.primaryEvidence=');
-    expect(result.stdout).toContain('"expectedCodegraphTarget":"@colbymchenry/codegraph@1.5.0"');
+    expect(result.stdout).toContain('"expectedCodegraphTarget":"@colbymchenry/codegraph@1.6.2"');
     expect(result.stdout).toContain('"currentWrapperTarget":"@colbymchenry/codegraph@1.1.1"');
-    expect(result.stdout).toContain('"currentWrapperTargetComparison":{"matches":false,"expected":"@colbymchenry/codegraph@1.5.0","actual":"@colbymchenry/codegraph@1.1.1"}');
+    expect(result.stdout).toContain('"currentWrapperTargetComparison":{"matches":false,"expected":"@colbymchenry/codegraph@1.6.2","actual":"@colbymchenry/codegraph@1.1.1"}');
     expect(result.stdout).toContain('"hostConfigMismatches":');
-    expect(result.stdout).toContain('"field":"codegraphTarget","expected":"@colbymchenry/codegraph@1.5.0","actual":"@colbymchenry/codegraph@1.1.1"');
+    expect(result.stdout).toContain('"field":"codegraphTarget","expected":"@colbymchenry/codegraph@1.6.2","actual":"@colbymchenry/codegraph@1.1.1"');
     expect(result.stdout).toContain('"field":"env.NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS","key":"NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS","expected":"30000","actual":"60000"');
     expect(result.stdout).toContain('diagnosticTriage.fallback=npm run codegraph:adapter:context -- --query "<query>" --json');
     expect(result.stdout).toContain('diagnosticTriage.decisionContract=');
@@ -337,7 +337,7 @@ describe('analyze-codegraph-mcp-log', () => {
     const script = makeScriptFile('module.exports = { version: "legacy-env-observation" };\n');
     const logPath = makeLog([
       wrapperStartEvent('legacy-env-run', script, {
-        codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+        codegraphTarget: '@colbymchenry/codegraph@1.6.2',
         env: {},
       }),
       contextResponseEvent('legacy-env-run', 'legacy-env-context'),
@@ -345,7 +345,7 @@ describe('analyze-codegraph-mcp-log', () => {
     const configPath = makeCodexMcpConfig({
       root: path.dirname(logPath),
       wrapperScriptPath: script.path,
-      codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+      codegraphTarget: '@colbymchenry/codegraph@1.6.2',
       env: { npm_config_cache: 'D:/Code/tools/codegraph-npm-cache' },
     });
 
@@ -374,7 +374,7 @@ describe('analyze-codegraph-mcp-log', () => {
     const script = makeScriptFile('module.exports = { version: "explicit-env-observation" };\n');
     const logPath = makeLog([
       wrapperStartEvent('explicit-env-run', script, {
-        codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+        codegraphTarget: '@colbymchenry/codegraph@1.6.2',
         envObservationSchemaVersion: 1,
         observedEnvKeys: ['npm_config_cache'],
         env: { npm_config_cache: actualCache },
@@ -384,7 +384,7 @@ describe('analyze-codegraph-mcp-log', () => {
     const configPath = makeCodexMcpConfig({
       root: path.dirname(logPath),
       wrapperScriptPath: script.path,
-      codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+      codegraphTarget: '@colbymchenry/codegraph@1.6.2',
       env: { npm_config_cache: expectedCache },
     });
 
@@ -405,7 +405,7 @@ describe('analyze-codegraph-mcp-log', () => {
     const script = makeScriptFile('module.exports = { version: "mismatched-env-observation" };\n');
     const logPath = makeLog([
       wrapperStartEvent('mismatched-env-run', script, {
-        codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+        codegraphTarget: '@colbymchenry/codegraph@1.6.2',
         envObservationSchemaVersion: 1,
         observedEnvKeys: ['npm_config_cache'],
         env: { npm_config_cache: 'D:/other-cache' },
@@ -415,7 +415,7 @@ describe('analyze-codegraph-mcp-log', () => {
     const configPath = makeCodexMcpConfig({
       root: path.dirname(logPath),
       wrapperScriptPath: script.path,
-      codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+      codegraphTarget: '@colbymchenry/codegraph@1.6.2',
       env: { npm_config_cache: 'D:/expected-cache' },
     });
 
@@ -434,7 +434,7 @@ describe('analyze-codegraph-mcp-log', () => {
     const script = makeScriptFile('module.exports = { version: "not-configured-env-observation" };\n');
     const logPath = makeLog([
       wrapperStartEvent('not-configured-env-run', script, {
-        codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+        codegraphTarget: '@colbymchenry/codegraph@1.6.2',
         envObservationSchemaVersion: 1,
         observedEnvKeys: ['npm_config_cache'],
         env: { npm_config_cache: 'D:/runtime-only-cache' },
@@ -444,7 +444,7 @@ describe('analyze-codegraph-mcp-log', () => {
     const configPath = makeCodexMcpConfig({
       root: path.dirname(logPath),
       wrapperScriptPath: script.path,
-      codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+      codegraphTarget: '@colbymchenry/codegraph@1.6.2',
       env: {},
     });
 
@@ -514,7 +514,7 @@ describe('analyze-codegraph-mcp-log', () => {
     const configPath = makeCodexMcpConfig({
       root: path.dirname(logPath),
       wrapperScriptPath: script.path,
-      codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+      codegraphTarget: '@colbymchenry/codegraph@1.6.2',
       env: {
         CODEGRAPH_NO_DAEMON: '0',
         CODEGRAPH_NO_WATCH: '0',
@@ -547,7 +547,7 @@ describe('analyze-codegraph-mcp-log', () => {
         'direct-mcp-healthy',
       ]),
       primaryEvidence: expect.objectContaining({
-        expectedCodegraphTarget: '@colbymchenry/codegraph@1.5.0',
+        expectedCodegraphTarget: '@colbymchenry/codegraph@1.6.2',
         currentWrapperTarget: '@colbymchenry/codegraph@1.1.1',
         currentContextWrapperTarget: '@colbymchenry/codegraph@1.1.1',
         currentWrapperMatchesDisk: false,

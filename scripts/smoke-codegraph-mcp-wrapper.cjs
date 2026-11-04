@@ -10,10 +10,11 @@ const {
   parseNanoFlowContextOutcomeV1,
 } = require('./lib/codegraph-context-outcome.cjs');
 
-const DEFAULT_CODEGRAPH_TARGET = '@colbymchenry/codegraph@1.5.0';
+const DEFAULT_CODEGRAPH_TARGET = '@colbymchenry/codegraph@1.6.2';
 const DEFAULT_QUERY = 'ProjectShellComponent';
 const DEFAULT_OVERLAY_QUERY = 'sync-rule-keyword';
 const DEFAULT_TIMEOUT_MS = 60_000;
+const MCP_PROTOCOL_VERSION = '2025-06-18';
 const WRAPPER_TIMEOUT_HEADROOM_MIN_MS = 1_000;
 const WRAPPER_TIMEOUT_HEADROOM_MAX_MS = 5_000;
 
@@ -300,11 +301,70 @@ function createMcpClient(child, timeoutMs, options = {}) {
     });
   }
 
+  function notify(message) {
+    if (terminalState) {
+      throw buildWrapperTerminalError('notification', terminalState);
+    }
+    return new Promise((resolve, reject) => {
+      const payload = `${JSON.stringify(message)}\n`;
+      try {
+        child.stdin.write(payload, error => {
+          if (error) {
+            reject(buildWrapperTerminalError('notification', {
+              event: 'stdin-write-error',
+              error,
+              stderrTail: stderr,
+              logPath: options.logPath,
+            }));
+            return;
+          }
+          resolve();
+        });
+      } catch (error) {
+        reject(buildWrapperTerminalError('notification', {
+          event: 'stdin-write-throw',
+          error,
+          stderrTail: stderr,
+          logPath: options.logPath,
+        }));
+      }
+    });
+  }
+
   return {
     request,
+    notify,
     stderrTail: () => stderr,
     pendingWaiterCount: () => waiters.length,
   };
+}
+
+async function initializeMcpClient(client, nextId) {
+  const response = await client.request({
+    jsonrpc: '2.0',
+    id: nextId(),
+    method: 'initialize',
+    params: {
+      protocolVersion: MCP_PROTOCOL_VERSION,
+      capabilities: {},
+      clientInfo: { name: 'nanoflow-codegraph-mcp-smoke', version: '1.0.0' },
+    },
+  }, 'initialize');
+  const result = response?.result;
+  if (
+    typeof result?.protocolVersion !== 'string'
+    || !result.capabilities
+    || typeof result.capabilities !== 'object'
+    || typeof result.serverInfo?.name !== 'string'
+    || typeof result.serverInfo?.version !== 'string'
+  ) {
+    const error = response?.error;
+    const detail = error
+      ? `error ${error.code ?? 'unknown'}: ${error.message ?? 'unknown error'}`
+      : 'invalid initialize result';
+    throw new Error(`MCP initialize failed (${detail})`);
+  }
+  await client.notify({ jsonrpc: '2.0', method: 'notifications/initialized' });
 }
 
 function buildWrapperTerminalError(label, state) {
@@ -649,6 +709,7 @@ async function main() {
   const repeatSuffix = round => options.repeat === 1 ? '' : `:${round}`;
 
   try {
+    await initializeMcpClient(client, nextId);
     const firstTools = await client.request(
       { jsonrpc: '2.0', id: nextId(), method: 'tools/list' },
       'first tools/list',

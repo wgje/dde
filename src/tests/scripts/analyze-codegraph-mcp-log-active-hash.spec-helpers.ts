@@ -31,7 +31,7 @@ export function registerAnalyzeCodegraphMcpLogActiveHashSpecs(): void {
       }),
       wrapperStartEvent('fresh-host-run', script, {
         ts: '2026-06-13T18:02:00.000Z',
-        codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+        codegraphTarget: '@colbymchenry/codegraph@1.6.2',
         env: {
           NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '30000',
           NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE: '1',
@@ -50,7 +50,7 @@ export function registerAnalyzeCodegraphMcpLogActiveHashSpecs(): void {
       distinctCodegraphTargets: 2,
       codegraphTargets: {
         '@colbymchenry/codegraph@1.1.1': 1,
-        '@colbymchenry/codegraph@1.5.0': 1,
+        '@colbymchenry/codegraph@1.6.2': 1,
       },
       contextPackTimeoutMs: {
         30000: 1,
@@ -64,7 +64,7 @@ export function registerAnalyzeCodegraphMcpLogActiveHashSpecs(): void {
     expect(summary.activeWrappers.latest).toEqual([
       expect.objectContaining({
         runId: 'fresh-host-run',
-        codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+        codegraphTarget: '@colbymchenry/codegraph@1.6.2',
         env: expect.objectContaining({
           NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '30000',
           NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE: '1',
@@ -80,7 +80,7 @@ export function registerAnalyzeCodegraphMcpLogActiveHashSpecs(): void {
       }),
     ]);
     expect(summary.currentWrapper).toEqual(expect.objectContaining({
-      codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+      codegraphTarget: '@colbymchenry/codegraph@1.6.2',
     }));
     expect(summary.recommendations).toEqual(expect.arrayContaining([
       expect.stringContaining('Multiple active CodeGraph targets are handling MCP requests'),
@@ -188,7 +188,7 @@ export function registerAnalyzeCodegraphMcpLogActiveHashSpecs(): void {
     const configPath = makeCodexMcpConfig({
       root: path.dirname(logPath),
       wrapperScriptPath: script.path,
-      codegraphTarget: '@colbymchenry/codegraph@1.5.0',
+      codegraphTarget: '@colbymchenry/codegraph@1.6.2',
       env: {
         NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '30000',
         NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE: '0',
