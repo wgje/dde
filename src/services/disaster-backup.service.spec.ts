@@ -1,14 +1,25 @@
 import 'fake-indexeddb/auto';
 
-import { Injector, signal } from '@angular/core';
+import { Injector, runInInjectionContext, signal } from '@angular/core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ActionQueueService } from './action-queue.service';
+import { LOCAL_QUEUE_CONFIG } from './action-queue-storage.helpers';
 import { LoggerService } from './logger.service';
 import { DisasterBackupService } from './disaster-backup.service';
 import { AuthService } from './auth.service';
 import type { DeadLetterItem, QueuedAction } from './action-queue.types';
 import { ActionQueueOwnerStorageService } from './action-queue-owner-storage.service';
+import {
+  createActionQueueServiceTestInjector,
+  resetActionQueueServiceMocks,
+} from './action-queue-service-test-harness.spec-helpers';
+import {
+  getLocalBackupUiRestoreQuiescenceSentinelStorageKey,
+  LocalBackupUiRestoreWriterPausedError,
+} from './local-backup-ui-restore-writer-quiescence.service';
 import { QueueBackupService } from './queue-backup.service';
 import { ToastService } from './toast.service';
+import { createMockDestroyRef } from '../test-setup.mocks';
 import { ThemeService } from './theme.service';
 import { UiStateService } from './ui-state.service';
 import { PreferenceService } from './preference.service';
@@ -323,6 +334,85 @@ describe('DisasterBackupService', () => {
     expect(payload.localState?.deadLetters).toEqual(deadLetters);
     expect(serialized.localState?.actionQueue).toEqual(payload.localState?.actionQueue);
     expect(serialized.localState?.deadLetters).toEqual(deadLetters);
+  });
+
+  it('keeps blocked owner dead-letter restore exportable with its operation identity', async () => {
+    resetActionQueueServiceMocks();
+    const destroyRef = createMockDestroyRef();
+    const action = (id: string, operationId: string): QueuedAction => ({
+      id,
+      operationId,
+      type: 'update',
+      entityType: 'task',
+      entityId: 'task-1',
+      payload: {
+        task: {
+          id: 'task-1',
+          title: 'Preserved task',
+          content: 'Keep replayable data',
+          stage: 1,
+          parentId: null,
+          order: 0,
+          rank: 500,
+          status: 'active',
+          x: 0,
+          y: 0,
+          createdDate: '2026-06-18T00:00:00.000Z',
+          displayId: '1',
+        },
+        projectId: 'project-1',
+      },
+      timestamp: 1,
+      retryCount: 0,
+    });
+    const original: DeadLetterItem = {
+      action: action('dead-letter-original', 'operation-original'),
+      failedAt: '2026-06-18T00:00:00.000Z',
+      reason: 'sync failure',
+    };
+    const attempted: DeadLetterItem = {
+      action: action('dead-letter-attempted', 'operation-attempted'),
+      failedAt: '2026-06-19T00:00:00.000Z',
+      reason: 'backup restore',
+    };
+    const storageKey = `${LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY}.user-1`;
+    const sentinelKey = getLocalBackupUiRestoreQuiescenceSentinelStorageKey('user-1');
+    localStorage.setItem(storageKey, JSON.stringify([original]));
+    const injector = createActionQueueServiceTestInjector(
+      signal<string | null>('user-1'),
+      destroyRef.destroyRef,
+    );
+    const queue = runInInjectionContext(injector, () => injector.get(ActionQueueService));
+
+    try {
+      await queue.reloadFromStorageForCurrentOwner();
+      expect(queue.deadLetterQueue()).toEqual([original]);
+      const beforeRestore = localStorage.getItem(storageKey);
+      localStorage.setItem(sentinelKey, JSON.stringify({
+        ownerUserId: 'user-1',
+        runId: 'restore-run',
+        state: 'quiesced',
+      }));
+
+      expect(() => queue.storage.restoreDeadLettersFromBackupItems([attempted], 'user-1'))
+        .toThrow(LocalBackupUiRestoreWriterPausedError);
+      expect(localStorage.getItem(storageKey)).toBe(beforeRestore);
+      expect(queue.deadLetterQueue()).toEqual([original]);
+
+      const payload = await createLocalBackupService().buildLocalPayload([createProject()], {
+        autoBackupEnabled: false,
+        autoBackupIntervalMs: 900000,
+      });
+      const exportedDeadLetters = payload.localState?.deadLetters as DeadLetterItem[] | undefined;
+      expect(exportedDeadLetters).toEqual([original]);
+      expect(exportedDeadLetters?.[0].action.operationId)
+        .toBe('operation-original');
+    } finally {
+      localStorage.removeItem(sentinelKey);
+      queue.reset();
+      destroyRef.destroy();
+      resetActionQueueServiceMocks();
+    }
   });
 
   it('exports canonical durable Black Box rows without hydration or IndexedDB writes', async () => {

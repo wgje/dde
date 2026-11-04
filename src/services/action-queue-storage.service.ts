@@ -17,7 +17,10 @@ import { NetworkAwarenessService } from './network-awareness.service';
 import { DeadLetterItem, OutboxSyncState, QueuedAction } from './action-queue.types';
 import { ActionQueueOwnerStorageService } from './action-queue-owner-storage.service';
 import type { QueueBackupStrictUpdateResult } from './queue-backup.service';
-import { trackLocalBackupUiRestoreWriterPromise } from './local-backup-ui-restore-writer-quiescence-tracker';
+import {
+  beginLocalBackupUiRestoreWriter,
+  trackLocalBackupUiRestoreWriterPromise,
+} from './local-backup-ui-restore-writer-quiescence-tracker';
 import { localBackupUiRestoreWriterQuiescence } from './local-backup-ui-restore-writer-quiescence.service';
 import { ActionQueueRestoreBarrierController, type ActionQueueRestoreBarrierRelease, type OwnerStorageRestoreOutcome } from './action-queue-restore-barrier.controller';
 import type { ActionQueueOwnerStorageRuntime } from './action-queue-owner-storage.types';
@@ -371,11 +374,26 @@ export class ActionQueueStorageService {
 
   restoreDeadLettersFromBackupItems(items: unknown[], ownerUserId: string): number {
     if (ownerUserId === this.getCurrentOwnerUserId() && !this.canPersistCurrentOwner()) return 0;
-    return this.ownerStorage.restoreDeadLettersFromBackupItems(
-      ownerUserId,
-      items,
-      this.ownerStorageRuntime(),
-    );
+    if (typeof localStorage === 'undefined') {
+      return this.ownerStorage.restoreDeadLettersFromBackupItems(
+        ownerUserId,
+        items,
+        this.ownerStorageRuntime(),
+      );
+    }
+
+    const writer = beginLocalBackupUiRestoreWriter(ownerUserId, 'action-queue', {
+      heartbeat: false,
+    });
+    try {
+      return this.ownerStorage.restoreDeadLettersFromBackupItems(
+        ownerUserId,
+        items,
+        this.ownerStorageRuntime(),
+      );
+    } finally {
+      writer.release();
+    }
   }
 
   // ========== 死信队列公共操作 ==========

@@ -8,6 +8,7 @@ import {
   LocalBackupUiRestoreWriterPausedError,
   localBackupUiRestoreWriterQuiescence,
 } from './local-backup-ui-restore-writer-quiescence.service';
+import { readActiveLocalBackupUiRestoreWriters } from './local-backup-ui-restore-writer-quiescence-tracker';
 import type {
   LocalBackupUiRestorePreActionQueueFenceInput,
   LocalBackupUiRestorePreActionQueueFenceResult,
@@ -322,6 +323,37 @@ describe('ActionQueue restore writer quiescence', () => {
     expect(() => service.discardActions(() => true)).toThrow(LocalBackupUiRestoreWriterPausedError);
     expect(service.pendingActions()).toEqual([queuedAction]);
     await handle.abortBeforeMutation();
+  });
+
+  it('blocks direct dead-letter restore before local and IndexedDB writes while the owner is frozen', async () => {
+    await service.reloadFromStorageForCurrentOwner();
+    const existing = createDeadLetter('existing');
+    const restored = createDeadLetter('restored');
+    const storageKey = 'nanoflow.dead-letter-queue.test-user';
+    const existingSnapshot = JSON.stringify([existing]);
+    localStorage.setItem(storageKey, existingSnapshot);
+    service.storage.deadLetterQueue.set([existing]);
+    service.storage.deadLetterSize.set(1);
+
+    const sentinelKey = getLocalBackupUiRestoreQuiescenceSentinelStorageKey('test-user');
+    localStorage.setItem(sentinelKey, JSON.stringify({
+      ownerUserId: 'test-user',
+      runId: 'restore-run',
+      state: 'quiesced',
+    }));
+    const setItem = vi.spyOn(localStorage, 'setItem');
+    mockQueueBackupService.backupDeadLetters.mockClear();
+    try {
+      expect(() => service.storage.restoreDeadLettersFromBackupItems([restored], 'test-user'))
+        .toThrow(LocalBackupUiRestoreWriterPausedError);
+      expect(localStorage.getItem(storageKey)).toBe(existingSnapshot);
+      expect(setItem.mock.calls.filter(([key]) => key === storageKey)).toEqual([]);
+      expect(mockQueueBackupService.backupDeadLetters).not.toHaveBeenCalled();
+      expect(service.deadLetterQueue()).toEqual([existing]);
+      expect(readActiveLocalBackupUiRestoreWriters('test-user')).toEqual([]);
+    } finally {
+      localStorage.removeItem(sentinelKey);
+    }
   });
 
   it('blocks beforeunload queue mirror saves once restore quiescence starts', async () => {
