@@ -62,6 +62,14 @@ function createController(options: {
   });
 }
 
+function createDeferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(res => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
 describe('DockCloudPushSchedulerController', () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -196,6 +204,55 @@ describe('DockCloudPushSchedulerController', () => {
     await vi.advanceTimersByTimeAsync(3000);
 
     expect(callbacks.persistLocalSnapshotImmediately).toHaveBeenCalledWith(snapshot, 'user-1');
+    expect(enqueueFocusSessionSync).not.toHaveBeenCalled();
+  });
+
+  it('does not enqueue an older same-owner snapshot after a newer push completes', async () => {
+    const firstPersist = createDeferred<boolean>();
+    const secondPersist = createDeferred<boolean>();
+    const firstSnapshot = makeSnapshot({ savedAt: '2026-01-01T00:00:04.000Z' });
+    const secondSnapshot = makeSnapshot({ savedAt: '2026-01-01T00:00:05.000Z' });
+    const callbacks = makeCallbacks({
+      persistLocalSnapshotImmediately: vi.fn((snapshot) => (
+        snapshot === firstSnapshot ? firstPersist.promise : secondPersist.promise
+      )),
+    });
+    const enqueueFocusSessionSync = vi.fn(() => Promise.resolve(true));
+    const controller = createController({ enqueueFocusSessionSync });
+
+    controller.scheduleCloudPush('user-1', firstSnapshot, callbacks, 0);
+    await vi.advanceTimersByTimeAsync(0);
+    controller.scheduleCloudPush('user-1', secondSnapshot, callbacks, 0);
+    await vi.advanceTimersByTimeAsync(0);
+
+    secondPersist.resolve(true);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(enqueueFocusSessionSync).toHaveBeenCalledTimes(1);
+    expect(enqueueFocusSessionSync).toHaveBeenCalledWith('user-1', secondSnapshot);
+
+    firstPersist.resolve(true);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(enqueueFocusSessionSync).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not enqueue an in-flight snapshot after pending pushes are cancelled', async () => {
+    const persist = createDeferred<boolean>();
+    const snapshot = makeSnapshot({ savedAt: '2026-01-01T00:00:06.000Z' });
+    const callbacks = makeCallbacks({
+      persistLocalSnapshotImmediately: vi.fn(() => persist.promise),
+    });
+    const enqueueFocusSessionSync = vi.fn(() => Promise.resolve(true));
+    const controller = createController({ enqueueFocusSessionSync });
+
+    controller.scheduleCloudPush('user-1', snapshot, callbacks, 0);
+    await vi.advanceTimersByTimeAsync(0);
+    controller.cancelPendingPush();
+    persist.resolve(true);
+    await Promise.resolve();
+    await Promise.resolve();
+
     expect(enqueueFocusSessionSync).not.toHaveBeenCalled();
   });
 

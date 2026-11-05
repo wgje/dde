@@ -27,6 +27,7 @@ interface DockCloudPushScheduleResult {
 export class DockCloudPushSchedulerController {
   private readonly cloudPushTimer = new TimerHandle();
   private readonly lastScheduledFocusMode = new Map<string, boolean>();
+  private pushGeneration = 0;
 
   constructor(private readonly options: DockCloudPushSchedulerControllerOptions) {}
 
@@ -48,13 +49,15 @@ export class DockCloudPushSchedulerController {
     const shouldFastTrackWidgetSync =
       this.consumeFocusModeTransition(userId, nextFocusMode);
     const delayMs = shouldFastTrackWidgetSync ? 0 : debounceMs;
+    const generation = ++this.pushGeneration;
 
-    this.scheduleCloudPushRunner(userId, frozenSnapshot, callbacks, delayMs);
+    this.scheduleCloudPushRunner(userId, frozenSnapshot, callbacks, delayMs, generation);
 
     return { nextFocusMode, shouldFastTrackWidgetSync };
   }
 
   cancelPendingPush(): void {
+    this.pushGeneration += 1;
     this.cloudPushTimer.cancel();
   }
 
@@ -74,12 +77,14 @@ export class DockCloudPushSchedulerController {
     frozenSnapshot: DockSnapshot,
     callbacks: DockCloudPushSchedulerCallbacks,
     delayMs: number,
+    generation: number,
   ): void {
     const runPush = (): void => this.runScheduledCloudPush(
       userId,
       frozenSnapshot,
       callbacks,
       runPush,
+      generation,
     );
     this.cloudPushTimer.schedule(runPush, delayMs);
   }
@@ -89,8 +94,9 @@ export class DockCloudPushSchedulerController {
     frozenSnapshot: DockSnapshot,
     callbacks: DockCloudPushSchedulerCallbacks,
     rerun: () => void,
+    generation: number,
   ): void {
-    if (this.options.isDestroyed()) {
+    if (generation !== this.pushGeneration || this.options.isDestroyed()) {
       return;
     }
 
@@ -118,7 +124,7 @@ export class DockCloudPushSchedulerController {
       return;
     }
 
-    void this.persistThenEnqueue(userId, frozenSnapshot, callbacks)
+    void this.persistThenEnqueue(userId, frozenSnapshot, callbacks, generation)
       .catch(error => {
         this.options.logger.error('scheduleCloudPush: focus session enqueue failed', {
           userId,
@@ -131,9 +137,10 @@ export class DockCloudPushSchedulerController {
     userId: string,
     frozenSnapshot: DockSnapshot,
     callbacks: DockCloudPushSchedulerCallbacks,
+    generation: number,
   ): Promise<void> {
     const persisted = await callbacks.persistLocalSnapshotImmediately(frozenSnapshot, userId);
-    if (!persisted || this.options.isDestroyed()) {
+    if (!persisted || generation !== this.pushGeneration || this.options.isDestroyed()) {
       return;
     }
 
