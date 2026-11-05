@@ -15,7 +15,10 @@ const hardeningMigrationPath = 'supabase/migrations/20260531120000_database_hard
 const attentionMetaMigrationPath = 'supabase/migrations/20260605062000_task_attention_meta.sql';
 const securitySyncFollowupMigrationPath = 'supabase/migrations/20260606050000_security_sync_followup.sql';
 const attachmentPayloadSyncMigrationPath = 'supabase/migrations/20260609010000_task_attachment_payload_sync.sql';
+const completedAtUnusedIndexRetirementMigrationPath =
+  'supabase/migrations/20260728000300_tasks_completed_at_unused_index_retirement.sql';
 const initScriptPath = 'scripts/init-supabase.sql';
+const migrationManifestPath = 'scripts/migration-dry-run-manifest.json';
 
 function readMigration(): string {
   return fs.readFileSync(path.join(process.cwd(), migrationPath), 'utf8');
@@ -301,5 +304,58 @@ describe('batch_upsert_tasks stale-write protection migration', () => {
       "parent_id = CASE WHEN v_is_stale OR v_write_intent IN ('task_text_update', 'task_soft_delete', 'task_attachment_update') THEN v_existing_parent ELSE EXCLUDED.parent_id END",
     );
     expect(normalized).not.toContain('WHEN v_is_stale THEN v_existing_deleted');
+  });
+
+  it('retires the unused completed_at project index only after a fail-closed identity check and keeps fresh-init aligned', () => {
+    const matchingMigrationFiles = fs
+      .readdirSync(path.join(process.cwd(), 'supabase', 'migrations'))
+      .filter(name => name.endsWith('_tasks_completed_at_unused_index_retirement.sql'));
+    const migrationAbsolutePath = path.join(
+      process.cwd(),
+      completedAtUnusedIndexRetirementMigrationPath,
+    );
+    const migration = normalize(
+      fs.existsSync(migrationAbsolutePath) ? fs.readFileSync(migrationAbsolutePath, 'utf8') : '',
+    ).toLowerCase();
+    const init = normalize(readInitScript()).toLowerCase();
+    const manifest = JSON.parse(
+      fs.readFileSync(path.join(process.cwd(), migrationManifestPath), 'utf8'),
+    ) as {
+      entries: Array<{
+        path: string;
+      }>;
+    };
+
+    expect(matchingMigrationFiles).toEqual([
+      '20260728000300_tasks_completed_at_unused_index_retirement.sql',
+    ]);
+    expect(
+      fs.existsSync(migrationAbsolutePath),
+      `${completedAtUnusedIndexRetirementMigrationPath} should exist`,
+    ).toBe(true);
+
+    for (const sql of [migration, init]) {
+      expect(sql).toContain("to_regclass('public.idx_tasks_project_completed_at')");
+      expect(sql).toContain("index_row.indrelid = 'public.tasks'::regclass");
+      expect(sql).toContain('pg_get_indexdef(index_row.indexrelid)');
+      expect(sql).toContain('pg_get_expr(index_row.indpred, index_row.indrelid)');
+      expect(sql).toContain('project_id, completed_at desc');
+      expect(sql).toContain('completed_at is not null');
+      expect(sql).toContain('deleted_at is null');
+      expect(sql).toContain("set local lock_timeout = '2s';");
+      expect(sql).toContain('drop index if exists public.idx_tasks_project_completed_at;');
+      expect(sql).toContain('set local lock_timeout = default;');
+      expect(sql).not.toContain('drop index concurrently');
+      expect(sql).not.toContain('begin;');
+      expect(sql).not.toContain('commit;');
+    }
+
+    expect(init).toContain(
+      '-- final convergence: 20260728000300 tasks completed_at unused index retirement',
+    );
+    expect(init).not.toContain('create index if not exists idx_tasks_project_completed_at');
+    expect(
+      manifest.entries.find(item => item.path === completedAtUnusedIndexRetirementMigrationPath),
+    ).toBeUndefined();
   });
 });
