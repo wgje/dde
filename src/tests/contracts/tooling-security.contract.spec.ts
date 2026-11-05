@@ -3,6 +3,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
+import {
+  findTrackedRuntimeScripts,
+  findUntrackedLocalDependencyViolations,
+} from './tooling-security-local-dependency-tracking.spec-helpers';
 
 function readText(relativePath: string): string {
   return fs.readFileSync(path.join(process.cwd(), relativePath), 'utf8');
@@ -198,8 +202,8 @@ describe('tooling security contracts', () => {
     expect(config.servers?.['codegraph']?.env?.CODEGRAPH_DAEMON_IDLE_TIMEOUT_MS).toBe('60000');
     expect(config.servers?.['codegraph']?.env?.CODEGRAPH_DAEMON_MAX_IDLE_MS).toBe('60000');
     expect(config.servers?.['codegraph']?.env?.NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE).toBe('1');
-    expect(readText('scripts/codegraph-adapter-context.cjs')).toContain("DEFAULT_CODEGRAPH_TARGET = '@colbymchenry/codegraph@1.2.0'");
-    expect(readText('scripts/smoke-codegraph-mcp-wrapper.cjs')).toContain("DEFAULT_CODEGRAPH_TARGET = '@colbymchenry/codegraph@1.2.0'");
+    expect(readText('scripts/codegraph-adapter-context.cjs')).toContain("DEFAULT_CODEGRAPH_TARGET = '@colbymchenry/codegraph@1.6.2'");
+    expect(readText('scripts/smoke-codegraph-mcp-wrapper.cjs')).toContain("DEFAULT_CODEGRAPH_TARGET = '@colbymchenry/codegraph@1.6.2'");
     expect(serverArgs).toContain('@upstash/context7-mcp@2.1.1');
     expect(serverArgs).toContain('@supabase/mcp-server-supabase@0.5.9');
 
@@ -289,10 +293,18 @@ describe('tooling security contracts', () => {
     expect(source).toContain('forwardToCodegraph(body)');
     expect(source).toContain('terminateChildTree(child.pid)');
     expect(source).toContain("NANOFLOW_CODEGRAPH_ALLOW_DAEMON");
-    expect(source).toContain("CODEGRAPH_NO_DAEMON: allowDaemon ? (process.env.CODEGRAPH_NO_DAEMON ?? '0') : '1'");
+    expect(source).toContain("const configuredNoDaemon = process.env.CODEGRAPH_NO_DAEMON ?? '0'");
+    expect(source).toContain("daemonOverride === '0'");
+    expect(source).toContain("daemonOverride === '1'");
+    expect(source).toContain('CODEGRAPH_NO_DAEMON: noDaemon');
     expect(source).toContain("CODEGRAPH_NO_WATCH: process.env.CODEGRAPH_NO_WATCH ?? '0'");
-    expect(source).toContain("CODEGRAPH_DAEMON_IDLE_TIMEOUT_MS: process.env.CODEGRAPH_DAEMON_IDLE_TIMEOUT_MS ?? '60000'");
-    expect(source).toContain("CODEGRAPH_DAEMON_MAX_IDLE_MS: process.env.CODEGRAPH_DAEMON_MAX_IDLE_MS ?? '60000'");
+    expect(source).toContain("const CODEGRAPH_DAEMON_IDLE_TIMEOUT_DEFAULT = '300000'");
+    expect(source).toContain("const CODEGRAPH_DAEMON_MAX_IDLE_DEFAULT = '1800000'");
+    expect(source).toContain('positiveIntegerEnvValue(process.env.CODEGRAPH_DAEMON_IDLE_TIMEOUT_MS)');
+    expect(source).toContain('?? CODEGRAPH_DAEMON_IDLE_TIMEOUT_DEFAULT');
+    expect(source).toContain('positiveIntegerEnvValue(process.env.CODEGRAPH_DAEMON_MAX_IDLE_MS)');
+    expect(source).toContain('?? CODEGRAPH_DAEMON_MAX_IDLE_DEFAULT');
+    expect(source).toContain('normalizeCodegraphChildEnv(process.env)');
     expect(source).toContain('normalizePath(args[index])');
 
     for (const wrapperPath of ['scripts/codegraph-mcp-stdio.cjs', configuredWrapper]) {
@@ -310,26 +322,203 @@ describe('tooling security contracts', () => {
     }
   });
 
-  it('codegraph MCP workspace wiring must be checked into git, not just left as local files', () => {
+  it('discovers every tracked runtime root instead of maintaining a filename allowlist', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-tooling-runtime-roots-'));
+
+    try {
+      fs.mkdirSync(path.join(tempDir, 'scripts/lib'), { recursive: true });
+      fs.writeFileSync(path.join(tempDir, 'scripts/codegraph-entry.cjs'), 'module.exports = {};\n');
+      fs.writeFileSync(path.join(tempDir, 'scripts/lib/analyze-codegraph-helper.mjs'), 'export {};\n');
+      fs.writeFileSync(path.join(tempDir, 'scripts/unrelated.cjs'), 'module.exports = {};\n');
+      fs.writeFileSync(path.join(tempDir, 'scripts/codegraph-local-only.cjs'), 'module.exports = {};\n');
+      expect(spawnSync('git', ['init', '--quiet'], {
+        cwd: tempDir,
+        encoding: 'utf8',
+      }).status).toBe(0);
+      expect(spawnSync('git', ['add', '--',
+        'scripts/codegraph-entry.cjs',
+        'scripts/lib/analyze-codegraph-helper.mjs',
+        'scripts/unrelated.cjs',
+      ], {
+        cwd: tempDir,
+        encoding: 'utf8',
+      }).status).toBe(0);
+
+      expect(findTrackedRuntimeScripts(tempDir)).toEqual([
+        'scripts/codegraph-entry.cjs',
+        'scripts/lib/analyze-codegraph-helper.mjs',
+        'scripts/unrelated.cjs',
+      ]);
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports an untracked local module referenced by a tracked runtime script', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-tooling-dependency-tracking-'));
+
+    try {
+      fs.mkdirSync(path.join(tempDir, 'scripts'), { recursive: true });
+      fs.writeFileSync(
+        path.join(tempDir, 'scripts/codegraph-entry.cjs'),
+        "require('./untracked-helper.cjs');\n",
+      );
+      fs.writeFileSync(
+        path.join(tempDir, 'scripts/untracked-helper.cjs'),
+        "module.exports = {};\n",
+      );
+      expect(spawnSync('git', ['init', '--quiet'], {
+        cwd: tempDir,
+        encoding: 'utf8',
+      }).status).toBe(0);
+      expect(spawnSync('git', ['add', '--', 'scripts/codegraph-entry.cjs'], {
+        cwd: tempDir,
+        encoding: 'utf8',
+      }).status).toBe(0);
+
+      expect(findUntrackedLocalDependencyViolations(tempDir, [
+        'scripts/codegraph-entry.cjs',
+      ])).toEqual([
+        'scripts/codegraph-entry.cjs -> ./untracked-helper.cjs -> scripts/untracked-helper.cjs (untracked)',
+      ]);
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports an untracked transitive dependency reached through static ESM imports', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-tooling-dependency-closure-'));
+
+    try {
+      fs.mkdirSync(path.join(tempDir, 'scripts'), { recursive: true });
+      fs.writeFileSync(
+        path.join(tempDir, 'scripts/codegraph-entry.mjs'),
+        "import './tracked-helper.mjs';\n",
+      );
+      fs.writeFileSync(
+        path.join(tempDir, 'scripts/tracked-helper.mjs'),
+        "await import('./untracked-leaf.mjs');\n",
+      );
+      fs.writeFileSync(
+        path.join(tempDir, 'scripts/untracked-leaf.mjs'),
+        "export const value = 1;\n",
+      );
+      expect(spawnSync('git', ['init', '--quiet'], {
+        cwd: tempDir,
+        encoding: 'utf8',
+      }).status).toBe(0);
+      expect(spawnSync('git', ['add', '--',
+        'scripts/codegraph-entry.mjs',
+        'scripts/tracked-helper.mjs',
+      ], {
+        cwd: tempDir,
+        encoding: 'utf8',
+      }).status).toBe(0);
+
+      expect(findUntrackedLocalDependencyViolations(tempDir, [
+        'scripts/codegraph-entry.mjs',
+      ])).toEqual([
+        'scripts/tracked-helper.mjs -> ./untracked-leaf.mjs -> scripts/untracked-leaf.mjs (untracked)',
+      ]);
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts a fully tracked dependency closure and ignores external modules', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-tooling-dependency-clean-'));
+
+    try {
+      fs.mkdirSync(path.join(tempDir, 'scripts'), { recursive: true });
+      fs.writeFileSync(
+        path.join(tempDir, 'scripts/codegraph-entry.cjs'),
+        "require('node:fs');\nrequire('./tracked-helper');\n",
+      );
+      fs.writeFileSync(
+        path.join(tempDir, 'scripts/tracked-helper.cjs'),
+        "module.exports = {};\n",
+      );
+      expect(spawnSync('git', ['init', '--quiet'], {
+        cwd: tempDir,
+        encoding: 'utf8',
+      }).status).toBe(0);
+      expect(spawnSync('git', ['add', '--',
+        'scripts/codegraph-entry.cjs',
+        'scripts/tracked-helper.cjs',
+      ], {
+        cwd: tempDir,
+        encoding: 'utf8',
+      }).status).toBe(0);
+
+      expect(findUntrackedLocalDependencyViolations(tempDir, [
+        'scripts/codegraph-entry.cjs',
+      ])).toEqual([]);
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports a local dependency that is absent from a clean checkout', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-tooling-dependency-missing-'));
+
+    try {
+      fs.mkdirSync(path.join(tempDir, 'scripts'), { recursive: true });
+      fs.writeFileSync(
+        path.join(tempDir, 'scripts/codegraph-entry.cjs'),
+        "require('./missing-helper.cjs');\n",
+      );
+      expect(spawnSync('git', ['init', '--quiet'], {
+        cwd: tempDir,
+        encoding: 'utf8',
+      }).status).toBe(0);
+      expect(spawnSync('git', ['add', '--', 'scripts/codegraph-entry.cjs'], {
+        cwd: tempDir,
+        encoding: 'utf8',
+      }).status).toBe(0);
+
+      expect(findUntrackedLocalDependencyViolations(tempDir, [
+        'scripts/codegraph-entry.cjs',
+      ])).toEqual([
+        'scripts/codegraph-entry.cjs -> ./missing-helper.cjs -> scripts/missing-helper.cjs (missing)',
+      ]);
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('tracked tooling runtime scripts must have a fully tracked local dependency closure', () => {
     if (!fs.existsSync(path.join(process.cwd(), '.git'))) {
       return;
     }
 
-    for (const filePath of [
-      '.vscode/mcp.json',
-      'scripts/codegraph-mcp-stdio.cjs',
-      'scripts/codegraph-nanoflow-mcp-stdio.cjs',
-      'src/tests/scripts/codegraph-nanoflow-overlay.spec.ts',
-      'src/tests/contracts/tooling-security.contract.spec.ts',
-    ]) {
-      const result = spawnSync('git', ['ls-files', '--error-unmatch', filePath], {
-        cwd: process.cwd(),
-        encoding: 'utf8',
-      });
+    const configPath = '.vscode/mcp.json';
+    const configTracked = spawnSync('git', ['ls-files', '--error-unmatch', configPath], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+    });
+    expect(configTracked.status, `${configPath} must be tracked by git`).toBe(0);
 
-      expect(result.status, `${filePath} must be tracked by git`).toBe(0);
-    }
-  });
+    const config = JSON.parse(readText(configPath)) as {
+      servers?: Record<string, { args?: string[] }>;
+    };
+    const configuredWrapperArg = config.servers?.['codegraph']?.args?.[0];
+    expect(configuredWrapperArg).toBeDefined();
+    const configuredWrapper = configuredWrapperArg!.replace('${workspaceFolder}/', '');
+    const runtimeEntries = [...new Set([
+      ...findTrackedRuntimeScripts(process.cwd()),
+      configuredWrapper,
+    ])].sort();
+    expect(runtimeEntries.length).toBeGreaterThan(0);
+
+    const violations = findUntrackedLocalDependencyViolations(
+      process.cwd(),
+      runtimeEntries,
+    );
+    expect(
+      violations,
+      `Tooling local runtime dependencies must be tracked:\n${violations.join('\n')}`,
+    ).toEqual([]);
+  }, 15_000);
 
   it('secrets audit must cover tracked and untracked non-ignored workspace files', () => {
     const packageJson = JSON.parse(readText('package.json')) as {
@@ -338,11 +527,14 @@ describe('tooling security contracts', () => {
     const source = readText('scripts/contracts/check-secrets.cjs');
 
     expect(packageJson.scripts?.['audit:secrets']).toBe('node scripts/contracts/check-secrets.cjs --mode=audit');
-    expect(packageJson.scripts?.['test:contract-specs']).toBe('npm run test:prepare-env && vitest run --config vitest.config.mts src/tests/contracts');
+    expect(packageJson.scripts?.['test:contract-specs']).toMatch(
+      /^npm run test:prepare-env && vitest run --config vitest\.config\.mts src\/tests\/contracts(?:\s|$)/,
+    );
     expect(packageJson.scripts?.['test:contracts']).toContain('npm run test:contract-specs');
-    expect(source).toContain("['ls-files', '--others', '--exclude-standard']");
-    expect(source).toContain('function getAuditFiles()');
-    expect(source).toContain('[...getTrackedFiles(), ...getUntrackedFiles()]');
+    expect(source).toContain("require('./git-visible-worktree.cjs')");
+    expect(source).toContain('listGitVisibleWorktreeFiles(process.cwd())');
+    expect(source).not.toContain('function getTrackedFiles()');
+    expect(source).not.toContain('function getUntrackedFiles()');
     expect(source).toContain('scanning tracked and untracked files');
     expect(source).toContain('SUPABASE_ACCESS_TOKEN_LITERAL');
     expect(source).toContain('SUPABASE_ACCESS_TOKEN');
