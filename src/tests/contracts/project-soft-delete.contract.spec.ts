@@ -51,8 +51,9 @@ describe('项目软删除契约', () => {
     const finalProjectsPolicySection = getLastSection(
       sql,
       'DROP POLICY IF EXISTS "owner select" ON public.projects;',
-      'CREATE OR REPLACE FUNCTION public.cleanup_cron_job_run_details('
+      'DROP POLICY IF EXISTS "focus_sessions_select" ON public.focus_sessions;'
     );
+    const normalizedFinalProjectsPolicies = finalProjectsPolicySection.replace(/\s+/g, ' ');
     const fullProjectSection = getSection(
       sql,
       'CREATE OR REPLACE FUNCTION public.get_full_project_data(',
@@ -86,7 +87,7 @@ describe('项目软删除契约', () => {
     const softDeleteRpcSection = getSection(
       sql,
       'CREATE OR REPLACE FUNCTION public.soft_delete_project(p_project_id uuid)',
-      'REVOKE EXECUTE ON FUNCTION public.soft_delete_project(uuid) FROM PUBLIC, anon;'
+      'REVOKE ALL ON FUNCTION public.soft_delete_project(uuid) FROM PUBLIC, anon, authenticated;'
     );
 
   expect(accessibleProjectIdsSection).toContain('AND deleted_at IS NULL');
@@ -95,7 +96,12 @@ describe('项目软删除契约', () => {
     expect(accessHelperSection).not.toContain('AND p.deleted_at IS NULL');
     expect(ownerHelperSection).not.toContain('AND p.deleted_at IS NULL');
     // projects RLS SELECT/UPDATE 也不再过滤 deleted_at，应用层自行过滤
-    expect(finalProjectsPolicySection).toContain('(SELECT auth.uid() AS uid) = owner_id');
+    expect(normalizedFinalProjectsPolicies).toContain(
+      'CREATE POLICY "owner select" ON public.projects FOR SELECT TO authenticated USING ((SELECT auth.uid()) = owner_id);',
+    );
+    expect(normalizedFinalProjectsPolicies).toContain(
+      'CREATE POLICY "owner update" ON public.projects FOR UPDATE TO authenticated USING ((SELECT auth.uid()) = owner_id) WITH CHECK ((SELECT auth.uid()) = owner_id);',
+    );
     expect(fullProjectSection).toContain('public.user_has_project_access(p_project_id)');
     expect(fullProjectSection).toContain('SELECT id, owner_id, title, description, created_date, updated_at, deleted_at, version');
     expect(userProjectsMetaSection).toContain('AND deleted_at IS NULL');
@@ -123,6 +129,116 @@ describe('项目软删除契约', () => {
     expect(softDeleteRpcSection).toContain('INSERT INTO public.task_tombstones');
     expect(softDeleteRpcSection).toContain('INSERT INTO public.connection_tombstones');
     expect(softDeleteRpcSection).toContain('SET deleted_at = v_operation_ts');
+  });
+
+  it('项目图读取必须由统一 owner RLS 承载并恢复 get_full_project_data invoker 语义', () => {
+    const migrationPath =
+      'supabase/migrations/20260715015000_project_graph_rls_security_invoker.sql';
+    const optimizedMigrationPath =
+      'supabase/migrations/20260715017800_project_graph_rls_set_membership_initplan.sql';
+    const migrationExists = fs.existsSync(path.join(process.cwd(), migrationPath));
+    const optimizedMigrationExists = fs.existsSync(path.join(process.cwd(), optimizedMigrationPath));
+    expect(migrationExists).toBe(true);
+    expect(optimizedMigrationExists).toBe(true);
+    if (!migrationExists || !optimizedMigrationExists) return;
+
+    const migration = readSql(migrationPath);
+    const optimizedMigration = readSql(optimizedMigrationPath);
+    const initSql = readSql('scripts/init-supabase.sql');
+    const initPolicySection = getLastSection(
+      initSql,
+      '-- Canonical owner-only project graph policies for SECURITY INVOKER reads.',
+      'CREATE OR REPLACE FUNCTION public.get_full_project_data(p_project_id uuid)',
+    );
+    const finalFunctionSection = getLastSection(
+      initSql,
+      'CREATE OR REPLACE FUNCTION public.get_full_project_data(p_project_id uuid)',
+      'COMMENT ON FUNCTION public.get_full_project_data(uuid) IS',
+    );
+    const migrationPolicySection = getSection(
+      migration,
+      '-- Canonical owner-only project graph policies for SECURITY INVOKER reads.',
+      'ALTER FUNCTION public.get_full_project_data(uuid) SECURITY INVOKER;',
+    );
+    const optimizedMigrationPolicySection = getSection(
+      optimizedMigration,
+      '-- Canonical owner-only project graph policies for SECURITY INVOKER reads.',
+      "NOTIFY pgrst, 'reload schema';",
+    );
+    const historicalPolicies = [
+      'CREATE POLICY tasks_owner_select ON public.tasks FOR SELECT TO authenticated USING (public.user_is_project_owner(project_id));',
+      'CREATE POLICY tasks_owner_insert ON public.tasks FOR INSERT TO authenticated WITH CHECK (public.user_is_project_owner(project_id));',
+      'CREATE POLICY tasks_owner_update ON public.tasks FOR UPDATE TO authenticated USING (public.user_is_project_owner(project_id)) WITH CHECK (public.user_is_project_owner(project_id));',
+      'CREATE POLICY tasks_owner_delete ON public.tasks FOR DELETE TO authenticated USING (public.user_is_project_owner(project_id));',
+      'CREATE POLICY connections_owner_select ON public.connections FOR SELECT TO authenticated USING (public.user_is_project_owner(project_id));',
+      'CREATE POLICY connections_owner_insert ON public.connections FOR INSERT TO authenticated WITH CHECK (public.user_is_project_owner(project_id));',
+      'CREATE POLICY connections_owner_update ON public.connections FOR UPDATE TO authenticated USING (public.user_is_project_owner(project_id)) WITH CHECK (public.user_is_project_owner(project_id));',
+      'CREATE POLICY connections_owner_delete ON public.connections FOR DELETE TO authenticated USING (public.user_is_project_owner(project_id));',
+      'CREATE POLICY task_tombstones_owner_select ON public.task_tombstones FOR SELECT TO authenticated USING (public.user_is_project_owner(project_id));',
+      'CREATE POLICY task_tombstones_owner_insert ON public.task_tombstones FOR INSERT TO authenticated WITH CHECK (public.user_is_project_owner(project_id));',
+      'CREATE POLICY connection_tombstones_owner_select ON public.connection_tombstones FOR SELECT TO authenticated USING (public.user_is_project_owner(project_id));',
+      'CREATE POLICY connection_tombstones_owner_insert ON public.connection_tombstones FOR INSERT TO authenticated WITH CHECK (public.user_is_project_owner(project_id));',
+    ];
+
+    const historicalNormalized = migrationPolicySection.replace(/\s+/g, ' ');
+    expect(migrationPolicySection).not.toContain('TO public');
+    for (const policy of historicalPolicies) {
+      expect(historicalNormalized).toContain(policy);
+    }
+
+    const canonicalPolicyNames = [
+      'tasks_owner_select',
+      'tasks_owner_insert',
+      'tasks_owner_update',
+      'tasks_owner_delete',
+      'connections_owner_select',
+      'connections_owner_insert',
+      'connections_owner_update',
+      'connections_owner_delete',
+      'task_tombstones_owner_select',
+      'task_tombstones_owner_insert',
+      'connection_tombstones_owner_select',
+      'connection_tombstones_owner_insert',
+    ];
+    for (const section of [optimizedMigrationPolicySection, initPolicySection]) {
+      const normalized = section.replace(/\s+/g, ' ');
+      expect(section).not.toContain('TO public');
+      expect(normalized).not.toContain('public.user_is_project_owner(project_id)');
+      expect(normalized).toContain('project_row.owner_id = (SELECT auth.uid())');
+      expect(normalized).toContain('project_row.deleted_at IS NULL');
+      for (const policyName of canonicalPolicyNames) {
+        expect(normalized).toContain(`CREATE POLICY ${policyName}`);
+      }
+    }
+
+    for (const legacyPolicy of [
+      '"tasks owner select"',
+      'tasks_select_optimized',
+      '"connections owner select"',
+      'connections_select_optimized',
+      '"task_tombstones_select_owner"',
+      'task_tombstones_select_optimized',
+      '"connection_tombstones_select"',
+      'connection_tombstones_select_optimized',
+    ]) {
+      expect(migration).toContain(`DROP POLICY IF EXISTS ${legacyPolicy}`);
+    }
+
+    expect(finalFunctionSection).toContain('STABLE');
+    expect(finalFunctionSection).toContain('SECURITY INVOKER');
+    expect(finalFunctionSection).not.toContain('SECURITY DEFINER');
+    expect(migration).toContain(
+      'ALTER FUNCTION public.get_full_project_data(uuid) SECURITY INVOKER;',
+    );
+    expect(migration).toContain(
+      'ALTER FUNCTION public.get_full_project_data(uuid) STABLE;',
+    );
+    expect(migration).toContain(
+      'REVOKE ALL ON FUNCTION public.get_full_project_data(uuid) FROM PUBLIC, anon;',
+    );
+    expect(migration).toContain(
+      'GRANT EXECUTE ON FUNCTION public.get_full_project_data(uuid) TO authenticated;',
+    );
   });
 
   it('前向修复 migrations 必须补 deleted_at 列并收口项目删除一致性', () => {
