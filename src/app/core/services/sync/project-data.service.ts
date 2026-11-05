@@ -32,6 +32,7 @@ import { mapTaskRowToTask } from './task-row.mapper';
 import {
   ProjectOfflineSnapshotService,
   type OfflineSnapshotLoadOptions,
+  type OfflineSnapshotWriteOptions,
   type StartupOfflineSnapshotLoadResult,
   type StartupOfflineSnapshotSource,
 } from './project-offline-snapshot.service';
@@ -452,8 +453,12 @@ export class ProjectDataService {
     this.offlineSnapshots.saveOfflineSnapshot(projects, ownerUserId);
   }
 
-  async saveOfflineSnapshotAndWait(projects: Project[], ownerUserId?: string | null): Promise<void> {
-    await this.offlineSnapshots.saveOfflineSnapshotAndWait(projects, ownerUserId);
+  async saveOfflineSnapshotAndWait(
+    projects: Project[],
+    ownerUserId?: string | null,
+    options?: OfflineSnapshotWriteOptions,
+  ): Promise<void> {
+    await this.offlineSnapshots.saveOfflineSnapshotAndWait(projects, ownerUserId, options);
   }
   
   /**

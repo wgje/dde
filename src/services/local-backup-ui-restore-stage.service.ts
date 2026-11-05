@@ -256,9 +256,14 @@ export class LocalBackupUiRestoreStageService {
       this.projectState.updateProjects(() => nextProjects, input.ownerUserId);
       await context.checkpoint();
     });
-    const importedCount = await context.runWriterMutation('external-source', async () => {
+    await context.runWriterMutation('offline-snapshot', async () => {
       await context.checkpoint();
-      await this.projectData.saveOfflineSnapshotAndWait(nextProjects, input.ownerUserId);
+      await this.projectData.saveOfflineSnapshotAndWait(nextProjects, input.ownerUserId, {
+        restoreWriterContinuation: true,
+      });
+      await context.checkpoint();
+    });
+    const importedCount = await context.runWriterMutation('external-source', async () => {
       await context.checkpoint();
       await this.externalSourceCache.saveLinks(nextLinks, input.ownerUserId);
       await context.checkpoint();

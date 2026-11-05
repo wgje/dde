@@ -31,6 +31,10 @@ export interface StartupOfflineSnapshotLoadResult {
   ownerUserId?: string | null;
 }
 
+export interface OfflineSnapshotWriteOptions {
+  restoreWriterContinuation?: boolean;
+}
+
 export interface OfflineSnapshotLoadOptions {
   allowOwnerHint?: boolean;
   ownerUserId?: string | null;
@@ -98,14 +102,21 @@ export class ProjectOfflineSnapshotService {
       .catch(error => this.handleFireAndForgetSnapshotFailure(snapshot, error));
   }
 
-  async saveOfflineSnapshotAndWait(projects: Project[], ownerUserId?: string | null): Promise<void> {
+  async saveOfflineSnapshotAndWait(
+    projects: Project[],
+    ownerUserId?: string | null,
+    options: OfflineSnapshotWriteOptions = {},
+  ): Promise<void> {
     if (this.startupPlaceholderState?.isHintOnlyActive()) {
       this.logger.debug('跳过 hint-only 启动占位快照持久化，等待 owner 确认后再写入真实离线快照');
       return;
     }
 
     const snapshot = this.prepareOfflineSnapshot(projects, ownerUserId);
-    await this.persistPreparedOfflineSnapshot(snapshot, { requireIndexedDB: true });
+    await this.persistPreparedOfflineSnapshot(snapshot, {
+      requireIndexedDB: true,
+      restoreWriterContinuation: options.restoreWriterContinuation,
+    });
   }
 
   loadOfflineSnapshot(options?: OfflineSnapshotLoadOptions): Project[] | null {
@@ -221,15 +232,23 @@ export class ProjectOfflineSnapshotService {
 
   private async persistPreparedOfflineSnapshot(
     snapshot: PreparedOfflineSnapshotWrite,
-    options: { requireIndexedDB: boolean },
+    options: { requireIndexedDB: boolean; restoreWriterContinuation?: boolean },
   ): Promise<void> {
-    await localBackupUiRestoreWriterQuiescence.runAsync(
-      snapshot.ownerUserId,
-      'offline-snapshot',
-      async () => {
-        await this.persistPreparedOfflineSnapshotUnlocked(snapshot, options);
-      },
-    );
+    const write = () => this.persistPreparedOfflineSnapshotUnlocked(snapshot, {
+      requireIndexedDB: options.requireIndexedDB,
+    });
+    const persist = options.restoreWriterContinuation
+      ? localBackupUiRestoreWriterQuiescence.runContinuationAsync(
+        snapshot.ownerUserId,
+        'offline-snapshot',
+        write,
+      )
+      : localBackupUiRestoreWriterQuiescence.runAsync(
+        snapshot.ownerUserId,
+        'offline-snapshot',
+        write,
+      );
+    await persist;
   }
 
   private async persistPreparedOfflineSnapshotUnlocked(

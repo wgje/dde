@@ -5,6 +5,7 @@ import { By } from '@angular/platform-browser';
 import { SettingsModalComponent } from './settings-modal.component';
 import { LoggerService } from '../../../services/logger.service';
 import { UserSessionService } from '../../../services/user-session.service';
+import { RetryQueueService } from '../../core/services/sync/retry-queue.service';
 import { PreferenceService } from '../../../services/preference.service';
 import { ExportService } from '../../../services/export.service';
 import { ImportService } from '../../../services/import.service';
@@ -148,6 +149,16 @@ describe('SettingsModalComponent', () => {
   const mockLocalBackupUiRestoreTransactionService = {
     prepare: vi.fn(),
   };
+  const mockRetryQueueService = {
+    add: vi.fn(),
+    addDurably: vi.fn(),
+    clear: vi.fn(),
+    configureActionQueueSupersessionBridge: vi.fn(),
+    getItems: vi.fn(() => []),
+    hasEntity: vi.fn(() => false),
+    removeByEntity: vi.fn(() => false),
+    removeByProjectIdDurablyForOwner: vi.fn().mockResolvedValue(true),
+  };
 
   const mockExportService = {
     isExporting: signal(false),
@@ -238,6 +249,7 @@ describe('SettingsModalComponent', () => {
       providers: [
         { provide: LoggerService, useValue: mockLogger },
         { provide: UserSessionService, useValue: mockUserSession },
+        { provide: RetryQueueService, useValue: mockRetryQueueService },
         { provide: PreferenceService, useValue: mockPreferenceService },
         { provide: ExportService, useValue: mockExportService },
         { provide: ImportService, useValue: mockImportService },
