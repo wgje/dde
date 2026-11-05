@@ -1,5 +1,6 @@
 import type { Attachment, Task, TaskAttentionMeta } from '../../../../models';
 import type { TaskParkingMeta } from '../../../../models/parking';
+import { markTaskContentMissingFromSource } from '../../../../utils/task-content-guard';
 
 export const REQUIRED_TASK_ROW_FIELDS = [
   'content',
@@ -76,7 +77,7 @@ function mapNullableJsonField<T>(row: TaskRowLike, key: keyof TaskRowLike): T | 
 
 function getMissingRequiredTaskRowFields(row: TaskRowLike): RequiredTaskRowField[] {
   return REQUIRED_TASK_ROW_FIELDS.filter(field => {
-    if (field === 'content') return typeof row.content !== 'string';
+    if (field === 'content') return row.content !== undefined && typeof row.content !== 'string';
     return !Object.prototype.hasOwnProperty.call(row, field) || row[field] === undefined;
   });
 }
@@ -147,6 +148,8 @@ function getTaskRowMetadataFields(row: TaskRowLike): Pick<
 
 export function mapTaskRowToTask(row: TaskRowLike, reporter: TaskRowMappingReporter): Task {
   const contentMissingFromSource = typeof row.content !== 'string';
+  const contentAbsentFromSource = !Object.prototype.hasOwnProperty.call(row, 'content')
+    || row.content === undefined;
 
   if (contentMissingFromSource) {
     reporter.warnContentMissing({
@@ -165,8 +168,14 @@ export function mapTaskRowToTask(row: TaskRowLike, reporter: TaskRowMappingRepor
     throw new TaskRowIntegrityError(row.id, missingFields, Object.keys(row));
   }
 
-  return {
+  const task: Task = {
     ...getTaskRowScalarFields(row),
     ...getTaskRowMetadataFields(row),
   };
+
+  if (contentAbsentFromSource) {
+    markTaskContentMissingFromSource(task);
+  }
+
+  return task;
 }

@@ -126,15 +126,42 @@ describe('mapTaskRowToTask', () => {
     });
     delete row.content;
 
-    expect(() => mapTaskRowToTask(row, localReporter)).toThrowError(
-      /missing required fields.*content/i,
-    );
+    const task = mapTaskRowToTask(row, localReporter);
 
+    expect(task.content).toBe('');
+    expect(hasTaskContentMissingFromSource(task)).toBe(true);
     expect(localReporter.warnContentMissing).toHaveBeenCalledWith(
       expect.objectContaining({ taskId: 'task-missing-content' }),
     );
     expect(localReporter.captureContentMissing).toHaveBeenCalledWith(
       expect.objectContaining({ taskId: 'task-missing-content' }),
+    );
+  });
+
+  it('recovers when content is explicitly undefined on the row', () => {
+    const localReporter: TaskRowMappingReporter = {
+      warnContentMissing: vi.fn(),
+      captureContentMissing: vi.fn(),
+    };
+    const row = createCompleteTaskRow({ id: 'task-undefined-content' });
+    Object.defineProperty(row, 'content', {
+      configurable: true,
+      enumerable: true,
+      value: undefined,
+    });
+
+    const task = mapTaskRowToTask(row, localReporter);
+
+    expect(task.content).toBe('');
+    expect(hasTaskContentMissingFromSource(task)).toBe(true);
+    expect(localReporter.warnContentMissing).toHaveBeenCalledWith(
+      expect.objectContaining({ taskId: 'task-undefined-content' }),
+    );
+    expect(localReporter.captureContentMissing).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskId: 'task-undefined-content',
+        rowKeys: expect.arrayContaining(['content']),
+      }),
     );
   });
 
@@ -160,6 +187,20 @@ describe('mapTaskRowToTask', () => {
     );
   });
 
+  it('preserves an empty string as valid task content', () => {
+    const localReporter: TaskRowMappingReporter = {
+      warnContentMissing: vi.fn(),
+      captureContentMissing: vi.fn(),
+    };
+
+    const task = mapTaskRowToTask(createCompleteTaskRow({ content: '' }), localReporter);
+
+    expect(task.content).toBe('');
+    expect(hasTaskContentMissingFromSource(task)).toBe(false);
+    expect(localReporter.warnContentMissing).not.toHaveBeenCalled();
+    expect(localReporter.captureContentMissing).not.toHaveBeenCalled();
+  });
+
   it('preserves numeric zero values instead of replacing them with defaults', () => {
     const task = mapTaskRowToTask(createCompleteTaskRow({
       id: 'task-zero',
@@ -177,7 +218,6 @@ describe('mapTaskRowToTask', () => {
   });
 
   it.each([
-    'content',
     'stage',
     'parent_id',
     'order',
