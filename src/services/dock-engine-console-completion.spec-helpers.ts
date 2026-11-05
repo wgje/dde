@@ -1,8 +1,10 @@
-import { beforeEach, expect, it } from 'vitest';
+import { beforeEach, expect, it, vi } from 'vitest';
 
 import type { DockSnapshot } from '../models/parking-dock';
+import { AuthService } from './auth.service';
 import type { DockEngineService } from './dock-engine.service';
 import type { DockEngineSpecContext } from './dock-engine.spec-context';
+import { DockTaskSyncService } from './dock-task-sync.service';
 
 async function flushDockCompletion(): Promise<void> {
   await Promise.resolve();
@@ -11,11 +13,33 @@ async function flushDockCompletion(): Promise<void> {
 
 export function registerDockEngineConsoleCompletionSpecs(context: DockEngineSpecContext): void {
   let service: DockEngineService;
+  let authFence = 'dock-fence-a';
+  let auth: {
+    currentUserId: { set(value: string | null): void };
+    captureAuthIdentityFence: ReturnType<typeof vi.fn>;
+  };
   const { seedTask, mockBlackBoxService, mockTaskOps } = context;
 
   beforeEach(() => {
     service = context.service();
+    auth = context.testBed.inject(AuthService) as unknown as typeof auth;
+    auth.currentUserId.set('user-1');
+    authFence = 'dock-fence-a';
+    auth.captureAuthIdentityFence = vi.fn(() => authFence);
   });
+
+  async function createInlineCompletionWithSuccessor(): Promise<string> {
+    mockBlackBoxService.createDurably.mockResolvedValueOnce({
+      ok: true,
+      value: { id: 'bb-inline-sync-failure', content: 'Inline Sync Failure' },
+    });
+    const inlineTaskId = await service.createInDock('Inline Sync Failure', 'combo-select', 'low');
+    if (!inlineTaskId) throw new Error('inline task was not created');
+    seedTask('B');
+    await service.dockTask('B', 'backup', { zoneSource: 'manual' });
+    service.toggleFocusMode();
+    return inlineTaskId;
+  }
 
   it('insertToConsoleFromRadar should move a backup task to the front and evict the last non-main visible card', async () => {
     seedTask('A');
@@ -422,6 +446,74 @@ export function registerDockEngineConsoleCompletionSpecs(context: DockEngineSpec
     expect(mockBlackBoxService.markAsCompletedDurably).toHaveBeenCalledWith('bb-inline-completed-before-exit');
     expect(mockBlackBoxService.markAsCompleted).not.toHaveBeenCalled();
     expect(mockBlackBoxService.archiveDurably).not.toHaveBeenCalledWith('bb-inline-completed-before-exit');
+  });
+
+  it('completeTask should not publish dock completion when inline completion sync returns false', async () => {
+    const inlineTaskId = await createInlineCompletionWithSuccessor();
+    const taskSync = context.testBed.inject(DockTaskSyncService);
+    const syncInlineCompletion = vi.spyOn(taskSync, 'syncInlineCompletion').mockResolvedValueOnce(false);
+
+    service.completeTask(inlineTaskId);
+    await flushDockCompletion();
+
+    expect(syncInlineCompletion).toHaveBeenCalledWith(
+      expect.objectContaining({ taskId: inlineTaskId }),
+    );
+    expect(service.entries().find(entry => entry.taskId === inlineTaskId)?.status).not.toBe('completed');
+    expect(service.focusingEntry()?.taskId).toBe(inlineTaskId);
+    expect(service.entries().find(entry => entry.taskId === 'B')?.isMain).toBe(false);
+    expect(mockTaskOps.updateTaskStatus).not.toHaveBeenCalled();
+  });
+
+  it('completeTask should not publish dock completion when inline completion sync rejects', async () => {
+    const inlineTaskId = await createInlineCompletionWithSuccessor();
+    const taskSync = context.testBed.inject(DockTaskSyncService);
+    const syncInlineCompletion = vi.spyOn(taskSync, 'syncInlineCompletion')
+      .mockRejectedValueOnce(new Error('inline completion sync rejected'));
+
+    service.completeTask(inlineTaskId);
+    await flushDockCompletion();
+
+    expect(syncInlineCompletion).toHaveBeenCalledWith(
+      expect.objectContaining({ taskId: inlineTaskId }),
+    );
+    expect(service.entries().find(entry => entry.taskId === inlineTaskId)?.status).not.toBe('completed');
+    expect(service.focusingEntry()?.taskId).toBe(inlineTaskId);
+    expect(service.entries().find(entry => entry.taskId === 'B')?.isMain).toBe(false);
+    expect(mockTaskOps.updateTaskStatus).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { identity: 'A->B', transitions: [['user-b', 'dock-fence-b']] },
+    { identity: 'A->B->A', transitions: [['user-b', 'dock-fence-b'], ['user-1', 'dock-fence-a2']] },
+    { identity: 'same-owner relogin', transitions: [['user-1', 'dock-fence-a2']] },
+  ])('completeTask should not publish stale $identity completion or successor state', async ({ transitions }) => {
+    seedTask('A');
+    seedTask('B');
+    await service.dockTask('A');
+    await service.dockTask('B', 'backup', { zoneSource: 'manual' });
+    await service.toggleFocusMode();
+    await service.switchToTask('A');
+
+    const resolvers: Array<(result: boolean) => void> = [];
+    (mockTaskOps.updateTaskStatus as unknown as ReturnType<typeof vi.fn>)
+      .mockImplementationOnce(() => new Promise(resolve => resolvers.push(resolve)));
+
+    service.completeTask('A');
+    await flushDockCompletion();
+    const [resolveStatusUpdate] = resolvers;
+    if (!resolveStatusUpdate) throw new Error('task status resolver was not captured');
+    for (const [owner, fence] of transitions) {
+      auth.currentUserId.set(owner);
+      authFence = fence;
+    }
+    resolveStatusUpdate(true);
+    await flushDockCompletion();
+
+    expect(service.entries().find(entry => entry.taskId === 'A')?.status).not.toBe('completed');
+    expect(service.focusingEntry()?.taskId).toBe('A');
+    expect(service.entries().find(entry => entry.taskId === 'B')?.isMain).toBe(false);
+    expect(mockTaskOps.updateTaskStatus).toHaveBeenCalledWith('A', 'completed');
   });
 
   it('save exit should backfill completed dock-created black-box sources restored from older snapshots', async () => {

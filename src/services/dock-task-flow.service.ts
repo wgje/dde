@@ -35,6 +35,7 @@ import {
   checkBurnoutThreshold
 } from './dock-scheduler.rules';
 import { TimerHandle } from '../utils/timer-handle';
+import { AuthService } from './auth.service';
 
 // ---------------------------------------------------------------------------
 //  Context interface — engine 在 constructor 中调用 init() 注入信号引用
@@ -115,6 +116,10 @@ export class DockTaskFlowService {
 
   private get taskOps(): TaskOperationAdapterService {
     return this.injector.get(TaskOperationAdapterService);
+  }
+
+  private get authService(): AuthService {
+    return this.injector.get(AuthService);
   }
 
   /**
@@ -339,14 +344,23 @@ export class DockTaskFlowService {
     const entry = this.ctx.entries().find(item => item.taskId === taskId);
     if (!entry || entry.status === 'completed') return;
     const wasMaster = entry.isMain;
+    const expectedUserId = this.authService.currentUserId();
+    const expectedAuthFence = this.authService.captureAuthIdentityFence();
 
-    this.trackBurnoutIfHighLoad(entry);
     const synced = await this.syncTaskCompletion(taskId, entry);
     if (!synced) {
       this.logger.warn('任务完成本地持久化失败，停泊坞完成态未提交', { taskId });
       return;
     }
+    if (
+      this.authService.currentUserId() !== expectedUserId
+      || this.authService.captureAuthIdentityFence() !== expectedAuthFence
+    ) {
+      this.logger.info('任务完成结算遇到身份切换，已保留持久化证据但未提交当前停泊坞视图', { taskId });
+      return;
+    }
 
+    this.trackBurnoutIfHighLoad(entry);
     this.ctx.entries.update(prev =>
       patchEntryByTaskId(prev, taskId, {
         status: 'completed',
@@ -388,7 +402,9 @@ export class DockTaskFlowService {
 
   /** 同步任务完成状态到项目数据层 */
   private async syncTaskCompletion(taskId: string, entry: DockEntry): Promise<boolean> {
-    this.taskSync.syncInlineCompletion(entry);
+    if (entry.sourceKind === 'dock-created' && !await this.taskSync.syncInlineCompletion(entry)) {
+      return false;
+    }
     const task = this.taskStore.getTask(taskId);
     const projectId = this.taskSync.resolveTaskProjectId(taskId);
     if (task && projectId) {
