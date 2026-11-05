@@ -5,6 +5,8 @@ const { spawn } = require('node:child_process');
 
 const DEFAULT_TAIL_CHARS = 6_000;
 const DEFAULT_STEP_TIMEOUT_MS = 30 * 60 * 1000;
+const PROCESS_TREE_CLEANUP_TIMEOUT_MS = 5_000;
+const PROCESS_TREE_TERM_GRACE_MS = 1_000;
 
 const DAILY_STEPS = [
   {
@@ -70,10 +72,15 @@ function parsePositiveIntegerEnv(name, fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-function parseMode(argv) {
+function parseOptions(argv) {
   let mode = 'daily';
+  let printPlan = false;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
+    if (arg === '--print-plan') {
+      printPlan = true;
+      continue;
+    }
     if (arg === '--mode') {
       mode = argv[index + 1] ?? '';
       index += 1;
@@ -93,18 +100,10 @@ function parseMode(argv) {
   if (!Object.hasOwn(PLANS, mode)) {
     throw new Error(`Unknown health gate mode "${mode}". Expected daily, strict, or full.`);
   }
-  return mode;
+  return { mode, printPlan };
 }
 
 function resolveNpmInvocation() {
-  if (process.env.NANOFLOW_HEALTH_GATE_NPM_CLI) {
-    return {
-      command: process.execPath,
-      argsPrefix: [process.env.NANOFLOW_HEALTH_GATE_NPM_CLI],
-      shell: false,
-    };
-  }
-
   if (process.env.npm_execpath) {
     return {
       command: process.execPath,
@@ -153,6 +152,79 @@ function writeFailureSummary(step, commandText, result, startedAt) {
   }
 }
 
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function signalDirectChild(child, signal) {
+  try {
+    child.kill(signal);
+  } catch {
+    // The child may already have exited between the cleanup decision and signal.
+  }
+}
+
+function signalPosixProcessGroup(pid, signal) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(-pid, signal);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function killWindowsProcessTree(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return Promise.resolve(false);
+
+  return new Promise((resolve) => {
+    let settled = false;
+    let timeoutTimer = null;
+    let killer;
+
+    const finish = (succeeded) => {
+      if (settled) return;
+      settled = true;
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+      resolve(succeeded);
+    };
+
+    try {
+      killer = spawn('taskkill', ['/PID', String(pid), '/T', '/F'], {
+        shell: false,
+        stdio: 'ignore',
+        windowsHide: true,
+      });
+    } catch {
+      finish(false);
+      return;
+    }
+
+    timeoutTimer = setTimeout(() => {
+      signalDirectChild(killer, 'SIGKILL');
+      finish(false);
+    }, PROCESS_TREE_CLEANUP_TIMEOUT_MS);
+    killer.once('error', () => finish(false));
+    killer.once('close', (code) => finish(code === 0));
+  });
+}
+
+async function terminateProcessTree(child) {
+  const pid = child.pid;
+  if (process.platform === 'win32') {
+    const killedTree = await killWindowsProcessTree(pid);
+    if (!killedTree) signalDirectChild(child, 'SIGKILL');
+    return;
+  }
+
+  const signaledGroup = signalPosixProcessGroup(pid, 'SIGTERM');
+  if (!signaledGroup) signalDirectChild(child, 'SIGTERM');
+  await delay(PROCESS_TREE_TERM_GRACE_MS);
+  if (!signalPosixProcessGroup(pid, 'SIGKILL')) {
+    signalDirectChild(child, 'SIGKILL');
+  }
+}
+
 function runNpmScript(step) {
   const invocation = resolveNpmInvocation();
   const args = [...invocation.argsPrefix, 'run', step.script];
@@ -170,7 +242,8 @@ function runNpmScript(step) {
     let stdoutTail = '';
     let stderrTail = '';
     let timedOut = false;
-    let killGraceTimer = null;
+    let cleanupPromise = null;
+    let settled = false;
 
     const child = spawn(invocation.command, args, {
       cwd: process.cwd(),
@@ -178,15 +251,32 @@ function runNpmScript(step) {
       shell: invocation.shell,
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
+      detached: process.platform !== 'win32',
     });
 
     const timeoutTimer = setTimeout(() => {
+      if (timedOut) return;
       timedOut = true;
-      child.kill('SIGTERM');
-      killGraceTimer = setTimeout(() => child.kill('SIGKILL'), 1000);
-      killGraceTimer.unref?.();
+      cleanupPromise = terminateProcessTree(child);
+      void cleanupPromise.then(() => {
+        settle({
+          code: 1,
+          signal: 'TIMEOUT',
+          stdoutTail,
+          stderrTail,
+          timedOut: true,
+          commandText,
+          startedAt,
+        });
+      });
     }, timeoutMs);
-    timeoutTimer.unref?.();
+
+    const settle = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutTimer);
+      Promise.resolve(cleanupPromise).then(() => resolve(result));
+    };
 
     child.stdout?.on('data', (chunk) => {
       stdoutTail = appendTail(stdoutTail, chunk, tailLimit);
@@ -199,24 +289,20 @@ function runNpmScript(step) {
     });
 
     child.on('error', (error) => {
-      clearTimeout(timeoutTimer);
-      if (killGraceTimer) clearTimeout(killGraceTimer);
       stderrTail = appendTail(stderrTail, Buffer.from(error.message), tailLimit);
-      resolve({
+      settle({
         code: 1,
-        signal: null,
+        signal: timedOut ? 'TIMEOUT' : null,
         stdoutTail,
         stderrTail,
-        timedOut: false,
+        timedOut,
         commandText,
         startedAt,
       });
     });
 
     child.on('close', (code, signal) => {
-      clearTimeout(timeoutTimer);
-      if (killGraceTimer) clearTimeout(killGraceTimer);
-      resolve({
+      settle({
         code: timedOut ? 1 : code ?? 0,
         signal: timedOut ? 'TIMEOUT' : signal,
         stdoutTail,
@@ -245,10 +331,10 @@ async function runPlan(mode, steps) {
 }
 
 async function main() {
-  const mode = parseMode(process.argv.slice(2));
+  const { mode, printPlan } = parseOptions(process.argv.slice(2));
   const steps = PLANS[mode];
 
-  if (process.env.NANOFLOW_HEALTH_GATE_PRINT_PLAN === '1') {
+  if (printPlan) {
     process.stdout.write(`${JSON.stringify({ mode, steps }, null, 2)}\n`);
     return;
   }
