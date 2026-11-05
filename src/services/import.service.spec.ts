@@ -19,7 +19,7 @@ import {
   ImportOptions,
   FileValidationResult 
 } from './import.service';
-import { ExportData, EXPORT_CONFIG } from './export.service';
+import { ExportData, EXPORT_CONFIG, ExportExternalSourceLink } from './export.service';
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
 import { LayoutService } from './layout.service';
@@ -53,7 +53,11 @@ describe('ImportService', () => {
   
   beforeEach(() => {
     vi.clearAllMocks();
-    mockExternalSourceLinks = { importPointers: vi.fn().mockResolvedValue(undefined) };
+    mockExternalSourceLinks = {
+      importPointers: vi.fn(async (_links: unknown[], commit?: () => void | Promise<void>) => {
+        await commit?.();
+      }),
+    };
     
     injector = Injector.create({
       providers: [
@@ -616,15 +620,66 @@ describe('ImportService', () => {
       );
 
       const importedProject = onProjectImported.mock.calls[0][0] as Project;
-      expect(mockExternalSourceLinks.importPointers).toHaveBeenCalledWith([
-        expect.objectContaining({
+      expect(mockExternalSourceLinks.importPointers).toHaveBeenCalledWith(
+        [expect.objectContaining({
           id: expect.not.stringMatching(/^link-1$/),
           taskId: importedProject.tasks[0].id,
           targetId: '20260608112233-abcdefg',
-        }),
-      ]);
+        })],
+        expect.any(Function),
+      );
     });
     
+    it('外部来源链接导入失败时不应提交项目成功语义', async () => {
+      const project = createValidExportData().projects[0];
+      const createLink = (id: string, targetId: string, sortOrder: number): ExportExternalSourceLink => {
+        const timestamp = `2026-06-08T00:00:0${sortOrder}.000Z`;
+        return {
+          id,
+          sourceType: 'siyuan-block',
+          targetId,
+          uri: `siyuan://blocks/${targetId}`,
+          sortOrder,
+          deletedAt: null,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        };
+      };
+      const data = createValidExportData({
+        projects: [{
+          ...project,
+          tasks: [{
+            ...project.tasks[0],
+            externalSourceLinks: [
+              createLink('link-1', '20260608112233-abcdefg', 0),
+              createLink('link-2', '20260608112234-hijklmn', 1),
+            ],
+          }],
+          connections: [],
+        }],
+      });
+      const onProjectImported = vi.fn().mockResolvedValue(undefined);
+      mockExternalSourceLinks.importPointers.mockImplementationOnce(async (links: unknown[]) => {
+        expect(links).toHaveLength(2);
+        throw new Error('external source link write failed');
+      });
+
+      const result = await service.executeImport(
+        data,
+        [],
+        { conflictStrategy: 'skip' },
+        onProjectImported,
+      );
+
+      expect(result.failedCount).toBe(1);
+      expect(result.details[0]).toMatchObject({
+        action: 'failed',
+        success: false,
+        error: 'external source link write failed',
+      });
+      expect(onProjectImported).not.toHaveBeenCalled();
+    });
+
     it('应正确更新父子关系的 ID', async () => {
       const data = createValidExportData();
       const onProjectImported = vi.fn().mockResolvedValue(undefined);

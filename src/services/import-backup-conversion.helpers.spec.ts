@@ -638,6 +638,34 @@ describe('restoreRetryQueueFromBackup', () => {
     expect(retryQueue.restoreFromBackupItems).toHaveBeenCalledWith([restoredItem], 'user-1');
   });
 
+  it('runs checkpoints on both sides of the awaited retry queue write', async () => {
+    const restoredItem = createRetryQueueItem();
+    const order: string[] = [];
+    let resolveWrite!: (value: number) => void;
+    const writeCompletion = new Promise<number>(resolve => {
+      resolveWrite = resolve;
+    });
+    const retryQueue = {
+      restoreFromBackupItems: vi.fn(async () => {
+        order.push('write');
+        return await writeCompletion;
+      }),
+    };
+    const checkpoint = vi.fn(async () => {
+      order.push('checkpoint');
+    });
+
+    const pending = restoreRetryQueueFromBackup({
+      localState: { retryQueue: [restoredItem] },
+    } as BackupData, 'user-1', retryQueue, { checkpoint });
+    await vi.waitFor(() => expect(retryQueue.restoreFromBackupItems).toHaveBeenCalledTimes(1));
+    expect(order).toEqual(['checkpoint', 'write']);
+
+    resolveWrite(1);
+    await expect(pending).resolves.toBe(1);
+    expect(order).toEqual(['checkpoint', 'write', 'checkpoint']);
+  });
+
   it('returns zero when backup retry queue is missing or invalid', async () => {
     const retryQueue = {
       restoreFromBackupItems: vi.fn(),
