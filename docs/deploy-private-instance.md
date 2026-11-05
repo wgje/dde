@@ -130,16 +130,16 @@ chmod +x scripts/verify-transcribe-setup.sh
 
 ## 可选：启用定时清理
 
-系统自动清理 30 天前删除的任务和过期日志：
+初始化脚本会在 pg_cron 可用时自动配置以下任务。如果是在初始化后才启用 pg_cron，可手动执行同一组命名任务：
 
 1. Supabase 控制台 → Database → Extensions → 搜索 `pg_cron` → 启用
 2. SQL Editor 执行：
 
 ```sql
-SELECT cron.schedule('cleanup-deleted-tasks', '0 3 * * *', $$SELECT cleanup_old_deleted_tasks()$$);
-SELECT cron.schedule('cleanup-deleted-connections', '0 3 * * *', $$SELECT cleanup_old_deleted_connections()$$);
-SELECT cron.schedule('cleanup-old-logs', '0 4 * * 0', $$SELECT cleanup_old_logs()$$);
-SELECT cron.schedule('cleanup-expired-scan-records', '0 5 * * 0', $$SELECT cleanup_expired_scan_records()$$);
+SELECT cron.schedule('nanoflow-cleanup-deleted-tasks', '10 3 * * *', $$SELECT public.cleanup_old_deleted_tasks();$$);
+SELECT cron.schedule('nanoflow-cleanup-deleted-connections', '20 3 * * *', $$SELECT public.cleanup_old_deleted_connections();$$);
+SELECT cron.schedule('nanoflow-cleanup-logs', '30 3 * * *', $$SELECT public.cleanup_old_logs();$$);
+SELECT cron.schedule('nanoflow-cleanup-expired-scan-records', '0 5 * * 0', $$SELECT public.cleanup_expired_scan_records();$$);
 ```
 
 ---

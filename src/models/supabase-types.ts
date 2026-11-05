@@ -245,25 +245,9 @@ export interface Database {
       };
     };
     Functions: {
-      cleanup_old_deleted_tasks: {
-        Args: Record<string, never>;
-        Returns: number;
-      };
-      cleanup_old_logs: {
-        Args: Record<string, never>;
-        Returns: number;
-      };
-      cleanup_old_deleted_connections: {
-        Args: Record<string, never>;
-        Returns: number;
-      };
       cleanup_expired_scan_records: {
         Args: Record<string, never>;
         Returns: number;
-      };
-      cleanup_deleted_attachments: {
-        Args: { retention_days?: number };
-        Returns: { deleted_count: number; storage_paths: string[] }[];
       };
       consume_transcription_quota: {
         Args: {
@@ -280,15 +264,6 @@ export interface Database {
           p_user_id: string;
         };
         Returns: Json;
-      };
-      /** 原子递增日常任务完成计数 */
-      increment_routine_completion: {
-        Args: {
-          p_completion_id: string;
-          p_routine_id: string;
-          p_date_key: string;
-        };
-        Returns: number;
       };
       /** 获取单项目聚合同步水位 */
       get_project_sync_watermark: {
@@ -342,65 +317,10 @@ export interface Database {
         Args: Record<string, never>;
         Returns: string;
       };
-      /** 获取仪表盘统计数据 */
-      get_dashboard_stats: {
-        Args: Record<string, never>;
-        Returns: Json;
-      };
       /** 获取当前用户 ID */
       current_user_id: {
         Args: Record<string, never>;
         Returns: string;
-      };
-      /** 批量更新/插入任务 */
-      batch_upsert_tasks: {
-        Args: { p_project_id: string; p_tasks: Json[] };
-        Returns: number;
-      };
-      /** 追加任务附件 */
-      append_task_attachment: {
-        Args: { p_attachment: Json; p_task_id: string };
-        Returns: boolean;
-      };
-      /** 移除任务附件 */
-      remove_task_attachment: {
-        Args: { p_attachment_id: string; p_task_id: string };
-        Returns: boolean;
-      };
-      /** 安全删除任务（软删除 + tombstone） */
-      safe_delete_tasks: {
-        Args: { p_project_id: string; p_task_ids: string[] };
-        Returns: number;
-      };
-      /** 安全软删除项目（owner-only, idempotent） */
-      soft_delete_project: {
-        Args: { p_project_id: string };
-        Returns: boolean;
-      };
-      /** 永久清除任务 v1 */
-      purge_tasks: {
-        Args: { p_task_ids: string[] };
-        Returns: number;
-      };
-      /** 永久清除任务 v2（带项目校验） */
-      purge_tasks_v2: {
-        Args: { p_project_id: string; p_task_ids: string[] };
-        Returns: number;
-      };
-      /** 永久清除任务 v3（返回附件路径） */
-      purge_tasks_v3: {
-        Args: { p_project_id: string; p_task_ids: string[] };
-        Returns: PurgeResult;
-      };
-      /** 检查任务是否已被墓碑化 */
-      is_task_tombstoned: {
-        Args: { p_task_id: string };
-        Returns: boolean;
-      };
-      /** 检查连接是否已被墓碑化 */
-      is_connection_tombstoned: {
-        Args: { p_connection_id: string };
-        Returns: boolean;
       };
       /** 检查用户是否为项目所有者 */
       user_is_project_owner: {
@@ -431,16 +351,6 @@ export interface Database {
           retry_after_seconds: number;
           remaining_calls: number;
         }[];
-      };
-      /** 迁移单个项目到 v2 */
-      migrate_project_data_to_v2: {
-        Args: { p_project_id: string };
-        Returns: { tasks_migrated: number; connections_migrated: number; errors: string[] }[];
-      };
-      /** 迁移所有项目到 v2 */
-      migrate_all_projects_to_v2: {
-        Args: Record<string, never>;
-        Returns: { project_id: string; project_title: string; tasks_migrated: number; connections_migrated: number; errors: string[] }[];
       };
     };
     CompositeTypes: {

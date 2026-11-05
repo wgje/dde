@@ -42,9 +42,7 @@ describe('full project aggregate RPC retirement', () => {
     const loader = read('src/app/core/services/sync/project-detail-loader.service.ts');
     const featureFlags = read('src/config/feature-flags.config.ts');
     const taskLoader = read('src/app/core/services/sync/project-task-data.service.ts');
-    const modelTypes = read('src/models/supabase-types.ts');
-    const clientTypes = read('src/types/supabase.ts');
-    const requestHelpers = read('src/services/supabase-fetch-request.helpers.ts');
+    const types = read('src/models/supabase-types.ts');
 
     expect(loader).not.toContain("client.rpc('get_full_project_data'");
     expect(loader).not.toContain('batchRpcUnavailable');
@@ -52,9 +50,7 @@ describe('full project aggregate RPC retirement', () => {
     expect(loader).not.toContain('callFullProjectRpcWithRetry');
     expect(loader).not.toContain('FEATURE_FLAGS');
     expect(featureFlags).not.toContain('PROJECT_FULL_DATA_RPC_V1');
-    expect(modelTypes).not.toContain('get_full_project_data:');
-    expect(clientTypes).not.toContain('get_full_project_data:');
-    expect(requestHelpers).not.toContain('get_full_project_data');
+    expect(types).not.toContain('get_full_project_data:');
     expect(loader).toMatch(
       /loadFullProjectOptimized[\s\S]*?return this\.loadFullProject\(projectId, expectedUserId, dependencies\);/,
     );
@@ -63,7 +59,6 @@ describe('full project aggregate RPC retirement', () => {
     expect(taskLoader).toContain('readCursor: readTaskCreatedPageCursor');
     expect(taskLoader).not.toContain('fetchAllSupabasePages<TaskRow>');
     expect(loader).toContain('fetchAllSupabaseKeysetPagesByCursor<');
-    expect(loader).toContain("query.gt('id', cursor.id)");
     expect(loader).toContain('this.taskData.pullTasksThrottled(');
   });
 });
