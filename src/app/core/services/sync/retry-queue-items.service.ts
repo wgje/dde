@@ -57,6 +57,25 @@ export abstract class RetryQueueItemsLayer extends RetryQueueBase {
     return [...this.queue];
   }
 
+  getOwnerItemsSnapshot(
+    ownerUserId: string,
+  ): { status: 'unknown' } | { status: 'ready'; items: RetryQueueItem[] } {
+    if (ownerUserId !== this.getCurrentOwnerUserId() || !this.isOwnerStorageLoadConfirmed(ownerUserId)) {
+      return { status: 'unknown' };
+    }
+
+    const rawItems = [...this.hiddenQueueItems, ...this.queue];
+    const seenItemIds = new Set<string>();
+    for (const item of rawItems) {
+      if (seenItemIds.has(item.id)) return { status: 'unknown' };
+      seenItemIds.add(item.id);
+    }
+
+    const items = rawItems
+      .filter(item => this.resolveItemOwnerUserId(item) === ownerUserId);
+    return { status: 'ready', items };
+  }
+
   getProjectPendingWriteState(
     projectId: string,
     ownerUserId: string,

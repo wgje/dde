@@ -239,6 +239,92 @@ describe('RetryQueueService', () => {
     expect(service.getItems()[0]?.sourceUserId).toBe('test-user');
   });
 
+  it('getOwnerItemsSnapshot should require a confirmed current-owner load and include every owner queue view', async () => {
+    expect(service.getOwnerItemsSnapshot('test-user')).toEqual({ status: 'unknown' });
+
+    loadFromStorageSpy.mockRestore();
+    initDbSpy.mockResolvedValue(null);
+    await service.reloadFromStorageForCurrentOwner();
+    expect(service.getProjectPendingWriteState('p-snapshot', 'test-user')).toBe('clear');
+
+    const ownerTask = createTask('owner-snapshot');
+    const ownerOperationId = stableUUID('owner-snapshot-operation');
+    await expect(service.addDurably(
+      'task', 'upsert', ownerTask, 'p-snapshot', 'test-user', undefined,
+      'task_text_update', undefined, ownerOperationId,
+    )).resolves.toBe(true);
+
+    const foreignTask = createTask('foreign-snapshot');
+    service.add(
+      'task', 'upsert', foreignTask, 'p-snapshot', 'other-user', undefined,
+      'task_text_update', undefined, stableUUID('foreign-snapshot-operation'),
+    );
+    const hiddenOwnerTask = createTask('hidden-owner-snapshot');
+    (service as unknown as { hiddenQueueItems: RetryQueueItem[] }).hiddenQueueItems.push({
+      id: stableUUID('hidden-owner-snapshot-item'),
+      type: 'task',
+      operation: 'upsert',
+      data: hiddenOwnerTask,
+      projectId: 'p-snapshot',
+      retryCount: 0,
+      createdAt: Date.now(),
+      sourceUserId: 'test-user',
+      operationId: stableUUID('hidden-owner-snapshot-operation'),
+      writeIntent: 'task_text_update',
+    });
+    const legacyTask = createTask('legacy-owner-snapshot');
+    (service as unknown as { hiddenQueueItems: RetryQueueItem[] }).hiddenQueueItems.push({
+      id: stableUUID('legacy-owner-snapshot-item'),
+      type: 'task',
+      operation: 'upsert',
+      data: legacyTask,
+      projectId: 'p-snapshot',
+      retryCount: 0,
+      createdAt: Date.now(),
+      operationId: stableUUID('legacy-owner-snapshot-operation'),
+      writeIntent: 'task_text_update',
+    });
+
+    const snapshot = service.getOwnerItemsSnapshot('test-user');
+    expect(snapshot.status).toBe('ready');
+    if (snapshot.status === 'ready') {
+      expect(snapshot.items.map(item => item.data.id).sort()).toEqual(
+        [ownerTask.id, hiddenOwnerTask.id].sort(),
+      );
+      expect(snapshot.items).toContainEqual(expect.objectContaining({
+        data: expect.objectContaining({ id: ownerTask.id }),
+        projectId: 'p-snapshot',
+        sourceUserId: 'test-user',
+        operationId: ownerOperationId,
+        writeIntent: 'task_text_update',
+      }));
+    }
+    expect(service.getOwnerItemsSnapshot('other-user')).toEqual({ status: 'unknown' });
+
+    const queueViews = service as unknown as {
+      queue: RetryQueueItem[];
+      hiddenQueueItems: RetryQueueItem[];
+    };
+    const visibleOwnerItem = queueViews.queue.find(item => item.data.id === ownerTask.id);
+    const hiddenForeignItem = queueViews.hiddenQueueItems.find(item => item.data.id === foreignTask.id);
+    expect(visibleOwnerItem).toBeDefined();
+    expect(hiddenForeignItem).toBeDefined();
+    const hiddenForeignId = hiddenForeignItem?.id;
+    if (!visibleOwnerItem || !hiddenForeignItem || !hiddenForeignId) return;
+    hiddenForeignItem.id = visibleOwnerItem.id;
+    expect(service.getOwnerItemsSnapshot('test-user')).toEqual({ status: 'unknown' });
+    hiddenForeignItem.id = hiddenForeignId;
+
+    const duplicateOwnerItem = queueViews.hiddenQueueItems.find(item => item.data.id === hiddenOwnerTask.id);
+    expect(duplicateOwnerItem).toBeDefined();
+    if (!duplicateOwnerItem) return;
+    queueViews.queue.push({
+      ...duplicateOwnerItem,
+      operationId: stableUUID('duplicate-owner-snapshot-operation'),
+    });
+    expect(service.getOwnerItemsSnapshot('test-user')).toEqual({ status: 'unknown' });
+  });
+
   it('显式传入来源用户时应优先使用捕获 owner，避免晚到失败被当前 auth 污染', () => {
     authServiceMock.currentUserId.mockReturnValue('new-user');
 
