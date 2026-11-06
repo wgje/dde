@@ -308,6 +308,35 @@ describe('PreferenceService', () => {
       expect(mockThemeService.loadUserTheme).toHaveBeenCalled();
       expect(mockSyncService.loadUserPreferences).not.toHaveBeenCalled();
     });
+
+    it('late A cloud proof response cannot overwrite the current B owner key', async () => {
+      await Promise.resolve();
+      expect(mockSyncService.loadUserPreferences).not.toHaveBeenCalled();
+
+      const aProof = '2025-01-02T00:00:00.000Z';
+      const bProof = '2025-01-01T00:00:00.000Z';
+      const bProofKey = 'nanoflow.preference.user-b.lastBackupProofAt';
+      let resolveA!: (value: { lastBackupProofAt: string }) => void;
+      const pendingA = new Promise<{ lastBackupProofAt: string }>(resolve => {
+        resolveA = resolve;
+      });
+      mockSyncService.loadUserPreferences.mockReturnValueOnce(pendingA);
+
+      currentUserId = 'user-a';
+      const publicLoad = service.loadUserPreferences();
+      await vi.waitFor(() => {
+        expect(mockSyncService.loadUserPreferences).toHaveBeenCalledTimes(1);
+        expect(mockSyncService.loadUserPreferences).toHaveBeenCalledWith('user-a');
+      });
+
+      currentUserId = 'user-b';
+      localStorage.setItem(bProofKey, bProof);
+      resolveA({ lastBackupProofAt: aProof });
+      await expect(publicLoad).resolves.toBeUndefined();
+
+      expect(localStorage.getItem(bProofKey)).toBe(bProof);
+      expect(localStorage.getItem('nanoflow.preference.user-a.lastBackupProofAt')).toBeNull();
+    });
   });
 
   describe('local backup cloud sync', () => {
