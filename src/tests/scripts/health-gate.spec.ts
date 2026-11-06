@@ -8,7 +8,7 @@ const projectRoot = process.cwd();
 const runnerPath = path.join(projectRoot, 'scripts', 'run-health-gate.cjs');
 const tempRoots: string[] = [];
 const dailyScripts = ['quality:baseline', 'perf:guard', 'docs:validate', 'codegraph:adapter:gate', 'typecheck', 'test:run'];
-const strictScripts = ['quality:baseline:ratchet', ...dailyScripts.slice(1, -1), 'test:run:verify'];
+const strictScripts = ['quality:baseline:ratchet', ...dailyScripts.slice(1, -1), 'quality:guard:migration-dry-run', 'test:run:verify'];
 const fullScripts = [...strictScripts.slice(0, -1), 'test:run:full', 'test:e2e'];
 const toCalls = (scripts: string[]) => scripts.map((script) => `run ${script}`);
 const dailyCalls = toCalls(dailyScripts);
@@ -194,6 +194,17 @@ describe('health gate runner', () => {
     const { result, calls } = runHealthWithFakeNpm([`--mode=${mode}`]);
     expect(result.status, result.stderr).toBe(0);
     expect(calls).toEqual(toCalls([...scripts]));
+  }, 20_000);
+
+  it('stops strict health at migration evidence failure before its matrix', () => {
+    const { result, calls } = runHealthWithFakeNpm(['--mode=strict'], {
+      failOn: 'quality:guard:migration-dry-run',
+      failCode: 29,
+    });
+    expect(result.status).toBe(29);
+    expect(calls).toEqual(toCalls(strictScripts.slice(0, -1)));
+    expect(result.stderr).toContain('[health-gate] FAIL migration dry-run evidence');
+    expect(result.stderr).not.toContain('test:run:verify');
   }, 20_000);
 
   it('runs the daily health scripts in order through one runner', () => {

@@ -42,6 +42,10 @@ const STRICT_STEPS = [
   },
   ...DAILY_STEPS.slice(1, -1),
   {
+    label: 'migration dry-run evidence',
+    script: 'quality:guard:migration-dry-run',
+  },
+  {
     label: 'verification test matrix',
     script: 'test:run:verify',
   },
