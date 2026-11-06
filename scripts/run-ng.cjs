@@ -123,7 +123,40 @@ function quoteCmdArg(value) {
   if (!/[\s"%&()<>^|]/.test(text)) return text;
   return `"${text.replace(/(["^&()<>|])/g, '^$1').replace(/%/g, '^%')}"`;
 }
-
+function resolveWindowsNpxCli() {
+  let runtimeDir;
+  try {
+    runtimeDir = fs.realpathSync.native(path.dirname(process.execPath));
+  } catch {
+    throw new Error('run-ng-node22-launcher-unavailable');
+  }
+  const segments = ['node_modules', 'npm', 'bin', 'npx-cli.js'];
+  const candidate = path.resolve(runtimeDir, ...segments);
+  const relative = path.relative(runtimeDir, candidate);
+  if (!relative || relative === '..' || path.isAbsolute(relative) || relative.startsWith(`..${path.sep}`)) {
+    throw new Error('run-ng-node22-launcher-invalid');
+  }
+  let current = runtimeDir;
+  for (let index = 0; index < segments.length; index += 1) {
+    current = path.join(current, segments[index]);
+    let stat;
+    try {
+      stat = fs.lstatSync(current);
+    } catch {
+      throw new Error('run-ng-node22-launcher-unavailable');
+    }
+    const final = index === segments.length - 1;
+    if (stat.isSymbolicLink() || (final ? !stat.isFile() : !stat.isDirectory())) {
+      throw new Error('run-ng-node22-launcher-invalid');
+    }
+  }
+  try {
+    fs.closeSync(fs.openSync(candidate, 'r'));
+  } catch {
+    throw new Error('run-ng-node22-launcher-unavailable');
+  }
+  return candidate;
+}
 function runWithSignalForwarding(nodeBin, scriptArgs) {
   const childEnv = buildChildEnv();
   const startedAt = Date.now();
@@ -218,15 +251,16 @@ async function main() {
         if (!fs.existsSync(node22Path)) node22Path = null;
       }
     }
-
     // 方法2：使用 npx 下载并运行 Node 22（作为后备）
     if (!node22Path) {
       console.log('[run-ng] Node 24+ 检测到（Angular CLI 不支持），使用 npx node@22 运行构建...');
-      const npxCmd = process.platform === 'win32' ? 'npx.cmd' : 'npx';
-      runWithSignalForwarding(npxCmd, ['-y', 'node@22.14.0', '--', ngPath, ...resolvedArgs]);
+      const npxCmd = process.platform === 'win32' ? process.execPath : 'npx';
+      const npxArgs = process.platform === 'win32'
+        ? [resolveWindowsNpxCli(), '-y', 'node@22.14.0', '--', ngPath, ...resolvedArgs]
+        : ['-y', 'node@22.14.0', '--', ngPath, ...resolvedArgs];
+      runWithSignalForwarding(npxCmd, npxArgs);
       return;
     }
-
     console.log(`[run-ng] Node 24+ 检测到（Angular CLI 不支持），使用本地 Node 22: ${node22Path}`);
     runWithSignalForwarding(node22Path, [ngPath, ...resolvedArgs]);
     return;
