@@ -52,8 +52,8 @@ console.log(`✓ All ${CLOUDFLARE_MIGRATION_FLAGS.length} migration flags consum
 
 // 2. 文档中必须列出所有迁移 flag
 if (!fs.existsSync(PLAN)) {
-  console.warn('⚠ docs/cloudflare-migration-plan.md not found — skipping doc snapshot diff');
-  process.exit(0);
+  console.error('✗ docs/cloudflare-migration-plan.md missing - env flag drift cannot be validated');
+  process.exit(1);
 }
 
 const planText = fs.readFileSync(PLAN, 'utf-8');
