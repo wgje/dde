@@ -66,6 +66,7 @@ describe('TaskAttributeService attention meta', () => {
   let recordAndUpdate: ReturnType<typeof vi.fn>;
   let recordAndUpdateDebounced: ReturnType<typeof vi.fn>;
   let recordAndUpdateDurably: ReturnType<typeof vi.fn>;
+  let recordAndUpdateProjectDurably: ReturnType<typeof vi.fn>;
   let handleTaskStatusChange: ReturnType<typeof vi.fn>;
   let getTask: ReturnType<typeof vi.fn>;
 
@@ -73,6 +74,7 @@ describe('TaskAttributeService attention meta', () => {
     recordAndUpdate = vi.fn();
     recordAndUpdateDebounced = vi.fn();
     recordAndUpdateDurably = vi.fn().mockResolvedValue(true);
+    recordAndUpdateProjectDurably = vi.fn().mockResolvedValue(true);
     handleTaskStatusChange = vi.fn();
     getTask = vi.fn(() => createTask());
     const injector = Injector.create({
@@ -80,8 +82,13 @@ describe('TaskAttributeService attention meta', () => {
         TaskAttributeService,
         { provide: LayoutService, useValue: { detectIncomplete: vi.fn(() => false) } },
         { provide: LoggerService, useValue: { category: () => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }) } },
-        { provide: ProjectStateService, useValue: { getTask } },
-        { provide: TaskRecordTrackingService, useValue: { recordAndUpdate, recordAndUpdateDebounced, recordAndUpdateDurably } },
+        { provide: ProjectStateService, useValue: {
+          getTask,
+          getProjectWithCurrentData: vi.fn(() => createProject(createTask({ id: 'shared-task' }))),
+        } },
+        { provide: TaskRecordTrackingService, useValue: {
+          recordAndUpdate, recordAndUpdateDebounced, recordAndUpdateDurably, recordAndUpdateProjectDurably,
+        } },
         { provide: ParkingService, useValue: { handleTaskStatusChange } },
         { provide: ToastService, useValue: { info: vi.fn() } },
       ],
@@ -247,6 +254,21 @@ describe('TaskAttributeService attention meta', () => {
     }));
     expect(updated.tasks.find(task => task.id === 'other-task')?.parkingMeta).toBeNull();
     vi.useRealTimers();
+  });
+
+  it('explicit parking metadata mutations target only the captured project recorder', async () => {
+    const updates = [{ taskId: 'shared-task', parkingMeta: null }];
+
+    await service.updateTaskParkingMetaDurably('project-a', 'shared-task', null);
+    await service.updateTaskParkingMetaBatchDurably('project-a', updates);
+
+    expect(recordAndUpdateProjectDurably).toHaveBeenNthCalledWith(
+      1, 'project-a', expect.any(Function), { updateType: 'content' },
+    );
+    expect(recordAndUpdateProjectDurably).toHaveBeenNthCalledWith(
+      2, 'project-a', expect.any(Function), { updateType: 'content' },
+    );
+    expect(recordAndUpdateDurably).not.toHaveBeenCalled();
   });
 
   it('updateTaskPositionDurably 应通过 durable-first 记录器更新坐标', async () => {
