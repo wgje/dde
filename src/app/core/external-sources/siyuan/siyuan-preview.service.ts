@@ -16,13 +16,34 @@ import {
 } from './siyuan-provider.interface';
 
 interface ActivePreviewRequest {
+  key: string;
   ownerUserId: string;
   linkId: string;
   blockId: string;
   controller: AbortController;
   requestSeq: number;
+  lifecycleGeneration: number;
   cacheGeneration: number;
+  subscribers: Set<PreviewRequestSubscriber>;
+  retainWithoutSubscribers: boolean;
+  promise: Promise<SiyuanPreviewResult>;
+  settled: boolean;
 }
+
+interface PreviewRequestSubscriber {
+  id: symbol;
+  ownerUserId: string;
+  lifecycleGeneration: number;
+  cancelled: boolean;
+  settled: boolean;
+  flight?: ActivePreviewRequest;
+  cancellationPromise: Promise<SiyuanPreviewResult>;
+  resolveCancellation(result: SiyuanPreviewResult): void;
+}
+
+export type SiyuanPreviewPromise = Promise<SiyuanPreviewResult> & {
+  cancel?: () => void;
+};
 
 @Injectable({ providedIn: 'root' })
 export class SiyuanPreviewService {
@@ -31,10 +52,11 @@ export class SiyuanPreviewService {
   private readonly directProvider = inject(SiyuanDirectProvider);
   private readonly logger = inject(LoggerService).category('SiyuanPreview');
   private readonly sessionRuntimeReset = inject(SessionRuntimeResetRegistry);
-  private activeRequest?: ActivePreviewRequest;
   private requestSeq = 0;
+  private lifecycleGeneration = 0;
   private lastExtensionConfigIssuedAt = 0;
-  private readonly inFlight = new Map<string, Promise<SiyuanPreviewResult>>();
+  private readonly inFlight = new Map<string, ActivePreviewRequest>();
+  private readonly subscribers = new Set<PreviewRequestSubscriber>();
 
   constructor() {
     this.sessionRuntimeReset.register('SiyuanPreviewService', () => this.resetSessionRuntime());
@@ -104,13 +126,39 @@ export class SiyuanPreviewService {
     return this.isOwnerCurrent(ownerUserId) ? result : { kind: 'unavailable' };
   }
 
-  async preview(link: ExternalSourceLink, options?: { forceRefresh?: boolean }): Promise<SiyuanPreviewResult> {
+  preview(link: ExternalSourceLink, options?: { forceRefresh?: boolean }): SiyuanPreviewPromise {
     const ownerUserId = this.cache.ownerId();
-    const requestSeq = this.requestSeq;
+    let resolveCancellation!: (result: SiyuanPreviewResult) => void;
+    const cancellationPromise = new Promise<SiyuanPreviewResult>(resolve => {
+      resolveCancellation = resolve;
+    });
+    const subscriber: PreviewRequestSubscriber = {
+      id: Symbol('siyuan-preview-subscriber'),
+      ownerUserId,
+      lifecycleGeneration: this.lifecycleGeneration,
+      cancelled: false,
+      settled: false,
+      cancellationPromise,
+      resolveCancellation,
+    };
+    this.subscribers.add(subscriber);
+    const work = this.loadPreview(link, options, subscriber);
+    const promise = Promise.race([work, cancellationPromise])
+      .finally(() => this.finishSubscriber(subscriber));
+    return Object.assign(promise, {
+      cancel: () => this.cancelSubscriber(subscriber),
+    });
+  }
+
+  private async loadPreview(
+    link: ExternalSourceLink,
+    options: { forceRefresh?: boolean } | undefined,
+    subscriber: PreviewRequestSubscriber,
+  ): Promise<SiyuanPreviewResult> {
+    const { ownerUserId } = subscriber;
     const cacheGeneration = this.cache.previewGeneration(link.id, ownerUserId);
     const cached = await this.cache.getPreview(link.id, link.targetId, ownerUserId);
-    if (!this.isOwnerCurrent(ownerUserId)
-      || this.requestSeq !== requestSeq
+    if (!this.isSubscriberCurrent(subscriber)
       || this.cache.previewGeneration(link.id, ownerUserId) !== cacheGeneration) {
       return { status: 'loading' };
     }
@@ -118,7 +166,7 @@ export class SiyuanPreviewService {
       const stale = Date.now() - new Date(cached.fetchedAt).getTime() > SIYUAN_CONFIG.CACHE_STALE_MS;
       // 只在缓存过期时触发后台刷新，遵守 CACHE_STALE_MS 预算并避免每次悬停都打 API。
       if (stale) {
-        void this.refreshDeduped(link, undefined, false, ownerUserId, cacheGeneration).catch(error => {
+        void this.refreshDeduped(link, undefined, false, ownerUserId, cacheGeneration, undefined, true).catch(error => {
           this.logger.debug('后台刷新思源预览失败，继续使用本机缓存', {
             linkId: link.id,
             blockId: link.targetId,
@@ -134,13 +182,18 @@ export class SiyuanPreviewService {
       options?.forceRefresh === true,
       ownerUserId,
       cacheGeneration,
+      subscriber,
     );
   }
 
   abortActive(): void {
-    this.requestSeq += 1;
-    this.activeRequest?.controller.abort();
-    this.activeRequest = undefined;
+    this.lifecycleGeneration += 1;
+    for (const subscriber of [...this.subscribers]) {
+      this.cancelSubscriber(subscriber);
+    }
+    for (const flight of [...this.inFlight.values()]) {
+      this.abortFlight(flight);
+    }
   }
 
   private refreshDeduped(
@@ -149,45 +202,69 @@ export class SiyuanPreviewService {
     forceRefresh: boolean,
     ownerUserId: string,
     cacheGeneration: number,
+    subscriber?: PreviewRequestSubscriber,
+    retainWithoutSubscribers = false,
   ): Promise<SiyuanPreviewResult> {
     const key = this.previewRequestKey(link, forceRefresh, ownerUserId, cacheGeneration);
-    const existing = this.inFlight.get(key);
-    if (existing) return existing;
+    let flight = this.inFlight.get(key);
+    if (!flight) {
+      flight = {
+        key,
+        ownerUserId,
+        linkId: link.id,
+        blockId: link.targetId,
+        controller: new AbortController(),
+        requestSeq: ++this.requestSeq,
+        lifecycleGeneration: this.lifecycleGeneration,
+        cacheGeneration,
+        subscribers: new Set(),
+        retainWithoutSubscribers,
+        promise: Promise.resolve({ status: 'loading' }),
+        settled: false,
+      };
+      this.inFlight.set(key, flight);
+      const currentFlight = flight;
+      flight.promise = this.executeRefresh(link, fallback, currentFlight).finally(() => {
+        this.finishFlight(currentFlight);
+      });
+    } else if (retainWithoutSubscribers) {
+      flight.retainWithoutSubscribers = true;
+    }
 
-    const request = this.refresh(link, fallback, ownerUserId, cacheGeneration).finally(() => {
-      if (this.inFlight.get(key) === request) {
-        this.inFlight.delete(key);
-      }
-    });
-    this.inFlight.set(key, request);
-    return request;
+    if (subscriber && this.isSubscriberCurrent(subscriber)) {
+      flight.subscribers.add(subscriber);
+      subscriber.flight = flight;
+    }
+    return flight.promise;
   }
 
-  async refresh(
+  refresh(
     link: ExternalSourceLink,
     fallback?: LocalSiyuanPreviewCache,
     ownerUserId = this.cache.ownerId(),
     cacheGeneration = this.cache.previewGeneration(link.id, ownerUserId),
   ): Promise<SiyuanPreviewResult> {
-    if (!this.isOwnerCurrent(ownerUserId)
-      || this.cache.previewGeneration(link.id, ownerUserId) !== cacheGeneration) {
-      return { status: 'loading' };
-    }
-    const { controller, requestSeq } = this.beginPreviewRequest(link, ownerUserId, cacheGeneration);
+    return this.refreshDeduped(link, fallback, true, ownerUserId, cacheGeneration, undefined, true);
+  }
 
+  private async executeRefresh(
+    link: ExternalSourceLink,
+    fallback: LocalSiyuanPreviewCache | undefined,
+    flight: ActivePreviewRequest,
+  ): Promise<SiyuanPreviewResult> {
+    if (!this.isRequestCurrent(link, flight)) return { status: 'loading' };
     try {
-      const provider = await this.selectProvider(ownerUserId);
-      if (!this.isOwnerCurrent(ownerUserId)) {
-        return { status: 'loading' };
-      }
+      const provider = await this.selectProvider(flight.ownerUserId);
+      if (!this.isRequestCurrent(link, flight)) return { status: 'loading' };
       if (!provider) {
         return fallback
           ? { status: 'cache-only', preview: fallback, errorCode: 'extension-unavailable', stale: true, origin: 'cache' }
           : { status: 'error', errorCode: 'extension-unavailable' };
       }
-      const preview = await this.getProviderPreview(provider, link.targetId, controller.signal, ownerUserId);
-      if (!this.isCurrent(link, controller, requestSeq, preview.blockId, ownerUserId)) {
-        return this.isOwnerCurrent(ownerUserId) && fallback
+      const preview = await this.getProviderPreview(provider, link.targetId, flight.controller.signal, flight.ownerUserId);
+      if (!this.isRequestCurrent(link, flight)) return { status: 'loading' };
+      if (preview.blockId !== link.targetId) {
+        return fallback
           ? { status: 'cache-only', preview: fallback, stale: true, origin: 'cache' }
           : { status: 'loading' };
       }
@@ -197,13 +274,13 @@ export class SiyuanPreviewService {
         fetchedAt: new Date().toISOString(),
         fetchStatus: 'ready',
       };
-      const saved = await this.cache.savePreview(cache, ownerUserId, cacheGeneration);
-      if (!saved || !this.isCurrent(link, controller, requestSeq, preview.blockId, ownerUserId)) {
+      const saved = await this.cache.savePreview(cache, flight.ownerUserId, flight.cacheGeneration);
+      if (!saved || !this.isRequestCurrent(link, flight)) {
         return { status: 'loading' };
       }
       return { status: 'ready', preview: cache, origin: 'network' };
     } catch (error) {
-      if (!this.isRequestCurrent(link, controller, requestSeq, ownerUserId)) {
+      if (!this.isRequestCurrent(link, flight)) {
         return { status: 'loading' };
       }
       const errorCode = error instanceof SiyuanProviderError ? error.code : 'unknown';
@@ -211,25 +288,6 @@ export class SiyuanPreviewService {
         ? { status: 'cache-only', preview: fallback, errorCode, stale: true, origin: 'cache' }
         : { status: 'error', errorCode };
     }
-  }
-
-  private beginPreviewRequest(
-    link: ExternalSourceLink,
-    ownerUserId: string,
-    cacheGeneration: number,
-  ): Pick<ActivePreviewRequest, 'controller' | 'requestSeq'> {
-    const requestSeq = this.requestSeq;
-    this.activeRequest?.controller.abort();
-    const controller = new AbortController();
-    this.activeRequest = {
-      ownerUserId,
-      linkId: link.id,
-      blockId: link.targetId,
-      controller,
-      requestSeq,
-      cacheGeneration,
-    };
-    return { controller, requestSeq };
   }
 
   private async selectProvider(ownerUserId: string): Promise<SiyuanPreviewProvider | null> {
@@ -266,30 +324,62 @@ export class SiyuanPreviewService {
     return `${ownerUserId}:${link.id}:${link.targetId}:${cacheGeneration}:${forceRefresh ? 'force' : 'normal'}`;
   }
 
-  private isCurrent(
-    link: ExternalSourceLink,
-    controller: AbortController,
-    requestSeq: number,
-    blockId: string,
-    ownerUserId: string,
-  ): boolean {
-    return this.isRequestCurrent(link, controller, requestSeq, ownerUserId)
-      && blockId === link.targetId;
+  private isRequestCurrent(link: ExternalSourceLink, flight: ActivePreviewRequest): boolean {
+    return !flight.controller.signal.aborted
+      && this.inFlight.get(flight.key) === flight
+      && flight.lifecycleGeneration === this.lifecycleGeneration
+      && this.isOwnerCurrent(flight.ownerUserId)
+      && flight.linkId === link.id
+      && flight.blockId === link.targetId
+      && this.cache.previewGeneration(link.id, flight.ownerUserId) === flight.cacheGeneration;
   }
 
-  private isRequestCurrent(
-    link: ExternalSourceLink,
-    controller: AbortController,
-    requestSeq: number,
-    ownerUserId: string,
-  ): boolean {
-    return this.isOwnerCurrent(ownerUserId)
-      && this.activeRequest?.ownerUserId === ownerUserId
-      && this.activeRequest.linkId === link.id
-      && this.activeRequest.blockId === link.targetId
-      && this.activeRequest.controller === controller
-      && this.activeRequest.requestSeq === requestSeq
-      && this.cache.previewGeneration(link.id, ownerUserId) === this.activeRequest.cacheGeneration;
+  private isSubscriberCurrent(subscriber: PreviewRequestSubscriber): boolean {
+    return !subscriber.cancelled
+      && !subscriber.settled
+      && subscriber.lifecycleGeneration === this.lifecycleGeneration
+      && this.isOwnerCurrent(subscriber.ownerUserId);
+  }
+
+  private cancelSubscriber(subscriber: PreviewRequestSubscriber): void {
+    if (subscriber.cancelled || subscriber.settled) return;
+    subscriber.cancelled = true;
+    subscriber.settled = true;
+    this.subscribers.delete(subscriber);
+    subscriber.resolveCancellation({ status: 'loading' });
+    this.detachSubscriber(subscriber);
+  }
+
+  private finishSubscriber(subscriber: PreviewRequestSubscriber): void {
+    if (subscriber.cancelled || subscriber.settled) return;
+    subscriber.settled = true;
+    this.subscribers.delete(subscriber);
+    this.detachSubscriber(subscriber);
+  }
+
+  private detachSubscriber(subscriber: PreviewRequestSubscriber): void {
+    const flight = subscriber.flight;
+    subscriber.flight = undefined;
+    if (!flight) return;
+    flight.subscribers.delete(subscriber);
+    if (!flight.settled && !flight.retainWithoutSubscribers && flight.subscribers.size === 0) {
+      this.abortFlight(flight);
+    }
+  }
+
+  private abortFlight(flight: ActivePreviewRequest): void {
+    if (flight.settled) return;
+    if (this.inFlight.get(flight.key) === flight) this.inFlight.delete(flight.key);
+    flight.controller.abort();
+  }
+
+  private finishFlight(flight: ActivePreviewRequest): void {
+    flight.settled = true;
+    if (this.inFlight.get(flight.key) === flight) this.inFlight.delete(flight.key);
+    for (const subscriber of flight.subscribers) {
+      if (subscriber.flight === flight) subscriber.flight = undefined;
+    }
+    flight.subscribers.clear();
   }
 
   private isOwnerCurrent(ownerUserId: string): boolean {
@@ -298,6 +388,5 @@ export class SiyuanPreviewService {
 
   private resetSessionRuntime(): void {
     this.abortActive();
-    this.inFlight.clear();
   }
 }

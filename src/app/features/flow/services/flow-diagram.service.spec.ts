@@ -410,6 +410,9 @@ describe('FlowDiagramService', () => {
   it('clears a held token on disposal while ordinary resize recovery leaves readiness intact', () => {
     attachDiagram();
     const commands = TestBed.inject(FlowCommandService);
+    const template = TestBed.inject(FlowTemplateService) as unknown as {
+      closeSiyuanPopover: ReturnType<typeof vi.fn>;
+    };
     commands.markViewReady(mockProjectState.captureActiveProjectOwner());
     recoveryInternals().recovery.armResizeRecovery();
     expect(service.isInitialized).toBe(true);
@@ -418,6 +421,7 @@ describe('FlowDiagramService', () => {
     (service as unknown as { diagram: null }).diagram = null;
     const token = recoveryInternals().beginHardRecovery()!;
     service.dispose();
+    expect(template.closeSiyuanPopover).toHaveBeenCalledWith(container);
     expect(recoveryInternals().releaseHardRecovery(token)).toBe(false);
     expect(commands.isViewReady()).toBe(false);
   });

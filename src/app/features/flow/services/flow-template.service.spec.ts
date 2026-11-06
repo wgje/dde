@@ -4,6 +4,7 @@ import * as go from 'gojs';
 import { LoggerService } from '../../../../services/logger.service';
 import { ThemeService } from '../../../../services/theme.service';
 import { UiStateService } from '../../../../services/ui-state.service';
+import type { ExternalSourceLink } from '../../../core/external-sources/external-source.model';
 import { KnowledgeAnchorPopoverService } from '../../../shared/components/knowledge-anchor/knowledge-anchor-popover.service';
 import { FlowDiagramConfigService } from './flow-diagram-config.service';
 import { FlowTemplateService } from './flow-template.service';
@@ -31,10 +32,22 @@ function findMockObject(root: unknown, predicate: (value: MockGoObject) => boole
 describe('FlowTemplateService sidecar template', () => {
   let isMobile = false;
   let service: FlowTemplateService;
+  let siyuanPopover: {
+    scheduleOpen: ReturnType<typeof vi.fn>;
+    scheduleClose: ReturnType<typeof vi.fn>;
+    openNow: ReturnType<typeof vi.fn>;
+    closeForOwner: ReturnType<typeof vi.fn>;
+  };
 
   beforeEach(() => {
     flowTemplateEventHandlers.onSidecarToggle = undefined;
     isMobile = false;
+    siyuanPopover = {
+      scheduleOpen: vi.fn(),
+      scheduleClose: vi.fn(),
+      openNow: vi.fn(),
+      closeForOwner: vi.fn(),
+    };
     const injector = Injector.create({
       providers: [
         FlowTemplateService,
@@ -47,7 +60,7 @@ describe('FlowTemplateService sidecar template', () => {
           },
         },
         { provide: ThemeService, useValue: { theme: () => 'default', isDark: () => false } },
-        { provide: KnowledgeAnchorPopoverService, useValue: { scheduleOpen: vi.fn(), scheduleClose: vi.fn(), openNow: vi.fn(), close: vi.fn() } },
+        { provide: KnowledgeAnchorPopoverService, useValue: siyuanPopover },
       ],
     });
     service = injector.get(FlowTemplateService);
@@ -126,5 +139,58 @@ describe('FlowTemplateService sidecar template', () => {
 
     expect(event.handled).toBe(true);
     expect(sidecarToggleHandler).toHaveBeenCalledWith('task-1', nodePart);
+  });
+
+  it('passes diagram div ownership separately from the virtual GoJS popover origin', () => {
+    const link: ExternalSourceLink = {
+      id: 'link-1',
+      taskId: 'task-1',
+      sourceType: 'siyuan-block',
+      targetId: '20260426123456-abc1234',
+      uri: 'siyuan://blocks/20260426123456-abc1234',
+      sortOrder: 0,
+      deletedAt: null,
+      createdAt: '2026-05-18T00:00:00.000Z',
+      updatedAt: '2026-05-18T00:00:00.000Z',
+    };
+    const diagramDiv = document.createElement('div');
+    const diagram = {
+      div: diagramDiv,
+      scale: 2,
+      transformDocToView: () => ({ x: 10, y: 20 }),
+    };
+    const event = { diagram, event: {}, handled: false } as unknown as go.InputEvent;
+    const shape = { fill: '', stroke: '' };
+    const object = {
+      part: { data: { siyuanLink: link } },
+      getDocumentBounds: () => ({ isReal: () => true, x: 1, y: 2, width: 4, height: 5 }),
+      findObject: () => shape,
+    } as unknown as go.GraphObject;
+    const handlers = service as unknown as {
+      handleSiyuanBadgeMouseEnter(event: go.InputEvent, object: go.GraphObject): void;
+      handleSiyuanBadgeMouseLeave(event: go.InputEvent, object: go.GraphObject): void;
+      handleSiyuanBadgeClick(event: go.InputEvent, object: go.GraphObject): void;
+    };
+
+    handlers.handleSiyuanBadgeMouseEnter(event, object);
+    handlers.handleSiyuanBadgeMouseLeave(event, object);
+    handlers.handleSiyuanBadgeClick(event, object);
+    service.closeSiyuanPopover(diagramDiv);
+
+    const [, virtualOrigin, openOwner] = siyuanPopover.scheduleOpen.mock.calls[0] ?? [];
+    expect(virtualOrigin).toEqual(expect.objectContaining({ x: 10, y: 20, width: 8, height: 10 }));
+    expect(virtualOrigin).not.toBe(diagramDiv);
+    expect(openOwner).toBe(diagramDiv);
+    expect(siyuanPopover.scheduleClose).toHaveBeenCalledWith(diagramDiv);
+    expect(siyuanPopover.openNow).toHaveBeenCalledWith(link, virtualOrigin, diagramDiv);
+    expect(siyuanPopover.closeForOwner).toHaveBeenCalledWith(diagramDiv);
+  });
+
+  it('does not globally close a popover when a flow diagram owner closes', () => {
+    const owner = document.createElement('div');
+
+    service.closeSiyuanPopover(owner);
+
+    expect(siyuanPopover.closeForOwner).toHaveBeenCalledWith(owner);
   });
 });

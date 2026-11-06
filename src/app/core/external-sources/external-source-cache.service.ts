@@ -133,8 +133,8 @@ export class ExternalSourceCacheService {
   async upsertPendingLink(
     link: ExternalSourceLink,
     options: { resetRetryCount?: boolean } = {},
+    userId = this.ownerId(),
   ): Promise<PendingExternalSourceLink> {
-    const userId = this.ownerId();
     const mirrorNext = this.upsertPendingLinkIntoList(
       this.readPendingMirror(userId),
       link,
@@ -168,24 +168,29 @@ export class ExternalSourceCacheService {
     }
   }
 
-  async removePendingLink(linkId: string, operationId: string): Promise<boolean> {
-    return this.settlePendingOperation(linkId, operationId);
+  async removePendingLink(
+    linkId: string,
+    operationId: string,
+    userId = this.ownerId(),
+  ): Promise<boolean> {
+    return this.settlePendingOperation(linkId, operationId, undefined, userId);
   }
 
   async restorePendingLinkSnapshot(
     linkId: string,
     operationId: string,
     previous: PendingExternalSourceLink | undefined,
+    userId = this.ownerId(),
   ): Promise<boolean> {
-    return this.settlePendingOperation(linkId, operationId, previous);
+    return this.settlePendingOperation(linkId, operationId, previous, userId);
   }
 
   private async settlePendingOperation(
     linkId: string,
     operationId: string,
     previous?: PendingExternalSourceLink,
+    userId = this.ownerId(),
   ): Promise<boolean> {
-    const userId = this.ownerId();
     const mirrorCurrent = this.readPendingMirror(userId);
     const mirrorOutcome = this.replacePendingSnapshot(mirrorCurrent, linkId, operationId, previous);
     let rollbackMirror = mirrorCurrent;
@@ -357,15 +362,15 @@ export class ExternalSourceCacheService {
     return true;
   }
 
-  async deletePreview(linkId: string, blockId: string): Promise<void> {
-    await Promise.all([
-      del(this.previewKey(linkId, blockId)),
-      del(this.legacyPreviewKey(linkId, blockId)),
-    ]);
+  async deletePreview(linkId: string, blockId: string, userId = this.ownerId()): Promise<void> {
+    const deletions = [del(this.previewKey(linkId, blockId, userId))];
+    if (userId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+      deletions.push(del(this.legacyPreviewKey(linkId, blockId)));
+    }
+    await Promise.all(deletions);
   }
 
-  async deletePreviewsForLink(linkId: string): Promise<void> {
-    const ownerUserId = this.ownerId();
+  async deletePreviewsForLink(linkId: string, ownerUserId = this.ownerId()): Promise<void> {
     this.invalidatePreviewGeneration(linkId, ownerUserId);
     const allKeys = await keys();
     const prefix = `siyuan-preview-cache:${ownerUserId}:${linkId}:`;
@@ -375,7 +380,8 @@ export class ExternalSourceCacheService {
         .filter(
           (key) =>
             typeof key === "string" &&
-            (key.startsWith(prefix) || key.startsWith(legacyPrefix)),
+            (key.startsWith(prefix)
+              || (ownerUserId === AUTH_CONFIG.LOCAL_MODE_USER_ID && key.startsWith(legacyPrefix))),
         )
         .map((key) => del(key)),
     );

@@ -113,6 +113,124 @@ describe('SiyuanPreviewService', () => {
     expect(second.status).toBe('ready');
   });
 
+  it('cancelling one host flight does not abort another host request', async () => {
+    const first = createDeferred<{
+      blockId: string;
+      plainText: string;
+      excerpt: string;
+      truncated: boolean;
+    }>();
+    const second = createDeferred<{
+      blockId: string;
+      plainText: string;
+      excerpt: string;
+      truncated: boolean;
+    }>();
+    let firstSignal: AbortSignal | undefined;
+    let secondSignal: AbortSignal | undefined;
+    const secondLink: ExternalSourceLink = {
+      ...link,
+      id: 'link-2',
+      targetId: '20260426123456-def5678',
+      uri: 'siyuan://blocks/20260426123456-def5678',
+    };
+    getBlockPreview.mockImplementation((blockId: string, signal: AbortSignal) => {
+      if (blockId === link.targetId) {
+        firstSignal = signal;
+        return first.promise;
+      }
+      secondSignal = signal;
+      return second.promise;
+    });
+    const service = TestBed.inject(SiyuanPreviewService);
+
+    const firstRequest = service.preview(link);
+    const secondRequest = service.preview(secondLink);
+    await vi.waitFor(() => expect(getBlockPreview).toHaveBeenCalledTimes(2));
+
+    firstRequest.cancel?.();
+    expect(firstSignal?.aborted).toBe(true);
+    expect(secondSignal?.aborted).toBe(false);
+
+    first.resolve({
+      blockId: link.targetId,
+      plainText: 'cancelled A',
+      excerpt: 'cancelled A',
+      truncated: false,
+    });
+    second.resolve({
+      blockId: secondLink.targetId,
+      plainText: 'current B',
+      excerpt: 'current B',
+      truncated: false,
+    });
+
+    await expect(firstRequest).resolves.toEqual({ status: 'loading' });
+    await expect(secondRequest).resolves.toMatchObject({
+      status: 'ready',
+      preview: { linkId: secondLink.id, blockId: secondLink.targetId },
+    });
+    expect(savePreview).toHaveBeenCalledTimes(1);
+    expect(savePreview).toHaveBeenCalledWith(expect.objectContaining({ linkId: secondLink.id }), 'user-1', 0);
+  });
+
+  it('keeps a deduped flight alive until its last host subscriber cancels', async () => {
+    const pending = createDeferred<{
+      blockId: string;
+      plainText: string;
+      excerpt: string;
+      truncated: boolean;
+    }>();
+    let requestSignal: AbortSignal | undefined;
+    getBlockPreview.mockImplementationOnce((_blockId: string, signal: AbortSignal) => {
+      requestSignal = signal;
+      return pending.promise;
+    });
+    const service = TestBed.inject(SiyuanPreviewService);
+
+    const firstRequest = service.preview(link);
+    const secondRequest = service.preview(link);
+    await vi.waitFor(() => expect(requestSignal).toBeDefined());
+
+    firstRequest.cancel?.();
+    expect(requestSignal?.aborted).toBe(false);
+    pending.resolve({
+      blockId: link.targetId,
+      plainText: 'shared result',
+      excerpt: 'shared result',
+      truncated: false,
+    });
+
+    await expect(firstRequest).resolves.toEqual({ status: 'loading' });
+    await expect(secondRequest).resolves.toMatchObject({
+      status: 'ready',
+      preview: { linkId: link.id, blockId: link.targetId },
+    });
+    expect(getBlockPreview).toHaveBeenCalledTimes(1);
+  });
+
+  it('aborts a shared flight only after its last subscriber cancels', async () => {
+    let requestSignal: AbortSignal | undefined;
+    getBlockPreview.mockImplementationOnce((_blockId: string, signal: AbortSignal) => new Promise((_resolve, reject) => {
+      requestSignal = signal;
+      signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
+    }));
+    const service = TestBed.inject(SiyuanPreviewService);
+
+    const firstRequest = service.preview(link);
+    const secondRequest = service.preview(link);
+    await vi.waitFor(() => expect(requestSignal).toBeDefined());
+
+    firstRequest.cancel?.();
+    expect(requestSignal?.aborted).toBe(false);
+    secondRequest.cancel?.();
+    expect(requestSignal?.aborted).toBe(true);
+    await expect(Promise.all([firstRequest, secondRequest])).resolves.toEqual([
+      { status: 'loading' },
+      { status: 'loading' },
+    ]);
+  });
+
   it('link 删除使缓存 generation 失效时不得把网络预览作为 ready 返回', async () => {
     previewGeneration.mockReturnValue(7);
     savePreview.mockResolvedValueOnce(false);
@@ -246,24 +364,34 @@ describe('SiyuanPreviewService', () => {
     expect(probeConfigStatus).toHaveBeenCalledWith('user-1');
   });
 
-  it('session reset 应 abort 当前预览请求并让晚到结果失效', async () => {
-    let requestSignal: AbortSignal | undefined;
-    getBlockPreview.mockImplementationOnce((_blockId: string, signal: AbortSignal) => {
-      requestSignal = signal;
+  it('session reset 应 abort 所有 host 预览请求并让晚到结果失效', async () => {
+    const requestSignals: AbortSignal[] = [];
+    getBlockPreview.mockImplementation((blockId: string, signal: AbortSignal) => {
+      requestSignals.push(signal);
       return new Promise((_resolve, reject) => {
         signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
       });
     });
     const service = TestBed.inject(SiyuanPreviewService);
+    const secondLink: ExternalSourceLink = {
+      ...link,
+      id: 'link-2',
+      targetId: '20260426123456-def5678',
+      uri: 'siyuan://blocks/20260426123456-def5678',
+    };
 
-    const pending = service.preview(link);
-    await vi.waitFor(() => expect(requestSignal).toBeDefined());
+    const pending = [service.preview(link), service.preview(secondLink)];
+    await vi.waitFor(() => expect(getBlockPreview).toHaveBeenCalledTimes(2));
     expect(resetRuntime).toBeTypeOf('function');
 
     resetRuntime?.('owner-change');
 
-    expect(requestSignal?.aborted).toBe(true);
-    expect((await pending).status).toBe('loading');
+    expect(requestSignals).toHaveLength(2);
+    expect(requestSignals.every(signal => signal.aborted)).toBe(true);
+    await expect(Promise.all(pending)).resolves.toEqual([
+      { status: 'loading' },
+      { status: 'loading' },
+    ]);
   });
 
   it('clear-local-data reset 发生在缓存读取期间时不得返回旧缓存或启动刷新', async () => {

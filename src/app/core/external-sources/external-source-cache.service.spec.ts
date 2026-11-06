@@ -273,6 +273,19 @@ describe('ExternalSourceCacheService fallback storage', () => {
     expect(mockDel).not.toHaveBeenCalledWith('siyuan-preview-cache:owner-b:link-1:block-b');
   });
 
+  it('does not remove an unowned legacy preview while deleting an authenticated owner cache', async () => {
+    mockKeys.mockResolvedValueOnce([
+      'siyuan-preview-cache:owner-a:link-1:block-a',
+      'siyuan-preview-cache:link-1:block-legacy',
+    ]);
+    const service = createService();
+
+    await service.deletePreviewsForLink('link-1', 'owner-a');
+
+    expect(mockDel).toHaveBeenCalledTimes(1);
+    expect(mockDel).toHaveBeenCalledWith('siyuan-preview-cache:owner-a:link-1:block-a');
+  });
+
   it('clearPreviewCache 应在 keys() 前捕获 owner，切换后清空原 owner 且保留新 owner', async () => {
     const keysDeferred = createDeferred<IDBValidKey[]>();
     mockKeys.mockReturnValueOnce(keysDeferred.promise);

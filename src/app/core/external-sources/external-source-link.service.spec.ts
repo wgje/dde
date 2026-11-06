@@ -407,6 +407,52 @@ describe('ExternalSourceLinkService', () => {
     expect(service.firstActiveLinkForTask('task-a')).toBeNull();
   });
 
+  it('hides the previous owner links immediately when auth changes', async () => {
+    const service = TestBed.inject(ExternalSourceLinkService);
+    await service.bindSiyuanBlock('task-a', '20260426123456-abc1234');
+    expect(service.links()).toHaveLength(1);
+
+    authUser.set(SECOND_OWNER_ID);
+    authFence.set('auth-fence-b');
+
+    expect(service.links()).toEqual([]);
+    expect(service.activeLinks()).toEqual([]);
+    expect(service.firstActiveLinkForTask('task-a')).toBeNull();
+    await service.ensureLoaded();
+    expect(service.links()).toEqual([]);
+  });
+
+  it('keeps a local mutation in its captured owner bucket across an auth switch', async () => {
+    const service = TestBed.inject(ExternalSourceLinkService);
+    const cache = TestBed.inject(ExternalSourceCacheService);
+    await service.ensureLoaded();
+
+    const pendingWritten = createDeferred<void>();
+    const continueMutation = createDeferred<void>();
+    const originalUpsertPendingLink = cache.upsertPendingLink.bind(cache);
+    vi.spyOn(cache, 'upsertPendingLink').mockImplementation(async (...args) => {
+      const pending = await originalUpsertPendingLink(...args);
+      pendingWritten.resolve();
+      await continueMutation.promise;
+      return pending;
+    });
+
+    const bindPromise = service.bindSiyuanBlock('task-owner-a', '20260426123456-abc1234');
+    await pendingWritten.promise;
+    authUser.set(SECOND_OWNER_ID);
+    authFence.set('auth-fence-b');
+    continueMutation.resolve();
+
+    await expect(bindPromise).resolves.toBeNull();
+    const ownerAPending = await cache.loadPendingLinks('00000000-0000-0000-0000-000000000001');
+    expect(ownerAPending).toHaveLength(1);
+    expect(await cache.loadLinks('00000000-0000-0000-0000-000000000001'))
+      .toEqual([ownerAPending[0].link]);
+    expect(await cache.loadPendingLinks(SECOND_OWNER_ID)).toEqual([]);
+    expect(await cache.loadLinks(SECOND_OWNER_ID)).toEqual([]);
+    expect(service.links()).toEqual([]);
+  });
+
   it('ignores a late ensureLoaded result from a previous owner', async () => {
     const service = TestBed.inject(ExternalSourceLinkService);
     const cache = TestBed.inject(ExternalSourceCacheService);
@@ -623,8 +669,8 @@ describe('ExternalSourceLinkService', () => {
 
     const pendingEntry = await upsertPendingSpy.mock.results[0]?.value;
     const payload = upsertPayloads[0] as { payload: Record<string, unknown> };
-    expect(upsertPendingSpy).toHaveBeenCalledWith(link, { resetRetryCount: false });
-    expect(removePendingSpy).toHaveBeenCalledWith(link.id, pendingEntry.operationId);
+    expect(upsertPendingSpy).toHaveBeenCalledWith(link, { resetRetryCount: false }, authUser());
+    expect(removePendingSpy).toHaveBeenCalledWith(link.id, pendingEntry.operationId, authUser());
     expect(pendingEntry.operationId).toMatch(/[0-9a-f-]{36}/);
     expect(payload.payload.operation_id).toBe(pendingEntry.operationId);
     expect(await cache.loadPendingLinks()).toHaveLength(0);

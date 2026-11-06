@@ -29,6 +29,7 @@ import { ConflictStorageService } from './conflict-storage.service';
 import { SupabaseClientService } from './supabase-client.service';
 import { ExternalSourceLinkService } from '../app/core/external-sources/external-source-link.service';
 import { ExternalSourceCacheService } from '../app/core/external-sources/external-source-cache.service';
+import type { ExternalSourceLink } from '../app/core/external-sources/external-source.model';
 import { resetBrowserNetworkSuspensionTrackingForTests } from '../utils/browser-network-suspension';
 import { AUTH_CONFIG } from '../config/auth.config';
 import { FOCUS_CONFIG } from '../config/focus.config';
@@ -66,11 +67,16 @@ async function seedBlackBoxRows(rows: Record<string, unknown>[]): Promise<void> 
   }));
 }
 
-function createLocalBackupService(entries: Record<string, unknown>[] = []): DisasterBackupService {
+function createLocalBackupService(
+  entries: Record<string, unknown>[] = [],
+  activeLinksForTask: (taskId: string) => ExternalSourceLink[] = () => [],
+  ensureExternalSourceLinksLoaded: () => Promise<void> = vi.fn().mockResolvedValue(undefined),
+  currentUserId: () => string | null = () => 'user-1',
+): DisasterBackupService {
   return Injector.create({ providers: [
     { provide: DisasterBackupService, useClass: DisasterBackupService },
     { provide: LoggerService, useValue: { category: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }) } },
-    { provide: AuthService, useValue: { currentUserId: vi.fn(() => 'user-1') } },
+    { provide: AuthService, useValue: { currentUserId: vi.fn(currentUserId) } },
     { provide: ThemeService, useValue: { theme: signal('forest'), colorMode: signal('dark') } },
     { provide: UiStateService, useValue: { layoutDirection: signal('ltr'), floatingWindowPref: signal('auto') } },
     { provide: PreferenceService, useValue: { autoResolveConflicts: signal(false) } },
@@ -78,7 +84,10 @@ function createLocalBackupService(entries: Record<string, unknown>[] = []): Disa
     { provide: BlackBoxService, useValue: { entriesMap: signal(new Map(entries.map(row => [String(row['id']), row]))) } },
     { provide: ConflictStorageService, useValue: { getAllConflicts: vi.fn().mockResolvedValue([]) } },
     { provide: SupabaseClientService, useValue: { isConfigured: false, client: vi.fn(() => null) } },
-    { provide: ExternalSourceLinkService, useValue: { ensureLoaded: vi.fn().mockResolvedValue(undefined), activeLinksForTask: vi.fn(() => []) } },
+    { provide: ExternalSourceLinkService, useValue: {
+      ensureLoaded: ensureExternalSourceLinksLoaded,
+      activeLinksForTask: vi.fn(activeLinksForTask),
+    } },
     { provide: ExternalSourceCacheService, useValue: { loadPendingLinks: vi.fn().mockResolvedValue([]) } },
   ] }).get(DisasterBackupService);
 }
@@ -137,6 +146,42 @@ describe('DisasterBackupService', () => {
   registerDisasterBackupOwnerScopeSpecs({
     createProject,
     seedStore,
+  });
+
+  it('rejects a backup when its owner changes while external source links load', async () => {
+    let effectiveUserId = 'user-1';
+    let resolveLinksLoaded!: () => void;
+    const linksLoaded = new Promise<void>(resolve => { resolveLinksLoaded = resolve; });
+    const activeLinksForTask = vi.fn((taskId: string): ExternalSourceLink[] => (
+      effectiveUserId === 'user-2'
+        ? [{
+            id: 'owner-b-link',
+            taskId,
+            sourceType: 'siyuan-block',
+            targetId: '20260426123456-abc1234',
+            uri: 'siyuan://blocks/20260426123456-abc1234',
+            sortOrder: 0,
+            createdAt: '2026-05-18T00:00:00.000Z',
+            updatedAt: '2026-05-18T00:00:00.000Z',
+          }]
+        : []
+    ));
+    const backup = createLocalBackupService(
+      [],
+      activeLinksForTask,
+      () => linksLoaded,
+      () => effectiveUserId,
+    );
+
+    const pendingBackup = backup.buildLocalPayload([createProject()], {
+      autoBackupEnabled: false,
+      autoBackupIntervalMs: 900000,
+    });
+    effectiveUserId = 'user-2';
+    resolveLinksLoaded();
+
+    await expect(pendingBackup).rejects.toThrow(/owner changed/i);
+    expect(activeLinksForTask).not.toHaveBeenCalled();
   });
 
   it('buildLocalPayload should read all personal tables through keyset queries without calling the snapshot RPC', async () => {
@@ -295,6 +340,51 @@ describe('DisasterBackupService', () => {
     expect(payload.localState?.dockSnapshot).toEqual(expect.objectContaining({
       localStorage: rawSnapshot,
     }));
+  });
+
+  it('exports current-owner external source links and excludes foreign-owner links', async () => {
+    const currentOwnerLink: ExternalSourceLink = {
+      id: '33333333-3333-4333-8333-333333333333',
+      taskId: 'task-1',
+      sourceType: 'siyuan-block',
+      targetId: '20261106000000-ownerA',
+      uri: 'siyuan://blocks/20261106000000-ownerA',
+      label: 'current owner link',
+      sortOrder: 0,
+      deletedAt: null,
+      createdAt: '2026-11-06T00:00:00.000Z',
+      updatedAt: '2026-11-06T00:00:00.000Z',
+    };
+    const foreignOwnerLink: ExternalSourceLink = {
+      ...currentOwnerLink,
+      id: '44444444-4444-4444-8444-444444444444',
+      targetId: '20261106000000-ownerB',
+      uri: 'siyuan://blocks/20261106000000-ownerB',
+      label: 'foreign owner link',
+    };
+    const storedLinks = [
+      { ownerUserId: 'user-1', link: currentOwnerLink },
+      { ownerUserId: 'user-2', link: foreignOwnerLink },
+    ];
+    let linksLoaded = false;
+    const ensureLoaded = vi.fn(async () => { linksLoaded = true; });
+    const activeLinksForTask = vi.fn((taskId: string) => linksLoaded
+      ? storedLinks
+        .filter(entry => entry.ownerUserId === 'user-1' && entry.link.taskId === taskId)
+        .map(entry => entry.link)
+      : []);
+
+    const payload = await createLocalBackupService([], activeLinksForTask, ensureLoaded)
+      .buildLocalPayload([createProject()], {
+        autoBackupEnabled: false,
+        autoBackupIntervalMs: 900000,
+      });
+
+    const exportedLinks = payload.tasks.find(task => task.id === 'task-1')?.externalSourceLinks;
+    expect(ensureLoaded).toHaveBeenCalledOnce();
+    expect(activeLinksForTask).toHaveBeenCalledWith('task-1');
+    expect(exportedLinks?.map(link => link.id)).toEqual([currentOwnerLink.id]);
+    expect(exportedLinks?.some(link => link.id === foreignOwnerLink.id)).toBe(false);
   });
 
   it('buildLocalBlob preserves ActionQueue replay identity and dead letters', async () => {

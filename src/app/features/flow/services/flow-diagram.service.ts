@@ -475,7 +475,7 @@ export class FlowDiagramService {
     
     // 清理数据服务
     this.dataService.dispose();
-    this.templateService.closeSiyuanPopover();
+    this.templateService.closeSiyuanPopover(this.diagramDiv ?? this.diagram?.div);
     
     this.disposeOverview();
     this.clearAllTimers();

@@ -139,8 +139,8 @@ export class FlowTemplateService {
     shape.stroke = active ? '#4f46e5' : '#818cf8';
   }
 
-  closeSiyuanPopover(): void {
-    this.siyuanPopover.close();
+  closeSiyuanPopover(owner?: object | null): void {
+    if (owner) this.siyuanPopover.closeForOwner(owner);
   }
 
   private handleNodeTemplateClick(e: go.InputEvent, node: go.GraphObject): void {
@@ -384,7 +384,7 @@ export class FlowTemplateService {
       pickable: true,
       visible: false,
       mouseEnter: (event: go.InputEvent, obj: go.GraphObject) => this.handleSiyuanBadgeMouseEnter(event, obj),
-      mouseLeave: (_event: go.InputEvent, obj: go.GraphObject) => this.handleSiyuanBadgeMouseLeave(obj),
+      mouseLeave: (event: go.InputEvent, obj: go.GraphObject) => this.handleSiyuanBadgeMouseLeave(event, obj),
       click: (event: go.InputEvent, obj: go.GraphObject) => this.handleSiyuanBadgeClick(event, obj),
     };
   }
@@ -393,14 +393,16 @@ export class FlowTemplateService {
     if (this.uiState.isMobile()) return;
     const link = this.getSiyuanLink(obj);
     const origin = this.getGraphObjectViewportOrigin(event, obj);
-    if (!link || !origin) return;
+    const owner = event.diagram?.div;
+    if (!link || !origin || !owner) return;
     this.setSiyuanBadgeHover(obj, true);
-    this.siyuanPopover.scheduleOpen(link, origin);
+    this.siyuanPopover.scheduleOpen(link, origin, owner);
   }
 
-  private handleSiyuanBadgeMouseLeave(obj: go.GraphObject): void {
+  private handleSiyuanBadgeMouseLeave(event: go.InputEvent, obj: go.GraphObject): void {
     this.setSiyuanBadgeHover(obj, false);
-    if (!this.uiState.isMobile()) this.siyuanPopover.scheduleClose();
+    const owner = event.diagram?.div;
+    if (!this.uiState.isMobile() && owner) this.siyuanPopover.scheduleClose(owner);
   }
 
   private handleSiyuanBadgeClick(event: go.InputEvent, obj: go.GraphObject): void {
@@ -408,7 +410,8 @@ export class FlowTemplateService {
     event.handled = true;
     const link = this.getSiyuanLink(obj);
     const origin = this.getGraphObjectViewportOrigin(event, obj);
-    if (link && origin) this.siyuanPopover.openNow(link, origin);
+    const owner = event.diagram?.div;
+    if (link && origin && owner) this.siyuanPopover.openNow(link, origin, owner);
   }
 
   private createDockBadge(): go.Panel {

@@ -171,6 +171,9 @@ export class DisasterBackupService {
     const remoteReadState: RemoteBackupReadState = { deferred: false };
 
     await this.externalSourceLinks.ensureLoaded();
+    if (this.resolveEffectiveUserId() !== userId) {
+      throw new Error('Backup owner changed while external source links were loading');
+    }
     const payloadBase = this.buildProjectPayload(projects, userId);
     const userPreferences = await this.collectUserPreferences(
       userId,
