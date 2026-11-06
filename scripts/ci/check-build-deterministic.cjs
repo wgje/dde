@@ -97,6 +97,12 @@ function normalizeArtifactManifest(manifest, dir, ngsw) {
     normalized.ngswHash = canonicalNgswHash(ngsw);
   }
 
+  if (normalized.metrics && typeof normalized.metrics === 'object') {
+    const manifestBase = structuredClone(normalized);
+    delete manifestBase.metrics.manifestDigest;
+    normalized.metrics.manifestDigest = stableObjectHash(manifestBase);
+  }
+
   return stableJson(normalized);
 }
 

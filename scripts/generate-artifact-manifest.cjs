@@ -46,6 +46,18 @@ function isPlainObject(value) {
   return prototype === Object.prototype || prototype === null;
 }
 function hash(algorithm, bytes) { return crypto.createHash(algorithm).update(bytes).digest('hex'); }
+function stableSharedJson(value) {
+  if (Array.isArray(value)) return value.map(stableSharedJson);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stableSharedJson(value[key])]));
+}
+function sharedIdentityBytes(record) {
+  if (record.requestPath !== '/ngsw.json' && record.requestPath !== '/version.json') return record.bytes;
+  const value = attempt('artifact-evidence-shared-identity', () => JSON.parse(decode(record.bytes, 'artifact-evidence-shared-identity')));
+  if (record.requestPath === '/ngsw.json') value.timestamp = 0;
+  if (record.requestPath === '/version.json') value.buildTime = '<build-time>';
+  return Buffer.from(JSON.stringify(stableSharedJson(value)), 'utf8');
+}
 function readCandidateCensus(repoRoot) {
   const candidates = EXTERNAL_CANDIDATES.map(([relativePath, kind]) => {
     const filePath = path.join(repoRoot, relativePath);
@@ -320,9 +332,14 @@ function generateArtifactManifest(options = {}) {
     stats ? requiredCacheableBrowserOutputs(stats, byPath) : undefined,
   );
   const candidateCensus = readCandidateCensus(repoRoot);
-  const sharedFiles = records.map((record) => ({
-    path: record.requestPath, bytes: record.bytes.length, sha256: hash('sha256', record.bytes),
-  }));
+  const sharedFiles = records.map((record) => {
+    const identityBytes = sharedIdentityBytes(record);
+    return {
+      path: record.requestPath,
+      bytes: identityBytes.length,
+      sha256: hash('sha256', identityBytes),
+    };
+  });
   const sharedIdentity = {
     readerReceiptId: 'SRC-B', stable: true, fileCount: sharedFiles.length,
     filesDigest: canonicalDigest(sharedFiles), candidateSetDigest: candidateCensus.candidateSetDigest,

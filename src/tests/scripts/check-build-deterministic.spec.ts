@@ -83,7 +83,22 @@ const files = Object.fromEntries(
     .filter((entry) => entry.isFile())
     .map((entry) => ['/' + entry.name, { sha256: sha256(path.join(dist, entry.name)) }]),
 );
-write('artifact-manifest.json', JSON.stringify({ schemaVersion: 1, files }) + '\n');
+const stableJson = (value) => Array.isArray(value) ? value.map(stableJson)
+  : value && typeof value === 'object'
+    ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, stableJson(value[key])]))
+    : value;
+const stableMarker = scenario === 'stable-manifest-field' && side === 'B' ? 'changed' : 'stable';
+const manifestBase = {
+  schemaVersion: 1,
+  gitSha: 'stable',
+  deploymentTarget: 'fixture',
+  ngswHash: 'raw-ngsw-hash',
+  metrics: { fileCount: Object.keys(files).length, stableMarker },
+  files,
+};
+manifestBase.metrics.manifestDigest = crypto.createHash('sha256')
+  .update(JSON.stringify(stableJson(manifestBase))).digest('hex');
+write('artifact-manifest.json', JSON.stringify(manifestBase) + '\n');
 if (scenario === 'file-link-a') {
   const target = path.join(process.cwd(), 'external-link.js');
   fs.writeFileSync(target, 'linked bundle\n');
@@ -246,6 +261,17 @@ describe('check-build-deterministic guard', () => {
     expect(result.output).toContain('check-build-deterministic PASSED');
     expect(result.ciValues).toEqual(['A:true', 'B:true']);
     expect(result.nestedCopied).toBe(true);
+    const rawA = JSON.parse(readFileSync(path.join(result.projectRoot, '.tmp', 'build-a', 'artifact-manifest.json'), 'utf8'));
+    const rawB = JSON.parse(readFileSync(path.join(result.projectRoot, '.tmp', 'build-b', 'artifact-manifest.json'), 'utf8'));
+    expect(rawA.files['/ngsw.json'].sha256).not.toBe(rawB.files['/ngsw.json'].sha256);
+    expect(rawA.files['/version.json'].sha256).not.toBe(rawB.files['/version.json'].sha256);
+    expect(rawA.metrics.manifestDigest).not.toBe(rawB.metrics.manifestDigest);
+  });
+  it('rejects a stable manifest field change after projection digest recomputation', () => {
+    const result = runScenario('stable-manifest-field');
+    expect(result.status).toBe(1);
+    expect(result.output).toContain('artifact-manifest.json stable content differs between builds');
+    expect(result.output).not.toContain('check-build-deterministic PASSED');
   });
   it.each([
     ['file-link-a', 'source-entry-invalid'], ['root-junction-a', 'source-root-invalid'],

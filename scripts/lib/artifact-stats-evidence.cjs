@@ -197,9 +197,10 @@ function rawComponentCss(output, rawKeys, normalizedKeys, inputs) {
   const keys = [...rawKeys];
   const normalized = [...normalizedKeys];
   const rawCanonical = keys[0]?.replace(/\\/g, '/');
-  return output.entryPoint === undefined && keys.length === 1
-    && rawCanonical?.startsWith('angular:styles/component:css;')
-    && inputs.has(normalized[0]);
+  if (output.entryPoint !== undefined || keys.length !== 1 || normalized.length !== 1
+    || !inputs.has(normalized[0])) return false;
+  if (rawCanonical?.startsWith('angular:styles/component:css;')) return true;
+  return output['ng-component'] === true && /\.(?:css|scss)$/i.test(normalized[0]);
 }
 
 function imports(value) {
@@ -333,9 +334,12 @@ function projectStats({ stats, files, requiredOutput } = {}) {
   const outputInputPaths = new Map();
   for (const [raw, value] of Object.entries(stats.outputs)) {
     const key = outputPath(raw);
+    const isCssOutput = key.endsWith('.css');
+    const hasValidExports = Array.isArray(value?.exports)
+      ? value.exports.every((name) => typeof name === 'string')
+      : isCssOutput && value?.exports === undefined;
     if (outputs.has(key) || !isPlainObject(value) || !safeCount(value.bytes)
-      || !isPlainObject(value.inputs) || !Array.isArray(value.exports)
-      || value.exports.some((name) => typeof name !== 'string')
+      || !isPlainObject(value.inputs) || !hasValidExports
       || (value.entryPoint !== undefined && (typeof value.entryPoint !== 'string' || !value.entryPoint))) fail('artifact-evidence-stats');
     imports(value.imports);
     const contributionInputs = new Set();
@@ -388,10 +392,10 @@ function projectStats({ stats, files, requiredOutput } = {}) {
   }
   for (const [key] of physical) if (HASHED_ROOT_JS.test(key)) {
     const output = outputs.get(key);
-    if (!output || (Object.keys(output.inputs).length === 0 && (output.entryPoint !== undefined || !reachable.has(key)))) fail('artifact-evidence-stats-output');
+    if (!output || (Object.keys(output.inputs).length === 0 && output.entryPoint === undefined && !reachable.has(key))) fail('artifact-evidence-stats-output');
   }
   for (const [key, value] of outputs) if (key.endsWith('.js') && Object.keys(value.inputs).length === 0
-    && (value.entryPoint !== undefined || !reachable.has(key))) fail('artifact-evidence-stats-output');
+    && value.entryPoint === undefined && !reachable.has(key)) fail('artifact-evidence-stats-output');
   return outputs;
 }
 

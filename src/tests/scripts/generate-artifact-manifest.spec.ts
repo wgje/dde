@@ -212,6 +212,52 @@ describe('generate-artifact-manifest', () => {
     expect(rerun.status, rerun.stderr).toBe(0);
     expect(fs.readFileSync(fixture.output, 'utf8')).toBe(text);
   });
+
+  it('keeps sharedIdentity.filesDigest stable when only build-time fields change', () => {
+    const first = makeFixture({ stats: false });
+    const second = makeFixture({ stats: false });
+    const firstNgswPath = path.join(first.dist, 'ngsw.json');
+    const secondNgswPath = path.join(second.dist, 'ngsw.json');
+    const firstVersionPath = path.join(first.dist, 'version.json');
+    const secondVersionPath = path.join(second.dist, 'version.json');
+    const firstNgsw = JSON.parse(fs.readFileSync(firstNgswPath, 'utf8')) as Record<string, unknown>;
+    const secondNgsw = JSON.parse(fs.readFileSync(secondNgswPath, 'utf8')) as Record<string, unknown>;
+    const firstVersion = JSON.parse(fs.readFileSync(firstVersionPath, 'utf8')) as Record<string, unknown>;
+    const secondVersion = JSON.parse(fs.readFileSync(secondVersionPath, 'utf8')) as Record<string, unknown>;
+    firstNgsw.timestamp = 101;
+    secondNgsw.timestamp = 202;
+    firstVersion.buildTime = '2026-08-02T01:00:00.000Z';
+    secondVersion.buildTime = '2026-08-02T02:00:00.000Z';
+    writeJson(firstNgswPath, firstNgsw);
+    writeJson(secondNgswPath, secondNgsw);
+    writeJson(firstVersionPath, firstVersion);
+    writeJson(secondVersionPath, secondVersion);
+    const firstResult = run(first);
+    const secondResult = run(second);
+    expect(firstResult.status, firstResult.stderr).toBe(0);
+    expect(secondResult.status, secondResult.stderr).toBe(0);
+    const firstManifest = JSON.parse(fs.readFileSync(first.output, 'utf8'));
+    const secondManifest = JSON.parse(fs.readFileSync(second.output, 'utf8'));
+    expect(firstManifest.metrics.sharedIdentity.filesDigest)
+      .toBe(secondManifest.metrics.sharedIdentity.filesDigest);
+    expect(firstManifest.files['/ngsw.json'].sha256)
+      .not.toBe(secondManifest.files['/ngsw.json'].sha256);
+  });
+
+  it('changes sharedIdentity.filesDigest when stable browser content changes', () => {
+    const first = makeFixture({ stats: false });
+    const second = makeFixture({ stats: false });
+    write(path.join(second.dist, 'index.html'), '<main>Changed stable content</main>\n');
+    refreshEvidence(second);
+    const firstResult = run(first);
+    const secondResult = run(second);
+    expect(firstResult.status, firstResult.stderr).toBe(0);
+    expect(secondResult.status, secondResult.stderr).toBe(0);
+    const firstManifest = JSON.parse(fs.readFileSync(first.output, 'utf8'));
+    const secondManifest = JSON.parse(fs.readFileSync(second.output, 'utf8'));
+    expect(firstManifest.metrics.sharedIdentity.filesDigest)
+      .not.toBe(secondManifest.metrics.sharedIdentity.filesDigest);
+  });
   it.each([
     ['bare package label', 'const packageName = "gojs";\n'],
     ['generic diagram noun', 'const title = "Diagram";\n'],
@@ -352,12 +398,8 @@ describe('generate-artifact-manifest', () => {
     });
     expectFailure(mismatch, 'artifact-evidence-stats-size');
   });
-  it.each([
-    ['chunk-GOJS1.js', false],
-    ['polyfills-POLY1.js', false],
-    ['runtime-RUN1.js', false],
-    ['chunk-EMPTY1.js', true],
-  ])('rejects incomplete present stats for hashed output: %s', (name, includeEmpty) => {
+  it.each(['chunk-GOJS1.js', 'polyfills-POLY1.js', 'runtime-RUN1.js'])(
+    'rejects incomplete present stats for hashed output: %s', (name) => {
     const fixture = makeFixture();
     const target = path.join(fixture.dist, name);
     write(target, 'const marker = "go.Diagram";\n');
@@ -365,12 +407,20 @@ describe('generate-artifact-manifest', () => {
     const outputs = {
       'dist/browser/main-APP1.js': outputEntry(mainBytes, 'src/main.ts'),
     };
-    if (includeEmpty) {
-      const empty = outputEntry(fs.statSync(target).size, 'src/main.ts');
-      empty.inputs = {};
-      Object.assign(outputs, { [`dist/browser/${name}`]: empty });
-    }
     refreshEvidence(fixture, outputs);
+    expectFailure(fixture, 'artifact-evidence-stats-output');
+  });
+  it('rejects a truly unreachable empty-input orphan output', () => {
+    const fixture = makeFixture();
+    const target = path.join(fixture.dist, 'chunk-ORPHAN1.js');
+    write(target, 'const marker = "orphan";\n');
+    const mainBytes = fs.statSync(path.join(fixture.dist, 'main-APP1.js')).size;
+    refreshEvidence(fixture, {
+      'dist/browser/main-APP1.js': outputEntry(mainBytes, 'src/main.ts'),
+      'dist/browser/chunk-ORPHAN1.js': {
+        bytes: fs.statSync(target).size, inputs: {}, imports: [], exports: [],
+      },
+    });
     expectFailure(fixture, 'artifact-evidence-stats-output');
   });
   it('rejects symlink, dangling, hardlinked and portable special entries', () => {

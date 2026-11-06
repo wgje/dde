@@ -88,6 +88,98 @@ describe('artifact stats evidence projection', () => {
     expect(result.has('/main-APP1.js')).toBe(true);
   });
 
+  it('accepts Angular component CSS output without an exports field', () => {
+    const result = projectStats({
+      stats: stats({
+        'main-APP1.js': output(1, { 'src/main.ts': { bytesInOutput: 1 } }, [], 'src/main.ts'),
+        'app.component-HASH.css': {
+          bytes: 1,
+          inputs: { 'angular:styles\\component:css;hash;src/app.ts': { bytesInOutput: 1 } },
+          imports: [],
+        },
+      }, {
+        'src/main.ts': input(),
+        'angular:styles\\component:css;hash;src/app.ts': input(),
+      }),
+      files: files('main-APP1.js'),
+      requiredOutput: '/main-APP1.js',
+    });
+    expect(result.has('/main-APP1.js')).toBe(true);
+  });
+
+  it('accepts root styles CSS output without an exports field but rejects JS without one', () => {
+    expect(() => projectStats({
+      stats: stats({
+        'main-APP1.js': output(1, { 'src/main.ts': { bytesInOutput: 1 } }, [], 'src/main.ts'),
+        'styles-HASH.css': { bytes: 1, inputs: {}, imports: [] },
+      }),
+      files: files('main-APP1.js', 'styles-HASH.css'),
+    })).not.toThrow();
+
+    expect(() => projectStats({
+      stats: stats({
+        'main-APP1.js': { bytes: 1, inputs: { 'src/main.ts': { bytesInOutput: 1 } }, imports: [], entryPoint: 'src/main.ts' },
+      }),
+      files: files('main-APP1.js'),
+    })).toThrow(/artifact-evidence-stats/);
+  });
+
+  it.each([
+    ['css', 'src/app/focus/gate-actions.component.css'],
+    ['scss', 'src/app/parking/parking-dock.component.scss'],
+  ])('accepts an external %s ng-component CSS input without a disk output', (_kind, inputPath) => {
+    const result = projectStats({
+      stats: stats({
+        'main-APP1.js': output(1, { 'src/main.ts': { bytesInOutput: 1 } }, [], 'src/main.ts'),
+        'component-HASH.css': {
+          bytes: 1,
+          inputs: { [inputPath]: { bytesInOutput: 1 } },
+          imports: [],
+          'ng-component': true,
+        },
+      }, {
+        'src/main.ts': input(),
+        [inputPath]: input(),
+      }),
+      files: files('main-APP1.js'),
+      requiredOutput: '/main-APP1.js',
+    });
+    expect(result.has('/main-APP1.js')).toBe(true);
+  });
+
+  it.each([
+    ['missing component marker', { 'src/app/component.css': { bytesInOutput: 1 } }, {}],
+    ['non-CSS component input', { 'src/app/component.ts': { bytesInOutput: 1 } }, { 'ng-component': true }],
+    ['multiple component inputs', {
+      'src/app/component.css': { bytesInOutput: 1 },
+      'src/app/component.scss': { bytesInOutput: 1 },
+    }, { 'ng-component': true }],
+  ])('rejects external component CSS with %s', (_name, componentInputs, metadata) => {
+    expect(() => projectStats({
+      stats: stats({
+        'main-APP1.js': output(1, { 'src/main.ts': { bytesInOutput: 1 } }, [], 'src/main.ts'),
+        'component-HASH.css': { bytes: 1, inputs: componentInputs, imports: [], ...metadata },
+      }, {
+        'src/main.ts': input(),
+        ...Object.fromEntries(Object.keys(componentInputs).map((key) => [key, input()])),
+      }),
+      files: files('main-APP1.js'),
+    })).toThrow(/artifact-evidence-stats-output/);
+  });
+
+  it('rejects a missing non-component CSS output even when its input exists', () => {
+    expect(() => projectStats({
+      stats: stats({
+        'main-APP1.js': output(1, { 'src/main.ts': { bytesInOutput: 1 } }, [], 'src/main.ts'),
+        'styles-HASH.css': { bytes: 1, inputs: { 'src/styles.css': { bytesInOutput: 1 } }, imports: [] },
+      }, {
+        'src/main.ts': input(),
+        'src/styles.css': input(),
+      }),
+      files: files('main-APP1.js'),
+    })).toThrow(/artifact-evidence-stats-output/);
+  });
+
   it('accepts a zero-input shared chunk reachable from a declared root', () => {
     const result = projectStats({
       stats: stats({
@@ -97,6 +189,41 @@ describe('artifact stats evidence projection', () => {
       files: files('main-APP1.js', 'chunk-SHARED1.js'),
     });
     expect(result.has('/chunk-SHARED1.js')).toBe(true);
+  });
+
+  it('accepts a zero-input JavaScript entrypoint with a present input and matching physical size', () => {
+    const result = projectStats({
+      stats: stats({
+        'main-APP1.js': output(1, { 'src/main.ts': { bytesInOutput: 1 } }, [], 'src/main.ts'),
+        'chunk-ENTRY1.js': output(3, {}, [], 'src/app/entry.ts'),
+      }, {
+        'src/main.ts': input(),
+        'src/app/entry.ts': input(),
+      }),
+      files: new Map([
+        ['/main-APP1.js', { size: 1 }],
+        ['/chunk-ENTRY1.js', { size: 3 }],
+      ]),
+    });
+    expect(result.has('/chunk-ENTRY1.js')).toBe(true);
+  });
+
+  it('rejects an unknown zero-input entrypoint and an unreachable empty-input orphan', () => {
+    expect(() => projectStats({
+      stats: stats({
+        'main-APP1.js': output(1, { 'src/main.ts': { bytesInOutput: 1 } }, [], 'src/main.ts'),
+        'chunk-UNKNOWN1.js': output(1, {}, [], 'src/missing-entry.ts'),
+      }),
+      files: files('main-APP1.js', 'chunk-UNKNOWN1.js'),
+    })).toThrow(/artifact-evidence-stats/);
+
+    expect(() => projectStats({
+      stats: stats({
+        'main-APP1.js': output(1, { 'src/main.ts': { bytesInOutput: 1 } }, [], 'src/main.ts'),
+        'chunk-ORPHAN1.js': output(1),
+      }),
+      files: files('main-APP1.js', 'chunk-ORPHAN1.js'),
+    })).toThrow(/artifact-evidence-stats-output/);
   });
 
   it.each([
