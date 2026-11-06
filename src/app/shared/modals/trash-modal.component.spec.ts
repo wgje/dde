@@ -2,6 +2,7 @@ import { Injector, runInInjectionContext, signal } from '@angular/core';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { Task } from '../../../models';
+import type { PermanentDeleteOutcome } from '../../../services/task-operation-trash-adapter.controller';
 import { ProjectStateService } from '../../../services/project-state.service';
 import { TaskOperationAdapterService } from '../../../services/task-operation-adapter.service';
 import { ToastService } from '../../../services/toast.service';
@@ -32,6 +33,9 @@ function createComponent() {
     restoreTask: vi.fn().mockResolvedValue(true),
     updateTaskStatus: vi.fn().mockResolvedValue(true),
     permanentlyDeleteTask: vi.fn().mockResolvedValue(true),
+    permanentlyDeleteTaskWithOutcome: vi.fn<
+      (taskId: string, canPublishUi?: () => boolean) => Promise<PermanentDeleteOutcome>
+    >().mockResolvedValue({ status: 'success' }),
     emptyTrash: vi.fn().mockResolvedValue(true),
   };
   const toast = {
@@ -86,6 +90,18 @@ describe('TrashModalComponent', () => {
     );
   });
 
+  it('restoreTask should report success after valid trash metadata is restored', async () => {
+    const { component, setActiveProject, taskOpsAdapter, toast } = createComponent();
+    const task = createRestorableDeletedTask({ id: 'task-restore-success', title: '恢复成功' });
+    setActiveProject('project-a', [task]);
+
+    await component.restoreTask(task);
+
+    expect(taskOpsAdapter.restoreTask).toHaveBeenCalledWith(task.id);
+    expect(toast.success).toHaveBeenCalledWith('已恢复', '任务 "恢复成功" 已恢复');
+    expect(toast.warning).not.toHaveBeenCalled();
+  });
+
   it('explains missing structure metadata without attempting a restore', async () => {
     const { component, setActiveProject, taskOpsAdapter, toast } = createComponent();
     const task = createTask({ id: 'task-missing-meta', deletedAt: '2026-06-15T00:00:00.000Z' });
@@ -114,6 +130,18 @@ describe('TrashModalComponent', () => {
       '取消归档失败',
       '任务状态本地保存失败，请释放浏览器存储空间后重试',
     );
+  });
+
+  it('unarchiveTask should report success after the active status is saved', async () => {
+    const { component, setActiveProject, taskOpsAdapter, toast } = createComponent();
+    const task = createTask({ id: 'task-unarchive-success', title: '取消归档目标' });
+    setActiveProject('project-a', [task]);
+
+    await component.unarchiveTask(task);
+
+    expect(taskOpsAdapter.updateTaskStatus).toHaveBeenCalledWith(task.id, 'active', 'project-a');
+    expect(toast.success).toHaveBeenCalledWith('已取消归档', '任务 "取消归档目标" 已恢复到主视图');
+    expect(toast.warning).not.toHaveBeenCalled();
   });
 
   it('rejects a task action that is not a member of the captured active project', async () => {
@@ -149,24 +177,79 @@ describe('TrashModalComponent', () => {
   });
 
   it('passes owner fencing to permanent delete and does not close stale confirmation UI', async () => {
-    let resolveDelete!: (saved: boolean) => void;
+    let resolveDelete!: (outcome: PermanentDeleteOutcome) => void;
     const { component, setActiveProject, setCanPublishUi, taskOpsAdapter, toast } = createComponent();
     const taskA = createTask({ id: 'task-a' });
     setActiveProject('project-a', [taskA]);
-    taskOpsAdapter.permanentlyDeleteTask.mockReturnValueOnce(new Promise(resolve => { resolveDelete = resolve; }));
+    taskOpsAdapter.permanentlyDeleteTaskWithOutcome.mockReturnValueOnce(
+      new Promise(resolve => { resolveDelete = resolve; }),
+    );
     component.confirmPermanentDelete(taskA);
 
     const completion = component.executePermanentDelete();
-    const canPublishUi = taskOpsAdapter.permanentlyDeleteTask.mock.calls[0]?.[1];
+    const canPublishUi = taskOpsAdapter.permanentlyDeleteTaskWithOutcome.mock.calls[0]?.[1];
     setCanPublishUi(false);
     setActiveProject('project-b', [createTask({ id: 'task-b' })]);
-    resolveDelete(true);
+    resolveDelete({ status: 'operation-failure' });
     await completion;
 
     expect(canPublishUi).toBeTypeOf('function');
+    if (typeof canPublishUi !== 'function') throw new Error('Expected permanent-delete owner fence');
     expect(canPublishUi()).toBe(false);
     expect(component.confirmDeleteTask()).toBe(taskA);
     expect(toast.success).not.toHaveBeenCalled();
+    expect(toast.warning).not.toHaveBeenCalled();
+  });
+
+  it('executePermanentDelete closes the confirmation after a successful delete', async () => {
+    const { component, setActiveProject, taskOpsAdapter, toast } = createComponent();
+    const task = createTask({ id: 'task-permanent-delete-success', title: '永久删除目标' });
+    setActiveProject('project-a', [task]);
+    component.confirmPermanentDelete(task);
+
+    await component.executePermanentDelete();
+
+    expect(taskOpsAdapter.permanentlyDeleteTaskWithOutcome).toHaveBeenCalledWith(task.id, expect.any(Function));
+    expect(component.confirmDeleteTask()).toBeNull();
+    expect(toast.success).toHaveBeenCalledWith('已删除', '任务 "永久删除目标" 已永久删除');
+  });
+
+  it('executePermanentDelete keeps the confirmation and allows retry after the delete operation fails', async () => {
+    const { component, setActiveProject, taskOpsAdapter, toast } = createComponent();
+    const task = createTask({ id: 'task-permanent-delete-retry', title: '重试删除目标' });
+    setActiveProject('project-a', [task]);
+    taskOpsAdapter.permanentlyDeleteTaskWithOutcome.mockResolvedValueOnce({ status: 'operation-failure' });
+    component.confirmPermanentDelete(task);
+
+    await component.executePermanentDelete();
+
+    expect(taskOpsAdapter.permanentlyDeleteTaskWithOutcome).toHaveBeenCalledWith(task.id, expect.any(Function));
+    expect(component.confirmDeleteTask()).toBe(task);
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(toast.warning).toHaveBeenCalledWith(
+      '永久删除未完成',
+      '任务仍保留在回收站中，请稍后重试。',
+    );
+
+    await component.executePermanentDelete();
+
+    expect(taskOpsAdapter.permanentlyDeleteTaskWithOutcome).toHaveBeenCalledTimes(2);
+    expect(component.confirmDeleteTask()).toBeNull();
+    expect(toast.success).toHaveBeenCalledWith('已删除', '任务 "重试删除目标" 已永久删除');
+  });
+
+  it('keeps the confirmation without a storage warning when local mutation is policy-blocked', async () => {
+    const { component, setActiveProject, taskOpsAdapter, toast } = createComponent();
+    const task = createTask({ id: 'task-permanent-delete-blocked', title: '只读状态任务' });
+    setActiveProject('project-a', [task]);
+    taskOpsAdapter.permanentlyDeleteTaskWithOutcome.mockResolvedValueOnce({ status: 'blocked' });
+    component.confirmPermanentDelete(task);
+
+    await component.executePermanentDelete();
+
+    expect(component.confirmDeleteTask()).toBe(task);
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(toast.warning).not.toHaveBeenCalled();
   });
 
   it('passes owner fencing to empty trash and suppresses stale dialog and toast commits', async () => {
@@ -186,6 +269,18 @@ describe('TrashModalComponent', () => {
     expect(canPublishUi()).toBe(false);
     expect(component.showEmptyConfirm()).toBe(true);
     expect(toast.success).not.toHaveBeenCalled();
+  });
+
+  it('executeEmptyTrash closes the confirmation after a successful clear', async () => {
+    const { component, setActiveProject, taskOpsAdapter, toast } = createComponent();
+    setActiveProject('project-a', [createTask({ id: 'task-empty-trash-success' })]);
+    component.confirmEmptyTrash();
+
+    await component.executeEmptyTrash();
+
+    expect(taskOpsAdapter.emptyTrash).toHaveBeenCalledWith(expect.any(Function));
+    expect(component.showEmptyConfirm()).toBe(false);
+    expect(toast.success).toHaveBeenCalledWith('已清空', '回收站已清空');
   });
 });
 

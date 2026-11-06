@@ -29,6 +29,7 @@ import { ErrorCodes, failure, Result, OperationError } from '../utils/result';
 import { blockTaskMutation, type TaskMutationBlockOptions } from './task-operation-mutation-guard.helpers';
 import { runTaskDurableFieldMutation } from './task-operation-durable-field.helpers';
 import {
+  type PermanentDeleteOutcome,
   TaskOperationTrashAdapterController,
   type TaskOperationUiOwner,
 } from './task-operation-trash-adapter.controller';
@@ -643,6 +644,12 @@ export class TaskOperationAdapterService {
   /** 永久删除任务（从回收站中删除） */
   async permanentlyDeleteTask(taskId: string, canPublishUi?: TaskOperationUiOwner): Promise<boolean> {
     return this.trashAdapter.permanentlyDeleteTask(taskId, canPublishUi);
+  }
+
+  permanentlyDeleteTaskWithOutcome(
+    taskId: string, canPublishUi?: TaskOperationUiOwner,
+  ): Promise<PermanentDeleteOutcome> {
+    return this.trashAdapter.permanentlyDeleteTaskWithOutcome(taskId, canPublishUi);
   }
 
   /** 批量删除任务（原子操作，P0 熔断层） */

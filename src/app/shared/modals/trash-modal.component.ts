@@ -536,10 +536,19 @@ export class TrashModalComponent {
     const captured = this.captureOwner(task.id);
     if (!captured) return;
     const canPublishUi = () => this.isOwnerCurrent(captured.owner, captured.canPublishUi);
-    const deleted = await this.taskOpsAdapter.permanentlyDeleteTask(task.id, canPublishUi);
+    const outcome = await this.taskOpsAdapter.permanentlyDeleteTaskWithOutcome(task.id, canPublishUi);
     if (!canPublishUi()) return;
-    if (deleted) this.toast.success('已删除', `任务 "${task.title}" 已永久删除`);
-    this.confirmDeleteTask.set(null);
+    switch (outcome.status) {
+      case 'success':
+        this.toast.success('已删除', `任务 "${task.title}" 已永久删除`);
+        this.confirmDeleteTask.set(null);
+        return;
+      case 'blocked':
+        return;
+      case 'operation-failure':
+        this.toast.warning('永久删除未完成', '任务仍保留在回收站中，请稍后重试。');
+        return;
+    }
   }
   
   /**

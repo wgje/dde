@@ -17,6 +17,11 @@ interface DurableRestoreResultLike {
 
 export type TaskOperationUiOwner = () => boolean;
 
+export type PermanentDeleteOutcome =
+  | { status: 'success' }
+  | { status: 'blocked' }
+  | { status: 'operation-failure' };
+
 export interface ProjectUiOwner {
   readonly projectId: string;
   readonly generation: number;
@@ -95,8 +100,15 @@ export class TaskOperationTrashAdapterController {
   async permanentlyDeleteTask(
     taskId: string, canPublishUi: TaskOperationUiOwner = () => true,
   ): Promise<boolean> {
+    const outcome = await this.permanentlyDeleteTaskWithOutcome(taskId, canPublishUi);
+    return outcome.status === 'success';
+  }
+
+  async permanentlyDeleteTaskWithOutcome(
+    taskId: string, canPublishUi: TaskOperationUiOwner = () => true,
+  ): Promise<PermanentDeleteOutcome> {
     if (this.options.blockLocalMutation('删除任务')) {
-      return false;
+      return { status: 'blocked' };
     }
 
     this.markStructureEditing();
@@ -105,15 +117,15 @@ export class TaskOperationTrashAdapterController {
     if (!result.saved) {
       this.options.rollbackSnapshotAfterDurableFailure(
         snapshot.id,
-        '任务永久删除本地持久化失败，未提交 UI 更新',
+        '任务永久删除未完成，未提交 UI 更新',
         { taskId },
         canPublishUi,
       );
-      return false;
+      return { status: 'operation-failure' };
     }
 
     this.options.recorder.setupSyncResultHandler(snapshot.id);
-    return true;
+    return { status: 'success' };
   }
 
   async deleteTasksBatch(

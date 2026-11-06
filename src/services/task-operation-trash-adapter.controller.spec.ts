@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   TaskOperationTrashAdapterController,
+  type PermanentDeleteOutcome,
   type TaskOperationTrashAdapterControllerOptions,
 } from './task-operation-trash-adapter.controller';
 
@@ -147,7 +148,7 @@ describe('TaskOperationTrashAdapterController', () => {
     );
   });
 
-  it('passes permanent-delete ownership to durable-failure cleanup', async () => {
+  it('passes permanent-delete ownership to operation-failure cleanup', async () => {
     const options = createOptions({
       core: {
         ...createOptions().core,
@@ -159,12 +160,37 @@ describe('TaskOperationTrashAdapterController', () => {
     const canPublishUi = () => false;
     const controller = new TaskOperationTrashAdapterController(options);
 
-    await controller.permanentlyDeleteTask('task-1', canPublishUi);
+    await expect(controller.permanentlyDeleteTaskWithOutcome('task-1', canPublishUi))
+      .resolves.toEqual({ status: 'operation-failure' } satisfies PermanentDeleteOutcome);
 
     expect(options.rollbackSnapshotAfterDurableFailure).toHaveBeenCalledWith(
-      'snapshot-1', '任务永久删除本地持久化失败，未提交 UI 更新',
+      'snapshot-1', '任务永久删除未完成，未提交 UI 更新',
       { taskId: 'task-1' }, canPublishUi,
     );
+  });
+
+  it('returns a blocked outcome before snapshot or durable IO when local mutation is policy-blocked', async () => {
+    const options = createOptions({ blockLocalMutation: vi.fn(() => true) });
+    const controller = new TaskOperationTrashAdapterController(options);
+
+    await expect(controller.permanentlyDeleteTaskWithOutcome('task-1'))
+      .resolves.toEqual({ status: 'blocked' } satisfies PermanentDeleteOutcome);
+
+    expect(options.blockLocalMutation).toHaveBeenCalledWith('删除任务');
+    expect(options.optimisticState.createTaskSnapshot).not.toHaveBeenCalled();
+    expect(options.core.permanentlyDeleteTaskDurably).not.toHaveBeenCalled();
+    expect(options.rollbackSnapshotAfterDurableFailure).not.toHaveBeenCalled();
+  });
+
+  it('returns success only after the durable delete succeeds', async () => {
+    const options = createOptions();
+    const controller = new TaskOperationTrashAdapterController(options);
+
+    await expect(controller.permanentlyDeleteTaskWithOutcome('task-1'))
+      .resolves.toEqual({ status: 'success' } satisfies PermanentDeleteOutcome);
+
+    expect(options.core.permanentlyDeleteTaskDurably).toHaveBeenCalledWith('task-1');
+    expect(options.recorder.setupSyncResultHandler).toHaveBeenCalledWith('snapshot-1');
   });
 
   it('passes empty-trash ownership to durable-failure cleanup', async () => {
