@@ -115,6 +115,24 @@ describe('DockFocusSceneComponent', () => {
     expect(component.focusStageStyle()['--stage-primary-rgb']).toBe('245 158 11');
   });
 
+  it('keeps ambient lighting restrained with a muted pine backdrop in steady focus mode', () => {
+    fixture.componentRef.setInput('active', true);
+    fixture.componentRef.setInput('scrimOn', true);
+    fixture.detectChanges();
+
+    const sceneStyle = component.focusSceneStyle();
+    const stageStyle = component.focusStageStyle();
+
+    expect(Number(sceneStyle['--scene-aurora-opacity'])).toBeLessThanOrEqual(0.05);
+    expect(Number(sceneStyle['--scene-grain-opacity'])).toBeLessThanOrEqual(0.01);
+    expect(Number(sceneStyle['--scene-vignette-opacity'])).toBeLessThanOrEqual(0.2);
+    expect(sceneStyle['--scene-drift-duration']).toBe('0s');
+    expect(sceneStyle['--scene-pulse-duration']).toBe('0s');
+    expect(Number(stageStyle['--stage-halo-opacity'])).toBeLessThanOrEqual(0.03);
+    expect(stageStyle['--stage-pulse-duration']).toBe('0s');
+    expect(component.focusBackdropColor()).toContain('rgba(24,36,31,');
+  });
+
   it('disables loop motion in T2 and reduced-motion profiles', () => {
     fixture.componentRef.setInput('active', true);
     fixture.componentRef.setInput('sceneMode', 'decision');

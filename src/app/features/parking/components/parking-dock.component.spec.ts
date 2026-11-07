@@ -662,6 +662,48 @@ describe('ParkingDockComponent v4', () => {
     expect(mockFocusLeader.tryTakeover).toHaveBeenCalled();
   });
 
+  it('ordinary dock exposes a working Focus entry through the canonical event', () => {
+    const listener = vi.fn();
+    window.addEventListener('dock-focus-session-toggle', listener);
+    fixture.detectChanges();
+    const entry = fixture.nativeElement.querySelector('[data-testid="dock-v3-focus-entry"]') as HTMLButtonElement;
+
+    expect(entry).toBeTruthy();
+    expect(entry.disabled).toBe(false);
+    entry.click();
+
+    expect(listener).toHaveBeenCalledTimes(1);
+    window.removeEventListener('dock-focus-session-toggle', listener);
+  });
+
+  it('active read-only follower sees the explanation and takeover action', () => {
+    focusMode.set(true);
+    mockFocusLeader.isReadOnlyFollower.set(true);
+    fixture.detectChanges();
+
+    const banner = fixture.nativeElement.querySelector('[data-testid="dock-v3-follower-banner"]');
+    const takeover = banner?.querySelector('[data-testid="dock-v3-takeover-button"]') as HTMLButtonElement | null;
+    expect(banner?.textContent).toContain('正在跟随另一端的 Focus');
+    expect(takeover).toBeTruthy();
+    takeover?.click();
+    expect(mockFocusLeader.tryTakeover).toHaveBeenCalled();
+  });
+
+  it('mobile Text to Flow transition collapses the dock without leaving Focus', async () => {
+    uiState.isMobile.set(true);
+    uiState.activeView.set('text');
+    dockExpanded.set(true);
+    fixture.detectChanges();
+
+    uiState.activeView.set('flow');
+    fixture.detectChanges();
+    await Promise.resolve();
+
+    expect(mockEngine.setDockExpanded).toHaveBeenCalledWith(false, { persistPreference: false });
+    expect(dockExpanded()).toBe(false);
+    expect(focusMode()).toBe(false);
+  });
+
   it('should render pending decision panel when at least one choice is present', () => {
     focusMode.set(true);
     pendingDecision.set({ reason: '候选异常', rootRemainingMinutes: 20 });

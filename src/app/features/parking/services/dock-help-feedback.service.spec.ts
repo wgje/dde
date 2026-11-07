@@ -32,6 +32,15 @@ describe('DockHelpFeedbackService', () => {
     }
   });
 
+  it('should describe explicit touch actions without obsolete gesture shortcuts', () => {
+    const touchSection = service.focusHelpSections.find(section => section.title === '触控');
+    const helpText = touchSection?.items.join(' ') ?? '';
+
+    expect(helpText).toContain('完成、等待和负荷切换都有明确按钮');
+    expect(helpText).toContain('主任务卡上的滑动与滚轮不会触发完成或负荷切换');
+    expect(helpText).not.toContain('上滑完成仍可用');
+  });
+
   // ── toggleHelpOverlay ──────────────────────────────────────
 
   it('should open help overlay on first toggle', () => {

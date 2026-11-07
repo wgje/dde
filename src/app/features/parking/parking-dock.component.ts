@@ -8,6 +8,7 @@ import {
   effect,
   inject,
   signal,
+  untracked,
   viewChild,
 } from '@angular/core';
 import { NgClass, NgStyle } from '@angular/common';
@@ -123,6 +124,8 @@ export class ParkingDockComponent implements OnDestroy {
     mobile: this.uiState.isMobile(),
     activeView: this.uiState.activeView(),
   }));
+  readonly isMobile = this.uiState.isMobile;
+  readonly activeView = this.uiState.activeView;
 
   readonly showNewTaskForm = signal(false);
   readonly inlineDockCreatePending = signal(false);
@@ -161,6 +164,16 @@ export class ParkingDockComponent implements OnDestroy {
   );
   readonly dockExpanded = this.engine.dockExpanded;
   readonly semicircleExpanded = computed(() => this.dockExpanded() || this.dragDrop.semicircleHoverExpanded());
+  private readonly mobileFlowDockCollapseEffect = effect(() => {
+    if (!this.uiState.isMobile() || this.uiState.activeView() !== 'flow' || !this.dockExpanded()) return;
+    untracked(() => {
+      this.closePlannerQuickEdit(false);
+      void this.engine.setDockExpanded(false, { persistPreference: false });
+      this.dragDrop.semicircleHoverExpanded.set(false);
+      this.dragDrop.cancelAutoCollapse();
+      this.helpFeedback.showDockFeedback('切换到 Flow，停泊坞已收起；任务和 Focus 会话保持不变。', 'info');
+    });
+  });
   readonly takeoverBannerVisible = computed(
     () => this.focusSessionMounted() && this.focusLeader.isReadOnlyFollower(),
   );
@@ -241,7 +254,8 @@ export class ParkingDockComponent implements OnDestroy {
 
   readonly dockMaxWidth = PARKING_CONFIG.DOCK_EXPANDED_MAX_WIDTH;
   readonly focusContentEffect = PARKING_CONFIG.DOCK_FOCUS_CONTENT_EFFECT;
-  readonly focusBackgroundUrl = PARKING_CONFIG.DOCK_FOCUS_BG_IMAGE_URL;
+  // Focus uses the neutral CSS backdrop instead of the ornamental gradient image.
+  readonly focusBackgroundUrl = '';
   readonly dockBottomInset =
     `calc(${PARKING_CONFIG.DOCK_BOTTOM_OFFSET_PX}px + env(safe-area-inset-bottom))`;
   readonly dockSemicircleBottomInset = computed(() =>
@@ -426,6 +440,11 @@ export class ParkingDockComponent implements OnDestroy {
     this.showNewTaskForm.update(value => !value);
   }
 
+  requestFocusSessionToggle(): void {
+    if (typeof window === 'undefined') return;
+    window.dispatchEvent(new CustomEvent('dock-focus-session-toggle'));
+  }
+
   async toggleDockExpanded(): Promise<void> {
     if (this.gateActive()) return;
     const next = !this.engine.dockExpanded();
@@ -574,7 +593,10 @@ export class ParkingDockComponent implements OnDestroy {
   }
 
   takeOverFocusControl(): void {
-    this.focusLeader.tryTakeover();
+    const acquired = this.focusLeader.tryTakeover();
+    if (!acquired) {
+      this.toast.info('主控端仍在活动', '请稍后重试，当前任务保持只读。');
+    }
   }
 
   async onScrimToggle(): Promise<void> {

@@ -1,275 +1,227 @@
-    <div class="orbit-ring orbit-ring-combo" [style.--combo-r.px]="comboRadius"></div>
-    <div class="orbit-ring orbit-ring-backup" [style.--backup-r.px]="backupRadius"></div>
+<div class="dock-radar" [class.dock-radar-mobile]="isMobile" [class.radar-promotion-active]="promotionLockTaskId() !== null" [attr.data-view-mode]="viewMode()" [style.--combo-r.px]="comboLayoutRadius()" [style.--backup-r.px]="backupLayoutRadius()" [style.--radar-view-transition]="viewTransition">
+  <div class="radar-orbit radar-orbit-candidate" aria-hidden="true"></div>
+  <div class="radar-orbit radar-orbit-backup" aria-hidden="true"></div>
 
-    @if (comboItems().length > 0) {
-      <div
-        class="region-label absolute text-slate-400 font-mono"
-        [style.left.px]="0"
-        [style.top.px]="-(comboRadius + 30)"
-        style="transform: translateX(-50%);">
-        组合选择区
+  @if (!isMobile) {
+    <div class="radar-label radar-label-candidate">可行动候选</div>
+    <div class="radar-label radar-label-backup">待命任务</div>
+    <div class="radar-edge-controls" data-testid="dock-v3-radar-edge-controls" data-radar-controls-portal="true">
+      <div class="radar-view-toggle" role="group" aria-label="雷达视图">
+        <button type="button" [class.active]="viewMode() === 'compact'" [attr.aria-pressed]="viewMode() === 'compact'" (click)="setViewMode('compact')">紧凑</button>
+        <button type="button" [class.active]="viewMode() === 'panorama'" [attr.aria-pressed]="viewMode() === 'panorama'" (click)="setViewMode('panorama')">全景</button>
       </div>
-    }
-    @if (backupItems().length > 0) {
-      <div
-        class="region-label absolute text-slate-500 font-mono"
-        [style.left.px]="0"
-        [style.top.px]="-(backupRadius + 30)"
-        style="transform: translateX(-50%);">
-        备选区
-      </div>
-    }
-    @if (groupSwitchEnabled()) {
-      <div
-        class="region-label absolute text-indigo-300/70 font-mono"
-        [style.left.px]="0"
-        [style.top.px]="-18"
-        style="transform: translateX(-50%);"
-        data-testid="dock-v3-radar-group-indicator">
-        当前组：{{ activeGroupLabel() }}
-      </div>
-    }
 
-    @if (comboOverflowCount() > 0) {
+      @if (groupSwitchEnabled()) {
+        <div class="radar-group-switch" role="group" aria-label="候选推荐分组">
+          @for (group of groupOrder; track group) {
+            <button type="button" [class.active]="activeGroup() === group" [attr.aria-pressed]="activeGroup() === group" (click)="selectGroup(group)">
+              @switch (group) { @case ('homologous-advancement') { 同源 } @case ('cognitive-downgrade') { 低负荷 } @case ('asynchronous-boot') { 并行 } }
+            </button>
+          }
+        </div>
+      }
+    </div>
+  }
+
+  @for (item of comboItems(); track item.entry.taskId) {
+    <button
+      type="button"
+      class="radar-task radar-task-candidate"
+      [class.radar-entering]="isEntering(item.entry.taskId)"
+      [class.radar-returning]="isRadarReturning(item.entry.taskId)"
+      [class.radar-float]="shouldAnimate(item.entry.taskId)"
+      [class.radar-highlight]="isHighlighted(item.entry.taskId)"
+      [class.radar-magnet-slide]="isMagnetSliding(item.entry.taskId)"
+      [style.left.px]="item.x"
+      [style.top.px]="item.y"
+      [style.--float-duration]="floatDuration"
+      [style.--float-delay]="getFloatDelay(item.entry.taskId, 'combo-select')"
+      [style.--appear-delay]="getAppearDelay(item.entry.taskId, 'combo-select')"
+      [style.--magnet-dx.px]="-item.x"
+      [style.--magnet-dy.px]="-item.y"
+      [attr.aria-label]="'预览候选任务：' + item.entry.title + '，状态：' + resolveStatusLabel(item.entry.status) + '，来源项目：' + resolveProjectName(item.entry)"
+      [attr.aria-describedby]="previewTaskId() === item.entry.taskId ? 'dock-radar-task-preview' : null"
+      [attr.aria-expanded]="previewTaskId() === item.entry.taskId"
+      [attr.aria-controls]="previewTaskId() === item.entry.taskId ? 'dock-radar-task-preview' : null"
+      [attr.data-task-id]="item.entry.taskId"
+      (click)="onRadarItemClick($event, item.entry.taskId)"
+      (mouseenter)="onRadarItemEnter(item.entry.taskId)"
+      (mouseleave)="onRadarItemLeave(item.entry.taskId)"
+      (focus)="onRadarItemFocus(item.entry.taskId)"
+      (blur)="onRadarItemBlur(item.entry.taskId)"
+      data-testid="dock-v3-radar-combo-item">
+      <span class="radar-project-mark" [style.background-color]="resolveProjectColor(item.entry)" aria-hidden="true"></span>
+      <span class="radar-status-mark" [attr.data-status]="item.entry.status" aria-hidden="true"></span>
+      <span class="radar-task-copy"><strong>{{ item.entry.title }}</strong><small>{{ resolveStatusLabel(item.entry.status) }} · {{ resolveProjectName(item.entry) }}</small></span>
+      @if (item.entry.expectedMinutes) { <span class="radar-task-time">{{ formatTime(item.entry.expectedMinutes) }}</span> }
+    </button>
+  }
+
+  @for (item of backupItems(); track item.entry.taskId) {
+    <button
+      type="button"
+      class="radar-task radar-task-backup"
+      [class.radar-entering]="isEntering(item.entry.taskId)"
+      [class.radar-returning]="isRadarReturning(item.entry.taskId)"
+      [class.radar-float]="shouldAnimate(item.entry.taskId)"
+      [class.radar-highlight]="isHighlighted(item.entry.taskId)"
+      [class.radar-magnet-slide]="isMagnetSliding(item.entry.taskId)"
+      [style.left.px]="item.x"
+      [style.top.px]="item.y"
+      [style.--float-duration]="backupFloatDuration"
+      [style.--float-delay]="getFloatDelay(item.entry.taskId, 'backup')"
+      [style.--appear-delay]="getAppearDelay(item.entry.taskId, 'backup')"
+      [style.--magnet-dx.px]="-item.x"
+      [style.--magnet-dy.px]="-item.y"
+      [attr.aria-label]="'预览待命任务：' + item.entry.title + '，状态：' + resolveStatusLabel(item.entry.status) + '，来源项目：' + resolveProjectName(item.entry)"
+      [attr.aria-describedby]="previewTaskId() === item.entry.taskId ? 'dock-radar-task-preview' : null"
+      [attr.aria-expanded]="previewTaskId() === item.entry.taskId"
+      [attr.aria-controls]="previewTaskId() === item.entry.taskId ? 'dock-radar-task-preview' : null"
+      [attr.data-task-id]="item.entry.taskId"
+      (click)="onRadarItemClick($event, item.entry.taskId)"
+      (mouseenter)="onRadarItemEnter(item.entry.taskId)"
+      (mouseleave)="onRadarItemLeave(item.entry.taskId)"
+      (focus)="onRadarItemFocus(item.entry.taskId)"
+      (blur)="onRadarItemBlur(item.entry.taskId)"
+      data-testid="dock-v3-radar-backup-item">
+      <span class="radar-project-mark" [style.background-color]="resolveProjectColor(item.entry)" aria-hidden="true"></span>
+      <span class="radar-status-mark" [attr.data-status]="item.entry.status" aria-hidden="true"></span>
+      <span class="radar-task-copy"><strong>{{ item.entry.title }}</strong><small>{{ resolveStatusLabel(item.entry.status) }} · {{ resolveProjectName(item.entry) }}</small></span>
+    </button>
+  }
+
+  @if (comboOverflowCount() > 0) {
+    <div class="radar-stack radar-stack-candidate" [class.radar-stack-open]="showComboOverflowPanel()">
       <button
         type="button"
-        class="absolute z-30 px-2 py-1 text-[10px] rounded-full bg-slate-800/90 border border-slate-600/70 text-slate-200 hover:bg-slate-700"
-        [style.left.px]="comboRadius * 0.72"
-        [style.top.px]="-(comboRadius + 24)"
-        style="pointer-events: auto;"
+        class="radar-stack-trigger"
+        [attr.aria-label]="'查看另有 ' + comboOverflowCount() + ' 个候选任务'"
+        aria-describedby="dock-radar-combo-stack-summary"
+        [attr.aria-expanded]="showComboOverflowPanel()"
+        aria-controls="dock-radar-combo-overflow"
         (click)="onComboOverflowTriggerClick($event)"
-        [attr.aria-label]="'查看组合选择区隐藏任务，共 ' + comboOverflowCount() + ' 项'"
         data-testid="dock-v3-radar-combo-overflow-trigger">
-        +{{ comboOverflowCount() }}
+        <span class="radar-stack-sheets" aria-hidden="true"><i></i><i></i></span>
+        <span class="radar-stack-copy"><strong>另有 {{ comboOverflowCount() }} 个候选</strong><small>{{ comboOverflowEntries()[0]?.title }}</small></span>
+        <span class="radar-stack-hover-summary" id="dock-radar-combo-stack-summary">
+          @for (entry of comboOverflowEntries().slice(0, 3); track entry.taskId) { <span>{{ resolveStatusLabel(entry.status) }} · {{ entry.title }}</span> }
+        </span>
       </button>
-    }
+      @if (showComboOverflowPanel()) {
+        <div id="dock-radar-combo-overflow" class="radar-overflow-list" data-testid="dock-v3-radar-combo-overflow-panel">
+          <h3>候选任务</h3>
+          @for (entry of comboOverflowEntries(); track entry.taskId) {
+            <button type="button" class="radar-overflow-item" (click)="onOverflowEntryClick($event, entry.taskId)" [attr.data-task-id]="entry.taskId" data-testid="dock-v3-radar-overflow-item">
+              <span class="radar-project-mark" [style.background-color]="resolveProjectColor(entry)" aria-hidden="true"></span>
+              <span class="radar-task-copy"><strong>{{ entry.title }}</strong><small>{{ resolveStatusLabel(entry.status) }} · {{ resolveProjectName(entry) }}</small></span>
+            </button>
+          }
+        </div>
+      }
+    </div>
+  }
 
-    @if (backupOverflowCount() > 0) {
+  @if (backupOverflowCount() > 0) {
+    <div class="radar-stack radar-stack-backup" [class.radar-stack-open]="showBackupOverflowPanel()">
       <button
         type="button"
-        class="absolute z-30 px-2 py-1 text-[10px] rounded-full bg-slate-800/90 border border-slate-600/70 text-slate-200 hover:bg-slate-700"
-        [style.left.px]="backupRadius * 0.78"
-        [style.top.px]="-(backupRadius + 22)"
-        style="pointer-events: auto;"
+        class="radar-stack-trigger"
+        [attr.aria-label]="'查看另有 ' + backupOverflowCount() + ' 个待命任务'"
+        aria-describedby="dock-radar-backup-stack-summary"
+        [attr.aria-expanded]="showBackupOverflowPanel()"
+        aria-controls="dock-radar-backup-overflow"
         (click)="onBackupOverflowTriggerClick($event)"
-        [attr.aria-label]="'查看备选区隐藏任务，共 ' + backupOverflowCount() + ' 项'"
         data-testid="dock-v3-radar-backup-overflow-trigger">
-        +{{ backupOverflowCount() }}
+        <span class="radar-stack-sheets" aria-hidden="true"><i></i><i></i></span>
+        <span class="radar-stack-copy"><strong>另有 {{ backupOverflowCount() }} 个待命</strong><small>{{ backupOverflowEntries()[0]?.title }}</small></span>
+        <span class="radar-stack-hover-summary" id="dock-radar-backup-stack-summary">
+          @for (entry of backupOverflowEntries().slice(0, 3); track entry.taskId) { <span>{{ resolveStatusLabel(entry.status) }} · {{ entry.title }}</span> }
+        </span>
       </button>
-    }
-
-
-    @for (item of comboItems(); track item.entry.taskId) {
-      <div
-        class="radar-item absolute glass-pill px-4 py-2.5 rounded-full"
-        [class.radar-float]="shouldAnimate(item.entry.taskId)"
-        [class.glass-pill-high-load]="item.entry.load === 'high'"
-        [class.radar-highlight]="isHighlighted(item.entry.taskId)"
-        [class.magnet-slide]="isMagnetSliding(item.entry.taskId)"
-        [style.left.px]="item.x"
-        [style.top.px]="item.y"
-        [style.opacity]="resolveOpacity(item.entry.taskId, comboOpacity)"
-        [style.--float-duration]="floatDuration"
-        [style.--float-delay]="getFloatDelay(item.entry.taskId, 'combo-select')"
-        [style.--magnet-dx.px]="-item.x"
-        [style.--magnet-dy.px]="-item.y"
-        (click)="onRadarItemClick($event, item.entry.taskId)"
-        (dblclick)="onRadarItemDoubleClick($event, 'combo-select')"
-        (wheel)="onWheel($event, item.entry.taskId)"
-        (touchstart)="onTouchStart($event, item.entry.taskId)"
-        (touchmove)="onTouchMove($event, item.entry.taskId)"
-        (touchend)="onTouchEnd()"
-        role="button"
-        tabindex="0"
-        [attr.aria-label]="'设为主任务：' + item.entry.title + '，来源项目：' + resolveProjectName(item.entry)"
-        [attr.title]="'来源项目：' + resolveProjectName(item.entry)"
-        (keydown)="onRadarItemKeydown($event, item.entry.taskId)"
-        (mouseenter)="onRadarItemEnter(item.entry.taskId)"
-        (mouseleave)="onRadarItemLeave(item.entry.taskId)"
-        (focus)="onRadarItemFocus(item.entry.taskId)"
-        (blur)="onRadarItemBlur(item.entry.taskId)"
-        data-testid="dock-v3-radar-combo-item">
-        <div class="radar-item-inner flex items-center gap-2.5"
-          [class.radar-entering]="isEntering(item.entry.taskId)"
-          [class.radar-returning]="isRadarReturning(item.entry.taskId)"
-          [style.--appear-dx]="(-item.x * 0.65) + 'px'"
-          [style.--appear-dy]="(-item.y * 0.65) + 'px'"
-          [style.--appear-delay]="getAppearDelay(item.entry.taskId, 'combo-select')">
-          <div
-            class="w-2.5 h-2.5 rounded-full shrink-0 border border-slate-300/30"
-            [style.background-color]="resolveProjectColor(item.entry)"
-            [attr.aria-label]="'来源项目：' + resolveProjectName(item.entry)"
-            [attr.title]="'来源项目：' + resolveProjectName(item.entry)">
-          </div>
-          <div
-            class="w-2.5 h-2.5 rounded-full shrink-0"
-            [class.load-dot-high]="item.entry.load === 'high'"
-            [class.load-dot-low]="item.entry.load === 'low'">
-          </div>
-          <span class="text-xs text-slate-100 font-medium whitespace-nowrap">{{ item.entry.title }}</span>
-          @if (item.entry.expectedMinutes) {
-            <span class="text-[10px] text-slate-500 font-mono">{{ formatTime(item.entry.expectedMinutes) }}</span>
+      @if (showBackupOverflowPanel()) {
+        <div id="dock-radar-backup-overflow" class="radar-overflow-list" data-testid="dock-v3-radar-backup-overflow-panel">
+          <h3>待命任务</h3>
+          @for (entry of backupOverflowEntries(); track entry.taskId) {
+            <button type="button" class="radar-overflow-item" (click)="onOverflowEntryClick($event, entry.taskId)" [attr.data-task-id]="entry.taskId" data-testid="dock-v3-radar-overflow-item">
+              <span class="radar-project-mark" [style.background-color]="resolveProjectColor(entry)" aria-hidden="true"></span>
+              <span class="radar-task-copy"><strong>{{ entry.title }}</strong><small>{{ resolveStatusLabel(entry.status) }} · {{ resolveProjectName(entry) }}</small></span>
+            </button>
           }
         </div>
-      </div>
-    }
+      }
+    </div>
+  }
 
-    @for (item of backupItems(); track item.entry.taskId) {
-      <div
-        class="radar-item absolute glass-pill-backup px-3 py-1.5 rounded-full"
-        [class.radar-float]="shouldAnimate(item.entry.taskId)"
-        [class.radar-highlight]="isHighlighted(item.entry.taskId)"
-        [class.magnet-slide]="isMagnetSliding(item.entry.taskId)"
-        [style.left.px]="item.x"
-        [style.top.px]="item.y"
-        [style.opacity]="resolveOpacity(item.entry.taskId, backupOpacity)"
-        [style.--float-duration]="backupFloatDuration"
-        [style.--float-delay]="getFloatDelay(item.entry.taskId, 'backup')"
-        [style.--magnet-dx.px]="-item.x"
-        [style.--magnet-dy.px]="-item.y"
-        (click)="onRadarItemClick($event, item.entry.taskId)"
-        (dblclick)="onRadarItemDoubleClick($event, 'backup')"
-        (wheel)="onWheel($event, item.entry.taskId)"
-        (touchstart)="onTouchStart($event, item.entry.taskId)"
-        (touchmove)="onTouchMove($event, item.entry.taskId)"
-        (touchend)="onTouchEnd()"
-        role="button"
-        tabindex="0"
-        [attr.aria-label]="'设为主任务：' + item.entry.title + '，来源项目：' + resolveProjectName(item.entry)"
-        [attr.title]="'来源项目：' + resolveProjectName(item.entry)"
-        (keydown)="onRadarItemKeydown($event, item.entry.taskId)"
-        (mouseenter)="onRadarItemEnter(item.entry.taskId)"
-        (mouseleave)="onRadarItemLeave(item.entry.taskId)"
-        (focus)="onRadarItemFocus(item.entry.taskId)"
-        (blur)="onRadarItemBlur(item.entry.taskId)"
-        data-testid="dock-v3-radar-backup-item">
-        <div class="radar-item-inner flex items-center gap-2"
-          [class.radar-entering]="isEntering(item.entry.taskId)"
-          [class.radar-returning]="isRadarReturning(item.entry.taskId)"
-          [style.--appear-dx]="(-item.x * 0.5) + 'px'"
-          [style.--appear-dy]="(-item.y * 0.5) + 'px'"
-          [style.--appear-delay]="getAppearDelay(item.entry.taskId, 'backup')">
-          <div
-            class="w-1.5 h-1.5 rounded-full shrink-0 border border-slate-300/30"
-            [style.background-color]="resolveProjectColor(item.entry)"
-            [attr.aria-label]="'来源项目：' + resolveProjectName(item.entry)"
-            [attr.title]="'来源项目：' + resolveProjectName(item.entry)">
-          </div>
-          <div
-            class="w-1.5 h-1.5 rounded-full shrink-0"
-            [class.load-dot-high]="item.entry.load === 'high'"
-            [class.load-dot-low]="item.entry.load === 'low'">
-          </div>
-          <span class="text-[10px] text-slate-400 whitespace-nowrap">{{ item.entry.title }}</span>
-          @if (item.entry.expectedMinutes) {
-            <span class="text-[9px] text-slate-600 font-mono">{{ formatTime(item.entry.expectedMinutes) }}</span>
-          }
-        </div>
+  @if (isMobile) {
+    <section class="radar-mobile-rail" aria-label="候选任务轨道" data-testid="dock-v3-mobile-candidate-rail" data-mobile-rail-portal="true">
+      <header><strong>可行动候选 · {{ mobileVisibleTaskCount() }}</strong><button type="button" (click)="openMobileTaskDrawer($event)" data-testid="dock-v3-mobile-all-tasks">全部任务 <span>{{ orderedComboEntries().length + orderedBackupEntries().length }}</span></button></header>
+      <div class="radar-mobile-track" tabindex="0" aria-label="横向浏览候选任务">
+        @for (entry of mobileCandidateEntries(); track entry.taskId) {
+          <button type="button" class="radar-mobile-task" (click)="openTaskPreview(entry.taskId, 'mobile-rail', $event.currentTarget)">
+            <span class="radar-project-mark" [style.background-color]="resolveProjectColor(entry)" aria-hidden="true"></span>
+            <span class="radar-mobile-copy"><strong>{{ entry.title }}</strong><small>{{ resolveStatusLabel(entry.status) }} · {{ formatTime(entry.expectedMinutes ?? 0) }}</small></span>
+          </button>
+        }
+        @if (orderedComboEntries().length === 0) { <p>暂无可行动候选</p> }
       </div>
-    }
+    </section>
+  }
 
-    @if (showComboOverflowPanel() && comboOverflowCount() > 0) {
-      <div
-        class="absolute z-40 rounded-xl border border-slate-600/70 bg-slate-900/95 p-2.5 w-[220px] max-h-[220px] overflow-y-auto"
-        [style.left.px]="comboRadius * 0.44"
-        [style.top.px]="-(comboRadius - 4)"
-        style="pointer-events: auto;"
-        data-testid="dock-v3-radar-combo-overflow-panel">
-        <div class="text-[10px] text-slate-300 font-mono mb-2">组合选择区隐藏任务</div>
-        @for (entry of comboOverflowEntries(); track entry.taskId) {
-          <button
-            type="button"
-            class="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-left text-[11px] text-slate-200 hover:bg-slate-700/60"
-            (click)="onOverflowEntryClick($event, entry.taskId)">
-            <span
-              class="w-2 h-2 rounded-full border border-slate-300/30 shrink-0"
-              [style.background-color]="resolveProjectColor(entry)"
-              [attr.title]="'来源项目：' + resolveProjectName(entry)">
-            </span>
-            <span class="truncate flex-1">{{ entry.title }}</span>
+  @if (previewEntry(); as entry) {
+    @if (!isMobile) {
+      <section id="dock-radar-task-preview" class="radar-task-preview" role="region" aria-label="任务预览" data-testid="dock-v3-task-preview">
+        <header><span>任务预览</span><button type="button" class="radar-icon-close" aria-label="关闭任务预览" (click)="closeTaskPreview()">×</button></header>
+        <h2>{{ entry.title }}</h2>
+        <p>{{ resolveProjectName(entry) }} · {{ entry.lane === 'combo-select' ? '候选任务' : '待命任务' }}</p>
+        <div class="radar-preview-reason"><strong>{{ resolveStatusLabel(entry.status) }}</strong><span>{{ resolvePreviewReason(entry) }}</span></div>
+        <dl><div><dt>负荷</dt><dd>{{ entry.load === 'high' ? '高' : '低' }}</dd></div><div><dt>预计</dt><dd>{{ entry.expectedMinutes ? formatTime(entry.expectedMinutes) : '未设置' }}</dd></div><div><dt>等待</dt><dd>{{ entry.waitMinutes ? formatTime(entry.waitMinutes) : '无' }}</dd></div></dl>
+        @if (canMutate) {
+          <div class="radar-preview-actions"><button type="button" [disabled]="promotionLockTaskId() !== null" (click)="togglePreviewLoad()">调整为{{ entry.load === 'low' ? '高' : '低' }}负荷</button><button type="button" class="radar-promote-button" [disabled]="promotionLockTaskId() !== null" (click)="confirmPreviewPromotion()" data-testid="dock-v3-preview-promote">{{ promotionLockTaskId() === entry.taskId ? '正在移入…' : '移入前台' }}</button></div>
+          <div class="radar-preview-edit">
+            <label>预计分钟<input type="number" min="1" [value]="entry.expectedMinutes ?? ''" (change)="commitPreviewMinutes('expected', $event)" /></label>
+            <label>等待分钟<input type="number" min="0" [value]="entry.waitMinutes ?? ''" (change)="commitPreviewMinutes('wait', $event)" /></label>
+          </div>
+        } @else { <p class="radar-readonly-note">只读跟随中，任务操作由主控端执行。</p> }
+      </section>
+    }
+  }
+
+  @if (isMobile && mobileTaskDrawerOpen()) {
+    <div class="radar-mobile-backdrop open" (click)="closeMobileTaskDrawer()" data-testid="dock-v3-mobile-drawer-backdrop" data-mobile-drawer-portal="true"></div>
+    <section class="radar-mobile-drawer" role="dialog" aria-modal="true" aria-labelledby="dock-radar-drawer-title" data-testid="dock-v3-mobile-task-drawer" data-mobile-drawer-portal="true" (keydown)="onMobileDrawerKeydown($event)">
+      <div class="radar-drawer-handle" aria-hidden="true"></div>
+      <header><h2 id="dock-radar-drawer-title">全部停泊任务</h2><button type="button" aria-label="关闭全部任务" data-testid="dock-v3-mobile-task-drawer-close" (click)="closeMobileTaskDrawer()">×</button></header>
+      @if (previewEntry(); as entry) {
+        <section class="radar-drawer-preview" id="dock-radar-task-preview" aria-label="任务预览" data-testid="dock-v3-task-preview">
+          <span>任务预览 · {{ resolveStatusLabel(entry.status) }}</span><h3>{{ entry.title }}</h3><p>{{ resolvePreviewReason(entry) }}</p>
+          @if (canMutate) { <div class="radar-preview-actions"><button type="button" [disabled]="promotionLockTaskId() !== null" (click)="togglePreviewLoad()">调整为{{ entry.load === 'low' ? '高' : '低' }}负荷</button><button type="button" class="radar-promote-button" [disabled]="promotionLockTaskId() !== null" (click)="confirmPreviewPromotion()" data-testid="dock-v3-preview-promote">{{ promotionLockTaskId() === entry.taskId ? '正在移入…' : '移入前台' }}</button><button type="button" (click)="closeTaskPreview(false)">返回任务列表</button></div><div class="radar-preview-edit"><label>预计分钟<input type="number" min="1" [value]="entry.expectedMinutes ?? ''" (change)="commitPreviewMinutes('expected', $event)" /></label><label>等待分钟<input type="number" min="0" [value]="entry.waitMinutes ?? ''" (change)="commitPreviewMinutes('wait', $event)" /></label></div> } @else { <p class="radar-readonly-note">只读跟随中，任务操作由主控端执行。</p> }
+        </section>
+      }
+      <div class="radar-drawer-list">
+        @if (groupSwitchEnabled()) {
+          <div class="radar-group-switch" role="group" aria-label="候选推荐分组">
+            @for (group of groupOrder; track group) {
+              <button type="button" [class.active]="activeGroup() === group" [attr.aria-pressed]="activeGroup() === group" (click)="selectGroup(group)">
+                @switch (group) { @case ('homologous-advancement') { 同源 } @case ('cognitive-downgrade') { 低负荷 } @case ('asynchronous-boot') { 并行 } }
+              </button>
+            }
+          </div>
+        }
+        <h3>可行动候选</h3>
+        @for (entry of orderedComboEntries(); track entry.taskId) {
+          <button type="button" class="radar-drawer-task" [attr.aria-expanded]="previewTaskId() === entry.taskId" (click)="openTaskPreview(entry.taskId, 'task-drawer', $event.currentTarget)" [attr.data-task-id]="entry.taskId">
+            <span class="radar-status-mark" [attr.data-status]="entry.status" aria-hidden="true"></span><span class="radar-task-copy"><strong>{{ entry.title }}</strong><small>{{ resolveStatusLabel(entry.status) }} · {{ resolveProjectName(entry) }}</small></span>
+          </button>
+        }
+        <h3>待命任务</h3>
+        @for (entry of orderedBackupEntries(); track entry.taskId) {
+          <button type="button" class="radar-drawer-task" [attr.aria-expanded]="previewTaskId() === entry.taskId" (click)="openTaskPreview(entry.taskId, 'task-drawer', $event.currentTarget)" [attr.data-task-id]="entry.taskId">
+            <span class="radar-status-mark" [attr.data-status]="entry.status" aria-hidden="true"></span><span class="radar-task-copy"><strong>{{ entry.title }}</strong><small>{{ resolveStatusLabel(entry.status) }} · {{ resolveProjectName(entry) }}</small></span>
           </button>
         }
       </div>
-    }
+    </section>
+  }
 
-    @if (showBackupOverflowPanel() && backupOverflowCount() > 0) {
-      <div
-        class="absolute z-40 rounded-xl border border-slate-600/70 bg-slate-900/95 p-2.5 w-[220px] max-h-[220px] overflow-y-auto"
-        [style.left.px]="backupRadius * 0.48"
-        [style.top.px]="-(backupRadius - 8)"
-        style="pointer-events: auto;"
-        data-testid="dock-v3-radar-backup-overflow-panel">
-        <div class="text-[10px] text-slate-300 font-mono mb-2">备选区隐藏任务</div>
-        @for (entry of backupOverflowEntries(); track entry.taskId) {
-          <button
-            type="button"
-            class="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-left text-[11px] text-slate-200 hover:bg-slate-700/60"
-            (click)="onOverflowEntryClick($event, entry.taskId)">
-            <span
-              class="w-2 h-2 rounded-full border border-slate-300/30 shrink-0"
-              [style.background-color]="resolveProjectColor(entry)"
-              [attr.title]="'来源项目：' + resolveProjectName(entry)">
-            </span>
-            <span class="truncate flex-1">{{ entry.title }}</span>
-          </button>
-        }
-      </div>
-    }
-
-    @if (createFormLane()) {
-      <div
-        class="radar-create-form absolute rounded-xl p-3 flex flex-col gap-2"
-        [style.left.px]="createFormX"
-        [style.top.px]="createFormY"
-        [style.width.px]="createFormWidth"
-        style="transform: translate(-50%, -50%);"
-        (click)="$event.stopPropagation()"
-        data-testid="dock-v3-radar-create-form">
-        <div class="text-[10px] text-slate-400 font-mono mb-1">
-          Create {{ createFormLane() === 'combo-select' ? 'Combo-select' : 'Backup' }} Task
-        </div>
-        <input
-          type="text"
-          [(ngModel)]="createTitle"
-          (keydown.enter)="submitCreate()"
-          (keydown.escape)="closeCreateForm()"
-          class="text-xs py-1.5 px-2 rounded-lg bg-slate-800/80 border border-slate-700 text-slate-200 placeholder:text-slate-500 focus:border-indigo-500 outline-none"
-          placeholder="Task title..." />
-        <div class="flex items-center gap-2">
-          <select
-            [(ngModel)]="createLoad"
-            class="text-[10px] py-1 px-1.5 rounded bg-slate-800/80 border border-slate-700 text-slate-300 outline-none flex-1">
-            <option value="low">Low Load</option>
-            <option value="high">High Load</option>
-          </select>
-          <input
-            type="number"
-            [(ngModel)]="createExpected"
-            min="1"
-            placeholder="min"
-            class="w-14 text-[10px] py-1 px-1.5 rounded bg-slate-800/80 border border-slate-700 text-slate-200 outline-none text-center" />
-        </div>
-        <div class="flex items-center gap-2">
-          <input
-            type="number"
-            [(ngModel)]="createWait"
-            min="0"
-            placeholder="Wait (min)"
-            class="flex-1 text-[10px] py-1 px-1.5 rounded bg-slate-800/80 border border-slate-700 text-slate-200 outline-none" />
-          <button
-            type="button"
-            (click)="submitCreate()"
-            class="px-2.5 py-1 text-[10px] rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition-colors"
-            style="min-height: 28px;">
-            Add
-          </button>
-          <button
-            type="button"
-            (click)="closeCreateForm()"
-            class="px-2 py-1 text-[10px] rounded-lg hover:bg-slate-700/60 text-slate-400 transition-colors"
-            style="min-height: 28px;">
-            Close
-          </button>
-        </div>
-      </div>
-    }
+  <div class="radar-sr-only" aria-live="polite" aria-atomic="true">{{ announcement() }}</div>
+</div>

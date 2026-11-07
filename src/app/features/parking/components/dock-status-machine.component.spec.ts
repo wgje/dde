@@ -3,6 +3,7 @@ import { computed, signal } from '@angular/core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { DockStatusMachineComponent } from './dock-status-machine.component';
 import { DockEngineService } from '../../../../services/dock-engine.service';
+import { FocusDockLeaderService } from '../../../../services/focus-dock-leader.service';
 import {
   StatusMachineEntry,
   DockPendingDecision,
@@ -32,6 +33,7 @@ describe('DockStatusMachineComponent', () => {
     },
   ]);
   const muted = signal(false);
+  const readOnlyFollower = signal(false);
   const pendingDecision = signal<DockPendingDecision | null>(null);
   const pendingDecisionEntries = signal<DockPendingDecisionEntry[]>([]);
   const fragmentEntryCountdown = signal<number | null>(null);
@@ -61,10 +63,14 @@ describe('DockStatusMachineComponent', () => {
     },
     tick: signal(0),
   };
+  const mockFocusLeader = {
+    isReadOnlyFollower: readOnlyFollower,
+  };
 
   beforeEach(async () => {
     vi.clearAllMocks();
     muted.set(false);
+    readOnlyFollower.set(false);
     pendingDecision.set(null);
     pendingDecisionEntries.set([]);
     fragmentEntryCountdown.set(null);
@@ -91,7 +97,10 @@ describe('DockStatusMachineComponent', () => {
 
     await TestBed.configureTestingModule({
       imports: [DockStatusMachineComponent],
-      providers: [{ provide: DockEngineService, useValue: mockEngine }],
+      providers: [
+        { provide: DockEngineService, useValue: mockEngine },
+        { provide: FocusDockLeaderService, useValue: mockFocusLeader },
+      ],
     }).compileComponents();
 
     fixture = TestBed.createComponent(DockStatusMachineComponent);
@@ -162,6 +171,35 @@ describe('DockStatusMachineComponent', () => {
     component.toggleMute();
     expect(mockEngine.toggleMuteWaitTone).toHaveBeenCalled();
     expect(muted()).toBe(true);
+  });
+
+  it('read-only followers cannot switch status rows from pointer or keyboard', () => {
+    readOnlyFollower.set(true);
+    fixture.componentRef.setInput('forcedMode', 'full');
+    fixture.detectChanges();
+
+    const row = fixture.nativeElement.querySelector('[data-testid="dock-v3-status-entry-suspended"]') as HTMLElement;
+    row.click();
+    row.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    row.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', bubbles: true }));
+
+    expect(mockEngine.switchToTask).not.toHaveBeenCalled();
+  });
+
+  it('read-only followers cannot persist mute or dismiss rest reminders, while leaders can', () => {
+    readOnlyFollower.set(true);
+    component.toggleMute();
+    component.dismissRestReminder();
+
+    expect(mockEngine.toggleMuteWaitTone).not.toHaveBeenCalled();
+    expect(mockEngine.fragmentRest.dismissRestReminder).not.toHaveBeenCalled();
+
+    readOnlyFollower.set(false);
+    component.toggleMute();
+    component.dismissRestReminder();
+
+    expect(mockEngine.toggleMuteWaitTone).toHaveBeenCalledTimes(1);
+    expect(mockEngine.fragmentRest.dismissRestReminder).toHaveBeenCalledTimes(1);
   });
 
   it('status mute button should keep a 44px touch target', () => {

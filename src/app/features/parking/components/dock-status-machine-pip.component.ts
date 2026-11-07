@@ -1,6 +1,7 @@
 import { ChangeDetectionStrategy, Component, HostListener, computed, inject, output, signal } from '@angular/core';
 import { NgClass } from '@angular/common';
 import { DockEngineService } from '../../../../services/dock-engine.service';
+import { FocusDockLeaderService } from '../../../../services/focus-dock-leader.service';
 import { isStatusMachineEntryExpired, type DockEntry, type StatusMachineEntry } from '../../../../models/parking-dock';
 
 type PipAlertTone = 'danger' | 'warning' | 'info' | 'calm';
@@ -56,6 +57,7 @@ interface PipTaskRow {
 })
 export class DockStatusMachinePipComponent {
   private readonly engine = inject(DockEngineService);
+  private readonly focusLeader = inject(FocusDockLeaderService);
 
   readonly returnRequested = output<void>();
   readonly closeRequested = output<void>();
@@ -363,12 +365,17 @@ export class DockStatusMachinePipComponent {
       case 'wait-finished':
       case 'waiting':
       case 'stalled':
+        if (this.focusLeader.isReadOnlyFollower()) {
+          this.returnToMain();
+          return;
+        }
         if (alert.taskId) {
           this.engine.switchToTask(alert.taskId);
         }
         this.returnToMain();
         return;
       case 'rest-reminder':
+        if (this.focusLeader.isReadOnlyFollower()) return;
         this.engine.fragmentRest.dismissRestReminder();
         return;
       default:
@@ -385,6 +392,10 @@ export class DockStatusMachinePipComponent {
   }
 
   exitFocusMode(): void {
+    if (this.focusLeader.isReadOnlyFollower()) {
+      this.closeRequested.emit();
+      return;
+    }
     if (this.engine.focusMode()) {
       void this.engine.toggleFocusMode();
     }
@@ -392,6 +403,7 @@ export class DockStatusMachinePipComponent {
   }
 
   toggleMute(): void {
+    if (this.focusLeader.isReadOnlyFollower()) return;
     void this.engine.toggleMuteWaitTone();
   }
 

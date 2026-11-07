@@ -20,11 +20,12 @@
        玻璃拟态基础 — 清新自然系
        ══════════════════════════════════════════ */
     .glass-card {
-      background: linear-gradient(165deg, rgba(22, 28, 36, 0.92), rgba(16, 20, 28, 0.88));
-      border: 1px solid rgba(148, 163, 184, 0.10);
-      box-shadow: 0 12px 48px rgba(0, 0, 0, 0.35),
-                  0 2px 8px rgba(0, 0, 0, 0.12),
-                  inset 0 0.5px 0 rgba(255, 255, 255, 0.06);
+      background: rgba(249, 251, 254, 0.97);
+      color: #172033;
+      border: 1px solid rgba(23, 32, 51, 0.11);
+      box-shadow: 0 14px 38px rgba(30, 41, 59, 0.15),
+                  0 2px 8px rgba(30, 41, 59, 0.06),
+                  inset 0 0.5px 0 rgba(255, 255, 255, 0.95);
       /* 不使用 backdrop-filter，避免与专注模式全屏 blur 叠加导致 GPU 合成瓶颈 */
       contain: layout style;
       transition:
@@ -33,11 +34,10 @@
     }
     /* 拖拽任务悬停在坞栏面板时的高亮反馈 */
     .glass-card.drag-receiving {
-      border-color: rgba(99, 102, 241, 0.4);
-      box-shadow: 0 12px 48px rgba(0, 0, 0, 0.35),
-                  0 2px 8px rgba(0, 0, 0, 0.12),
-                  0 0 0 1px rgba(99, 102, 241, 0.25),
-                  0 0 24px rgba(99, 102, 241, 0.08),
+      border-color: rgba(139, 153, 121, 0.42);
+      box-shadow: 0 14px 38px rgba(30, 41, 59, 0.15),
+                  0 2px 8px rgba(30, 41, 59, 0.06),
+                  0 0 0 1px rgba(139, 153, 121, 0.18),
                   inset 0 0.5px 0 rgba(255, 255, 255, 0.06);
     }
 
@@ -91,14 +91,101 @@
       pointer-events: auto;
     }
     .dock-bar.focus-secondary .dock-shell {
-      background:
-        linear-gradient(180deg, rgba(17, 24, 39, 0.92), rgba(15, 23, 42, 0.88)),
-        linear-gradient(120deg, rgba(99, 102, 241, 0.07), transparent 35%);
-      border-color: rgba(129, 140, 248, 0.26);
+      background: rgba(31, 34, 31, 0.96);
+      border-color: rgba(190, 193, 180, 0.14);
       box-shadow:
-        0 16px 40px rgba(2, 6, 23, 0.38),
-        0 0 0 1px rgba(129, 140, 248, 0.12),
-        inset 0 1px 0 rgba(255, 255, 255, 0.05);
+        0 12px 30px rgba(0, 0, 0, 0.3),
+        inset 0 1px 0 rgba(255, 255, 255, 0.035);
+    }
+    .dock-bar.focus-session-active.focus-expanded .dock-shell {
+      background: rgba(31, 34, 31, .96);
+      color: #e5eaf2;
+      border-color: rgba(190, 193, 180, .14);
+      box-shadow: 0 12px 30px rgba(0, 0, 0, .3), inset 0 1px 0 rgba(255, 255, 255, .035);
+    }
+    .dock-bar:not(.focus-session-active) .dock-shell {
+      background: rgba(249, 251, 254, 0.97);
+      color: #172033;
+    }
+    .dock-bar:not(.focus-session-active) .dock-shell h3,
+    .dock-bar:not(.focus-session-active) .dock-shell [class*="text-slate-"] {
+      color: #344054 !important;
+    }
+    .dock-bar.focus-session-active.focus-expanded .dock-shell,
+    .dock-bar.focus-secondary .dock-shell {
+      color: #e5eaf2;
+    }
+    .dock-bar:not(.focus-session-active) .dock-shell .dock-panel-action {
+      color: #344054;
+      border-color: rgba(23, 32, 51, .11);
+      background: rgba(232, 237, 245, .82);
+    }
+    .dock-bar:not(.focus-session-active) .dock-shell .dock-panel-action:hover {
+      background: #e5eaf2;
+    }
+    .dock-bar:not(.focus-session-active) .dock-card {
+      border-color: #dce3ed;
+      color: #253247;
+      background: rgba(255, 255, 255, .94);
+      box-shadow: 0 4px 14px rgba(30, 41, 59, .08);
+    }
+    .dock-bar:not(.focus-session-active) .dock-card.main-card {
+      border-color: rgba(139, 153, 121, .36);
+      background: rgba(139, 153, 121, .07);
+    }
+    .dock-bar:not(.focus-session-active) .dock-card.secondary-card {
+      border-color: #dce3ed;
+      color: #475467;
+      background: #f2f5f9;
+    }
+    .dock-focus-entry {
+      min-height: 48px;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 0 15px;
+      border: 1px solid rgba(139, 153, 121, .32);
+      border-radius: 9px;
+      color: #fff;
+      background: #596a51;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, .16);
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: transform var(--pk-micro-hover) var(--pk-ease-micro), box-shadow var(--pk-micro-hover) var(--pk-ease-micro);
+    }
+    .dock-focus-entry:hover { transform: translateY(-1px); background: #65765d; box-shadow: 0 6px 16px rgba(0, 0, 0, .2); }
+    .dock-focus-entry:disabled { opacity: .55; cursor: not-allowed; }
+    .dock-focus-entry:focus-visible { outline: 2px solid #b5bea6; outline-offset: 3px; }
+
+    .dock-follower-banner {
+      position: fixed;
+      z-index: 76;
+      top: calc(env(safe-area-inset-top, 0px) + 14px);
+      left: 50%;
+      width: min(520px, calc(100vw - 24px));
+      min-height: 56px;
+      display: flex;
+      align-items: center;
+      gap: 11px;
+      padding: 8px 10px;
+      transform: translateX(-50%);
+      border: 1px solid rgba(148, 163, 184, .22);
+      border-radius: 14px;
+      color: #e8edf6;
+      background: rgba(17, 25, 39, .96);
+      box-shadow: 0 12px 30px rgba(0, 0, 0, .3);
+      pointer-events: auto;
+    }
+    .dock-follower-mark { width: 26px; height: 26px; display: grid; place-items: center; flex: 0 0 26px; border-radius: 8px; color: #fde68a; background: rgba(245, 158, 11, .16); }
+    .dock-follower-copy { min-width: 0; flex: 1 1 auto; display: grid; gap: 3px; }
+    .dock-follower-copy strong { color: #f1f5f9; font-size: 12px; font-weight: 600; }
+    .dock-follower-copy small { color: #c1cad6; font-size: 11px; }
+    .dock-follower-banner button { min-height: 40px; padding: 0 11px; border: 1px solid rgba(251, 191, 36, .28); border-radius: 9px; color: #fde68a; background: rgba(245, 158, 11, .12); font-size: 11px; cursor: pointer; }
+    app-dock-radar-zone { pointer-events: none; }
+    @media (max-width: 767px) {
+      .mobile-radar-layer { z-index: 72 !important; pointer-events: none; }
+      .mobile-radar-layer app-dock-radar-zone { pointer-events: none; }
     }
     .dock-bar.focus-secondary:hover,
     .dock-bar.focus-secondary.drag-receiving {
@@ -123,14 +210,14 @@
       width: var(--pk-semicircle-w);
       height: var(--pk-semicircle-h);
       border-radius: 80px 80px 0 0;
-      background: linear-gradient(180deg, rgba(30, 41, 59, 0.95), rgba(15, 23, 42, 0.92));
-      border: 1px solid rgba(148, 163, 184, 0.12);
+      background: rgba(38, 41, 38, .96);
+      border: 1px solid rgba(190, 193, 180, .12);
       border-bottom: none;
       display: flex;
       align-items: center;
       justify-content: center;
       gap: 4px;
-      opacity: 0.32;
+      opacity: 0.68;
       backface-visibility: hidden;
       transition:
         transform var(--pk-panel-enter) var(--pk-ease-enter),
@@ -138,9 +225,7 @@
         background-color var(--pk-panel-exit) var(--pk-ease-standard),
         box-shadow var(--pk-panel-exit) var(--pk-ease-standard),
         left var(--pk-shell-enter) var(--pk-ease-standard);
-      box-shadow:
-        0 -8px 24px rgba(0, 0, 0, 0.24),
-        0 -1px 4px rgba(99, 102, 241, 0.08);
+      box-shadow: 0 -7px 18px rgba(0, 0, 0, .2);
     }
     .dock-semicircle:hover,
     .dock-semicircle.expanded,
@@ -149,21 +234,18 @@
       transform: translateX(-50%) translateY(0) scale(1, 1);
     }
     .dock-semicircle:hover {
-      background: linear-gradient(180deg, rgba(30, 41, 59, 0.98), rgba(15, 23, 42, 0.96));
-      box-shadow:
-        0 -12px 28px rgba(0, 0, 0, 0.3),
-        0 -2px 10px rgba(99, 102, 241, 0.14);
+      background: rgba(47, 50, 46, .98);
+      box-shadow: 0 -9px 22px rgba(0, 0, 0, .25);
     }
     .dock-semicircle.expanded {
-      background: linear-gradient(180deg, rgba(30, 41, 59, 0.96), rgba(15, 23, 42, 0.94));
+      background: rgba(42, 45, 41, .97);
     }
     /* 拖拽悬停反馈：任务块拖过半圆时提供明显的视觉提示 */
     .dock-semicircle.drag-active {
-      background: linear-gradient(180deg, rgba(99, 102, 241, 0.25), rgba(30, 41, 59, 0.95));
+      background: rgba(89, 106, 81, .92);
       box-shadow:
-        0 -12px 30px rgba(0, 0, 0, 0.3),
-        0 -2px 14px rgba(99, 102, 241, 0.2),
-        0 0 0 1px rgba(99, 102, 241, 0.24);
+        0 -8px 20px rgba(0, 0, 0, .24),
+        0 0 0 1px rgba(139, 153, 121, .22);
     }
     .dock-semicircle .count-badge {
       display: inline-flex;
@@ -172,22 +254,21 @@
       min-width: 16px;
       height: 16px;
       border-radius: 8px;
-      background: rgba(99, 102, 241, 0.2);
-      color: rgba(165, 180, 252, 0.85);
+      background: rgba(139, 153, 121, .2);
+      color: rgba(194, 201, 180, .9);
       font-size: 9px;
       font-weight: 700;
       font-variant-numeric: tabular-nums;
       padding: 0 4px;
       line-height: 1;
     }
+    .dock-semicircle-label { color: rgba(226, 232, 240, .92); font-size: 11px; font-weight: 600; }
     @keyframes semicircleIn {
       0%   { opacity: 0; transform: translateX(-50%) translateY(calc(var(--pk-dist-semicircle-lift) + 6px)) scale(0.94); }
       60%  { opacity: 0.24; transform: translateX(-50%) translateY(max(1px, calc(var(--pk-dist-semicircle-lift) - 4px))) scale(0.985); }
-      100% { opacity: 0.32; transform: translateX(-50%) translateY(var(--pk-dist-semicircle-lift)) scale(1); }
+      100% { opacity: 0.68; transform: translateX(-50%) translateY(var(--pk-dist-semicircle-lift)) scale(1); }
     }
-    .dock-semicircle-enter {
-      animation: semicircleIn var(--pk-panel-enter) var(--pk-ease-enter) both;
-    }
+    .dock-semicircle-enter { animation: semicircleIn var(--pk-panel-enter) var(--pk-ease-enter); }
 
     /* ══════════════════════════════════════════
        坞栏卡片 — 悬浮抬升 + 认知负荷侧边色条 · 清新系
@@ -224,10 +305,10 @@
       transform: translateY(0) scale(var(--pk-dist-card-press-scale));
     }
     .dock-card.main-card {
-      border-color: rgba(99, 102, 241, 0.35);
-      background: linear-gradient(145deg, rgba(99, 102, 241, 0.10), rgba(99, 102, 241, 0.05));
-      box-shadow: 0 0 0 1px rgba(99, 102, 241, 0.15),
-                  0 4px 20px rgba(99, 102, 241, 0.10),
+      border-color: rgba(139, 153, 121, .32);
+      background: rgba(139, 153, 121, .07);
+      box-shadow: 0 0 0 1px rgba(139, 153, 121, .1),
+                  0 4px 16px rgba(0, 0, 0, .1),
                   0 -1px 0 rgba(255, 255, 255, 0.04) inset;
     }
     .dock-card.main-card::before {
@@ -236,7 +317,7 @@
       top: -1px; left: -1px; right: -1px;
       height: 2px;
       border-radius: 12px 12px 0 0;
-      background: linear-gradient(90deg, rgba(99,102,241,0.4), rgba(167,139,250,0.6), rgba(99,102,241,0.4));
+      background: #8b997a;
     }
     .dock-card.secondary-card {
       background: linear-gradient(180deg, rgba(15, 23, 42, 0.74), rgba(15, 23, 42, 0.68));
@@ -245,14 +326,14 @@
     }
     .dock-card.secondary-card:hover {
       box-shadow:
-        0 10px 24px rgba(15, 23, 42, 0.28),
-        0 0 0 1px rgba(129, 140, 248, 0.18);
+        0 8px 20px rgba(0, 0, 0, .22),
+        0 0 0 1px rgba(177, 187, 160, .16);
     }
     .dock-card.secondary-active {
-      border-color: rgba(129, 140, 248, 0.38);
+      border-color: rgba(139, 153, 121, .32);
       box-shadow:
-        0 0 0 1px rgba(129, 140, 248, 0.18),
-        0 14px 32px rgba(15, 23, 42, 0.24);
+        0 0 0 1px rgba(139, 153, 121, .12),
+        0 10px 24px rgba(0, 0, 0, .22);
     }
     .dock-card-secondary-label {
       display: inline-flex;
@@ -281,12 +362,10 @@
         box-shadow var(--pk-micro-glow) var(--pk-ease-standard);
     }
     .dock-card-load-bar.high {
-      background: linear-gradient(180deg, #f87171, #ef4444);
-      box-shadow: 0 0 6px rgba(239, 68, 68, 0.35);
+      background: #b87868;
     }
     .dock-card-load-bar.low {
-      background: linear-gradient(180deg, #34d399, #10b981);
-      box-shadow: 0 0 6px rgba(16, 185, 129, 0.35);
+      background: #82927a;
     }
 
     /* 等待时间徽标 · 清新柔和 */
@@ -322,7 +401,7 @@
       height: 6px;
       border-radius: 50%;
     }
-    .status-dot.focusing   { background: #818cf8; box-shadow: 0 0 6px rgba(129,140,248,0.5); }
+    .status-dot.focusing   { background: #9cab8b; }
     .status-dot.suspended  { background: #f59e0b; }
     .status-dot.idle       { background: #57534e; }
 
@@ -340,15 +419,15 @@
         transform var(--pk-panel-exit) var(--pk-ease-standard);
     }
     .drop-zone.can-drop {
-      border-color: rgba(99, 102, 241, 0.5);
-      background: rgba(99, 102, 241, 0.06);
-      color: rgba(165, 180, 252, 0.9);
+      border-color: rgba(139, 153, 121, .42);
+      background: rgba(139, 153, 121, .08);
+      color: rgba(194, 201, 180, .92);
     }
     .drop-zone.active,
     .drop-zone.alt-drag-hover {
-      border-color: rgba(99, 102, 241, 0.6);
-      background: rgba(99, 102, 241, 0.08);
-      box-shadow: inset 0 0 20px rgba(99, 102, 241, 0.06);
+      border-color: rgba(139, 153, 121, .5);
+      background: rgba(139, 153, 121, .1);
+      box-shadow: inset 0 0 12px rgba(139, 153, 121, .04);
       transform: translateY(-1px);
     }
     @keyframes dropRejectShake {
@@ -372,11 +451,11 @@
       position: fixed;
       pointer-events: none;
       border-radius: 20px;
-      background: linear-gradient(140deg, rgba(39, 39, 42, 0.92), rgba(24, 24, 27, 0.88));
+      background: linear-gradient(140deg, rgba(42, 47, 41, 0.94), rgba(25, 31, 28, 0.9));
       border: 1px solid rgba(255, 255, 255, 0.16);
       box-shadow:
         0 18px 48px rgba(0, 0, 0, 0.5),
-        0 0 0 1px rgba(99, 102, 241, 0.2),
+        0 0 0 1px rgba(139, 153, 121, 0.18),
         inset 0 1px 0 rgba(255, 255, 255, 0.06);
       opacity: 0.96;
       transform-origin: top left;
@@ -598,7 +677,7 @@
       }
     }
 
-    @media (min-width: 641px) {
+    @media (min-width: 768px) {
       .dock-bar {
         /* 桌面端：停泊坞展开高度不超过视口 55%，宽度 ≤ 860px */
         max-width: min(860px, calc(100vw - var(--dock-sidebar-width, 0px) - 32px));

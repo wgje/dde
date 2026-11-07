@@ -74,36 +74,32 @@ interface DockFocusScenePreset {
       background-repeat: no-repeat;
       opacity: var(--scene-base-opacity, 0.78);
       transform: translate3d(0, 0, 0) scale(var(--scene-base-scale, 1.03));
-      animation: focusSceneDrift var(--scene-drift-duration, 24s) ease-in-out infinite alternate;
-      animation-delay: var(--scene-ambient-delay, 340ms);
+      animation: none;
     }
 
     .focus-scene-aurora {
       background:
-        radial-gradient(circle at 18% 24%, rgba(var(--scene-primary-rgb, 99 102 241), calc(var(--scene-aurora-opacity, 0.18) * 0.92)) 0%, transparent 32%),
-        radial-gradient(circle at 76% 30%, rgba(var(--scene-secondary-rgb, 52 211 153), calc(var(--scene-aurora-opacity, 0.18) * 0.8)) 0%, transparent 36%),
-        radial-gradient(circle at 54% 78%, rgba(var(--scene-tertiary-rgb, 245 158 11), calc(var(--scene-aurora-opacity, 0.18) * 0.62)) 0%, transparent 40%);
-      opacity: 0.88;
-      transform: scale(var(--scene-bloom-scale, 1.05));
-      animation: focusSceneBloom var(--scene-pulse-duration, 10s) ease-in-out infinite;
-      animation-delay: var(--scene-ambient-delay, 340ms);
+        radial-gradient(circle at 50% 34%, rgba(var(--scene-primary-rgb, 99 102 241), calc(var(--scene-aurora-opacity, 0.04) * 0.45)) 0%, transparent 64%);
+      opacity: 0.7;
+      transform: scale(var(--scene-bloom-scale, 1.01));
+      animation: none;
     }
 
     .focus-scene-vignette {
-      background:
-        radial-gradient(ellipse 88% 68% at 50% 42%, rgba(4, 6, 12, 0) 0%, rgba(4, 6, 12, var(--scene-vignette-opacity, 0.52)) 100%),
-        linear-gradient(180deg, rgba(6, 8, 14, 0.06) 0%, rgba(6, 8, 14, 0.24) 100%);
+      background: linear-gradient(
+        180deg,
+        rgba(14, 16, 14, 0.02) 0%,
+        rgba(14, 16, 14, var(--scene-vignette-opacity, 0.18)) 100%
+      );
     }
 
     .focus-scene-grain {
       opacity: var(--scene-grain-opacity, 0.04);
       background-image:
-        repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.04) 0 1px, transparent 1px 3px),
-        repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.035) 0 1px, transparent 1px 4px);
-      background-size: 180px 180px, 220px 220px;
+        repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.018) 0 1px, transparent 1px 4px);
+      background-size: 180px 180px;
       mix-blend-mode: soft-light;
-      animation: focusSceneGrainShift 16s linear infinite;
-      animation-delay: var(--scene-ambient-delay, 340ms);
+      animation: none;
     }
 
     .focus-backdrop {
@@ -165,19 +161,13 @@ interface DockFocusScenePreset {
       background:
         radial-gradient(
           ellipse 84% 66% at center,
-          rgba(var(--stage-primary-rgb), var(--stage-halo-opacity)) 0%,
+          rgba(156, 166, 145, var(--stage-halo-opacity)) 0%,
           transparent 72%
-        ),
-        radial-gradient(
-          ellipse 80% 60% at center,
-          rgba(var(--stage-secondary-rgb), var(--stage-secondary-opacity)) 0%,
-          transparent 65%
         );
       border-radius: 50%;
       pointer-events: none;
       z-index: -1;
-      animation: stageHaloPulse var(--stage-pulse-duration) ease-in-out infinite;
-      animation-delay: var(--scene-ambient-delay, 340ms);
+      animation: none;
     }
 
     .console-stage-shell::after {
@@ -188,7 +178,7 @@ interface DockFocusScenePreset {
       width: calc(var(--stage-halo-width) * 0.75);
       height: calc(var(--stage-halo-height) * 0.76);
       transform: translate(-50%, calc(-50% - 20px));
-      border: 1px solid rgba(var(--stage-primary-rgb), var(--stage-ring-opacity));
+      border: 1px solid rgba(182, 188, 170, var(--stage-ring-opacity));
       border-radius: 50%;
       pointer-events: none;
       z-index: -1;
@@ -505,96 +495,96 @@ export class DockFocusSceneComponent implements OnInit, OnDestroy {
       primaryRgb: '99 102 241',
       secondaryRgb: '52 211 153',
       tertiaryRgb: '245 158 11',
-      backdropAlpha: 0.72,
-      baseOpacity: 0.82,
-      auroraOpacity: 0.2,
-      grainOpacity: 0.04,
-      vignetteOpacity: 0.52,
-      baseScale: 1.05,
-      baseSaturation: 1.12,
-      baseBrightness: 0.96,
-      bloomScale: 1.06,
-      driftDurationS: 26,
-      pulseDurationS: 11,
-      stageHaloOpacity: 0.09,
-      stageRingOpacity: 0.08,
-      stageSecondaryOpacity: 0.04,
+      backdropAlpha: 0.82,
+      baseOpacity: 0.68,
+      auroraOpacity: 0.045,
+      grainOpacity: 0.008,
+      vignetteOpacity: 0.18,
+      baseScale: 1.02,
+      baseSaturation: 1.03,
+      baseBrightness: 0.99,
+      bloomScale: 1.01,
+      driftDurationS: 40,
+      pulseDurationS: 30,
+      stageHaloOpacity: 0.025,
+      stageRingOpacity: 0.018,
+      stageSecondaryOpacity: 0.012,
     },
     decision: {
       primaryRgb: '99 102 241',
       secondaryRgb: '245 158 11',
       tertiaryRgb: '248 113 113',
-      backdropAlpha: 0.76,
-      baseOpacity: 0.84,
-      auroraOpacity: 0.24,
-      grainOpacity: 0.045,
-      vignetteOpacity: 0.58,
-      baseScale: 1.06,
-      baseSaturation: 1.15,
-      baseBrightness: 0.94,
-      bloomScale: 1.08,
-      driftDurationS: 20,
-      pulseDurationS: 8,
-      stageHaloOpacity: 0.12,
-      stageRingOpacity: 0.1,
-      stageSecondaryOpacity: 0.06,
+      backdropAlpha: 0.84,
+      baseOpacity: 0.7,
+      auroraOpacity: 0.05,
+      grainOpacity: 0.008,
+      vignetteOpacity: 0.2,
+      baseScale: 1.02,
+      baseSaturation: 1.03,
+      baseBrightness: 0.98,
+      bloomScale: 1.01,
+      driftDurationS: 36,
+      pulseDurationS: 28,
+      stageHaloOpacity: 0.03,
+      stageRingOpacity: 0.022,
+      stageSecondaryOpacity: 0.015,
     },
     fragment: {
       primaryRgb: '56 189 248',
       secondaryRgb: '251 191 36',
       tertiaryRgb: '52 211 153',
-      backdropAlpha: 0.74,
-      baseOpacity: 0.8,
-      auroraOpacity: 0.18,
-      grainOpacity: 0.03,
-      vignetteOpacity: 0.48,
-      baseScale: 1.04,
-      baseSaturation: 1.08,
-      baseBrightness: 0.98,
-      bloomScale: 1.05,
-      driftDurationS: 24,
-      pulseDurationS: 10,
-      stageHaloOpacity: 0.1,
-      stageRingOpacity: 0.08,
-      stageSecondaryOpacity: 0.05,
+      backdropAlpha: 0.82,
+      baseOpacity: 0.66,
+      auroraOpacity: 0.04,
+      grainOpacity: 0.008,
+      vignetteOpacity: 0.17,
+      baseScale: 1.02,
+      baseSaturation: 1.02,
+      baseBrightness: 1,
+      bloomScale: 1.01,
+      driftDurationS: 38,
+      pulseDurationS: 30,
+      stageHaloOpacity: 0.025,
+      stageRingOpacity: 0.018,
+      stageSecondaryOpacity: 0.012,
     },
     burnout: {
       primaryRgb: '245 158 11',
       secondaryRgb: '248 113 113',
       tertiaryRgb: '99 102 241',
-      backdropAlpha: 0.80,
-      baseOpacity: 0.86,
-      auroraOpacity: 0.22,
-      grainOpacity: 0.035,
-      vignetteOpacity: 0.62,
-      baseScale: 1.03,
-      baseSaturation: 1.06,
-      baseBrightness: 0.9,
-      bloomScale: 1.04,
-      driftDurationS: 18,
-      pulseDurationS: 7,
-      stageHaloOpacity: 0.14,
-      stageRingOpacity: 0.11,
-      stageSecondaryOpacity: 0.08,
+      backdropAlpha: 0.86,
+      baseOpacity: 0.7,
+      auroraOpacity: 0.05,
+      grainOpacity: 0.008,
+      vignetteOpacity: 0.22,
+      baseScale: 1.02,
+      baseSaturation: 1.02,
+      baseBrightness: 0.97,
+      bloomScale: 1.01,
+      driftDurationS: 34,
+      pulseDurationS: 26,
+      stageHaloOpacity: 0.035,
+      stageRingOpacity: 0.025,
+      stageSecondaryOpacity: 0.018,
     },
     zen: {
       primaryRgb: PARKING_CONFIG.ZEN_MODE_PRIMARY_RGB,
       secondaryRgb: PARKING_CONFIG.ZEN_MODE_SECONDARY_RGB,
       tertiaryRgb: '14 165 233',
-      backdropAlpha: 0.82,
-      baseOpacity: 0.78,
-      auroraOpacity: 0.16,
-      grainOpacity: 0.02,
-      vignetteOpacity: 0.64,
+      backdropAlpha: 0.88,
+      baseOpacity: 0.64,
+      auroraOpacity: 0.03,
+      grainOpacity: 0.006,
+      vignetteOpacity: 0.2,
       baseScale: 1.02,
-      baseSaturation: 1.02,
-      baseBrightness: 0.88,
-      bloomScale: 1.03,
-      driftDurationS: 32,
-      pulseDurationS: 12,
-      stageHaloOpacity: 0.07,
-      stageRingOpacity: 0.06,
-      stageSecondaryOpacity: 0.04,
+      baseSaturation: 1,
+      baseBrightness: 0.96,
+      bloomScale: 1.005,
+      driftDurationS: 44,
+      pulseDurationS: 36,
+      stageHaloOpacity: 0.018,
+      stageRingOpacity: 0.014,
+      stageSecondaryOpacity: 0.008,
     },
   };
 
@@ -631,19 +621,16 @@ export class DockFocusSceneComponent implements OnInit, OnDestroy {
     const grainFactor = reduced || tier === 'T2'
       ? 0
       : (tier === 'T1' ? 0.35 : 1) * transparentFactor;
-    const driftDuration = reduced || tier === 'T2'
-      ? '0s'
-      : `${(preset.driftDurationS * (tier === 'T1' ? 1.2 : 1)).toFixed(1)}s`;
-    const pulseDuration = reduced || tier === 'T2'
-      ? '0s'
-      : `${(preset.pulseDurationS * (tier === 'T1' ? 1.15 : 1)).toFixed(1)}s`;
+    const driftDuration = '0s';
+    const pulseDuration = '0s';
+    const sceneScale = reduced || tier === 'T2' ? 1 : preset.baseScale;
 
     return {
       '--scene-primary-rgb': preset.primaryRgb,
       '--scene-secondary-rgb': preset.secondaryRgb,
       '--scene-tertiary-rgb': preset.tertiaryRgb,
       '--scene-base-opacity': (preset.baseOpacity * transparentFactor).toFixed(3),
-      '--scene-base-scale': (reduced || tier === 'T2' ? 1 : preset.baseScale).toFixed(3),
+      '--scene-base-scale': sceneScale.toFixed(3),
       '--scene-aurora-opacity': (preset.auroraOpacity * auroraFactor).toFixed(3),
       '--scene-grain-opacity': (preset.grainOpacity * grainFactor).toFixed(3),
       '--scene-vignette-opacity': (
@@ -665,7 +652,6 @@ export class DockFocusSceneComponent implements OnInit, OnDestroy {
   readonly focusStageStyle = computed<Record<string, string>>(() => {
     const preset = this.presets[this.sceneMode$()];
     const tier = this.performanceTier$();
-    const reduced = this.reducedMotion$();
     const exiting = this.transitionPhase$() === 'exiting';
     const scrimFactor = this.scrimOn$() ? 1 : PARKING_CONFIG.FOCUS_SCENE_TRANSPARENT_STAGE_ALPHA;
     const haloFactor = (tier === 'T2' ? 0.4 : tier === 'T1' ? 0.72 : 1) * scrimFactor;
@@ -682,9 +668,7 @@ export class DockFocusSceneComponent implements OnInit, OnDestroy {
       '--stage-ring-opacity': (preset.stageRingOpacity * haloFactor).toFixed(3),
       '--stage-halo-width': tier === 'T2' ? '560px' : '640px',
       '--stage-halo-height': tier === 'T2' ? '380px' : '420px',
-      '--stage-pulse-duration': reduced || tier === 'T2'
-        ? '0s'
-        : `${(preset.pulseDurationS * 0.9).toFixed(1)}s`,
+      '--stage-pulse-duration': '0s',
       '--stage-shell-opacity': scrimFactor.toFixed(3),
       '--stage-enter-from-y': `${enterShiftPx}px`,
       '--stage-enter-mid-y': `${enterMidShiftPx}px`,
@@ -704,7 +688,8 @@ export class DockFocusSceneComponent implements OnInit, OnDestroy {
     const tier = this.performanceTier$();
     const alphaBoost = tier === 'T2' ? 0.16 : tier === 'T1' ? 0.08 : 0;
     const alpha = Math.min(0.96, preset.backdropAlpha + alphaBoost);
-    return `rgba(6,10,18,${alpha.toFixed(2)})`;
+    // A muted pine-charcoal tint keeps the scrim calm without collapsing into neutral gray.
+    return `rgba(24,36,31,${alpha.toFixed(2)})`;
   });
 
   onStageAnimationEnd(event: AnimationEvent): void {

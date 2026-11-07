@@ -219,10 +219,12 @@ describe('DockConsoleStackComponent', () => {
     }
   });
 
-  it('should render the focus card without explicit load buttons', () => {
-    expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-load-low"]')).toBeFalsy();
-    expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-load-high"]')).toBeFalsy();
-    expect(fixture.nativeElement.textContent).not.toContain('认知负荷');
+  it('should expose explicit load controls and completion on the focus card', () => {
+    const loadControl = fixture.nativeElement.querySelector('[data-testid="dock-v3-load-control"]') as HTMLElement | null;
+    expect(loadControl).toBeTruthy();
+    expect(loadControl?.querySelector('[data-testid="dock-v3-load-low"]')?.getAttribute('aria-pressed')).toBe('false');
+    expect(loadControl?.querySelector('[data-testid="dock-v3-load-high"]')?.getAttribute('aria-pressed')).toBe('true');
+    expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-complete-btn"]')).toBeTruthy();
   });
 
   it('should expose localized wait presets and hide unsupported custom preset', () => {
@@ -246,14 +248,85 @@ describe('DockConsoleStackComponent', () => {
     expect(mockEngine.toggleLoad).toHaveBeenCalledWith('focus-task', 'down');
   });
 
-  it('onTaskWheel should toggle load only when alt key is pressed', () => {
-    const preventDefault = vi.fn();
-    component.onTaskWheel({ altKey: false, deltaY: 120, preventDefault } as unknown as WheelEvent, 'focus-task');
-    expect(mockEngine.toggleLoad).not.toHaveBeenCalled();
+  it('explicit load buttons should use the focused task load operation', () => {
+    const lowLoadButton = fixture.nativeElement.querySelector('[data-testid="dock-v3-load-low"]') as HTMLButtonElement | null;
+    expect(lowLoadButton).toBeTruthy();
 
-    component.onTaskWheel({ altKey: true, deltaY: -120, preventDefault } as unknown as WheelEvent, 'focus-task');
-    expect(preventDefault).toHaveBeenCalled();
-    expect(mockEngine.toggleLoad).toHaveBeenCalledWith('focus-task', 'up');
+    lowLoadButton?.click();
+
+    expect(mockEngine.toggleLoad).toHaveBeenCalledWith('focus-task', 'down');
+  });
+
+  it('should disable focused task mutations for a read-only follower', () => {
+    fixture.componentRef.setInput('canMutate', false);
+    fixture.detectChanges();
+
+    expect((fixture.nativeElement.querySelector('[data-testid="dock-v3-load-low"]') as HTMLButtonElement).disabled).toBe(true);
+    expect((fixture.nativeElement.querySelector('[data-testid="dock-v3-complete-btn"]') as HTMLButtonElement).disabled).toBe(true);
+    expect((fixture.nativeElement.querySelector('[data-testid="dock-v3-wait-trigger"]') as HTMLButtonElement).disabled).toBe(true);
+    const backgroundCards = Array.from(
+      fixture.nativeElement.querySelectorAll('[data-testid="dock-v3-console-card"]'),
+    ) as HTMLElement[];
+    const backgroundCard = backgroundCards.find(card => card.textContent?.includes('Depth 1 Task'));
+    expect(backgroundCard?.getAttribute('role')).toBeNull();
+
+    component.setLoad('focus-task', 'low');
+    component.onComplete('focus-task');
+    component.onWait('focus-task', 15);
+    component.toggleWaitPresets('focus-task');
+    const backgroundEntry = component.stackEntries().find(entry => entry.taskId === 'depth-1-task');
+    if (backgroundEntry) component.onCardClick(backgroundEntry);
+
+    expect(mockEngine.toggleLoad).not.toHaveBeenCalled();
+    expect(mockEngine.completeTask).not.toHaveBeenCalled();
+    expect(mockEngine.suspendTask).not.toHaveBeenCalled();
+    expect(mockEngine.switchToTask).not.toHaveBeenCalled();
+    expect(component.isWaitPresetVisible('focus-task')).toBe(false);
+  });
+
+  it('wheel and swipe gestures should not mutate or complete the focused task', () => {
+    const focusCard = (fixture.nativeElement.querySelector('[data-testid="dock-v3-complete-btn"]') as HTMLElement | null)
+      ?.closest('[data-testid="dock-v3-console-card"]') as HTMLElement | null;
+    expect(focusCard).toBeTruthy();
+    if (!focusCard) return;
+
+    const wheel = new WheelEvent('wheel', {
+      bubbles: true,
+      cancelable: true,
+      altKey: true,
+      deltaY: -120,
+    });
+    focusCard.dispatchEvent(wheel);
+
+    const touchEvent = (type: string, clientY: number): Event => {
+      const event = new Event(type, { bubbles: true, cancelable: true });
+      Object.defineProperties(event, {
+        touches: { value: type === 'touchend' ? [] : [{ clientY }] },
+        changedTouches: { value: [{ clientY }] },
+      });
+      return event;
+    };
+    focusCard.dispatchEvent(touchEvent('touchstart', 180));
+    focusCard.dispatchEvent(touchEvent('touchmove', 90));
+    focusCard.dispatchEvent(touchEvent('touchend', 90));
+
+    const pointerEvent = (type: string, clientY: number): Event => {
+      const event = new Event(type, { bubbles: true, cancelable: true });
+      Object.defineProperties(event, {
+        button: { value: 0 },
+        clientY: { value: clientY },
+        pointerId: { value: 1 },
+        isPrimary: { value: true },
+      });
+      return event;
+    };
+    focusCard.dispatchEvent(pointerEvent('pointerdown', 180));
+    focusCard.dispatchEvent(pointerEvent('pointermove', 90));
+    focusCard.dispatchEvent(pointerEvent('pointerup', 90));
+
+    expect(wheel.defaultPrevented).toBe(false);
+    expect(mockEngine.toggleLoad).not.toHaveBeenCalled();
+    expect(mockEngine.completeTask).not.toHaveBeenCalled();
   });
 
   it('should expose a closable wait menu and respond to the global close event', () => {

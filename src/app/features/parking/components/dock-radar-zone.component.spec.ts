@@ -60,6 +60,8 @@ describe('DockRadarZoneComponent', () => {
     lastRadarEvictedTaskId,
     focusScrimOn: signal(false),
     toggleLoad: vi.fn(),
+    setExpectedTime: vi.fn().mockResolvedValue(true),
+    setWaitTime: vi.fn().mockResolvedValue(true),
     setMainTask: vi.fn(),
     insertToConsoleFromRadar: vi.fn(),
     createInDock: vi.fn(),
@@ -129,6 +131,7 @@ describe('DockRadarZoneComponent', () => {
   });
 
   it('should distribute combo entries into left/top/right sectors when no group metadata exists', () => {
+    component.setViewMode('panorama');
     comboEntries.set([
       { taskId: 'C1', title: 'C1', lane: 'combo-select', load: 'low', expectedMinutes: 15, status: 'pending_start', isMain: false },
       { taskId: 'C2', title: 'C2', lane: 'combo-select', load: 'low', expectedMinutes: 15, status: 'pending_start', isMain: false },
@@ -171,6 +174,7 @@ describe('DockRadarZoneComponent', () => {
   });
 
   it('should arrange backup entries on upper arc with stable spacing', () => {
+    component.setViewMode('panorama');
     backupEntries.set(Array.from({ length: 10 }, (_, index) => ({
       taskId: `B${index}`,
       title: `Backup ${index}`,
@@ -196,16 +200,219 @@ describe('DockRadarZoneComponent', () => {
     expect(backupDelay).toBeLessThan(0);
   });
 
+  it('activating a radar task opens a preview and does not promote it', () => {
+    const event = { stopPropagation: vi.fn() } as unknown as MouseEvent;
+    component.onRadarItemClick(event, 'S1');
+
+    expect(component.previewTaskId()).toBe('S1');
+    expect(mockEngine.setMainTask).not.toHaveBeenCalled();
+    expect(mockEngine.insertToConsoleFromRadar).not.toHaveBeenCalled();
+  });
+
   it('promoteToConsole should trigger magnet animation then set main task', async () => {
     component.promoteToConsole('S1');
+    fixture.detectChanges();
     expect(mockEngine.setMainTask).not.toHaveBeenCalled();
     expect(component.isMagnetSliding('S1')).toBe(true);
     expect(component.promotionLockTaskId()).toBe('S1');
+    expect(fixture.nativeElement.querySelector('.dock-radar')?.classList.contains('radar-promotion-active')).toBe(true);
 
     await vi.advanceTimersByTimeAsync(PARKING_CONFIG.CONSOLE_MAGNET_PULL_MS + 10);
+    fixture.detectChanges();
     expect(component.isMagnetSliding('S1')).toBe(false);
     expect(mockEngine.setMainTask).toHaveBeenCalledWith('S1');
     expect(component.promotionLockTaskId()).toBeNull();
+    expect(fixture.nativeElement.querySelector('.dock-radar')?.classList.contains('radar-promotion-active')).toBe(false);
+  });
+
+  it('renders a return cue when a focused task is evicted back to the radar', () => {
+    lastRadarEvictedTaskId.set('W1');
+    fixture.detectChanges();
+
+    const returningItem = fixture.nativeElement.querySelector('[data-task-id="W1"]') as HTMLElement | null;
+    expect(component.isRadarReturning('W1')).toBe(true);
+    expect(returningItem?.classList.contains('radar-returning')).toBe(true);
+  });
+
+  it('explicit preview confirmation promotes the selected task', async () => {
+    component.openTaskPreview('S1', 'radar-node');
+    component.confirmPreviewPromotion();
+    await vi.advanceTimersByTimeAsync(PARKING_CONFIG.CONSOLE_MAGNET_PULL_MS + 10);
+
+    expect(component.previewTaskId()).toBeNull();
+    expect(mockEngine.setMainTask).toHaveBeenCalledWith('S1');
+  });
+
+  it('compact radar exposes 3 candidates and 2 backups before overflow', () => {
+    comboEntries.set(Array.from({ length: 5 }, (_, index) => ({
+      taskId: `compact-c-${index}`,
+      title: `Candidate ${index}`,
+      lane: 'combo-select',
+      load: 'low',
+      expectedMinutes: 10,
+      status: 'pending_start',
+      isMain: false,
+      dockedOrder: index,
+    })));
+    backupEntries.set(Array.from({ length: 4 }, (_, index) => ({
+      taskId: `compact-b-${index}`,
+      title: `Backup ${index}`,
+      lane: 'backup',
+      load: 'low',
+      expectedMinutes: 10,
+      status: 'pending_start',
+      isMain: false,
+      dockedOrder: index,
+    })));
+    fixture.detectChanges();
+
+    expect(component.comboItems()).toHaveLength(3);
+    expect(component.backupItems()).toHaveLength(2);
+    expect(component.comboOverflowCount()).toBe(2);
+    expect(component.backupOverflowCount()).toBe(2);
+  });
+
+  it('panorama keeps the existing 8/10 task limits', () => {
+    comboEntries.set(Array.from({ length: 11 }, (_, index) => ({
+      taskId: `panorama-c-${index}`,
+      title: `Candidate ${index}`,
+      lane: 'combo-select',
+      load: 'low',
+      expectedMinutes: 10,
+      status: 'pending_start',
+      isMain: false,
+      dockedOrder: index,
+    })));
+    backupEntries.set(Array.from({ length: 12 }, (_, index) => ({
+      taskId: `panorama-b-${index}`,
+      title: `Backup ${index}`,
+      lane: 'backup',
+      load: 'low',
+      expectedMinutes: 10,
+      status: 'pending_start',
+      isMain: false,
+      dockedOrder: index,
+    })));
+    component.setViewMode('panorama');
+    fixture.detectChanges();
+
+    expect(component.comboItems()).toHaveLength(8);
+    expect(component.backupItems()).toHaveLength(10);
+  });
+
+  it('view controls and overflow stack render as separate affordances', () => {
+    backupEntries.set(Array.from({ length: 4 }, (_, index) => ({
+      taskId: `stack-${index}`,
+      title: `Stack Task ${index}`,
+      lane: 'backup',
+      load: 'low',
+      expectedMinutes: 10,
+      status: 'pending_start',
+      isMain: false,
+      dockedOrder: index,
+    })));
+    fixture.detectChanges();
+    const view = fixture.nativeElement.querySelector('.radar-edge-controls');
+    const stack = fixture.nativeElement.querySelector('.radar-stack-backup');
+    expect(view).toBeTruthy();
+    expect(stack).toBeTruthy();
+  });
+
+  it('prioritizes actionable states while keeping the previous order within each state', () => {
+    comboEntries.set([
+      { taskId: 'pending-first', title: 'Pending first', lane: 'combo-select', load: 'low', status: 'pending_start', isMain: false, dockedOrder: 1 },
+      { taskId: 'stalled', title: 'Stalled', lane: 'combo-select', load: 'low', status: 'stalled', isMain: false, dockedOrder: 2 },
+      { taskId: 'wait-ended', title: 'Wait ended', lane: 'combo-select', load: 'low', status: 'wait_finished', isMain: false, dockedOrder: 3 },
+      { taskId: 'pending-second', title: 'Pending second', lane: 'combo-select', load: 'low', status: 'pending_start', isMain: false, dockedOrder: 4 },
+    ]);
+
+    expect(component.orderedComboEntries().map(entry => entry.taskId)).toEqual([
+      'wait-ended', 'stalled', 'pending-first', 'pending-second',
+    ]);
+  });
+
+  it('mobile drawer opens as a modal task list and previews without promoting', async () => {
+    fixture.componentRef.setInput('isMobile', true);
+    fixture.detectChanges();
+    const trigger = document.createElement('button');
+    component.openMobileTaskDrawer({ currentTarget: trigger } as unknown as MouseEvent);
+    component.openTaskPreview('S1', 'task-drawer', trigger);
+    fixture.detectChanges();
+    await vi.advanceTimersByTimeAsync(16);
+    fixture.detectChanges();
+
+    expect(document.querySelector('[data-testid="dock-v3-mobile-task-drawer"]')?.getAttribute('aria-modal'))
+      .toBe('true');
+    expect(document.querySelector('[data-testid="dock-v3-task-preview"]')).toBeTruthy();
+    expect(document.activeElement?.getAttribute('data-testid')).toBe('dock-v3-mobile-task-drawer-close');
+    expect(mockEngine.setMainTask).not.toHaveBeenCalled();
+  });
+
+  it('restores the prior body overflow when switching from mobile to desktop with drawer open', async () => {
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'auto';
+    try {
+      fixture.componentRef.setInput('isMobile', true);
+      fixture.detectChanges();
+      component.openMobileTaskDrawer({ currentTarget: document.createElement('button') } as unknown as MouseEvent);
+      fixture.detectChanges();
+      await vi.advanceTimersByTimeAsync(16);
+      fixture.detectChanges();
+
+      expect(document.body.style.overflow).toBe('hidden');
+      fixture.componentRef.setInput('isMobile', false);
+      fixture.detectChanges();
+
+      expect(component.mobileTaskDrawerOpen()).toBe(false);
+      expect(document.body.style.overflow).toBe('auto');
+    } finally {
+      document.body.style.overflow = previousOverflow;
+    }
+  });
+
+  it('switching mobile Text to Flow closes the drawer and returns to compact display', () => {
+    fixture.componentRef.setInput('isMobile', true);
+    component.setViewMode('panorama');
+    component.mobileTaskDrawerOpen.set(true);
+    fixture.componentRef.setInput('activeView', 'flow');
+    fixture.detectChanges();
+
+    expect(component.viewMode()).toBe('compact');
+    expect(component.mobileTaskDrawerOpen()).toBe(false);
+  });
+
+  it('read-only follower can inspect a task but cannot promote or change its load', () => {
+    fixture.componentRef.setInput('canMutate', false);
+    component.openTaskPreview('S1');
+    component.confirmPreviewPromotion();
+    component.togglePreviewLoad();
+
+    expect(component.previewTaskId()).toBe('S1');
+    expect(mockEngine.setMainTask).not.toHaveBeenCalled();
+    expect(mockEngine.toggleLoad).not.toHaveBeenCalled();
+  });
+
+  it('preview exposes explicit load and planner changes through durable engine methods', async () => {
+    component.openTaskPreview('S1');
+    fixture.detectChanges();
+    component.togglePreviewLoad();
+    const expected = fixture.nativeElement.querySelector('[data-testid="dock-v3-task-preview"] .radar-preview-edit input[min="1"]') as HTMLInputElement;
+    expected.value = '35';
+    expected.dispatchEvent(new Event('change', { bubbles: true }));
+    await Promise.resolve();
+
+    expect(mockEngine.toggleLoad).toHaveBeenCalledWith('S1', 'up');
+    expect(mockEngine.setExpectedTime).toHaveBeenCalledWith('S1', 35);
+  });
+
+  it('recommendation groups are available as explicit segmented controls', () => {
+    pendingDecisionEntries.set([{ taskId: 'S1', group: 'homologous-advancement' }]);
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelectorAll('.radar-group-switch button')).toHaveLength(3);
+    component.selectGroup('cognitive-downgrade');
+    fixture.detectChanges();
+    expect(component.activeGroup()).toBe('cognitive-downgrade');
   });
 
   it('promoteToConsole should route to insertToConsoleFromRadar in focus mode', async () => {
@@ -418,42 +625,6 @@ describe('DockRadarZoneComponent', () => {
     }
   });
 
-  it('should clear touch long press timer when the timer handle is 0', () => {
-    const setTimeoutSpy = mockTimeoutHandleForDelay(
-      PARKING_CONFIG.RADAR_PROMOTION_DELAY_MS,
-      0 as unknown as ReturnType<typeof setTimeout>,
-    );
-    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
-
-    try {
-      component.onTouchStart({ touches: [{ clientY: 120 }] } as unknown as TouchEvent, 'S1');
-      component.onTouchEnd();
-
-      expect(clearTimeoutSpy).toHaveBeenCalledWith(0);
-    } finally {
-      setTimeoutSpy.mockRestore();
-      clearTimeoutSpy.mockRestore();
-    }
-  });
-
-  it('should clear existing touch long press timer when the timer handle is 0 before scheduling another', () => {
-    const setTimeoutSpy = mockTimeoutHandleForDelay(
-      PARKING_CONFIG.RADAR_PROMOTION_DELAY_MS,
-      0 as unknown as ReturnType<typeof setTimeout>,
-    );
-    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
-
-    try {
-      component.onTouchStart({ touches: [{ clientY: 120 }] } as unknown as TouchEvent, 'S1');
-      component.onTouchStart({ touches: [{ clientY: 130 }] } as unknown as TouchEvent, 'S1');
-
-      expect(clearTimeoutSpy).toHaveBeenCalledWith(0);
-    } finally {
-      setTimeoutSpy.mockRestore();
-      clearTimeoutSpy.mockRestore();
-    }
-  });
-
   it('should clear radar return timer when the timer handle is 0 and the task is evicted again', () => {
     const state = component as unknown as {
       radarReturnTimers: Map<string, ReturnType<typeof setTimeout>>;
@@ -474,63 +645,47 @@ describe('DockRadarZoneComponent', () => {
 
   it('should clear owned timers on destroy when timer handles are 0', () => {
     const state = component as unknown as {
-      longPressTimer: ReturnType<typeof setTimeout> | null;
       promotionTimer: ReturnType<typeof setTimeout> | null;
     };
     const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
-    state.longPressTimer = 0 as unknown as ReturnType<typeof setTimeout>;
     state.promotionTimer = 0 as unknown as ReturnType<typeof setTimeout>;
 
     try {
       fixture.destroy();
 
       expect(clearTimeoutSpy).toHaveBeenCalledWith(0);
-      expect(state.longPressTimer).toBeNull();
       expect(state.promotionTimer).toBeNull();
     } finally {
       clearTimeoutSpy.mockRestore();
     }
   });
 
-  it('onWheel should toggle load only with alt key', () => {
-    const preventDefault = vi.fn();
-    component.onWheel({ altKey: false, deltaY: 120, preventDefault } as unknown as WheelEvent, 'S1');
-    expect(mockEngine.toggleLoad).not.toHaveBeenCalled();
+  it('radar task controls are native buttons and keyboard activation opens preview', () => {
+    const item = fixture.nativeElement.querySelector('[data-testid="dock-v3-radar-combo-item"]') as HTMLButtonElement;
+    expect(item.tagName).toBe('BUTTON');
+    item.click();
+    fixture.detectChanges();
 
-    component.onWheel({ altKey: true, deltaY: 120, preventDefault } as unknown as WheelEvent, 'S1');
-    expect(preventDefault).toHaveBeenCalled();
-    expect(mockEngine.toggleLoad).toHaveBeenCalledWith('S1', 'down');
+    expect(component.previewTaskId()).toBe('S1');
+    expect(mockEngine.setMainTask).not.toHaveBeenCalled();
   });
 
-  it('keyboard Enter should promote radar task to console', () => {
-    const preventDefault = vi.fn();
-    const event = {
-      key: 'Enter',
-      preventDefault,
-    } as unknown as KeyboardEvent;
-    const promoteSpy = vi.spyOn(component, 'promoteToConsole');
+  it('overflow task selection opens preview instead of promoting', () => {
+    comboEntries.set([
+      ...comboEntries(),
+      { ...comboEntries()[0], taskId: 'S2', title: 'Overflow Task', dockedOrder: 2 },
+      { ...comboEntries()[0], taskId: 'S3', title: 'Overflow Task 2', dockedOrder: 3 },
+      { ...comboEntries()[0], taskId: 'S4', title: 'Overflow Task 3', dockedOrder: 4 },
+    ]);
+    component.setViewMode('compact');
+    component.toggleComboOverflowPanel();
+    fixture.detectChanges();
+    const overflow = fixture.nativeElement.querySelector('[data-testid="dock-v3-radar-overflow-item"]') as HTMLButtonElement;
+    overflow.click();
+    fixture.detectChanges();
 
-    component.onRadarItemKeydown(event, 'S1');
-
-    expect(preventDefault).toHaveBeenCalled();
-    expect(promoteSpy).toHaveBeenCalledWith('S1');
-  });
-
-  it('submitCreate should create task in selected radar lane', async () => {
-    mockEngine.createInDock.mockResolvedValueOnce('dock-created-1');
-    component.createFormLane.set('combo-select');
-    component.createTitle = 'Radar Draft';
-    component.createLoad = 'low';
-    component.createExpected = '25';
-    component.createWait = '5';
-
-    await component.submitCreate();
-
-    expect(mockEngine.createInDock).toHaveBeenCalledWith('Radar Draft', 'combo-select', 'low', {
-      expectedMinutes: 25,
-      waitMinutes: 5,
-    });
-    expect(component.createFormLane()).toBeNull();
+    expect(component.previewTaskId()).toBeTruthy();
+    expect(mockEngine.setMainTask).not.toHaveBeenCalled();
   });
 
   it('should render project source color dot with accessible project text', () => {
@@ -554,8 +709,8 @@ describe('DockRadarZoneComponent', () => {
     expect(component.resolveProjectColor(comboEntries()[0])).toBe('#ff5722');
   });
 
-  it('should expose +N trigger and overflow panel when combo entries exceed limit', () => {
-    const oversized = Array.from({ length: PARKING_CONFIG.RADAR_COMBO_VISIBLE_LIMIT + 2 }, (_, index) => ({
+  it('should expose a task stack and overflow list after the compact candidate budget', () => {
+    const oversized = Array.from({ length: component.comboVisibleCount() + 2 }, (_, index) => ({
       taskId: `combo-${index}`,
       title: `Combo ${index}`,
       lane: 'combo-select',
