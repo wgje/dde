@@ -24,7 +24,8 @@ function createTask(overrides: Partial<Task>): Task {
     id: overrides.id ?? crypto.randomUUID(),
     title: overrides.title ?? 'T',
     content: overrides.content ?? '',
-    stage: overrides.stage ?? 1,
+    // stage 显式传 null 表示待分配任务，必须保留；仅在未传入时才默认阶段 1
+    stage: overrides.stage === undefined ? 1 : overrides.stage,
     parentId: overrides.parentId ?? null,
     order: overrides.order ?? 1,
     rank: overrides.rank ?? 1000,
@@ -316,8 +317,7 @@ describe('浮动任务树 (Floating Task Tree)', () => {
       expect(assignedChild?.parentId).toBe('root');
     });
 
-    it.skip('分配到现有父任务下时应正确更新 displayId', async () => {
-      // TODO: displayId 自动更新功能未实现
+    it('分配到现有父任务下时应正确更新 displayId', async () => {
       // 创建一个已分配的父任务
       const existingParent = createTask({ 
         id: 'existing-parent', 
@@ -367,14 +367,10 @@ describe('浮动任务树 (Floating Task Tree)', () => {
       expect(assignedFloatRoot?.displayId).toBe('1,a');
       expect(assignedFloatChild?.displayId).toBe('1,a,a');
     });
-
-    // TODO: displayId 自动更新功能待实现，暂时跳过此测试
-    it.skip('分配到现有父任务下时应正确更新 displayId - 待实现', () => {});
   });
 
   describe('子树拆分分配', () => {
-    it.skip('可单独分配某个子任务及其后代', async () => {
-      // TODO: 当前实现会级联分配整个树，不支持部分分配
+    it('可单独分配某个子任务及其后代', async () => {
       // 创建待分配树：root -> child -> grandchild
       const root = createTask({ id: 'root', stage: null, parentId: null });
       const child = createTask({ id: 'child', stage: null, parentId: 'root' });
@@ -405,8 +401,7 @@ describe('浮动任务树 (Floating Task Tree)', () => {
       expect(assignedChild?.parentId).toBeNull();
     });
 
-    it.skip('分配一个待分配子任务后，其兄弟任务应保持与父任务的关系', async () => {
-      // TODO: 当前实现会级联分配整个树，不支持部分分配
+    it('分配一个待分配子任务后，其兄弟任务应保持与父任务的关系', async () => {
       // 创建待分配树：parent -> child1, child2, child3
       const parent = createTask({ id: 'parent', stage: null, parentId: null });
       const child1 = createTask({ id: 'child1', stage: null, parentId: 'parent' });
@@ -499,8 +494,7 @@ describe('浮动任务树 (Floating Task Tree)', () => {
   });
 
   describe('待分配区内部重组', () => {
-    it.skip('可在待分配区内重新组织父子关系', async () => {
-      // TODO: 待分配区内部重组功能待实现
+    it('可在待分配区内重新组织父子关系', async () => {
       // 创建两个独立的待分配任务
       const task1 = createTask({ id: 'task1', stage: null, parentId: null });
       const task2 = createTask({ id: 'task2', stage: null, parentId: null });
@@ -521,8 +515,7 @@ describe('浮动任务树 (Floating Task Tree)', () => {
       expect(updatedTask2?.parentId).toBe('task1');
     });
 
-    it.skip('应检测循环依赖', async () => {
-      // TODO: 循环依赖检测功能待实现
+    it('应检测循环依赖', async () => {
       // 创建链式待分配任务：task1 -> task2 -> task3
       const task1 = createTask({ id: 'task1', stage: null, parentId: null });
       const task2 = createTask({ id: 'task2', stage: null, parentId: 'task1' });
@@ -543,8 +536,7 @@ describe('浮动任务树 (Floating Task Tree)', () => {
       }
     });
 
-    it.skip('应拒绝将待分配任务挂载到已分配任务下', async () => {
-      // TODO: 跨边界检测功能待实现
+    it('应拒绝将待分配任务挂载到已分配任务下', async () => {
       const unassigned = createTask({ id: 'unassigned', stage: null, parentId: null });
       const assigned = createTask({ id: 'assigned', stage: 1, parentId: null });
       
