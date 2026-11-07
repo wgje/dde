@@ -28,6 +28,11 @@ export enum FlowCommandType {
 }
 
 /**
+ * 通用命令队列仅作为诊断历史，限制其内存和每次追加的复制成本。
+ */
+export const FLOW_COMMAND_DIAGNOSTIC_HISTORY_LIMIT = 100;
+
+/**
  * 流程图命令接口
  * 
  * 纯数据结构，可序列化，不包含运行时逻辑
@@ -89,7 +94,7 @@ export class FlowCommandService {
   
   /**
    * 命令队列信号
-   * 作为 Shell 和 View 的异步缓冲区
+   * 仅保留有限的诊断历史，不作为 Flow 行为的消费通道
    */
   private readonly _commandQueue = signal<FlowCommand[]>([]);
   
@@ -200,7 +205,7 @@ export class FlowCommandService {
 
   /**
    * 通用命令分发方法
-   * 采用不可变更新模式追加命令
+   * 仅保留最近的诊断历史；Flow 行为由专用信号和 owner claim 驱动。
    */
   dispatch(type: FlowCommandType, payload?: Record<string, unknown>): void {
     const command: FlowCommand = {
@@ -210,7 +215,12 @@ export class FlowCommandService {
       timestamp: Date.now()
     };
     
-    this._commandQueue.update(queue => [...queue, command]);
+    this._commandQueue.update(queue => {
+      const nextQueue = [...queue, command];
+      return nextQueue.length > FLOW_COMMAND_DIAGNOSTIC_HISTORY_LIMIT
+        ? nextQueue.slice(-FLOW_COMMAND_DIAGNOSTIC_HISTORY_LIMIT)
+        : nextQueue;
+    });
   }
 
   // ========== View 端 API ==========

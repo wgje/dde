@@ -3,6 +3,8 @@ import { TestBed } from '@angular/core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  FLOW_COMMAND_DIAGNOSTIC_HISTORY_LIMIT,
+  FlowCommandType,
   FlowCommandService,
   type CenterNodeCommandClaim,
 } from './flow-command.service';
@@ -106,5 +108,28 @@ describe('FlowCommandService', () => {
     expect(service.isViewReady()).toBe(false);
     const claim = service.claimPendingCenterCommand() as CenterNodeCommandClaim;
     expect(claim.payload.taskId).toBe('task-recovery');
+  });
+
+  it('bounds diagnostic history while retaining the newest commands in order', () => {
+    const dispatchCount = FLOW_COMMAND_DIAGNOSTIC_HISTORY_LIMIT + 25;
+
+    for (let index = 0; index < dispatchCount; index += 1) {
+      service.dispatch(FlowCommandType.ZoomToFit, { index });
+    }
+
+    const queue = service.commandQueue();
+    expect(queue).toHaveLength(FLOW_COMMAND_DIAGNOSTIC_HISTORY_LIMIT);
+    expect(queue.map(command => command.payload?.['index'])).toEqual(
+      Array.from(
+        { length: FLOW_COMMAND_DIAGNOSTIC_HISTORY_LIMIT },
+        (_, offset) => dispatchCount - FLOW_COMMAND_DIAGNOSTIC_HISTORY_LIMIT + offset,
+      ),
+    );
+    expect(service.hasPendingCommands()).toBe(queue.length > 0);
+
+    service.acknowledgeCommands(queue.map(command => command.id));
+
+    expect(service.commandQueue()).toEqual([]);
+    expect(service.hasPendingCommands()).toBe(false);
   });
 });
