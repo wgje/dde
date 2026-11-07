@@ -12,9 +12,11 @@ import { ProjectStateService } from './project-state.service';
 import { ProjectOperationService } from './project-operation.service';
 import { SyncCoordinatorService } from './sync-coordinator.service';
 import { AppAuthCoordinatorService } from '../app/core/services/app-auth-coordinator.service';
+import { UserSessionService } from './user-session.service';
 import { Router } from '@angular/router';
 import { type ConflictData } from './modal.service';
 import { type ConflictResolutionPlan } from './conflict-resolution.types';
+import type { Project } from '../models';
 
 // ── Fake component for modal loading ─────────────────────────
 class FakeComponent {}
@@ -70,8 +72,11 @@ const mockModalLoader = {
 type BeforeProjectChange = (previousId: string | null, nextId: string | null) => void;
 let activeProjectId: string | null = 'project-a';
 let beforeProjectChange: BeforeProjectChange | null = null;
+let sessionUserId: string | null = 'user-a';
+let sessionGeneration = 1;
 const mockProjectState = {
-  projects: vi.fn(() => []),
+  projects: vi.fn<() => unknown[]>(() => []),
+  getProjectsWithCurrentData: vi.fn<() => unknown[]>(() => []),
   activeProjectId: vi.fn(() => activeProjectId),
   registerBeforeActiveProjectChange: vi.fn((listener: BeforeProjectChange) => {
     beforeProjectChange = listener;
@@ -79,6 +84,13 @@ const mockProjectState = {
       if (beforeProjectChange === listener) beforeProjectChange = null;
     };
   }),
+};
+
+const mockUserSession = {
+  currentUserId: vi.fn(() => sessionUserId),
+  getCurrentSessionGeneration: vi.fn(() => sessionGeneration),
+  isSessionContextCurrent: vi.fn((generation: number, userId: string | null) =>
+    generation === sessionGeneration && userId === sessionUserId),
 };
 
 function switchActiveProject(nextId: string | null): void {
@@ -113,6 +125,8 @@ describe('WorkspaceModalCoordinatorService', () => {
     lastModalRef = null;
     activeProjectId = 'project-a';
     beforeProjectChange = null;
+    sessionUserId = 'user-a';
+    sessionGeneration = 1;
 
     injector = Injector.create({
       providers: [
@@ -126,6 +140,7 @@ describe('WorkspaceModalCoordinatorService', () => {
         { provide: ProjectOperationService, useValue: mockProjectOps },
         { provide: SyncCoordinatorService, useValue: mockSyncCoordinator },
         { provide: AppAuthCoordinatorService, useValue: mockAuthCoord },
+        { provide: UserSessionService, useValue: mockUserSession },
       ],
     });
 
@@ -164,6 +179,70 @@ describe('WorkspaceModalCoordinatorService', () => {
     expect(mockDynamicModal.open).toHaveBeenCalledOnce();
     // Loading flag should be cleared after completion
     expect(service.isModalLoading('settings')).toBe(false);
+  });
+
+  it('should provide authoritative current project data to settings', async () => {
+    const staleShells = [{ id: 'project-1', tasks: [], connections: [] }];
+    const currentProjects = [{
+      id: 'project-1',
+      tasks: [{ id: 'task-1', content: 'current content' }],
+      connections: [{ id: 'connection-1', source: 'task-1', target: 'task-1' }],
+    }];
+    mockProjectState.getProjectsWithCurrentData.mockReturnValueOnce(currentProjects);
+
+    await service.openSettings();
+
+    expect(lastModalConfig?.inputs?.['projects']).toBe(currentProjects);
+    expect(lastModalConfig?.inputs?.['projects']).not.toBe(staleShells);
+    expect(mockProjectState.getProjectsWithCurrentData).toHaveBeenCalledOnce();
+    expect(mockProjectState.projects).not.toHaveBeenCalled();
+  });
+
+  it('should pass an awaitable project import callback and retain the output fallback', async () => {
+    let resolveImport!: () => void;
+    const importCompletion = new Promise<void>(resolve => {
+      resolveImport = resolve;
+    });
+    const handleImportComplete = vi.fn(() => importCompletion);
+    const importedProject = { id: 'project-1' } as unknown as Project;
+    service.initCallbacks({ handleImportComplete });
+
+    await service.openSettings();
+
+    const importProject = lastModalConfig?.inputs?.['importProject'];
+    expect(importProject).toEqual(expect.any(Function));
+    expect(lastModalConfig?.outputs?.['importComplete']).toEqual(expect.any(Function));
+    if (typeof importProject !== 'function') return;
+
+    const pending = (importProject as (project: Project) => Promise<void>)(importedProject);
+    expect(pending).toBe(importCompletion);
+    expect(handleImportComplete).toHaveBeenCalledWith(importedProject);
+
+    resolveImport();
+    await pending;
+  });
+
+  it('should reject Settings imports from a stale owner before invoking the host writer', async () => {
+    const handleImportComplete = vi.fn();
+    const importedProject = { id: 'project-stale' } as unknown as Project;
+    service.initCallbacks({ handleImportComplete });
+
+    await service.openSettings();
+
+    const importProject = lastModalConfig?.inputs?.['importProject'];
+    const importComplete = lastModalConfig?.outputs?.['importComplete'];
+    expect(importProject).toEqual(expect.any(Function));
+    expect(importComplete).toEqual(expect.any(Function));
+
+    sessionUserId = 'user-b';
+    sessionGeneration += 1;
+
+    await expect(
+      Promise.resolve().then(() => (importProject as (project: Project) => unknown)(importedProject)),
+    ).rejects.toThrow('会话已切换');
+    expect(() => (importComplete as (project: Project) => unknown)(importedProject))
+      .toThrow('会话已切换');
+    expect(handleImportComplete).not.toHaveBeenCalled();
   });
 
   it('should show error toast when settings load fails', async () => {

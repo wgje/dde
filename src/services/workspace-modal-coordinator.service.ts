@@ -20,6 +20,7 @@ import { ProjectStateService } from './project-state.service';
 import { ProjectOperationService } from './project-operation.service';
 import { SyncCoordinatorService } from './sync-coordinator.service';
 import { AppAuthCoordinatorService } from '../app/core/services/app-auth-coordinator.service';
+import { UserSessionService } from './user-session.service';
 import { type ConflictResolutionPlan } from './conflict-resolution.types';
 /* eslint-enable no-restricted-imports */
 import type { StorageEscapeData } from '../app/shared/modals';
@@ -27,6 +28,13 @@ import { ThemeType, Project } from '../models';
 import type { ProjectUiOwner } from './task-operation-trash-adapter.controller';
 
 type ConflictResolutionAction = 'local' | 'remote' | 'merge' | 'plan';
+
+interface SettingsImportOwnerContext {
+  readonly sessionGeneration: number;
+  readonly userId: string | null;
+}
+
+const SETTINGS_IMPORT_STALE_SESSION_ERROR = '会话已切换，导入已取消';
 
 @Injectable({ providedIn: 'root' })
 export class WorkspaceModalCoordinatorService {
@@ -39,6 +47,7 @@ export class WorkspaceModalCoordinatorService {
   private readonly projectOps = inject(ProjectOperationService);
   private readonly syncCoordinator = inject(SyncCoordinatorService);
   private readonly authCoord = inject(AppAuthCoordinatorService);
+  private readonly userSession = inject(UserSessionService);
 
   // ── State ───────────────────────────────────────────────────────────
 
@@ -132,18 +141,20 @@ export class WorkspaceModalCoordinatorService {
     if (this.isModalLoading('settings')) return;
     this.setModalLoading('settings', true);
     try {
+      const importOwner = this.captureSettingsImportOwner();
       const component = await this.modalLoader.loadSettingsModal();
       this.dynamicModal.open(component, {
         inputs: {
           sessionEmail: this.authCoord.sessionEmail(),
-          projects: this.projectState.projects()
+          projects: this.projectState.getProjectsWithCurrentData(),
+          importProject: (project: Project) => this.forwardSettingsImport(importOwner, project),
         },
         outputs: {
           close: () => this.closeSettings(),
           signOut: () => this._callbacks.signOut?.(),
           themeChange: (theme: unknown) => this._callbacks.updateTheme?.(theme as ThemeType),
           openDashboard: () => this.openDashboardFromSettings(),
-          importComplete: (project: unknown) => this._callbacks.handleImportComplete?.(project as Project)
+          importComplete: (project: unknown) => this.forwardSettingsImport(importOwner, project as Project)
         }
       });
     } catch {
@@ -151,6 +162,23 @@ export class WorkspaceModalCoordinatorService {
     } finally {
       this.setModalLoading('settings', false);
     }
+  }
+
+  private captureSettingsImportOwner(): SettingsImportOwnerContext {
+    return Object.freeze({
+      sessionGeneration: this.userSession.getCurrentSessionGeneration(),
+      userId: this.userSession.currentUserId(),
+    });
+  }
+
+  private forwardSettingsImport(
+    owner: SettingsImportOwnerContext,
+    project: Project,
+  ): Promise<void> | void {
+    if (!this.userSession.isSessionContextCurrent(owner.sessionGeneration, owner.userId)) {
+      throw new Error(SETTINGS_IMPORT_STALE_SESSION_ERROR);
+    }
+    return this._callbacks.handleImportComplete?.(project);
   }
 
   closeSettings(): void {
@@ -643,7 +671,7 @@ export class WorkspaceModalCoordinatorService {
 export interface ModalCallbacks {
   signOut?: () => void;
   updateTheme?: (theme: ThemeType) => void;
-  handleImportComplete?: (project: Project) => void;
+  handleImportComplete?: (project: Project) => Promise<void> | void;
   handleLoginFromModal?: (data: { email: string; password: string }) => void;
   handleSignupFromModal?: (data: { email: string; password: string; confirmPassword: string }) => void;
   handleResetPasswordFromModal?: (email: string) => void;

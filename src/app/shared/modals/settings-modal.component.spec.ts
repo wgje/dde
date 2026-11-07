@@ -431,6 +431,114 @@ describe('SettingsModalComponent', () => {
     expect(mockImportService.executeImport).not.toHaveBeenCalled();
   });
 
+  it('should await the configured project import callback before reporting success', async () => {
+    const importedProject = createProject('project-imported', [createTask('task-imported')]);
+    let resolveImport!: () => void;
+    const importCompletion = new Promise<void>(resolve => {
+      resolveImport = resolve;
+    });
+    const importProject = vi.fn(() => importCompletion);
+    (component as unknown as { importProject: () => typeof importProject }).importProject =
+      () => importProject;
+    const alertSpy = vi.spyOn(globalThis, 'alert').mockImplementation(() => undefined);
+    mockImportService.validateFile.mockResolvedValue({ valid: true, data: { projects: [] } });
+    mockImportService.generatePreview.mockResolvedValue({ conflicts: [] });
+    mockImportService.executeImport.mockImplementation(async (...args: unknown[]) => {
+      const onProjectImported = args[3] as ((project: Project) => Promise<void> | void) | undefined;
+      await onProjectImported?.(importedProject);
+      return {
+        success: true,
+        importedCount: 1,
+        skippedCount: 0,
+        failedCount: 0,
+        details: [],
+        durationMs: 0,
+      };
+    });
+
+    let settled = false;
+    const pending = component.handleFileSelected(createImportFileInputEvent()).then(() => {
+      settled = true;
+    });
+    await vi.waitFor(() => expect(importProject).toHaveBeenCalledWith(importedProject));
+    expect(settled).toBe(false);
+    expect(alertSpy).not.toHaveBeenCalled();
+
+    resolveImport();
+    await pending;
+
+    expect(settled).toBe(true);
+    expect(alertSpy).toHaveBeenCalledWith('导入完成！\n成功: 1\n跳过: 0');
+  });
+
+  it('should report import failure when the configured project callback rejects', async () => {
+    const importedProject = createProject('project-imported', []);
+    const importProject = vi.fn().mockRejectedValue(new Error('persist failed'));
+    (component as unknown as { importProject: () => typeof importProject }).importProject =
+      () => importProject;
+    const alertSpy = vi.spyOn(globalThis, 'alert').mockImplementation(() => undefined);
+    mockImportService.validateFile.mockResolvedValue({ valid: true, data: { projects: [] } });
+    mockImportService.generatePreview.mockResolvedValue({ conflicts: [] });
+    mockImportService.executeImport.mockImplementation(async (...args: unknown[]) => {
+      const onProjectImported = args[3] as ((project: Project) => Promise<void> | void) | undefined;
+      try {
+        await onProjectImported?.(importedProject);
+        return {
+          success: true,
+          importedCount: 1,
+          skippedCount: 0,
+          failedCount: 0,
+          details: [],
+          durationMs: 0,
+        };
+      } catch (error) {
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'persist failed',
+          importedCount: 0,
+          skippedCount: 0,
+          failedCount: 1,
+          details: [],
+          durationMs: 0,
+        };
+      }
+    });
+
+    await component.handleFileSelected(createImportFileInputEvent());
+
+    expect(importProject).toHaveBeenCalledWith(importedProject);
+    expect(alertSpy).toHaveBeenCalledWith('导入失败：persist failed');
+    expect(alertSpy).not.toHaveBeenCalledWith(expect.stringContaining('导入完成'));
+  });
+
+  it('should preserve the importComplete output fallback when no project callback is configured', async () => {
+    const importedProject = createProject('project-imported', []);
+    const importComplete = vi.fn();
+    component.importComplete.subscribe(importComplete);
+    const alertSpy = vi.spyOn(globalThis, 'alert').mockImplementation(() => undefined);
+    mockImportService.validateFile.mockResolvedValue({ valid: true, data: { projects: [] } });
+    mockImportService.generatePreview.mockResolvedValue({ conflicts: [] });
+    mockImportService.executeImport.mockImplementation(async (...args: unknown[]) => {
+      const onProjectImported = args[3] as ((project: Project) => Promise<void> | void) | undefined;
+      await onProjectImported?.(importedProject);
+      return {
+        success: true,
+        importedCount: 1,
+        skippedCount: 0,
+        failedCount: 0,
+        details: [],
+        durationMs: 0,
+      };
+    });
+
+    await component.handleFileSelected(createImportFileInputEvent());
+
+    expect(importComplete).toHaveBeenCalledOnce();
+    expect(importComplete).toHaveBeenCalledWith(importedProject);
+    expect(importComplete.mock.calls[0]?.[0]).toBe(importedProject);
+    expect(alertSpy).toHaveBeenCalledWith('导入完成！\n成功: 1\n跳过: 0');
+  });
+
   it('should keep the black box toggle visible and functional', () => {
     const toggle = fixture.debugElement.query(By.css('[data-testid="settings-blackbox-toggle"]'));
 
@@ -740,6 +848,18 @@ describe('SettingsModalComponent', () => {
           arrayBuffer: vi.fn().mockResolvedValue(new ArrayBuffer(8)),
         }],
         value: filename,
+      },
+    } as unknown as Event;
+  }
+
+  function createImportFileInputEvent(): Event {
+    const file = new File([
+      JSON.stringify({ metadata: { version: '1.0.0' }, projects: [] }),
+    ], 'project-export.json', { type: 'application/json' });
+    return {
+      target: {
+        files: [file],
+        value: file.name,
       },
     } as unknown as Event;
   }
