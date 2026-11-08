@@ -210,6 +210,7 @@ export class FlowMinimapComponent implements AfterViewInit, OnDestroy {
   private vpRaf: MinimapFrameHandle | null = null;
   private rebuildRaf: MinimapFrameHandle | null = null;
   private viewportHandler: ((e: go.DiagramEvent) => void) | null = null;
+  private selectionHandler: ((e: go.DiagramEvent) => void) | null = null;
   private documentHandler: ((e: go.DiagramEvent) => void) | null = null;
   private modelHandler: ((e: go.ChangedEvent) => void) | null = null;
   private windowPointerMoveHandler: ((e: PointerEvent) => void) | null = null;
@@ -292,9 +293,11 @@ export class FlowMinimapComponent implements AfterViewInit, OnDestroy {
 
   private attachTo(diagram: go.Diagram): void {
     this.viewportHandler = () => this.onViewportChanged();
+    this.selectionHandler = () => this.scheduleRebuild();
     this.documentHandler = () => this.scheduleRebuild();
     this.modelHandler = () => this.scheduleRebuild();
     diagram.addDiagramListener('ViewportBoundsChanged', this.viewportHandler);
+    diagram.addDiagramListener('ChangedSelection', this.selectionHandler);
     diagram.addDiagramListener('DocumentBoundsChanged', this.documentHandler);
     diagram.addDiagramListener('LayoutCompleted', this.documentHandler);
     diagram.addModelChangedListener(this.modelHandler);
@@ -307,6 +310,9 @@ export class FlowMinimapComponent implements AfterViewInit, OnDestroy {
     if (this.viewportHandler) {
       this.removeDiagramListenerSafely(diagram, 'ViewportBoundsChanged', this.viewportHandler);
     }
+    if (this.selectionHandler) {
+      this.removeDiagramListenerSafely(diagram, 'ChangedSelection', this.selectionHandler);
+    }
     if (this.documentHandler) {
       this.removeDiagramListenerSafely(diagram, 'DocumentBoundsChanged', this.documentHandler);
       this.removeDiagramListenerSafely(diagram, 'LayoutCompleted', this.documentHandler);
@@ -315,6 +321,7 @@ export class FlowMinimapComponent implements AfterViewInit, OnDestroy {
       this.removeModelChangedListenerSafely(diagram, this.modelHandler);
     }
     this.viewportHandler = null;
+    this.selectionHandler = null;
     this.documentHandler = null;
     this.modelHandler = null;
     this.boundDiagram = null;
@@ -346,6 +353,7 @@ export class FlowMinimapComponent implements AfterViewInit, OnDestroy {
   // ===================== 被动同步（zone 外触发，必须 zone.run） =====================
 
   private onViewportChanged(): void {
+    this.scheduleRebuild();
     if (this.dragging) return; // 拖动时由 onPointerMove 乐观更新 viewport signal
     if (this.vpRaf !== null) return;
     this.vpRaf = requestMinimapFrame(() => {

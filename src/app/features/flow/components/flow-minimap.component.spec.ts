@@ -34,6 +34,7 @@ type FlowMinimapInternals = {
   svgEl: SVGSVGElement | null;
   boundDiagram: go.Diagram | null;
   viewportHandler: DiagramListener | null;
+  selectionHandler: DiagramListener | null;
   documentHandler: DiagramListener | null;
   modelHandler: ModelListener | null;
   dragging: boolean;
@@ -330,6 +331,42 @@ describe('FlowMinimapComponent frame scheduling', () => {
     }
   });
 
+  it('binding-only selection/viewport visual updates invalidate the minimap snapshot', () => {
+    const diagram = new FakeMinimapDiagram();
+    diagram.nodeEntries = [
+      {
+        key: 'task-visual-state',
+        data: { familyColor: '#111111' },
+        actualBounds: new go.Rect(0, 0, 80, 40),
+      },
+    ];
+    const { component } = createFlowMinimapHarness(diagram as unknown as go.Diagram);
+    const internals = component as unknown as FlowMinimapInternals;
+    internals.attachTo(diagram as unknown as go.Diagram);
+    expect(component.nodeShapes()[0]?.fill).toBe('#111111');
+
+    const raf = installQueuedAnimationFrame();
+    try {
+      diagram.nodeEntries[0].data = { isSearchMatch: true, color: '#B89C48', familyColor: '#111111' };
+      const selectionListener = diagram.diagramListeners.get('ChangedSelection')?.[0];
+      expect(selectionListener).toBeDefined();
+      selectionListener?.({} as go.DiagramEvent);
+      raf.flushNext();
+      expect(component.nodeShapes()[0]?.fill).toBe('#B89C48');
+
+      diagram.nodeEntries[0].data = { isParked: true, borderColor: '#78716C' };
+      const viewportListener = diagram.diagramListeners.get('ViewportBoundsChanged')?.[0];
+      expect(viewportListener).toBeDefined();
+      viewportListener?.({} as go.DiagramEvent);
+      raf.flushNext();
+      expect(component.nodeShapes()[0]?.stroke).toBe('#d97706');
+    } finally {
+      raf.restore();
+      internals.ngOnDestroy();
+      TestBed.resetTestingModule();
+    }
+  });
+
   it('销毁时 GoJS listener 移除失败不应阻断内部绑定状态清理', () => {
     const diagram = new FakeMinimapDiagram();
     const { component } = createFlowMinimapHarness(diagram as unknown as go.Diagram);
@@ -341,6 +378,7 @@ describe('FlowMinimapComponent frame scheduling', () => {
 
     expect(internals.boundDiagram).toBeNull();
     expect(internals.viewportHandler).toBeNull();
+    expect(internals.selectionHandler).toBeNull();
     expect(internals.documentHandler).toBeNull();
     expect(internals.modelHandler).toBeNull();
     TestBed.resetTestingModule();
