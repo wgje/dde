@@ -36,6 +36,8 @@ export interface AttachmentUploadFailure {
   success: false;
   error: string;
   cancelled?: boolean;
+  attachment?: Attachment;
+  pendingUpload?: PendingAttachmentUploadIdentity;
 }
 
 export type AttachmentUploadResult = AttachmentUploadSuccess | AttachmentUploadFailure;
@@ -43,11 +45,14 @@ export type AttachmentUploadResult = AttachmentUploadSuccess | AttachmentUploadF
 interface QueuePendingLocalAttachmentUploadInput {
   actionQueue: {
     enqueueDurably(action: EnqueueParams): Promise<string>;
+    enqueueDurablyForOwner?(ownerUserId: string, action: EnqueueParams): Promise<string>;
   };
   context: AttachmentUploadContext;
   file: File;
   projectId: string;
   taskId: string;
+  operationId?: string;
+  ownerFence?: { isCurrent(): boolean };
   updateProgress(fileName: string, progress: number, status: 'pending'): void;
   uploadOutbox: {
     removePendingUpload(identity: PendingAttachmentUploadIdentity): Promise<void>;
@@ -198,9 +203,12 @@ export function createAttachmentUploadContextForPayload(
 export async function queuePendingLocalAttachmentUpload(
   input: QueuePendingLocalAttachmentUploadInput,
 ): Promise<AttachmentUploadResult> {
+  if (input.ownerFence && !input.ownerFence.isCurrent()) {
+    return { success: false, error: '附件导入 owner 已变化，已拒绝入队' };
+  }
   const attachment = createLocalPendingAttachment(input.file, input.context);
   const blobKey = input.context.attachmentId;
-  const operationId = buildAttachmentCreateOperationId(input.context.attachmentId);
+  const operationId = input.operationId ?? buildAttachmentCreateOperationId(input.context.attachmentId);
   const payload = buildAttachmentUploadPayload(input, attachment, blobKey);
 
   try {
@@ -221,11 +229,26 @@ export async function queuePendingLocalAttachmentUpload(
   } catch {
     return { success: false, error: '附件上传队列持久化失败' };
   }
+  if (input.ownerFence && !input.ownerFence.isCurrent()) {
+    return {
+      success: false,
+      error: '附件导入 owner 已变化，已保留 outbox 证据',
+      attachment,
+      pendingUpload: {
+        ownerUserId: input.userId,
+        blobKey,
+        operationId,
+      },
+    };
+  }
   const { actionId, enqueueCommitStateUnknown } = await enqueuePendingLocalAttachmentAction(
     input,
     operationId,
     payload,
   );
+  if (input.ownerFence && !input.ownerFence.isCurrent()) {
+    return { success: false, error: '附件导入 owner 已变化，已保留 queue 证据' };
+  }
 
   if (!actionId) {
     if (!enqueueCommitStateUnknown) {
@@ -261,14 +284,17 @@ async function enqueuePendingLocalAttachmentAction(
   payload: AttachmentUploadPayload,
 ): Promise<PendingLocalAttachmentEnqueueResult> {
   try {
-    const actionId = await input.actionQueue.enqueueDurably({
+    const action = {
       type: 'create',
       entityType: 'attachment',
       entityId: payload.attachment.id,
       operationId,
       payload,
       priority: 'normal',
-    });
+    } satisfies EnqueueParams;
+    const actionId = input.actionQueue.enqueueDurablyForOwner
+      ? await input.actionQueue.enqueueDurablyForOwner(input.userId, action)
+      : await input.actionQueue.enqueueDurably(action);
     return { actionId, enqueueCommitStateUnknown: false };
   } catch {
     return { actionId: '', enqueueCommitStateUnknown: true };

@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Injector, runInInjectionContext } from '@angular/core';
 import { AttachmentExportService } from './attachment-export.service';
 import { AttachmentImportService } from './attachment-import.service';
+import { AttachmentImportResumeService } from './attachment-import-resume.service';
 import { AttachmentService } from './attachment.service';
 import { AuthService } from './auth.service';
 import { SupabaseClientService } from './supabase-client.service';
@@ -15,6 +16,7 @@ import { SCAN_STATUS } from '../config/virus-scan.config';
 describe('Attachment Export/Import Roundtrip', () => {
   let exportService: AttachmentExportService;
   let importService: AttachmentImportService;
+  let resumeService: AttachmentImportResumeService;
   let fetchSpy: ReturnType<typeof vi.spyOn>;
 
   const mockAttachmentService = {
@@ -69,6 +71,7 @@ describe('Attachment Export/Import Roundtrip', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    resumeService = new AttachmentImportResumeService();
 
     const injector = Injector.create({
       providers: [
@@ -79,6 +82,7 @@ describe('Attachment Export/Import Roundtrip', () => {
         { provide: SupabaseClientService, useValue: mockSupabase },
         { provide: TaskOperationAdapterService, useValue: mockTaskOpsAdapter },
         { provide: VirusScanService, useValue: mockVirusScan },
+        { provide: AttachmentImportResumeService, useValue: resumeService },
       ],
     });
 
@@ -91,8 +95,9 @@ describe('Attachment Export/Import Roundtrip', () => {
     } as Response);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     fetchSpy.mockRestore();
+    await resumeService.clearCheckpointsForTests();
   });
 
   it('应支持 ZIP 导出后再导入并挂载到任务', async () => {
@@ -238,17 +243,82 @@ describe('Attachment Export/Import Roundtrip', () => {
     expect(mockTaskOpsAdapter.addTaskAttachmentToProject).toHaveBeenCalledWith(
       'project-1',
       'task-1',
-      expect.objectContaining({ id: 'uploaded-task-1' })
+      expect.objectContaining({ id: 'uploaded-task-1' }),
+      expect.objectContaining({ operationId: expect.any(String) }),
     );
     expect(mockTaskOpsAdapter.addTaskAttachmentToProject).toHaveBeenCalledWith(
       'project-1',
       'task-2',
-      expect.objectContaining({ id: 'uploaded-task-2' })
+      expect.objectContaining({ id: 'uploaded-task-2' }),
+      expect.objectContaining({ operationId: expect.any(String) }),
     );
     expect(mockTaskOpsAdapter.addTaskAttachmentToProject).toHaveBeenCalledWith(
       'project-2',
       'task-3',
-      expect.objectContaining({ id: 'uploaded-task-3' })
+      expect.objectContaining({ id: 'uploaded-task-3' }),
+      expect.objectContaining({ operationId: expect.any(String) }),
     );
+  });
+
+  it('导入中断后同 owner 重开应复用检查点并跳过已完成附件', async () => {
+    const items = [
+      {
+        projectId: 'project-1',
+        taskId: 'task-1',
+        metadata: { id: 'roundtrip-att-1', name: 'one.txt', size: 3, mimeType: 'text/plain' },
+        data: new Blob(['one'], { type: 'text/plain' }),
+      },
+      {
+        projectId: 'project-1',
+        taskId: 'task-2',
+        metadata: { id: 'roundtrip-att-2', name: 'two.txt', size: 3, mimeType: 'text/plain' },
+        data: new Blob(['two'], { type: 'text/plain' }),
+      },
+    ];
+    let failSecondItem = true;
+    mockAttachmentService.uploadFile.mockImplementation(async (
+      _userId: string,
+      _projectId: string,
+      taskId: string,
+    ) => {
+      if (taskId === 'task-2' && failSecondItem) {
+        return { success: false, error: '进程中断' };
+      }
+      return {
+        success: true,
+        attachment: {
+          id: `uploaded-${taskId}`,
+          name: `${taskId}.txt`,
+          type: 'document',
+          url: `pending://${taskId}`,
+          mimeType: 'text/plain',
+          size: 3,
+          createdAt: new Date().toISOString(),
+        },
+        queuedUpload: {
+          actionId: `action-${taskId}`,
+          ownerUserId: 'user-1',
+          blobKey: `uploaded-${taskId}`,
+          operationId: `operation-${taskId}`,
+        },
+      };
+    });
+
+    const first = await importService.importAttachments('project-1', items);
+    expect(first.success).toBe(false);
+    expect(first.imported).toBe(1);
+
+    const identity = await resumeService.buildPackageIdentity('project-1', items);
+    const checkpoint = await resumeService.readCheckpoint('user-1', 'project-1', identity.packageDigest);
+    expect(checkpoint?.items.map(item => item.status)).toEqual(['completed', 'failed']);
+
+    failSecondItem = false;
+    const callsBeforeResume = mockAttachmentService.uploadFile.mock.calls.length;
+    const resumed = await importService.importAttachments('project-1', items);
+
+    expect(resumed.success).toBe(true);
+    expect(resumed.imported).toBe(2);
+    expect(mockAttachmentService.uploadFile.mock.calls.length - callsBeforeResume).toBe(1);
+    expect(await resumeService.readCheckpoint('user-1', 'project-1', identity.packageDigest)).toBeNull();
   });
 });

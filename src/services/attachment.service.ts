@@ -44,6 +44,10 @@ import {
 
 export type { UploadProgress } from './attachment-upload-state.controller';
 
+export interface AttachmentUploadOwnerFence {
+  isCurrent(): boolean;
+}
+
 export interface QueuedAttachmentUploadFence {
   signal: AbortSignal;
   isCurrent: () => boolean;
@@ -216,10 +220,21 @@ export class AttachmentService {
     userId: string,
     projectId: string,
     taskId: string,
-    file: File
+    file: File,
+    options: {
+      attachmentId?: string;
+      operationId?: string;
+      ownerFence?: AttachmentUploadOwnerFence;
+    } = {},
   ): Promise<AttachmentUploadResult> {
+    if (options.ownerFence && !options.ownerFence.isCurrent()) {
+      return { success: false, error: '附件导入 owner 已变化，已拒绝上传' };
+    }
     const preparation = await this.prepareFileUpload(userId, projectId, taskId, file);
     if (!preparation.success) return preparation;
+    if (options.ownerFence && !options.ownerFence.isCurrent()) {
+      return { success: false, error: '附件导入 owner 已变化，已拒绝上传' };
+    }
 
     const uploadContext = this.createUploadContext(
       userId,
@@ -228,8 +243,20 @@ export class AttachmentService {
       file,
       preparation.scanMetadata,
       true,
+      options.attachmentId,
     );
-    return this.queuePendingLocalUpload(userId, projectId, taskId, file, uploadContext);
+    const result = await this.queuePendingLocalUpload(
+      userId,
+      projectId,
+      taskId,
+      file,
+      uploadContext,
+      options.operationId,
+      options.ownerFence,
+    );
+    return options.ownerFence && !options.ownerFence.isCurrent()
+      ? { success: false, error: '附件导入 owner 已变化，已保留上传证据' }
+      : result;
   }
 
   async uploadQueuedAttachment(
@@ -293,8 +320,10 @@ export class AttachmentService {
     file: File,
     scanMetadata?: Attachment['scanMetadata'],
     remoteUploadDeferred = false,
+    attachmentId?: string,
   ): AttachmentUploadContext {
     return createAttachmentUploadContext({
+      attachmentId,
       file,
       projectId,
       remoteUploadDeferred,
@@ -317,6 +346,8 @@ export class AttachmentService {
     taskId: string,
     file: File,
     context: AttachmentUploadContext,
+    operationId?: string,
+    ownerFence?: AttachmentUploadOwnerFence,
   ): Promise<AttachmentUploadResult> {
     return queuePendingLocalAttachmentUpload({
       actionQueue: this.actionQueue,
@@ -324,6 +355,8 @@ export class AttachmentService {
       file,
       projectId,
       taskId,
+      operationId,
+      ownerFence,
       updateProgress: (fileName, progress, status) =>
         this.uploadState.updateProgress(fileName, progress, status),
       uploadOutbox: this.uploadOutbox,

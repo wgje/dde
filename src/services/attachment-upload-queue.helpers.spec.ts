@@ -200,6 +200,43 @@ describe('attachment-upload-queue.helpers', () => {
     expect(updateProgress).toHaveBeenCalledWith('offline.txt', 0, 'pending');
   });
 
+  it('preserves an import operationId through outbox and owner-scoped ActionQueue enqueue', async () => {
+    const file = new File(['offline'], 'offline.txt', { type: 'text/plain' });
+    const context: AttachmentUploadContext = {
+      attachmentId: 'attachment-import-1',
+      abortController: new AbortController(),
+      filePath: 'user-1/project-1/task-1/attachment-import-1.txt',
+      remoteUploadDeferred: true,
+      scanMetadata: createPendingAttachmentScanMetadata('2026-06-13T00:00:00.000Z'),
+    };
+    const savePendingUpload = vi.fn().mockResolvedValue(undefined);
+    const removePendingUpload = vi.fn().mockResolvedValue(undefined);
+    const enqueueDurablyForOwner = vi.fn().mockResolvedValue('queued-import');
+    const enqueueDurably = vi.fn();
+
+    const result = await queuePendingLocalAttachmentUpload({
+      actionQueue: { enqueueDurably, enqueueDurablyForOwner },
+      context,
+      file,
+      operationId: 'attachment-import:package:0:attachment-import-1',
+      projectId: 'project-1',
+      taskId: 'task-1',
+      updateProgress: vi.fn(),
+      uploadOutbox: { savePendingUpload, removePendingUpload },
+      userId: 'user-1',
+    });
+
+    expect(result.success).toBe(true);
+    expect(savePendingUpload).toHaveBeenCalledWith(expect.objectContaining({
+      operationId: 'attachment-import:package:0:attachment-import-1',
+      recovery: expect.objectContaining({ operationId: 'attachment-import:package:0:attachment-import-1' }),
+    }));
+    expect(enqueueDurablyForOwner).toHaveBeenCalledWith('user-1', expect.objectContaining({
+      operationId: 'attachment-import:package:0:attachment-import-1',
+    }));
+    expect(enqueueDurably).not.toHaveBeenCalled();
+  });
+
   it('removes the pending blob and returns failure when attachment create is not durably queued', async () => {
     const file = new File(['offline'], 'offline.txt', { type: 'text/plain' });
     const context: AttachmentUploadContext = {

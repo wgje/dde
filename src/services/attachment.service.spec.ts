@@ -256,6 +256,47 @@ describe('AttachmentService', () => {
       }));
     });
 
+    it('导入 override 会贯通 attachmentId、operationId 和 owner-scoped queue', async () => {
+      const { FileTypeValidatorService } = await import('./file-type-validator.service');
+      const { VirusScanService } = await import('./virus-scan.service');
+      const enqueueDurablyForOwner = vi.fn().mockResolvedValue('queued-import');
+      const enqueueDurably = vi.fn();
+      const savePendingUpload = vi.fn().mockResolvedValue(undefined);
+      const removePendingUpload = vi.fn().mockResolvedValue(undefined);
+      const injector = Injector.create({
+        providers: [
+          { provide: AttachmentService, useClass: AttachmentService },
+          { provide: SupabaseClientService, useValue: { isConfigured: false, client: vi.fn(() => null) } },
+          { provide: LoggerService, useValue: { category: () => mockLoggerCategory } },
+          { provide: FileTypeValidatorService, useValue: { validateFile: vi.fn().mockResolvedValue({ valid: true }) } },
+          { provide: VirusScanService, useValue: mockVirusScan },
+          { provide: ActionQueueService, useValue: { enqueueDurably, enqueueDurablyForOwner } },
+          { provide: AttachmentUploadOutboxService, useValue: { savePendingUpload, removePendingUpload } },
+          { provide: AttachmentCleanupOutboxService, useValue: { enqueuePaths: vi.fn().mockResolvedValue([]), removePendingCleanups: vi.fn() } },
+          { provide: DestroyRef, useValue: { onDestroy: vi.fn() } },
+        ],
+      });
+      const uploadService = injector.get(AttachmentService);
+      const result = await uploadService.uploadFile(
+        'user1',
+        'proj1',
+        'task1',
+        new File(['test'], 'test.txt', { type: 'text/plain' }),
+        { attachmentId: 'import-attachment-1', operationId: 'attachment-import:package:0:import-attachment-1' },
+      );
+
+      expect(result.success).toBe(true);
+      expect(savePendingUpload).toHaveBeenCalledWith(expect.objectContaining({
+        attachmentId: 'import-attachment-1',
+        blobKey: 'import-attachment-1',
+        operationId: 'attachment-import:package:0:import-attachment-1',
+      }));
+      expect(enqueueDurablyForOwner).toHaveBeenCalledWith('user1', expect.objectContaining({
+        operationId: 'attachment-import:package:0:import-attachment-1',
+      }));
+      expect(enqueueDurably).not.toHaveBeenCalled();
+    });
+
     it('扫描服务离线时先返回本地附件并持久化上传 outbox', async () => {
       const { FileTypeValidatorService } = await import('./file-type-validator.service');
       const { VirusScanService } = await import('./virus-scan.service');

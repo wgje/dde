@@ -16,7 +16,7 @@
 import { Injectable, Injector, inject, signal } from '@angular/core';
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
-import { AttachmentService } from './attachment.service';
+import { AttachmentService, type AttachmentUploadOwnerFence } from './attachment.service';
 import { AuthService } from './auth.service';
 import { SupabaseClientService } from './supabase-client.service';
 import { TaskOperationAdapterService } from './task-operation-adapter.service';
@@ -24,10 +24,16 @@ import { ActionQueueService } from './action-queue.service';
 import type { AttachmentUploadPayload, QueuedAction } from './action-queue.types';
 import { AttachmentUploadOutboxService } from './attachment-upload-outbox.service';
 import type { QueuedAttachmentUploadReceipt } from './attachment-upload-queue.helpers';
-import { ProjectStateService } from './project-state.service';
+import { ProjectStateService, type ActiveProjectOwner } from './project-state.service';
 import { Attachment } from '../models';
 import { ATTACHMENT_CONFIG } from '../config/attachment.config';
 import { extractAttachmentItemsFromZip, type AttachmentImportZipLimits } from './attachment-import-zip.helpers';
+import {
+  AttachmentImportResumeService,
+  type AttachmentImportCheckpoint,
+  type AttachmentImportCheckpointItem,
+  type AttachmentImportPackageIdentity,
+} from './attachment-import-resume.service';
 
 // ============================================
 // 配置
@@ -120,15 +126,40 @@ export interface QuotaCheckResult {
 
 interface BatchUploadResult {
   status: 'queued' | 'failed' | 'skipped';
+  itemKey: string;
   taskId: string;
   attachmentName: string;
   attachment?: Attachment;
+  queuedUpload?: QueuedAttachmentUploadReceipt;
+  pendingUpload?: { ownerUserId: string; blobKey: string; operationId: string };
+  compensationStatus?: 'completed' | 'failed' | 'unknown';
   error?: string;
+}
+
+interface AttachmentImportWorkItem {
+  item: AttachmentImportItem;
+  checkpointItem: AttachmentImportCheckpointItem;
 }
 
 interface AttachmentImportRun {
   result: AttachmentImportResult;
-  validItems: AttachmentImportItem[];
+  validItems: AttachmentImportWorkItem[];
+  checkpoint: AttachmentImportCheckpoint;
+  identity: AttachmentImportPackageIdentity;
+  completedBeforeRun: number;
+  skippedBeforeRun: number;
+  processedCount: number;
+  ownerFence: AttachmentImportOwnerFence;
+}
+
+interface AttachmentImportOwnerFence extends AttachmentUploadOwnerFence {
+  readonly ownerUserId: string;
+  readonly projectOwner: ActiveProjectOwner;
+}
+
+interface ReconciledAttachmentUpload {
+  attachment: Attachment;
+  queuedUpload: QueuedAttachmentUploadReceipt;
 }
 
 // ============================================
@@ -146,6 +177,8 @@ export class AttachmentImportService {
   private readonly auth = inject(AuthService);
   private readonly supabase = inject(SupabaseClientService);
   private readonly projectState = inject(ProjectStateService, { optional: true });
+  private readonly resume = inject(AttachmentImportResumeService, { optional: true })
+    ?? new AttachmentImportResumeService();
   private readonly zipLimits: AttachmentImportZipLimits = {
     maxEntries: ATTACHMENT_IMPORT_CONFIG.MAX_ZIP_ENTRIES,
     maxEntryUncompressedBytes: ATTACHMENT_IMPORT_CONFIG.MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES,
@@ -211,16 +244,81 @@ export class AttachmentImportService {
     
     this._isImporting.set(true);
     this.abortController = new AbortController();
-    const run = this.createImportRun(items);
+    const projectOwner = this.projectState
+      && typeof this.projectState.captureActiveProjectOwner === 'function'
+      ? this.projectState.captureActiveProjectOwner()
+      : { projectId, generation: 0 };
+    const ownerFence: AttachmentImportOwnerFence = Object.freeze({
+      ownerUserId: userId,
+      projectOwner,
+      isCurrent: () => (
+        this.auth.currentUserId() === userId
+        && (!this.projectState
+          || typeof this.projectState.isActiveProjectOwnerCurrent !== 'function'
+          || this.projectState.isActiveProjectOwnerCurrent(projectOwner))
+      ),
+    });
+    let run: AttachmentImportRun | null = null;
     
     try {
-      if (this.finishEmptyImport(run)) return run.result;
+      if (!ownerFence.isCurrent()) {
+        return this.createImportFailure('附件导入 owner 已变化，已拒绝写入', items.length);
+      }
+      const identity = await this.resume.buildPackageIdentity(projectId, items);
+      if (!ownerFence.isCurrent()) {
+        return this.createImportFailure('附件导入 owner 已变化，已拒绝写入', items.length);
+      }
+      const lookup = await this.resume.inspect(userId, projectId, identity.packageDigest);
+      if (lookup.status === 'owner-mismatch') {
+        return this.createImportFailure('附件导入检查点属于其他用户，已拒绝续传', items.length);
+      }
+      if (lookup.status === 'changed-package') {
+        return this.createImportFailure('附件导入包已改变，已拒绝续传', items.length);
+      }
+      if (lookup.status === 'invalid') {
+        return this.createImportFailure('附件导入检查点格式无效，已保留原诊断数据', items.length);
+      }
+      if (lookup.status === 'storage-failed') {
+        return this.createImportFailure('附件导入检查点存储不可用，已拒绝写入', items.length);
+      }
+      if (!ownerFence.isCurrent()) {
+        return this.createImportFailure('附件导入 owner 已变化，已拒绝写入', items.length);
+      }
+
+      const checkpoint = lookup.status === 'resume'
+        ? lookup.checkpoint
+        : this.resume.createCheckpoint(userId, projectId, identity);
+      if (checkpoint.ownerUserId !== userId || checkpoint.projectId !== projectId
+        || checkpoint.packageDigest !== identity.packageDigest) {
+        return this.createImportFailure('附件导入检查点身份不匹配，已拒绝写入', items.length);
+      }
+      if (!this.resume.matchesPackageIdentity(checkpoint, identity)) {
+        return this.createImportFailure('附件导入检查点与来源包不一致，已拒绝写入', items.length);
+      }
+      run = this.createImportRun(items, identity, checkpoint, ownerFence);
+
+      if (run.validItems.length === 0) {
+        if (this.isCheckpointTerminal(run.checkpoint)) {
+          await this.resume.removeCheckpoint(userId, projectId, identity.packageDigest);
+        }
+        this.finishEmptyImport(run);
+        return run.result;
+      }
+
+      await this.persistCheckpoint(run);
       
       const hasQuota = await this.ensureImportQuota(run);
-      if (!hasQuota) return run.result;
+      if (!hasQuota) {
+        try {
+          await this.persistCheckpoint(run, run.result.errors.at(-1)?.error);
+        } catch (persistError) {
+          this.logger.error('附件导入配额失败诊断持久化失败', persistError);
+        }
+        return run.result;
+      }
       
       await this.uploadImportBatches(userId, projectId, run);
-      this.finishImportRun(run);
+      await this.finishImportRun(run);
       this.logger.info('附件导入完成', {
         imported: run.result.imported,
         queued: run.result.queued,
@@ -231,7 +329,11 @@ export class AttachmentImportService {
       return run.result;
       
     } catch (error) {
-      return this.failImportRun(run, error);
+      if (run) return this.failImportRun(run, error);
+      return this.createImportFailure(
+        error instanceof Error ? error.message : '未知错误',
+        items.length,
+      );
       
     } finally {
       this._isImporting.set(false);
@@ -239,19 +341,63 @@ export class AttachmentImportService {
     }
   }
 
-  private createImportRun(items: AttachmentImportItem[]): AttachmentImportRun {
-    const validItems = items.filter(item => item.data);
+  private createImportRun(
+    items: AttachmentImportItem[],
+    identity: AttachmentImportPackageIdentity,
+    checkpoint: AttachmentImportCheckpoint,
+    ownerFence: AttachmentImportOwnerFence,
+  ): AttachmentImportRun {
+    const checkpointByKey = new Map(checkpoint.items.map(item => [item.itemKey, item]));
+    const validItems: AttachmentImportWorkItem[] = [];
+    for (const [index, item] of items.entries()) {
+      const descriptor = identity.descriptors[index];
+      const checkpointItem = descriptor ? checkpointByKey.get(descriptor.itemKey) : undefined;
+      if (!checkpointItem || checkpointItem.status === 'completed' || checkpointItem.status === 'skipped') {
+        continue;
+      }
+      if (item.data) validItems.push({ item, checkpointItem });
+    }
+
+    const completedBeforeRun = checkpoint.items.filter(item => item.status === 'completed').length;
+    const skippedBeforeRun = checkpoint.items.filter(item => item.status === 'skipped').length;
     return {
       validItems,
+      checkpoint,
+      identity,
+      completedBeforeRun,
+      skippedBeforeRun,
+      processedCount: completedBeforeRun,
+      ownerFence,
       result: {
         success: false,
-        imported: 0,
-        queued: 0,
+        imported: completedBeforeRun,
+        queued: completedBeforeRun,
         failed: 0,
-        skipped: items.length - validItems.length,
+        skipped: skippedBeforeRun,
         errors: [],
       },
     };
+  }
+
+  private createImportFailure(error: string, skipped: number): AttachmentImportResult {
+    return {
+      success: false,
+      imported: 0,
+      queued: 0,
+      failed: 0,
+      skipped,
+      errors: [{ taskId: '', attachmentName: '', error }],
+    };
+  }
+
+  private async persistCheckpoint(run: AttachmentImportRun, lastError?: string): Promise<void> {
+    if (lastError) run.checkpoint.lastError = lastError;
+    run.checkpoint.updatedAt = new Date().toISOString();
+    await this.resume.saveCheckpoint(run.checkpoint);
+  }
+
+  private isCheckpointTerminal(checkpoint: AttachmentImportCheckpoint): boolean {
+    return checkpoint.items.every(item => item.status === 'completed' || item.status === 'skipped');
   }
 
   private finishEmptyImport(run: AttachmentImportRun): boolean {
@@ -273,8 +419,12 @@ export class AttachmentImportService {
   private async ensureImportQuota(run: AttachmentImportRun): Promise<boolean> {
     this.updateProgress('checking-quota', 5, undefined, run.validItems.length);
 
-    const totalSize = run.validItems.reduce((sum, item) => sum + item.metadata.size, 0);
+    const totalSize = run.validItems.reduce((sum, workItem) => sum + workItem.item.metadata.size, 0);
     const quotaCheck = await this.checkQuota(totalSize);
+    if (!run.ownerFence.isCurrent()) {
+      run.result.errors.push({ taskId: '', attachmentName: '', error: '附件导入 owner 已变化，已停止写入' });
+      return false;
+    }
     if (!quotaCheck.hasQuota) {
       this.toast.error(
         '存储配额不足',
@@ -297,10 +447,10 @@ export class AttachmentImportService {
   }
 
   private async uploadImportBatches(userId: string, projectId: string, run: AttachmentImportRun): Promise<void> {
-    this.updateProgress('uploading', 10, undefined, run.validItems.length);
+    const totalItems = run.checkpoint.items.filter(item => item.dataDigest !== 'missing').length;
+    this.updateProgress('uploading', 10, undefined, totalItems);
 
     const batches = this.createBatches(run.validItems, ATTACHMENT_IMPORT_CONFIG.BATCH_SIZE);
-    let processedCount = 0;
 
     for (const batch of batches) {
       if (this.abortController?.signal.aborted) {
@@ -308,24 +458,42 @@ export class AttachmentImportService {
         break;
       }
 
-      const batchResults = await this.processBatch(userId, projectId, batch);
+      for (const workItem of batch) {
+        workItem.checkpointItem.status = 'in-progress';
+        delete workItem.checkpointItem.error;
+      }
+      await this.persistCheckpoint(run);
+
+      const batchResults = await this.processBatch(userId, projectId, batch, run.ownerFence);
       for (const batchResult of batchResults) {
-        processedCount++;
-        this.applyBatchResult(run, batchResult, processedCount);
+        run.processedCount++;
+        await this.applyBatchResult(run, batchResult, run.processedCount);
       }
     }
   }
 
-  private applyBatchResult(
+  private async applyBatchResult(
     run: AttachmentImportRun,
     batchResult: BatchUploadResult,
     processedCount: number,
-  ): void {
+  ): Promise<void> {
+    const checkpointItem = run.checkpoint.items.find(item => item.itemKey === batchResult.itemKey);
+    if (!checkpointItem) {
+      throw new Error('附件导入检查点条目不存在');
+    }
+
     if (batchResult.status === 'queued') {
       run.result.imported++;
       run.result.queued++;
+      checkpointItem.status = 'completed';
+      checkpointItem.attachment = batchResult.attachment;
+      checkpointItem.queuedUpload = batchResult.queuedUpload;
+      checkpointItem.pendingUpload = batchResult.pendingUpload;
+      delete checkpointItem.error;
     } else if (batchResult.status === 'skipped') {
       run.result.skipped++;
+      checkpointItem.status = 'skipped';
+      checkpointItem.error = batchResult.error;
     } else {
       run.result.failed++;
       run.result.errors.push({
@@ -333,35 +501,55 @@ export class AttachmentImportService {
         attachmentName: batchResult.attachmentName,
         error: batchResult.error ?? '上传失败',
       });
+      checkpointItem.status = 'failed';
+      checkpointItem.error = batchResult.error ?? '上传失败';
+      checkpointItem.queuedUpload = batchResult.queuedUpload;
+      checkpointItem.pendingUpload = batchResult.pendingUpload;
+      checkpointItem.attachment = batchResult.attachment;
+      checkpointItem.compensationStatus = batchResult.compensationStatus;
     }
 
-    const percentage = 10 + (processedCount / run.validItems.length) * 85;
+    const totalItems = run.checkpoint.items.filter(item => item.dataDigest !== 'missing').length;
+    const percentage = 10 + (processedCount / Math.max(1, totalItems)) * 85;
     this._progress.update(p => ({
       ...p,
       stage: 'uploading',
       percentage: Math.min(100, Math.max(0, percentage)),
       currentItem: batchResult.attachmentName,
-      totalItems: run.validItems.length,
+      totalItems,
       completedItems: run.result.imported,
       failedItems: run.result.failed,
       skippedItems: run.result.skipped,
     }));
+    await this.persistCheckpoint(run);
   }
 
-  private finishImportRun(run: AttachmentImportRun): void {
+  private async finishImportRun(run: AttachmentImportRun): Promise<void> {
+    const terminal = this.isCheckpointTerminal(run.checkpoint);
+    const totalItems = run.checkpoint.items.filter(item => item.dataDigest !== 'missing').length;
     this._progress.update(p => ({
       ...p,
       stage: 'completed',
       percentage: 100,
-      totalItems: run.validItems.length,
+      totalItems,
       completedItems: run.result.imported,
       failedItems: run.result.failed,
       skippedItems: run.result.skipped,
     }));
-    run.result.success = run.result.failed === 0;
+    run.result.success = terminal && run.result.failed === 0;
+
+    if (terminal && run.result.failed === 0) {
+      await this.resume.removeCheckpoint(
+        run.checkpoint.ownerUserId,
+        run.checkpoint.projectId,
+        run.checkpoint.packageDigest,
+      );
+    } else {
+      await this.persistCheckpoint(run);
+    }
   }
 
-  private failImportRun(run: AttachmentImportRun, error: unknown): AttachmentImportResult {
+  private async failImportRun(run: AttachmentImportRun, error: unknown): Promise<AttachmentImportResult> {
     this.logger.error('附件导入失败', error);
     this._progress.update(p => ({
       ...p,
@@ -376,6 +564,11 @@ export class AttachmentImportService {
       attachmentName: '',
       error: error instanceof Error ? error.message : '未知错误',
     });
+    try {
+      await this.persistCheckpoint(run, error instanceof Error ? error.message : '未知错误');
+    } catch (persistError) {
+      this.logger.error('附件导入检查点持久化失败', persistError);
+    }
     return run.result;
   }
   
@@ -497,21 +690,23 @@ export class AttachmentImportService {
   private async processBatch(
     userId: string,
     projectId: string,
-    batch: AttachmentImportItem[]
+    batch: AttachmentImportWorkItem[],
+    ownerFence: AttachmentImportOwnerFence,
   ): Promise<BatchUploadResult[]> {
     // 并发上传，但限制并发数
     const semaphore = new Semaphore(ATTACHMENT_IMPORT_CONFIG.CONCURRENT_UPLOADS);
     
-    const promises = batch.map(async (item) => {
+    const promises = batch.map(async (workItem) => {
       await semaphore.acquire();
       
       try {
-        return await this.processBatchItem(userId, projectId, item);
+        return await this.processBatchItem(userId, projectId, workItem, ownerFence);
       } catch (error) {
         return {
           status: 'failed' as const,
-          taskId: item.taskId,
-          attachmentName: item.metadata.name,
+          itemKey: workItem.checkpointItem.itemKey,
+          taskId: workItem.item.taskId,
+          attachmentName: workItem.item.metadata.name,
           error: error instanceof Error ? error.message : '未知错误',
         };
         
@@ -526,11 +721,37 @@ export class AttachmentImportService {
   private async processBatchItem(
     userId: string,
     projectId: string,
-    item: AttachmentImportItem,
+    workItem: AttachmentImportWorkItem,
+    ownerFence: AttachmentImportOwnerFence,
   ): Promise<BatchUploadResult> {
+    const item = workItem.item;
+    const itemKey = workItem.checkpointItem.itemKey;
+    if (!ownerFence.isCurrent()) {
+      return {
+        status: 'failed',
+        itemKey,
+        taskId: item.taskId,
+        attachmentName: item.metadata.name,
+        error: '附件导入 owner 已变化，已停止写入',
+      };
+    }
+
+    const reconciled = await this.reconcileRetainedUpload(workItem.checkpointItem, ownerFence);
+    if (reconciled) {
+      return this.writeImportedAttachment(
+        projectId,
+        item,
+        itemKey,
+        reconciled.attachment,
+        reconciled.queuedUpload,
+        workItem.checkpointItem.operationId,
+        ownerFence,
+      );
+    }
     if (!item.data) {
       return {
         status: 'skipped',
+        itemKey,
         taskId: item.taskId,
         attachmentName: item.metadata.name,
         error: '附件数据缺失',
@@ -539,36 +760,154 @@ export class AttachmentImportService {
 
     const targetProjectId = item.projectId ?? projectId;
     if (!this.hasImportTarget(targetProjectId, item.taskId)) {
-      return this.createMissingTargetResult(item);
+      return this.createMissingTargetResult(item, itemKey);
     }
 
     const file = new File([item.data], item.metadata.name, {
       type: item.metadata.mimeType,
     });
-    const uploadResult = await this.attachmentService.uploadFile(userId, targetProjectId, item.taskId, file);
+    const uploadResult = await this.attachmentService.uploadFile(
+      userId,
+      targetProjectId,
+      item.taskId,
+      file,
+      {
+        attachmentId: workItem.checkpointItem.attachment?.id ?? item.metadata.id,
+        operationId: workItem.checkpointItem.operationId,
+        ownerFence,
+      },
+    );
 
     if (!uploadResult.success) {
       return {
         status: 'failed',
+        itemKey,
         taskId: item.taskId,
         attachmentName: item.metadata.name,
         error: uploadResult.error,
+        attachment: uploadResult.attachment,
+        pendingUpload: uploadResult.pendingUpload,
       };
     }
 
-    const restoredAttachment = this.restoreImportedAttachmentId(uploadResult.attachment, item);
-    const written = await this.taskOpsAdapter.addTaskAttachmentToProject(targetProjectId, item.taskId, restoredAttachment);
-    if (!written) {
-      await this.compensateQueuedUpload(uploadResult.queuedUpload);
-      return this.createMissingTargetResult(item);
+    return this.writeImportedAttachment(
+      targetProjectId,
+      item,
+      itemKey,
+      this.restoreImportedAttachmentId(uploadResult.attachment, item),
+      uploadResult.queuedUpload,
+      workItem.checkpointItem.operationId,
+      ownerFence,
+    );
+  }
+
+  private async writeImportedAttachment(
+    projectId: string,
+    item: AttachmentImportItem,
+    itemKey: string,
+    attachment: Attachment,
+    queuedUpload: QueuedAttachmentUploadReceipt,
+    operationId: string,
+    ownerFence: AttachmentImportOwnerFence,
+  ): Promise<BatchUploadResult> {
+    if (!ownerFence.isCurrent()) {
+      const compensationStatus = await this.compensateQueuedUpload(queuedUpload);
+      return this.createMissingTargetResult(item, itemKey, queuedUpload, attachment, compensationStatus);
+    }
+    const written = await this.taskOpsAdapter.addTaskAttachmentToProject(
+      projectId,
+      item.taskId,
+      attachment,
+      { operationId },
+    );
+    if (!written || !ownerFence.isCurrent()) {
+      const compensationStatus = await this.compensateQueuedUpload(queuedUpload);
+      return this.createMissingTargetResult(item, itemKey, queuedUpload, attachment, compensationStatus);
     }
 
     return {
       status: 'queued',
+      itemKey,
       taskId: item.taskId,
       attachmentName: item.metadata.name,
-      attachment: restoredAttachment,
+      attachment,
+      queuedUpload,
     };
+  }
+
+  private async reconcileRetainedUpload(
+    checkpointItem: AttachmentImportCheckpointItem,
+    ownerFence: AttachmentImportOwnerFence,
+  ): Promise<ReconciledAttachmentUpload | null> {
+    if (checkpointItem.compensationStatus === 'completed') return null;
+    const receipt = checkpointItem.queuedUpload;
+    const pending = checkpointItem.pendingUpload;
+    const identity = receipt ?? pending;
+    if (!identity) {
+      if (checkpointItem.attachment && checkpointItem.status === 'failed') {
+        throw new Error('附件导入保留了附件但缺少可重放 receipt，已拒绝重复上传');
+      }
+      return null;
+    }
+    if (!ownerFence.isCurrent()) throw new Error('附件导入 owner 已变化，已保留原 receipt');
+
+    const outbox = this.injector.get(AttachmentUploadOutboxService);
+    const readback = await outbox.readPendingUploadStrictly({
+      ownerUserId: identity.ownerUserId,
+      blobKey: identity.blobKey,
+      operationId: identity.operationId,
+    });
+    if (readback.status !== 'found') {
+      throw new Error(`附件导入 retained receipt 无法读回：${readback.status}`);
+    }
+    const recovery = readback.record.recovery?.payload;
+    if (!recovery || !outbox.matchesPendingUploadForReplay(readback.record, identity.operationId, recovery)) {
+      throw new Error('附件导入 retained receipt 身份不匹配，已拒绝重复上传');
+    }
+
+    const actionQueue = this.injector.get(ActionQueueService);
+    const pendingActions = typeof actionQueue.pendingActions === 'function'
+      ? actionQueue.pendingActions()
+      : [];
+    const existingAction = pendingActions.find(action => {
+      if (action.operationId !== identity.operationId
+        || action.type !== 'create'
+        || action.entityType !== 'attachment'
+        || action.entityId !== identity.blobKey) {
+        return false;
+      }
+      const payload = action.payload as Partial<AttachmentUploadPayload>;
+      return (payload.sourceUserId ?? payload.userId) === identity.ownerUserId
+        && payload.blobKey === identity.blobKey;
+    });
+
+    let actionId = existingAction?.id ?? (receipt?.actionId ?? '');
+    if (!existingAction) {
+      if (!ownerFence.isCurrent()) throw new Error('附件导入 owner 已变化，已保留原 receipt');
+      const action = {
+        type: 'create' as const,
+        entityType: 'attachment' as const,
+        entityId: recovery.attachment.id,
+        operationId: identity.operationId,
+        payload: recovery,
+        priority: 'normal' as const,
+      };
+      actionId = typeof actionQueue.enqueueDurablyForOwner === 'function'
+        ? await actionQueue.enqueueDurablyForOwner(identity.ownerUserId, action)
+        : await actionQueue.enqueueDurably(action);
+      if (!actionId) throw new Error('附件导入 retained receipt action 重放失败');
+    }
+    if (!ownerFence.isCurrent()) throw new Error('附件导入 owner 已变化，已保留原 receipt');
+
+    const reconciledReceipt = {
+      ownerUserId: identity.ownerUserId,
+      blobKey: identity.blobKey,
+      operationId: identity.operationId,
+      actionId,
+    };
+    checkpointItem.queuedUpload = reconciledReceipt;
+    checkpointItem.attachment = recovery.attachment;
+    return { attachment: recovery.attachment, queuedUpload: reconciledReceipt };
   }
 
   private hasImportTarget(projectId: string, taskId: string): boolean {
@@ -577,17 +916,29 @@ export class AttachmentImportService {
       project.id === projectId && project.tasks.some(task => task.id === taskId));
   }
 
-  private createMissingTargetResult(item: AttachmentImportItem): BatchUploadResult {
+  private createMissingTargetResult(
+    item: AttachmentImportItem,
+    itemKey: string,
+    queuedUpload?: QueuedAttachmentUploadReceipt,
+    attachment?: Attachment,
+    compensationStatus?: 'completed' | 'failed' | 'unknown',
+  ): BatchUploadResult {
     return {
       status: 'failed',
+      itemKey,
       taskId: item.taskId,
       attachmentName: item.metadata.name,
+      queuedUpload,
+      attachment,
+      compensationStatus,
       error: '目标任务不存在，附件未写入项目',
     };
   }
 
-  private async compensateQueuedUpload(receipt: QueuedAttachmentUploadReceipt): Promise<void> {
-    if (!await this.removeQueuedUploadAction(receipt)) return;
+  private async compensateQueuedUpload(
+    receipt: QueuedAttachmentUploadReceipt,
+  ): Promise<'completed' | 'failed' | 'unknown'> {
+    if (!await this.removeQueuedUploadAction(receipt)) return 'failed';
 
     try {
       await this.injector.get(AttachmentUploadOutboxService).removePendingUpload({
@@ -595,8 +946,10 @@ export class AttachmentImportService {
         blobKey: receipt.blobKey,
         operationId: receipt.operationId,
       });
+      return 'completed';
     } catch (error) {
       this.logger.warn('附件导入目标失效后 Blob 补偿失败', { receipt, error });
+      return 'unknown';
     }
   }
 
