@@ -41,7 +41,10 @@ import {
   type ResumeRecoverOptions,
 } from './sync/sync-resume-coordinator.service';
 import { ProjectPushService } from './sync/project-push.service';
-import { ProjectDeleteCoordinatorService } from './sync/project-delete-coordinator.service';
+import {
+  ProjectDeleteCoordinatorService,
+  type ProjectDeleteReplayFence,
+} from './sync/project-delete-coordinator.service';
 import {
   ProjectSyncCursorService,
   type ProjectDeltaDrift,
@@ -705,8 +708,15 @@ export class SimpleSyncService {
     userId: string,
     operationId?: string,
     baseUpdatedAt?: string | null,
+    replayFence?: ProjectDeleteReplayFence,
   ): Promise<Result<void, OperationError>> {
-    return this.projectDelete.deleteProjectFromCloud(projectId, userId, operationId, baseUpdatedAt);
+    return this.projectDelete.deleteProjectFromCloud(
+      projectId,
+      userId,
+      operationId,
+      baseUpdatedAt,
+      replayFence,
+    );
   }
 
   async loadSingleProject(projectId: string, userId: string): Promise<Project | null> { return this.loadFullProject(projectId, userId); }

@@ -166,6 +166,123 @@ export function registerSimpleSyncStartupSnapshotAndProjectDeleteSpecs(
       });
     });
 
+    it('deleteProjectFromCloud 在回放 fence 初始失效时零远端写入', async () => {
+      mockSupabase.isConfigured = true;
+      mockSupabase.clientAsync.mockResolvedValue(mockClient);
+      mockSyncRpcClient.isFeatureEnabled.mockReturnValue(true);
+      mockSyncRpcClient.isClientRejected.mockReturnValue(false);
+      const lease = new AbortController();
+      const isCurrent = vi.fn(() => false);
+
+      const result = await service.deleteProjectFromCloud(
+        'project-delete-fence-before',
+        'user-1',
+        'op-project-delete-fence-before',
+        '2026-07-14T01:00:00.000Z',
+        { leaseSignal: lease.signal, isCurrent },
+      );
+
+      expect(result).toEqual(expect.objectContaining({
+        ok: false,
+        error: expect.objectContaining({
+          code: 'SYNC_OFFLINE',
+          details: expect.objectContaining({ reason: 'replay_fence_stale' }),
+        }),
+      }));
+      expect(mockSupabase.clientAsync).not.toHaveBeenCalled();
+      expect(mockSyncRpcClient.deleteProject).not.toHaveBeenCalled();
+    });
+
+    it('deleteProjectFromCloud 在会话 await 后 fence 失效时不执行 RPC', async () => {
+      mockSupabase.isConfigured = true;
+      mockSupabase.clientAsync.mockResolvedValue(mockClient);
+      mockSyncRpcClient.isFeatureEnabled.mockReturnValue(true);
+      mockSyncRpcClient.isClientRejected.mockReturnValue(false);
+      let resolveSession: ((value: unknown) => void) | undefined;
+      mockClient.auth.getSession.mockReturnValueOnce(new Promise(resolve => {
+        resolveSession = resolve;
+      }));
+      let current = true;
+      const lease = new AbortController();
+      const isCurrent = vi.fn(() => current);
+      const pending = service.deleteProjectFromCloud(
+        'project-delete-fence-after-session',
+        'user-1',
+        'op-project-delete-fence-after-session',
+        '2026-07-14T01:00:00.000Z',
+        { leaseSignal: lease.signal, isCurrent },
+      );
+
+      await Promise.resolve();
+      current = false;
+      resolveSession?.({ data: { session: { user: { id: 'user-1' } } } });
+
+      const result = await pending;
+      expect(result).toEqual(expect.objectContaining({
+        ok: false,
+        error: expect.objectContaining({
+          details: expect.objectContaining({ reason: 'replay_fence_stale' }),
+        }),
+      }));
+      expect(mockSyncRpcClient.deleteProject).not.toHaveBeenCalled();
+    });
+
+    it('deleteProjectFromCloud 应将 replay fence 传到 RPC 并保留 operationId/baseUpdatedAt', async () => {
+      mockSupabase.isConfigured = true;
+      mockSupabase.clientAsync.mockResolvedValue(mockClient);
+      mockClient.auth.getSession.mockResolvedValue({
+        data: { session: { user: { id: 'user-1' } } },
+      });
+      mockSyncRpcClient.isFeatureEnabled.mockReturnValue(true);
+      mockSyncRpcClient.isClientRejected.mockReturnValue(false);
+      mockSyncRpcClient.deleteProject.mockResolvedValueOnce({
+        status: 'applied',
+        entityId: 'project-delete-fence-rpc',
+        serverUpdatedAt: '2026-07-14T01:10:00.000Z',
+        raw: {},
+      });
+      const lease = new AbortController();
+      const isCurrent = vi.fn(() => true);
+
+      const result = await service.deleteProjectFromCloud(
+        'project-delete-fence-rpc',
+        'user-1',
+        'op-project-delete-fence-rpc',
+        '2026-07-14T01:00:00.000Z',
+        { leaseSignal: lease.signal, isCurrent },
+      );
+
+      expect(result.ok).toBe(true);
+      expect(mockSyncRpcClient.deleteProject).toHaveBeenCalledWith({
+        operationId: 'op-project-delete-fence-rpc',
+        projectId: 'project-delete-fence-rpc',
+        baseUpdatedAt: '2026-07-14T01:00:00.000Z',
+        abortSignal: lease.signal,
+        isCurrent,
+      });
+    });
+
+    it('deleteProjectFromCloud 会话 owner 不匹配时 fail closed 且不执行 RPC', async () => {
+      mockSupabase.isConfigured = true;
+      mockSupabase.clientAsync.mockResolvedValue(mockClient);
+      mockClient.auth.getSession.mockResolvedValue({
+        data: { session: { user: { id: 'user-2' } } },
+      });
+      const lease = new AbortController();
+      const isCurrent = vi.fn(() => true);
+
+      const result = await service.deleteProjectFromCloud(
+        'project-delete-owner-mismatch',
+        'user-1',
+        'op-project-delete-owner-mismatch',
+        '2026-07-14T01:00:00.000Z',
+        { leaseSignal: lease.signal, isCurrent },
+      );
+
+      expect(result.ok).toBe(false);
+      expect(mockSyncRpcClient.deleteProject).not.toHaveBeenCalled();
+    });
+
     it('deleteProjectFromCloud 应优先使用调用方传入的 operationId', async () => {
       mockSupabase.isConfigured = true;
       mockSupabase.clientAsync.mockResolvedValue(mockClient);

@@ -33,13 +33,14 @@ import { SyncCoordinatorService } from './sync-coordinator.service';
 import { ToastService } from './toast.service';
 import { UserSessionService } from './user-session.service';
 import { createProject } from './project-operation.test-harness';
+import type { QueueProcessorContext } from './action-queue-processing.types';
 import {
   createProjectConflictHandoffPayloadDigest,
   createProjectConflictHandoffReservationId,
 } from './project-operation-conflict-retry-settlement.controller';
 import { createDerivedSyncOperationId } from '../utils/sync-operation-id';
 
-type QueueProcessor = (action: QueuedAction, context?: { leaseSignal?: AbortSignal }) => Promise<ActionQueueProcessorResult>;
+type QueueProcessor = (action: QueuedAction, context?: QueueProcessorContext) => Promise<ActionQueueProcessorResult>;
 
 describe('ActionQueueProjectProcessorsService', () => {
   let ownerStorageLoadListener: (() => void) | undefined;
@@ -768,6 +769,84 @@ describe('ActionQueueProjectProcessorsService', () => {
       'proj-delete-queued', 'user-1',
     );
     expect(actionQueue.markActionSyncedRemotely).toHaveBeenCalledWith('action-delete-proj-delete-queued');
+  });
+
+  it('project:delete 应透传 leaseSignal/isCurrent 与 operationId/baseUpdatedAt', async () => {
+    const lease = new AbortController();
+    const isCurrent = vi.fn(() => true);
+    const action = projectDeleteAction('proj-delete-fenced');
+
+    const result = await processor('project:delete')(action, {
+      leaseSignal: lease.signal,
+      isCurrent,
+    });
+
+    expect(result).toBe(true);
+    expect(projectDelete.deleteProjectFromCloud).toHaveBeenCalledWith(
+      'proj-delete-fenced',
+      'user-1',
+      'op-delete-proj-delete-fenced',
+      '2026-07-14T01:00:00.000Z',
+      { leaseSignal: lease.signal, isCurrent },
+    );
+  });
+
+  it.each([
+    ['stale before await', { leaseSignal: new AbortController().signal, isCurrent: vi.fn(() => false) }],
+    ['aborted before await', (() => {
+      const controller = new AbortController();
+      controller.abort();
+      return { leaseSignal: controller.signal, isCurrent: vi.fn(() => true) };
+    })()],
+  ])('project:delete %s leaves remote and local settlement untouched', async (_label, context) => {
+    const action = projectDeleteAction('proj-delete-stale-before');
+
+    const result = await processor('project:delete')(action, context);
+
+    expect(result).toEqual(expect.objectContaining({ outcome: 'defer-retry' }));
+    expect(projectDelete.deleteProjectFromCloud).not.toHaveBeenCalled();
+    expect(retryQueue.removeByProjectIdDurablyForOwner).not.toHaveBeenCalled();
+    expect(actionQueue.settleExactCurrentProjectDeleteSuccess).not.toHaveBeenCalled();
+    expect(actionQueue.markActionSyncedRemotely).not.toHaveBeenCalled();
+  });
+
+  it('project:delete stale after awaited delete does not settle dependent queues or mark success', async () => {
+    let current = true;
+    const lease = new AbortController();
+    const isCurrent = vi.fn(() => current);
+    projectDelete.deleteProjectFromCloud.mockImplementationOnce(async () => {
+      await Promise.resolve();
+      current = false;
+      return { ok: true, value: undefined };
+    });
+    const action = projectDeleteAction('proj-delete-stale-after');
+
+    const result = await processor('project:delete')(action, {
+      leaseSignal: lease.signal,
+      isCurrent,
+    });
+
+    expect(result).toEqual(expect.objectContaining({ outcome: 'defer-retry' }));
+    expect(retryQueue.removeByProjectIdDurablyForOwner).not.toHaveBeenCalled();
+    expect(actionQueue.settleExactCurrentProjectDeleteSuccess).not.toHaveBeenCalled();
+    expect(actionQueue.markActionSyncedRemotely).not.toHaveBeenCalled();
+  });
+
+  it('project:delete owner mismatch remains fail closed before remote delete', async () => {
+    auth.currentUserId.mockReturnValue('user-2');
+    const action = projectDeleteAction('proj-delete-owner-mismatch');
+
+    const result = await processor('project:delete')(action, {
+      leaseSignal: new AbortController().signal,
+      isCurrent: vi.fn(() => true),
+    });
+
+    expect(result).toBe(true);
+    expect(projectDelete.deleteProjectFromCloud).not.toHaveBeenCalled();
+    expect(actionQueue.moveToDeadLetter).toHaveBeenCalledWith(
+      action,
+      expect.stringContaining('user-1'),
+    );
   });
 
   it('project:delete 未登录时应延后重试且不调用远端删除', async () => {

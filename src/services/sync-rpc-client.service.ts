@@ -376,6 +376,8 @@ export class SyncRpcClientService {
     operationId: string;
     projectId: string;
     baseUpdatedAt: string | null;
+    abortSignal?: AbortSignal;
+    isCurrent?: () => boolean;
   }): Promise<SyncRpcResult> {
     return this.invokeRpc('sync_delete_project', {
       operation_id: params.operationId,
@@ -383,7 +385,7 @@ export class SyncRpcClientService {
       base_updated_at: params.baseUpdatedAt,
       project_id: params.projectId,
       ...this.buildAuditFields(),
-    });
+    }, params.abortSignal, params.isCurrent);
   }
 
   /** 客户端 task batch delete / purge RPC 包装。 */

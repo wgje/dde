@@ -132,7 +132,9 @@ export class ActionQueueProjectProcessorsService implements OnDestroy {
     this.actionQueue.registerProcessor('project:update', (action, context?: QueueProcessorContext) =>
       this.processProjectMutation(action, 'project:update', 'update', context)
     );
-    this.actionQueue.registerProcessor('project:delete', action => this.processProjectDelete(action));
+    this.actionQueue.registerProcessor('project:delete', (action, context?: QueueProcessorContext) =>
+      this.processProjectDelete(action, context)
+    );
     this.actionQueue.registerProcessor('project:create', action =>
       this.processProjectMutation(action, 'project:create', 'create')
     );
@@ -370,6 +372,25 @@ export class ActionQueueProjectProcessorsService implements OnDestroy {
         === input.projectMutationViewGeneration;
   }
 
+  private isProjectDeleteReplayCurrent(context?: QueueProcessorContext): boolean {
+    return context === undefined
+      || (context.leaseSignal?.aborted !== true && context.isCurrent?.() === true);
+  }
+
+  private deferProjectDeleteReplay(action: QueuedAction, projectId: string): ActionQueueProcessorResult {
+    return this.actionQueue.deferRetry({
+      code: 'SYNC_PROJECT_DELETE_REPLAY_STALE',
+      message: '项目删除回放已过期，已保留删除意图等待重试',
+      details: {
+        reason: 'replay_fence_stale',
+        actionType: 'project:delete',
+        actionId: action.id,
+        operationId: action.operationId,
+        projectId,
+      },
+    });
+  }
+
   private getProjectMutationStaleness(context: ProjectMutationContext): ProjectMutationStaleness {
     if (!this.actionQueue.isQueueViewCurrent(context.queueViewGeneration, context.ownerUserId)) {
       this.logger.debug(`${context.actionType} 结果已过期，跳过本地副作用`, {
@@ -399,7 +420,10 @@ export class ActionQueueProjectProcessorsService implements OnDestroy {
     return 'current';
   }
 
-  private async processProjectDelete(action: QueuedAction): Promise<ActionQueueProcessorResult> {
+  private async processProjectDelete(
+    action: QueuedAction,
+    processorContext?: QueueProcessorContext,
+  ): Promise<ActionQueueProcessorResult> {
     const payload = action.payload as ProjectDeletePayload;
     const projectId = payload.projectId ?? action.entityId;
     const userId = this.authService.currentUserId();
@@ -417,25 +441,59 @@ export class ActionQueueProjectProcessorsService implements OnDestroy {
     if (!sourceUserId) {
       return false;
     }
+    if (!this.isProjectDeleteReplayCurrent(processorContext)) {
+      return this.deferProjectDeleteReplay(action, projectId);
+    }
 
     try {
-      const result = await this.projectDelete.deleteProjectFromCloud(
-        projectId,
-        sourceUserId,
-        action.operationId,
-        payload.baseUpdatedAt,
-      );
+      const result = processorContext === undefined
+        ? await this.projectDelete.deleteProjectFromCloud(
+          projectId,
+          sourceUserId,
+          action.operationId,
+          payload.baseUpdatedAt,
+        )
+        : await this.projectDelete.deleteProjectFromCloud(
+          projectId,
+          sourceUserId,
+          action.operationId,
+          payload.baseUpdatedAt,
+          processorContext,
+        );
+      if (!this.isProjectDeleteReplayCurrent(processorContext)) {
+        return this.deferProjectDeleteReplay(action, projectId);
+      }
       if (result.ok) {
         const settled = await settleProjectDeleteDependentMutations(
-          () => this.retryQueue.removeByProjectIdDurablyForOwner(projectId, sourceUserId),
-          () => this.actionQueue.settleExactCurrentProjectDeleteSuccess(sourceUserId, projectId, action.id, action.operationId),
+          async () => {
+            if (!this.isProjectDeleteReplayCurrent(processorContext)) return false;
+            const removed = await this.retryQueue.removeByProjectIdDurablyForOwner(projectId, sourceUserId);
+            return this.isProjectDeleteReplayCurrent(processorContext) && removed;
+          },
+          async () => {
+            if (!this.isProjectDeleteReplayCurrent(processorContext)) return 0;
+            const settlement = await this.actionQueue.settleExactCurrentProjectDeleteSuccess(
+              sourceUserId,
+              projectId,
+              action.id,
+              action.operationId,
+            );
+            return this.isProjectDeleteReplayCurrent(processorContext) ? settlement : 0;
+          },
         );
         if (!settled) {
           return this.actionQueue.deferRetry(
             buildProjectDeleteDependentCleanupError(projectId, action.operationId),
           );
         }
+        if (!this.isProjectDeleteReplayCurrent(processorContext)) {
+          return this.deferProjectDeleteReplay(action, projectId);
+        }
         return this.markRemoteActionSuccess(action.id);
+      }
+
+      if (result.error.details?.['reason'] === 'replay_fence_stale') {
+        return this.deferProjectDeleteReplay(action, projectId);
       }
 
       throw buildOperationErrorPure(result.error);

@@ -44,6 +44,12 @@ import {
 /** 获取 Supabase 客户端回调（门面持有离线降级 + sentry 归因语义） */
 export type GetSupabaseClientHandler = () => Promise<SupabaseClient | null>;
 
+/** ActionQueue project delete replay fence. Direct callers may omit it for non-replay deletes. */
+export interface ProjectDeleteReplayFence {
+  leaseSignal?: AbortSignal;
+  isCurrent?: () => boolean;
+}
+
 @Injectable({ providedIn: 'root' })
 export class ProjectDeleteCoordinatorService {
   private readonly logger = inject(LoggerService).category('ProjectDelete');
@@ -110,6 +116,24 @@ export class ProjectDeleteCoordinatorService {
     });
   }
 
+  private buildProjectDeleteReplayFenceStaleFailure(
+    projectId: string,
+    userId: string,
+    operationId: string,
+  ): Result<void, OperationError> {
+    return this.buildProjectDeleteRetryableFailure('项目删除回放已过期，已保留删除意图等待重试', {
+      projectId,
+      userId,
+      operationId,
+      reason: 'replay_fence_stale',
+    });
+  }
+
+  private isReplayFenceCurrent(fence?: ProjectDeleteReplayFence): boolean {
+    return fence === undefined
+      || (fence.leaseSignal?.aborted !== true && fence.isCurrent?.() === true);
+  }
+
   private buildProjectDeleteMissingOperationIdFailure(
     projectId: string,
     userId: string,
@@ -169,8 +193,16 @@ export class ProjectDeleteCoordinatorService {
     userId: string,
     operationId: string,
     baseUpdatedAt: string | null,
+    replayFence?: ProjectDeleteReplayFence,
   ): Promise<Result<void, OperationError>> {
-    const sessionUserId = await this.resolveProjectDeleteSessionUserId(client);
+    if (!this.isReplayFenceCurrent(replayFence)) {
+      return this.buildProjectDeleteReplayFenceStaleFailure(projectId, userId, operationId);
+    }
+
+    const sessionUserId = await this.resolveProjectDeleteSessionUserId(client, replayFence);
+    if (!this.isReplayFenceCurrent(replayFence)) {
+      return this.buildProjectDeleteReplayFenceStaleFailure(projectId, userId, operationId);
+    }
 
     if (!sessionUserId) {
       return this.handleMissingProjectDeleteSession(projectId, userId);
@@ -189,31 +221,52 @@ export class ProjectDeleteCoordinatorService {
       });
     }
 
+    if (!this.isReplayFenceCurrent(replayFence)) {
+      return this.buildProjectDeleteReplayFenceStaleFailure(projectId, userId, operationId);
+    }
     await this.primeProjectSyncRpcCapability();
+    if (!this.isReplayFenceCurrent(replayFence)) {
+      return this.buildProjectDeleteReplayFenceStaleFailure(projectId, userId, operationId);
+    }
 
     if (this.syncRpcClient?.isClientRejected() === true) {
       return this.buildProjectDeleteClientRejectedFailure(projectId, userId);
     }
 
     if (this.shouldUseSyncRpc()) {
-      return await this.deleteProjectWithSyncRpc(projectId, userId, operationId, baseUpdatedAt);
+      return await this.deleteProjectWithSyncRpc(
+        projectId,
+        userId,
+        operationId,
+        baseUpdatedAt,
+        replayFence,
+      );
     }
 
     return this.buildProjectDeleteSyncRpcUnavailableFailure(projectId, userId, operationId);
   }
 
-  private async resolveProjectDeleteSessionUserId(client: SupabaseClient): Promise<string | null> {
+  private async resolveProjectDeleteSessionUserId(
+    client: SupabaseClient,
+    replayFence?: ProjectDeleteReplayFence,
+  ): Promise<string | null> {
+    if (!this.isReplayFenceCurrent(replayFence)) return null;
     const { data: { session } } = await client.auth.getSession();
+    if (!this.isReplayFenceCurrent(replayFence)) return null;
     if (session?.user?.id) {
       return session.user.id;
     }
 
+    if (!this.isReplayFenceCurrent(replayFence)) return null;
     const refreshed = await this.sessionManager.tryRefreshSession('deleteProjectFromCloud.getSession');
+    if (!this.isReplayFenceCurrent(replayFence)) return null;
     if (!refreshed) {
       return null;
     }
 
+    if (!this.isReplayFenceCurrent(replayFence)) return null;
     const { data: { session: refreshedSession } } = await client.auth.getSession();
+    if (!this.isReplayFenceCurrent(replayFence)) return null;
     return refreshedSession?.user?.id ?? null;
   }
 
@@ -248,6 +301,7 @@ export class ProjectDeleteCoordinatorService {
     userId: string,
     operationId: string,
     baseUpdatedAt: string | null,
+    replayFence?: ProjectDeleteReplayFence,
   ): Promise<Result<void, OperationError>> {
     if (baseUpdatedAt === null) {
       const message = '项目删除缺少已确认的远端版本，已保留删除意图等待人工处理';
@@ -268,11 +322,23 @@ export class ProjectDeleteCoordinatorService {
 
     const localTimestamp = Date.now();
     const lastSyncTimeBefore = this.syncState().lastSyncTime;
-    const result = await this.syncRpcClient!.deleteProject({
+    if (!this.isReplayFenceCurrent(replayFence)) {
+      return this.buildProjectDeleteReplayFenceStaleFailure(projectId, userId, operationId);
+    }
+    const deleteRequest = {
       operationId,
       projectId,
       baseUpdatedAt,
-    });
+      ...(replayFence ? {
+        abortSignal: replayFence.leaseSignal,
+        isCurrent: replayFence.isCurrent,
+      } : {}),
+    };
+    const result = await this.syncRpcClient!.deleteProject(deleteRequest);
+
+    if (!this.isReplayFenceCurrent(replayFence)) {
+      return this.buildProjectDeleteReplayFenceStaleFailure(projectId, userId, operationId);
+    }
 
     this.recordProjectDeleteRpcWriteAudit({
       projectId,
@@ -386,9 +452,14 @@ export class ProjectDeleteCoordinatorService {
     userId: string,
     operationId?: string,
     durableBaseUpdatedAt?: string | null,
+    replayFence?: ProjectDeleteReplayFence,
   ): Promise<Result<void, OperationError>> {
     if (operationId === undefined) {
       return this.buildProjectDeleteMissingOperationIdFailure(projectId, userId);
+    }
+
+    if (!this.isReplayFenceCurrent(replayFence)) {
+      return this.buildProjectDeleteReplayFenceStaleFailure(projectId, userId, operationId);
     }
 
     if (this.syncState().sessionExpired) {
@@ -405,6 +476,9 @@ export class ProjectDeleteCoordinatorService {
     const baseUpdatedAt = this.resolveProjectDeleteBaseUpdatedAt(projectId, durableBaseUpdatedAt);
 
     const client = this.getSupabaseClientHandler ? await this.getSupabaseClientHandler() : null;
+    if (!this.isReplayFenceCurrent(replayFence)) {
+      return this.buildProjectDeleteReplayFenceStaleFailure(projectId, userId, operationId);
+    }
     if (!client) {
       return this.buildProjectDeleteRetryableFailure('当前离线，删除将在恢复连接后重试', {
         projectId,
@@ -414,8 +488,21 @@ export class ProjectDeleteCoordinatorService {
     }
 
     try {
-      return await this.executeProjectDelete(client, projectId, userId, operationId, baseUpdatedAt);
+      const result = await this.executeProjectDelete(
+        client,
+        projectId,
+        userId,
+        operationId,
+        baseUpdatedAt,
+        replayFence,
+      );
+      return this.isReplayFenceCurrent(replayFence)
+        ? result
+        : this.buildProjectDeleteReplayFenceStaleFailure(projectId, userId, operationId);
     } catch (e) {
+      if (!this.isReplayFenceCurrent(replayFence)) {
+        return this.buildProjectDeleteReplayFenceStaleFailure(projectId, userId, operationId);
+      }
       if (isBrowserNetworkSuspendedError(e)) {
         return this.buildProjectDeleteBrowserSuspendedFailure(projectId, userId);
       }
@@ -430,6 +517,7 @@ export class ProjectDeleteCoordinatorService {
           enhanced.code,
           operationId,
           baseUpdatedAt,
+          replayFence,
         );
       }
 
@@ -448,12 +536,20 @@ export class ProjectDeleteCoordinatorService {
     errorCode: unknown,
     operationId: string,
     baseUpdatedAt: string | null,
+    replayFence?: ProjectDeleteReplayFence,
   ): Promise<Result<void, OperationError>> {
+    if (!this.isReplayFenceCurrent(replayFence)) {
+      return this.buildProjectDeleteReplayFenceStaleFailure(projectId, userId, operationId);
+    }
     const canRetry = await this.sessionManager.handleAuthErrorWithRefresh('deleteProjectFromCloud', {
       projectId,
       userId,
       errorCode,
     });
+
+    if (!this.isReplayFenceCurrent(replayFence)) {
+      return this.buildProjectDeleteReplayFenceStaleFailure(projectId, userId, operationId);
+    }
 
     if (!canRetry) {
       if (isBrowserNetworkSuspendedWindow()) {
@@ -463,8 +559,21 @@ export class ProjectDeleteCoordinatorService {
     }
 
     try {
-      return await this.executeProjectDelete(client, projectId, userId, operationId, baseUpdatedAt);
+      const result = await this.executeProjectDelete(
+        client,
+        projectId,
+        userId,
+        operationId,
+        baseUpdatedAt,
+        replayFence,
+      );
+      return this.isReplayFenceCurrent(replayFence)
+        ? result
+        : this.buildProjectDeleteReplayFenceStaleFailure(projectId, userId, operationId);
     } catch (retryError) {
+      if (!this.isReplayFenceCurrent(replayFence)) {
+        return this.buildProjectDeleteReplayFenceStaleFailure(projectId, userId, operationId);
+      }
       return this.handleProjectDeleteRetryAfterRefreshError(projectId, userId, retryError);
     }
   }
