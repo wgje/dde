@@ -178,6 +178,21 @@ export function registerAttachmentImportZipIntegritySpecs(
         .rejects.toThrow('附件 manifest 声明大小与实际字节不一致');
     });
 
+    it('rejects manifest content digest mismatches before import', async () => {
+      const zipData = createStoredZip([
+        {
+          path: 'manifest.json',
+          text: JSON.stringify(manifestWith([
+            manifestAttachment({ checksum: '0'.repeat(64) }),
+          ])),
+        },
+        { path: 'attachments/att-1.txt', text: 'demo' },
+      ]);
+
+      await expect(context.getService().extractAttachmentsFromZip(zipData, new Map()))
+        .rejects.toThrow('附件 manifest 校验和与实际字节不一致');
+    });
+
     it('preserves size zero as unspecified-size compatibility', async () => {
       const zipData = createStoredZip([
         {

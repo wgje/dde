@@ -15,6 +15,7 @@ import {
   calculateAttachmentTotalSize,
   createAttachmentExportManifest,
   createSimpleZip,
+  calculateAttachmentSha256,
   generateAttachmentBundlePath,
   summarizeAttachmentDownloadResults,
   ZipFileEntry,
@@ -507,12 +508,7 @@ export class AttachmentExportService {
    */
   private async calculateBlobChecksum(blob: Blob): Promise<string> {
     try {
-      if (typeof crypto !== 'undefined' && crypto.subtle) {
-        const buffer = await blob.arrayBuffer();
-        const hashBuffer = await crypto.subtle.digest('SHA-256', buffer);
-        const hashArray = Array.from(new Uint8Array(hashBuffer));
-        return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-      }
+      if (typeof crypto !== 'undefined' && crypto.subtle) return calculateAttachmentSha256(blob);
     } catch (e) {
       // 降级处理：使用简单校验和
       this.logger.debug('SHA-256 计算失败，使用简单校验和', { error: e });

@@ -80,6 +80,17 @@ export interface ZipFileEntry {
   data: Blob | string;
 }
 
+/** Content digest used by both ZIP export and import verification. */
+export async function calculateAttachmentSha256(data: Blob | ArrayBuffer | Uint8Array): Promise<string> {
+  const bytes = data instanceof Blob
+    ? await data.arrayBuffer()
+    : data instanceof Uint8Array
+      ? data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)
+      : data;
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
 export function calculateAttachmentTotalSize(attachments: AttachmentManifest[]): number {
   return attachments.reduce((sum, attachment) => sum + attachment.size, 0);
 }

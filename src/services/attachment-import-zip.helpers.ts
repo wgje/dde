@@ -1,4 +1,5 @@
 import type { AttachmentImportItem } from './attachment-import.service';
+import { calculateAttachmentSha256 } from './attachment-export.helpers';
 
 export interface AttachmentImportZipLimits {
   maxEntries: number;
@@ -45,6 +46,7 @@ interface AttachmentBundleManifestItem {
   mimeType: string;
   size: number;
   bundlePath: string;
+  checksum?: string;
 }
 
 interface ManifestAttachmentPreflight {
@@ -64,7 +66,7 @@ export async function extractAttachmentItemsFromZip(
     return [];
   }
 
-  const manifestItems = buildItemsFromManifest(entries, options.logger);
+  const manifestItems = await buildItemsFromManifest(entries, options.logger);
   if (manifestItems !== null) {
     return manifestItems;
   }
@@ -122,15 +124,15 @@ export async function parseZipEntries(
   return entries;
 }
 
-function buildItemsFromManifest(
+async function buildItemsFromManifest(
   entries: Map<string, ZipEntryData>,
   logger: AttachmentImportZipLogger,
-): AttachmentImportItem[] | null {
+): Promise<AttachmentImportItem[] | null> {
   const manifestEntry = entries.get(MANIFEST_FILENAME);
   if (!manifestEntry) return null;
 
   const attachments = parseManifestAttachments(manifestEntry, logger);
-  const preflight = preflightManifestAttachments(attachments, entries);
+  const preflight = await preflightManifestAttachments(attachments, entries);
   return buildItemsFromManifestPreflight(preflight);
 }
 
@@ -180,14 +182,17 @@ function parseManifestAttachment(
     mimeType: readString(value, 'mimeType', index),
     size: readAttachmentSize(value['size'], index),
     bundlePath: readRequiredString(value, 'bundlePath', index),
+    ...(value['checksum'] === undefined
+      ? {}
+      : { checksum: readChecksum(value['checksum'], index) }),
   };
 }
 
-function preflightManifestAttachments(
+async function preflightManifestAttachments(
   attachments: AttachmentBundleManifestItem[],
   entries: Map<string, ZipEntryData>,
-): ManifestAttachmentPreflight[] {
-  return attachments.map((attachment, index) => {
+): Promise<ManifestAttachmentPreflight[]> {
+  return Promise.all(attachments.map(async (attachment, index) => {
     if (!isSafeZipEntryPath(attachment.bundlePath)) {
       throw new Error(`附件 manifest 路径无效: attachments[${index}]`);
     }
@@ -199,9 +204,22 @@ function preflightManifestAttachments(
     if (attachment.size > 0 && attachment.size !== fileEntry.data.byteLength) {
       throw new Error(`附件 manifest 声明大小与实际字节不一致: ${attachment.bundlePath}`);
     }
+    if (attachment.checksum) {
+      const actualChecksum = await calculateAttachmentSha256(fileEntry.data);
+      if (actualChecksum !== attachment.checksum) {
+        throw new Error(`附件 manifest 校验和与实际字节不一致: ${attachment.bundlePath}`);
+      }
+    }
 
     return { attachment, fileEntry };
-  });
+  }));
+}
+
+function readChecksum(value: unknown, index: number): string {
+  if (typeof value !== 'string' || !/^[a-f0-9]{64}$/i.test(value)) {
+    throw new Error(`附件 manifest 校验和无效: attachments[${index}]`);
+  }
+  return value.toLowerCase();
 }
 
 function buildItemsFromManifestPreflight(
