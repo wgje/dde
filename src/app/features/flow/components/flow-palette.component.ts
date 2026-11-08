@@ -345,12 +345,14 @@ export class FlowPaletteComponent implements OnDestroy {
   // 拖动事件
   onDragStart(event: DragEvent, task: Task) {
     if (event.dataTransfer) {
+      const projectOwner = this.projectState.captureActiveProjectOwner();
       writeTaskDragPayload(event.dataTransfer, {
         v: 1,
         type: 'task',
         taskId: task.id,
-        projectId: this.projectState.activeProjectId(),
-        fromProjectId: this.projectState.activeProjectId(),
+        projectId: projectOwner.projectId,
+        projectOwner,
+        fromProjectId: projectOwner.projectId,
         source: 'flow',
       });
       event.dataTransfer.effectAllowed = 'move';
