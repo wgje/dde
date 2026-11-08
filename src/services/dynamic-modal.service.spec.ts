@@ -1,8 +1,28 @@
-import { ApplicationRef, Component, DestroyRef, EventEmitter, Input, OnDestroy, Output, inject, type ComponentRef } from '@angular/core';
+import {
+  ApplicationRef,
+  Component,
+  DestroyRef,
+  EventEmitter,
+  InjectionToken,
+  Input,
+  OnDestroy,
+  Output,
+  inject,
+  input,
+  output,
+  type ComponentRef,
+} from '@angular/core';
 import { TestBed } from '@angular/core/testing';
 import { ConfigurableFocusTrapFactory, type ConfigurableFocusTrap } from '@angular/cdk/a11y';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { DynamicModalService, MODAL_DATA, MODAL_REF, type ModalRef } from './dynamic-modal.service';
+import {
+  DYNAMIC_MODAL_COMPONENT_FACTORY,
+  DynamicModalService,
+  MODAL_DATA,
+  MODAL_REF,
+  type ModalRef,
+} from './dynamic-modal.service';
+import { createTestBedDynamicModalComponentFactory } from './dynamic-modal.service.spec-helpers';
 
 let componentCreationFailure: Error | null = null;
 let outputSubscribeFailure: Error | null = null;
@@ -13,6 +33,18 @@ class TestDynamicModalComponent {
   @Output() close = new EventEmitter<unknown>();
   readonly data = inject(MODAL_DATA) as { title: string };
   readonly modalRef = inject(MODAL_REF);
+}
+const LOCAL_MODAL_PROVIDER = new InjectionToken<string>('LOCAL_MODAL_PROVIDER');
+@Component({
+  standalone: true,
+  providers: [{ provide: LOCAL_MODAL_PROVIDER, useValue: 'component-local-provider' }],
+  template: `<button type="button" (click)="close.emit(label())">{{ label() }} {{ providerValue }}</button>`,
+})
+class TestSignalModalComponent {
+  @Input({ isSignal: true } as any)
+  readonly label = input('');
+  readonly close = output<string>();
+  readonly providerValue = inject(LOCAL_MODAL_PROVIDER);
 }
 @Component({ standalone: true, template: `<button type="button">close</button>` })
 class ReentrantCloseModalComponent implements OnDestroy {
@@ -495,5 +527,62 @@ describe('DynamicModalService', () => {
     expect(() => ref.close()).not.toThrow();
     flushRender();
     expect(createTrap).toHaveBeenCalledOnce();
+  });
+});
+
+describe('DynamicModalService TestBed component factory bridge', () => {
+  let service: DynamicModalService;
+  let createTrap: ReturnType<typeof vi.fn>;
+  let traps: Array<ConfigurableFocusTrap & {
+    destroy: ReturnType<typeof vi.fn>;
+    focusInitialElement: ReturnType<typeof vi.fn>;
+  }>;
+
+  beforeEach(async () => {
+    traps = [];
+    createTrap = vi.fn(() => {
+      const trap = { destroy: vi.fn(), enabled: true, focusInitialElement: vi.fn(() => true) } as unknown as ConfigurableFocusTrap & {
+        destroy: ReturnType<typeof vi.fn>;
+        focusInitialElement: ReturnType<typeof vi.fn>;
+      };
+      traps.push(trap);
+      return trap;
+    });
+    TestBed.configureTestingModule({
+      imports: [TestSignalModalComponent],
+      providers: [
+        DynamicModalService,
+        { provide: DYNAMIC_MODAL_COMPONENT_FACTORY, useFactory: createTestBedDynamicModalComponentFactory },
+        { provide: ConfigurableFocusTrapFactory, useValue: { create: createTrap } },
+      ],
+    });
+    await TestBed.compileComponents();
+    service = TestBed.inject(DynamicModalService);
+  });
+
+  afterEach(() => {
+    service.closeAll();
+  });
+
+  it('uses signal inputs, local providers, outputs, and service cleanup', async () => {
+    const closeHandler = vi.fn();
+    const ref = service.open(TestSignalModalComponent, {
+      inputs: { label: 'signal-label' },
+      outputs: { close: closeHandler },
+    });
+
+    ref.componentRef.changeDetectorRef.detectChanges();
+    const instance = ref.componentRef.instance as TestSignalModalComponent;
+    expect(instance.label()).toBe('signal-label');
+    expect(instance.providerValue).toBe('component-local-provider');
+    expect(document.body.querySelector('.dynamic-modal-container')).not.toBeNull();
+
+    instance.close.emit('signal-label');
+    await expect(ref.result).resolves.toBe('signal-label');
+    expect(closeHandler).toHaveBeenCalledOnce();
+    expect(closeHandler).toHaveBeenCalledWith('signal-label');
+    expect(service.stackDepth()).toBe(0);
+    expect(document.body.querySelector('.dynamic-modal-container')).toBeNull();
+    expect(traps[0].destroy).toHaveBeenCalledOnce();
   });
 });

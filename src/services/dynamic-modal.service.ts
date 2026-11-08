@@ -58,6 +58,31 @@ export interface ModalConfig<T = unknown> {
   zIndex?: number;
 }
 
+export interface DynamicModalComponentFactory {
+  create<C>(
+    component: Type<C>,
+    options: {
+      elementInjector: Injector;
+      environmentInjector: EnvironmentInjector;
+      hostElement: HTMLElement;
+    },
+  ): ComponentRef<C>;
+}
+
+export const DYNAMIC_MODAL_COMPONENT_FACTORY = new InjectionToken<DynamicModalComponentFactory>(
+  'DYNAMIC_MODAL_COMPONENT_FACTORY',
+  {
+    providedIn: 'root',
+    factory: () => ({
+      create: <C>(component: Type<C>, options: {
+        elementInjector: Injector;
+        environmentInjector: EnvironmentInjector;
+        hostElement: HTMLElement;
+      }) => createComponent(component, options),
+    }),
+  },
+);
+
 /** 模态框引用，用于控制已打开的模态框 */
 export interface ModalRef<R = unknown> {
   /** 关闭模态框并返回结果 */
@@ -126,6 +151,7 @@ export class DynamicModalService {
   private document = inject(DOCUMENT);
   private destroyRef = inject(DestroyRef);
   private focusTrapFactory = inject(ConfigurableFocusTrapFactory);
+  private componentFactory = inject(DYNAMIC_MODAL_COMPONENT_FACTORY);
 
   /** 模态框栈 */
   private modalStack = signal<ModalStackItem[]>([]);
@@ -318,7 +344,7 @@ export class DynamicModalService {
       parent: this.injector
     });
 
-    return createComponent(component, {
+    return this.componentFactory.create(component, {
       environmentInjector: this.injector,
       elementInjector: customInjector,
       hostElement

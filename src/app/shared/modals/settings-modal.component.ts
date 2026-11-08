@@ -1,4 +1,4 @@
-import { Component, inject, output, input, computed, viewChild, ElementRef, isDevMode, ChangeDetectionStrategy, effect } from '@angular/core';
+import { Component, Input, inject, output, input, computed, viewChild, ElementRef, isDevMode, ChangeDetectionStrategy, effect } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { LoggerService } from '../../../services/logger.service';
@@ -64,10 +64,12 @@ export class SettingsModalComponent {
   readonly isDev = isDevMode();
   
   /** 当前登录用户邮箱 */
+  @Input({ isSignal: true } as any)
   sessionEmail = input<string | null>(null);
   initialSection = input<'focus-routines' | null>(null);
   
   /** 所有项目（用于导出） */
+  @Input({ isSignal: true } as any)
   projects = input<Project[]>([]);
   private readonly focusRoutineSectionRef = viewChild<ElementRef<HTMLElement>>('focusRoutineSection');
   
@@ -76,6 +78,7 @@ export class SettingsModalComponent {
   readonly themeChange = output<ThemeType>();
   readonly openDashboard = output<void>();
   readonly importComplete = output<Project>();
+  @Input({ isSignal: true } as any)
   readonly importProject = input<(project: Project) => void | Promise<void>>();
   readonly routineSlots = computed(() =>
     [...this.dockEngine.dailySlots()].sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
