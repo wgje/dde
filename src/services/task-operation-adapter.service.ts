@@ -36,6 +36,7 @@ import {
 import {
   addTaskAttachmentToProjectState,
   enqueueTaskAttachmentProjectUpdateIfNeeded,
+  type TaskProjectAttachmentOwnerFence,
 } from './task-operation-attachment-project.helpers';
 import {
   recordTaskPositionBatchDurably,
@@ -438,25 +439,48 @@ export class TaskOperationAdapterService {
     }, this.durableFieldRuntime);
   }
 
-  async addTaskAttachmentToProject(projectId: string, taskId: string, attachment: Attachment): Promise<boolean> {
+  async addTaskAttachmentToProject(
+    projectId: string,
+    taskId: string,
+    attachment: Attachment,
+    options: { operationId?: string } = {},
+  ): Promise<boolean> {
     if (this.blockLocalMutation('添加任务附件')) {
       return false;
     }
 
     const ownerUserId = this.authService.currentUserId() ?? AUTH_CONFIG.LOCAL_MODE_USER_ID;
-    return localBackupUiRestoreWriterQuiescence.runAsync(
+    const projectOwner = Object.freeze({ ...this.projectState.captureActiveProjectOwner() });
+    const ownerFence: TaskProjectAttachmentOwnerFence = Object.freeze({
+      ownerUserId,
+      projectOwner,
+      operationId: options.operationId ?? crypto.randomUUID(),
+      isCurrent: () => (
+        (this.authService.currentUserId() ?? AUTH_CONFIG.LOCAL_MODE_USER_ID) === ownerUserId
+        && this.projectState.isActiveProjectOwnerCurrent(projectOwner)
+      ),
+    });
+    if (!ownerFence.isCurrent()) return false;
+
+    const result = await localBackupUiRestoreWriterQuiescence.runAsync(
       ownerUserId,
       'project-state',
-      () => this.addTaskAttachmentToProjectUnderWriter(projectId, taskId, attachment, ownerUserId),
+      () => {
+        if (!ownerFence.isCurrent()) return Promise.resolve(false);
+        return this.addTaskAttachmentToProjectUnderWriter(projectId, taskId, attachment, ownerFence);
+      },
     );
+    return ownerFence.isCurrent() ? result : false;
   }
 
   private async addTaskAttachmentToProjectUnderWriter(
     projectId: string,
     taskId: string,
     attachment: Attachment,
-    ownerUserId: string,
+    ownerFence: TaskProjectAttachmentOwnerFence,
   ): Promise<boolean> {
+    if (!ownerFence.isCurrent()) return false;
+    const ownerUserId = ownerFence.ownerUserId;
     const currentProject = this.projectState.projects().find(project => project.id === projectId);
     const currentTask = currentProject?.tasks.find(task => task.id === taskId);
     if (!currentProject || !currentTask) {
@@ -470,18 +494,31 @@ export class TaskOperationAdapterService {
       task: currentTask,
       taskId,
       attachment,
+      operationId: ownerFence.operationId,
     }, {
-      currentUserId: () => this.authService.currentUserId(),
-      enqueueDurably: action => this.actionQueue.enqueueDurably(action),
+      ownerFence,
+      currentUserId: () => ownerFence.isCurrent() ? ownerUserId : null,
+      enqueueDurably: action => {
+        const enqueueForOwner = this.actionQueue.enqueueDurablyForOwner;
+        return typeof enqueueForOwner === 'function'
+          ? enqueueForOwner.call(this.actionQueue, ownerUserId, action)
+          : this.actionQueue.enqueueDurably(action);
+      },
       warn: (message, data) => this.logger.warn(message, data),
     });
-    if (!outboxReady) {
+    if (!outboxReady || !ownerFence.isCurrent()) {
       return false;
     }
 
-    return addTaskAttachmentToProjectState({ projectId, taskId, attachment }, {
+    return addTaskAttachmentToProjectState({
+      projectId,
+      taskId,
+      attachment,
+      operationId: ownerFence.operationId,
+    }, {
+      ownerFence,
       blockLocalMutation: () => false,
-      currentUserId: () => this.authService.currentUserId(),
+      currentUserId: () => ownerFence.isCurrent() ? ownerUserId : null,
       getProjectsWithCurrentData: () => this.projectState.getProjectsWithCurrentData(),
       persistOfflineSnapshot: (projects, ownerUserId) =>
         this.syncCoordinator.saveOfflineSnapshotAndWait(projects, ownerUserId),

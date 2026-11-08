@@ -242,6 +242,8 @@ const mockConnectionAdapterService = {
 
 const mockActionQueueService = {
   enqueueDurably: vi.fn().mockResolvedValue('queued-action-1'),
+  enqueueDurablyForOwner: vi.fn((_ownerUserId: string, action: unknown) =>
+    mockActionQueueService.enqueueDurably(action)),
 };
 
 const mockAuthService = {
@@ -347,6 +349,7 @@ describe('TaskOperationAdapterService - moveTaskToStage', () => {
     mockTaskOperationService.updateTaskAttentionItemsDurably.mockResolvedValue(true);
     mockRecorderService.recordAndUpdateDurably.mockResolvedValue(true);
     mockActionQueueService.enqueueDurably.mockResolvedValue('queued-action-1');
+    mockActionQueueService.enqueueDurablyForOwner.mockClear();
     mockAuthService.currentUserId.mockReturnValue('user-1');
   });
 
@@ -618,7 +621,9 @@ describe('TaskOperationAdapterService - moveTaskToStage', () => {
     createTask,
     getProjects: () => mockProjectsSignal(),
     setActiveProjectId: projectId => mockActiveProjectIdSignal.set(projectId),
+    switchActiveProject: projectId => mockProjectStateService.setActiveProjectId(projectId),
     setProjects: projects => mockProjectsSignal.set(projects),
+    mockProjectStateService: () => mockProjectStateService,
     mockChangeTrackerService: () => mockChangeTrackerService,
     mockSyncCoordinatorService: () => mockSyncCoordinatorService,
     mockActionQueueService: () => mockActionQueueService,

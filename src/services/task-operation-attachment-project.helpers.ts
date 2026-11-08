@@ -1,7 +1,16 @@
 import type { Attachment, Project, Task } from '../models';
+import type { ActiveProjectOwner } from './project-state.service';
+
+export interface TaskProjectAttachmentOwnerFence {
+  readonly ownerUserId: string;
+  readonly projectOwner: ActiveProjectOwner;
+  readonly operationId: string;
+  isCurrent: () => boolean;
+}
 
 export interface TaskProjectAttachmentRuntime {
   blockLocalMutation: (actionLabel: string) => boolean;
+  ownerFence: TaskProjectAttachmentOwnerFence;
   currentUserId: () => string | null;
   getProjectsWithCurrentData: () => Project[];
   persistOfflineSnapshot: (projects: Project[], ownerUserId: string | null) => Promise<void>;
@@ -15,11 +24,13 @@ export interface TaskProjectAttachmentRuntime {
 }
 
 export interface TaskProjectAttachmentOutboxRuntime {
+  ownerFence: TaskProjectAttachmentOwnerFence;
   currentUserId: () => string | null;
   enqueueDurably: (action: {
     type: 'update';
     entityType: 'task';
     entityId: string;
+    operationId?: string;
     payload: {
       task: Task;
       projectId: string;
@@ -33,6 +44,7 @@ export interface AddTaskAttachmentToProjectOptions {
   projectId: string;
   taskId: string;
   attachment: Attachment;
+  operationId?: string;
 }
 
 export interface EnqueueTaskAttachmentProjectUpdateOptions extends AddTaskAttachmentToProjectOptions {
@@ -52,6 +64,7 @@ export async function enqueueTaskAttachmentProjectUpdateIfNeeded(
   runtime: TaskProjectAttachmentOutboxRuntime,
 ): Promise<boolean> {
   const { project, projectId, taskId, attachment } = options;
+  if (!runtime.ownerFence.isCurrent()) return false;
   if (project.syncSource === 'local-only') {
     return true;
   }
@@ -66,16 +79,19 @@ export async function enqueueTaskAttachmentProjectUpdateIfNeeded(
     return false;
   }
 
+  if (!runtime.ownerFence.isCurrent()) return false;
   const actionId = await runtime.enqueueDurably({
     type: 'update',
     entityType: 'task',
     entityId: taskId,
+    operationId: runtime.ownerFence.operationId,
     payload: {
       task: createTaskWithAttachment(options.task, attachment),
       projectId,
       sourceUserId,
     },
   });
+  if (!runtime.ownerFence.isCurrent()) return false;
   if (!actionId) {
     runtime.warn('任务附件 Outbox 本地持久化失败，未提交 UI 更新', {
       projectId,
@@ -95,6 +111,7 @@ export function addTaskAttachmentToProjectState(
   if (runtime.blockLocalMutation('添加任务附件')) {
     return Promise.resolve(false);
   }
+  if (!runtime.ownerFence.isCurrent()) return Promise.resolve(false);
 
   return addTaskAttachmentToProjectStateDurably(options, runtime);
 }
@@ -104,6 +121,7 @@ async function addTaskAttachmentToProjectStateDurably(
   runtime: TaskProjectAttachmentRuntime,
 ): Promise<boolean> {
   const { projectId, taskId, attachment } = options;
+  if (!runtime.ownerFence.isCurrent()) return false;
   const mutation = buildProjectAttachmentMutation(
     runtime.getProjectsWithCurrentData(),
     options,
@@ -116,6 +134,7 @@ async function addTaskAttachmentToProjectStateDurably(
 
   const ownerUserId = runtime.currentUserId();
   if (mutation.requiresPreCommitSnapshot) {
+    if (!runtime.ownerFence.isCurrent()) return false;
     try {
       await runtime.persistOfflineSnapshot(mutation.updatedProjects, ownerUserId);
     } catch (error) {
@@ -127,8 +146,10 @@ async function addTaskAttachmentToProjectStateDurably(
       });
       return false;
     }
+    if (!runtime.ownerFence.isCurrent()) return false;
   }
 
+  if (!runtime.ownerFence.isCurrent()) return false;
   runtime.updateProjects(() => mutation.updatedProjects);
   runtime.markEditing();
   runtime.setLastUpdateType('content');
@@ -136,14 +157,20 @@ async function addTaskAttachmentToProjectStateDurably(
   runtime.markLocalChanges('content');
   runtime.schedulePersist();
   if (!mutation.requiresPreCommitSnapshot) {
-    void runtime.persistOfflineSnapshot(mutation.updatedProjects, ownerUserId).catch((error: unknown) => {
-      runtime.warn('任务附件项目快照本地持久化失败，已保留 Outbox 并等待后台持久化重试', {
-        projectId,
-        taskId,
-        attachmentId: attachment.id,
-        error,
-      });
-    });
+    void (async () => {
+      if (!runtime.ownerFence.isCurrent()) return;
+      try {
+        await runtime.persistOfflineSnapshot(mutation.updatedProjects, ownerUserId);
+        if (!runtime.ownerFence.isCurrent()) return;
+      } catch (error: unknown) {
+        runtime.warn('任务附件项目快照本地持久化失败，已保留 Outbox 并等待后台持久化重试', {
+          projectId,
+          taskId,
+          attachmentId: attachment.id,
+          error,
+        });
+      }
+    })();
   }
   return true;
 }

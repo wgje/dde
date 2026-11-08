@@ -11,14 +11,16 @@ export interface TaskOperationAdapterProjectAttachmentSpecContext {
   createTask(overrides?: Partial<Task>): Task;
   getProjects(): Project[];
   setActiveProjectId(projectId: string | null): void;
+  switchActiveProject(projectId: string): void;
   setProjects(projects: Project[]): void;
+  mockProjectStateService(): { updateProjects: Mock };
   mockChangeTrackerService(): { trackTaskUpdate: Mock };
   mockSyncCoordinatorService(): {
     markLocalChanges: Mock;
     schedulePersist: Mock;
     saveOfflineSnapshotAndWait: Mock;
   };
-  mockActionQueueService(): { enqueueDurably: Mock };
+  mockActionQueueService(): { enqueueDurably: Mock; enqueueDurablyForOwner: Mock };
 }
 
 export function registerTaskOperationAdapterProjectAttachmentSpecs(
@@ -51,12 +53,18 @@ export function registerTaskOperationAdapterProjectAttachmentSpecs(
       }),
     );
 
-    const completion = context.service().addTaskAttachmentToProject('target-project', 'target-task', uploaded);
+    const completion = context.service().addTaskAttachmentToProject(
+      'target-project',
+      'target-task',
+      uploaded,
+      { operationId: 'attachment-operation-uploaded' },
+    );
 
     expect(context.mockActionQueueService().enqueueDurably).toHaveBeenCalledWith(expect.objectContaining({
       type: 'update',
       entityType: 'task',
       entityId: 'target-task',
+      operationId: 'attachment-operation-uploaded',
       payload: expect.objectContaining({
         projectId: 'target-project',
         task: expect.objectContaining({
@@ -104,6 +112,104 @@ export function registerTaskOperationAdapterProjectAttachmentSpecs(
       ]),
       'user-1',
     );
+  });
+
+  it('A→B owner 切换发生在附件 Outbox await 期间时，B 不得写入 queue、snapshot 或 ProjectState', async () => {
+    const attachment: Attachment = {
+      id: 'att-owner-switch-outbox',
+      type: 'file',
+      name: 'owner-switch.txt',
+      url: 'https://example.com/owner-switch.txt',
+      mimeType: 'text/plain',
+      size: 4,
+      createdAt: '2026-06-01T00:00:00.000Z',
+    };
+    const taskA = context.createTask({ id: 'task-owner-a', attachments: [] });
+    const taskB = context.createTask({ id: 'task-owner-b', attachments: [] });
+    context.setProjects([
+      context.createProject({ id: 'project-owner-a', tasks: [taskA] }),
+      context.createProject({ id: 'project-owner-b', tasks: [taskB] }),
+    ]);
+    context.setActiveProjectId('project-owner-a');
+
+    let releaseOutbox!: () => void;
+    context.mockActionQueueService().enqueueDurablyForOwner.mockReturnValueOnce(
+      new Promise<string>(resolve => {
+        releaseOutbox = () => resolve('queued-owner-switch');
+      }),
+    );
+
+    const completion = context.service().addTaskAttachmentToProject(
+      'project-owner-a',
+      'task-owner-a',
+      attachment,
+      { operationId: 'operation-owner-switch' },
+    );
+    await vi.waitFor(() => expect(
+      context.mockActionQueueService().enqueueDurablyForOwner,
+    ).toHaveBeenCalledOnce());
+
+    context.switchActiveProject('project-owner-b');
+    releaseOutbox();
+
+    await expect(completion).resolves.toBe(false);
+    expect(context.mockActionQueueService().enqueueDurablyForOwner).toHaveBeenCalledWith(
+      'user-1',
+      expect.objectContaining({
+        operationId: 'operation-owner-switch',
+        payload: expect.objectContaining({ projectId: 'project-owner-a' }),
+      }),
+    );
+    expect(context.mockSyncCoordinatorService().saveOfflineSnapshotAndWait).not.toHaveBeenCalled();
+    expect(context.mockProjectStateService().updateProjects).not.toHaveBeenCalled();
+    expect(context.getProjects().find(project => project.id === 'project-owner-b')?.tasks[0]?.attachments ?? [])
+      .toEqual([]);
+  });
+
+  it('A→B owner 切换发生在本地附件 snapshot await 期间时，B 不得发布 ProjectState', async () => {
+    const attachment: Attachment = {
+      id: 'att-owner-switch-snapshot',
+      type: 'file',
+      name: 'owner-switch-snapshot.txt',
+      url: 'https://example.com/owner-switch-snapshot.txt',
+      mimeType: 'text/plain',
+      size: 4,
+      createdAt: '2026-06-01T00:00:00.000Z',
+    };
+    const taskA = context.createTask({ id: 'task-snapshot-a', attachments: [] });
+    const taskB = context.createTask({ id: 'task-snapshot-b', attachments: [] });
+    context.setProjects([
+      context.createProject({ id: 'project-snapshot-a', syncSource: 'local-only', tasks: [taskA] }),
+      context.createProject({ id: 'project-snapshot-b', syncSource: 'local-only', tasks: [taskB] }),
+    ]);
+    context.setActiveProjectId('project-snapshot-a');
+
+    let releaseSnapshot!: () => void;
+    context.mockSyncCoordinatorService().saveOfflineSnapshotAndWait.mockReturnValueOnce(
+      new Promise<void>(resolve => {
+        releaseSnapshot = () => resolve();
+      }),
+    );
+
+    const completion = context.service().addTaskAttachmentToProject(
+      'project-snapshot-a',
+      'task-snapshot-a',
+      attachment,
+      { operationId: 'operation-snapshot-switch' },
+    );
+    await vi.waitFor(() => expect(
+      context.mockSyncCoordinatorService().saveOfflineSnapshotAndWait,
+    ).toHaveBeenCalledOnce());
+
+    context.switchActiveProject('project-snapshot-b');
+    releaseSnapshot();
+
+    await expect(completion).resolves.toBe(false);
+    expect(context.mockActionQueueService().enqueueDurablyForOwner).not.toHaveBeenCalled();
+    expect(context.mockProjectStateService().updateProjects).not.toHaveBeenCalled();
+    expect(context.mockChangeTrackerService().trackTaskUpdate).not.toHaveBeenCalled();
+    expect(context.getProjects().find(project => project.id === 'project-snapshot-b')?.tasks[0]?.attachments ?? [])
+      .toEqual([]);
   });
 
   it('local-only 项目应先确认附件快照落盘，再提交跨项目附件 UI 更新', async () => {
