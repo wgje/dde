@@ -769,8 +769,9 @@ class NanoflowWidgetRepository(private val context: Context) {
     appWidgetId: Int,
     entryId: String,
     action: BlackBoxEntryAction,
+    event: NanoflowWidgetReplayEvent,
   ): WidgetOptimisticResult<WidgetBlackBoxOptimisticSnapshot> =
-    store.readOptimisticSummary(appWidgetId).mapCommitted { source ->
+    store.readOptimisticSummary(appWidgetId, event.ownerDeviceId, event.bindingGeneration).mapCommitted { source ->
       val cached = source.summary
       val privacyMode = store.isPrivacyModeEnabled()
       val gateEntries = resolveRenderableGateEntries(cached, privacyMode)
@@ -1151,7 +1152,10 @@ class NanoflowWidgetRepository(private val context: Context) {
     return true
   }
 
-  suspend fun markBlackBoxEntry(appWidgetId: Int, entryId: String, action: BlackBoxEntryAction): Boolean {
+  suspend fun markBlackBoxEntry(
+    appWidgetId: Int, entryId: String, action: BlackBoxEntryAction,
+    ownerDeviceId: String, operationId: String, originBindingGeneration: Int,
+  ): Boolean {
     val binding = store.readBinding()
     if (binding == null) {
       NanoflowWidgetTelemetry.warn(
@@ -1165,10 +1169,20 @@ class NanoflowWidgetRepository(private val context: Context) {
       return false
     }
 
+    if (binding.deviceId != ownerDeviceId || binding.bindingGeneration != originBindingGeneration) {
+      NanoflowWidgetTelemetry.warn(
+        "widget_black_box_action_failure",
+        mapOf("appWidgetId" to appWidgetId, "reason" to "binding-changed", "action" to action.wireValue),
+      )
+      return false
+    }
+
     val requestBody = json.encodeToString(
       WidgetBlackBoxActionRequestPayload(
         entryId = entryId,
         action = action.wireValue,
+        operationId = operationId,
+        originBindingGeneration = originBindingGeneration,
       ),
     )
 
@@ -1979,29 +1993,13 @@ class NanoflowWidgetRepository(private val context: Context) {
     )
   }
 
-  suspend fun shiftGatePage(appWidgetId: Int, delta: Int): Int? {
-    val summary = store.readSummary(appWidgetId) ?: return null
-    if (summary.focus.active == true) {
-      store.persistGatePageIndex(appWidgetId, 0)
-      store.persistGateSelectedEntryId(appWidgetId, null)
-      return 0
+  suspend fun shiftGatePage(event: NanoflowWidgetReplayEvent): Int? {
+    val summary = store.readSummary(event.appWidgetId) ?: return null
+    val entryIds = if (summary.focus.active == true) emptyList() else {
+      resolveRenderableGateEntries(summary, store.isPrivacyModeEnabled())
+        .mapNotNull { it.entryId?.takeIf(String::isNotBlank) }
     }
-
-    val privacyMode = store.isPrivacyModeEnabled()
-    val gateEntries = resolveRenderableGateEntries(summary, privacyMode)
-    if (gateEntries.size <= 1) {
-      store.persistGatePageIndex(appWidgetId, 0)
-      store.persistGateSelectedEntryId(appWidgetId, gateEntries.firstOrNull()?.entryId)
-      return 0
-    }
-
-    val currentIndex = resolveGatePageIndex(appWidgetId, gateEntries)
-    val nextIndex = (currentIndex + delta).coerceIn(0, gateEntries.lastIndex)
-    if (nextIndex != currentIndex) {
-      store.persistGatePageIndex(appWidgetId, nextIndex)
-      store.persistGateSelectedEntryId(appWidgetId, gateEntries[nextIndex].entryId)
-    }
-    return nextIndex
+    return store.commitDurableGateNavigation(event, entryIds)?.pageIndex
   }
 
   private fun buildSetupSupportingLine(code: String?): String {

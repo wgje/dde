@@ -310,7 +310,7 @@ class NanoflowWidgetReceiver : AppWidgetProvider() {
     val appContext = context.applicationContext
     silentActionScope.launch {
       try {
-        NanoflowWidgetGateActionHandler.handle(appContext, appWidgetId, intent)
+        NanoflowWidgetGateActionHandler.handleWithDurableReplay(appContext, appWidgetId, intent)
       } finally {
         pendingResult.finish()
       }

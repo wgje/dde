@@ -135,6 +135,8 @@ data class WidgetFocusPromoteRequestPayload(
 data class WidgetBlackBoxActionRequestPayload(
   val entryId: String,
   val action: String,
+  val operationId: String? = null,
+  val originBindingGeneration: Int? = null,
 )
 
 data class WidgetDeviceIdentity(
@@ -232,6 +234,25 @@ data class WidgetContentCard(
   val interactionHint: String? = null,
   /** 标记此卡片为大门空状态（E 图）——Factory 应切换为 🚪 图标并隐藏 创建/已读 元信息。 */
   val isGateEmptyState: Boolean = false,
+)
+
+@Serializable
+data class NanoflowWidgetReplayEvent(
+  val eventId: String,
+  val operationId: String,
+  val kind: String,
+  val appWidgetId: Int,
+  val delta: Int = 0,
+  val gateAction: String? = null,
+  val entryId: String? = null,
+  val ownerDeviceId: String,
+  val bindingGeneration: Int,
+  val status: String = "pending",
+  val attemptCount: Int = 0,
+  val processingRuntimeId: String? = null,
+  val createdAtMs: Long,
+  val updatedAtMs: Long,
+  val lastError: String? = null,
 )
 
 /**

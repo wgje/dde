@@ -4,6 +4,7 @@ import android.appwidget.AppWidgetManager
 import android.content.Context
 import java.util.ArrayDeque
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -157,6 +158,7 @@ internal class NanoflowWidgetGateNavigationCoordinator<Result>(
 }
 
 internal object NanoflowWidgetGateNavigationProcessCoordinator {
+  private val durableScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
   private val coordinator = NanoflowWidgetGateNavigationCoordinator<NavigationResult>(
     reportFailure = ::reportFailure,
   )
@@ -167,43 +169,72 @@ internal object NanoflowWidgetGateNavigationProcessCoordinator {
     delta: Int,
     finish: () -> Unit,
   ) {
+    durableScope.launch { NanoflowWidgetDurableReplayCoordinator.submitGateNavigation(context, appWidgetId, delta, finish) }
+  }
+
+  internal suspend fun replayEvent(
+    context: Context,
+    event: NanoflowWidgetReplayEvent,
+    store: NanoflowWidgetStore,
+    finish: () -> Unit = {},
+  ) {
+    val completed = CompletableDeferred<Unit>()
+    val finished = AtomicBoolean(false)
+    val finishOnce = {
+      if (finished.compareAndSet(false, true)) {
+        runCatching(finish)
+        completed.complete(Unit)
+      }
+    }
     val appContext = context.applicationContext
-    val eventName = if (delta < 0) {
+    val eventName = if (event.delta < 0) {
       "widget_click_previous_blackbox_entry"
     } else {
       "widget_click_next_blackbox_entry"
     }
-    coordinator.submit(
-      appWidgetId = appWidgetId,
-      delta = delta,
-      persist = { currentDelta ->
-        val repository = NanoflowWidgetRepository(appContext)
-        NavigationResult(
-          repository = repository,
-          pageIndex = repository.shiftGatePage(appWidgetId, currentDelta),
-        )
-      },
-      telemetry = { result ->
-        NanoflowWidgetTelemetry.info(
-          eventName,
-          mapOf("appWidgetId" to appWidgetId, "pageIndex" to result.pageIndex),
-        )
-      },
-      render = { result ->
-        val appWidgetManager = AppWidgetManager.getInstance(appContext)
-        NanoflowWidgetReceiver.renderAndApplyWidget(
-          context = appContext,
-          appWidgetManager = appWidgetManager,
-          repository = result.repository,
-          appWidgetId = appWidgetId,
-          partialUpdate = true,
-          afterApply = {
-            NanoflowWidgetReceiver.notifyActionListsDataChanged(appWidgetManager, appWidgetId)
-          },
-        )
-      },
-      finish = finish,
-    )
+    try {
+      coordinator.submit(
+        appWidgetId = event.appWidgetId,
+        delta = event.delta,
+        persist = {
+          val claimed = store.claimDurableReplayEvent(event)
+            ?: throw IllegalStateException("Widget navigation replay owner or claim changed")
+          try {
+            val repository = NanoflowWidgetRepository(appContext)
+            val pageIndex = repository.shiftGatePage(claimed)
+              ?: throw IllegalStateException("Widget navigation summary is unavailable")
+            NavigationResult(repository, pageIndex)
+          } catch (error: Throwable) {
+            store.updateDurableReplayEvent(event.eventId, "failed", error.message ?: error.javaClass.simpleName)
+            throw error
+          }
+        },
+        telemetry = { result ->
+          NanoflowWidgetTelemetry.info(
+            eventName,
+            mapOf("appWidgetId" to event.appWidgetId, "pageIndex" to result.pageIndex, "operationId" to event.operationId),
+          )
+        },
+        render = { result ->
+          val appWidgetManager = AppWidgetManager.getInstance(appContext)
+          NanoflowWidgetReceiver.renderAndApplyWidget(
+            context = appContext,
+            appWidgetManager = appWidgetManager,
+            repository = result.repository,
+            appWidgetId = event.appWidgetId,
+            partialUpdate = true,
+            afterApply = {
+              NanoflowWidgetReceiver.notifyActionListsDataChanged(appWidgetManager, event.appWidgetId)
+            },
+          )
+        },
+        finish = finishOnce,
+      )
+      completed.await()
+    } catch (error: Throwable) {
+      finishOnce()
+      throw error
+    }
   }
 
   private fun reportFailure(error: Throwable) {
@@ -216,6 +247,6 @@ internal object NanoflowWidgetGateNavigationProcessCoordinator {
 
   private data class NavigationResult(
     val repository: NanoflowWidgetRepository,
-    val pageIndex: Int?,
+    val pageIndex: Int,
   )
 }

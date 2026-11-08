@@ -18,7 +18,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
 import java.util.UUID
 
-private val Context.widgetDataStore by preferencesDataStore(name = "nanoflow_widget")
+internal val Context.widgetDataStore by preferencesDataStore(name = "nanoflow_widget")
 internal fun instanceIdKey(id: Int) = stringPreferencesKey("instance.$id.id")
 internal fun sizeBucketKey(id: Int) = stringPreferencesKey("instance.$id.sizeBucket")
 internal fun gatePageIndexKey(id: Int) = intPreferencesKey("instance.$id.gatePageIndex")
@@ -42,7 +42,7 @@ internal fun Iterable<NanoflowWidgetAuthoritativeRefreshTicket>.retainCurrentRef
 }
 
 class NanoflowWidgetStore internal constructor(
-  private val context: Context,
+  internal val context: Context,
   private val securePreferencesOverride: SharedPreferences? = null,
 ) {
   private val summaryCacheFormatVersion = 2
@@ -108,10 +108,30 @@ class NanoflowWidgetStore internal constructor(
     WidgetDeviceIdentity(installationId, deviceId, deviceSecret)
   }
 
-  suspend fun readBinding(): StoredWidgetBinding? = bindingMutex.withLock {
+  suspend fun readBinding(): StoredWidgetBinding? = bindingMutex.withLock { readBindingLocked() }
+
+  private suspend fun readBindingLocked(): StoredWidgetBinding? {
     migrateLegacySecureFields(context.widgetDataStore.data.first())
-    recoverBindingMirrorLocked(context.widgetDataStore.data.first())
+    return recoverBindingMirrorLocked(context.widgetDataStore.data.first())
   }
+
+  internal suspend fun <T> withReplayOwner(
+    ownerDeviceId: String,
+    generation: Int,
+    operation: suspend () -> T,
+  ): T? {
+    bindingMutex.lock()
+    try {
+      if (!matchesReplayOwner(readBindingLocked(), ownerDeviceId, generation)) return null
+      return operation()
+    } finally {
+      bindingMutex.unlock()
+    }
+  }
+
+  private fun matchesReplayOwner(binding: StoredWidgetBinding?, ownerDeviceId: String, generation: Int): Boolean =
+    if (binding == null) ownerDeviceId == "unbound" && generation == 0
+    else binding.deviceId == ownerDeviceId && binding.bindingGeneration == generation
 
   internal suspend fun beginAuthoritativeRefresh(
     appWidgetId: Int,
@@ -332,12 +352,6 @@ class NanoflowWidgetStore internal constructor(
 
   suspend fun readSizeBucket(appWidgetId: Int): String? = context.widgetDataStore.data.first()[sizeBucketKey(appWidgetId)]
 
-  suspend fun persistGatePageIndex(appWidgetId: Int, pageIndex: Int) =
-    context.widgetDataStore.edit { it[gatePageIndexKey(appWidgetId)] = pageIndex.coerceAtLeast(0) }
-
-  suspend fun readGatePageIndex(appWidgetId: Int): Int =
-    context.widgetDataStore.data.first()[gatePageIndexKey(appWidgetId)] ?: 0
-
   suspend fun readSelectedTaskIndex(appWidgetId: Int): Int =
     context.widgetDataStore.data.first()[selectedTaskIndexKey(appWidgetId)] ?: 0
 
@@ -417,21 +431,6 @@ class NanoflowWidgetStore internal constructor(
     val action = snapshot[pendingFocusMutationActionKey(appWidgetId)] ?: return null
     val issuedAtMs = snapshot[pendingFocusMutationIssuedAtKey(appWidgetId)] ?: return null
     return PendingFocusMutation(action = action, issuedAtMs = issuedAtMs)
-  }
-
-  suspend fun persistGateSelectedEntryId(appWidgetId: Int, entryId: String?) {
-    context.widgetDataStore.edit { prefs ->
-      val key = gateSelectedEntryIdKey(appWidgetId)
-      if (entryId.isNullOrBlank()) {
-        prefs.remove(key)
-      } else {
-        prefs[key] = entryId
-      }
-    }
-  }
-
-  suspend fun readGateSelectedEntryId(appWidgetId: Int): String? {
-    return context.widgetDataStore.data.first()[gateSelectedEntryIdKey(appWidgetId)]
   }
 
   /**
@@ -580,12 +579,6 @@ class NanoflowWidgetStore internal constructor(
     }
   }
 
-  internal suspend fun readOptimisticSummary(appWidgetId: Int): WidgetOptimisticSummaryResult {
-    val start = beginAuthoritativeRefresh(appWidgetId)
-    if (start.binding == null || start.ticket.owner == null) return WidgetOptimisticResult.RejectedStale
-    val summary = start.summary ?: return WidgetOptimisticResult.CurrentNoSnapshot
-    return WidgetOptimisticResult.Committed(NanoflowWidgetOptimisticSummarySnapshot(summary, start.ticket))
-  }
   internal suspend fun <Snapshot> commitOptimisticSummary(
     appWidgetId: Int,
     source: NanoflowWidgetOptimisticSummarySnapshot,
