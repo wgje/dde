@@ -64,6 +64,27 @@ describe('check-supabase-ready-contract availability probes', () => {
     expect(result.stderr).toContain('session-manager.service.ts:2');
   });
 
+  it('rejects property aliases that bypass the synchronous call check', () => {
+    const files = {
+      'src/services/auth.service.ts': 'const getClient = this.supabase.client;\ngetClient();\n',
+    };
+    const result = runFixture(createFixture(files), Object.keys(files));
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('auth.service.ts:1');
+  });
+
+  it('rejects chained synchronous client calls outside the bounded probe line', () => {
+    const files = {
+      'src/app/core/services/sync/session-manager.service.ts':
+        'return this.supabase.client().from(\'tasks\');\n',
+    };
+    const result = runFixture(createFixture(files), Object.keys(files));
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('session-manager.service.ts:1');
+  });
+
   it('rejects a drifted probe shape instead of silently widening the exception', () => {
     const files = {
       'src/services/auth.service.ts':

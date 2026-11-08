@@ -22,7 +22,7 @@ const CHECK_FILES = [
   'src/app/core/services/sync/project-data.service.ts',
 ];
 
-const FORBIDDEN_PATTERN = /\.client\s*\(\s*\)/g;
+const FORBIDDEN_PATTERN = /\bthis\s*\.\s*supabase\s*\.\s*client\b/g;
 
 // Only these two calls are availability probes: both immediately catch a
 // synchronous-client construction failure and return a safe readiness value.
@@ -72,7 +72,7 @@ function collectViolations(root = ROOT, checkFiles = CHECK_FILES) {
     while (match) {
       if (!isAllowedAvailabilityProbe(relativeFile, content, match.index)) {
         const line = getLineNumber(content, match.index);
-        violations.push(`${relativeFile}:${line} 出现禁用调用 ".client()"`);
+        violations.push(`${relativeFile}:${line} 出现禁用 Supabase client 访问（必须使用 clientAsync()/ensureClientReady()）`);
       }
       match = FORBIDDEN_PATTERN.exec(content);
     }
@@ -99,7 +99,7 @@ if (require.main === module) {
   }
 
   if (violations.length > 0) {
-    console.error('[check-supabase-ready-contract] ❌ 检测到关键链路使用同步 client()：');
+    console.error('[check-supabase-ready-contract] ❌ 检测到关键链路使用同步 Supabase client 访问：');
     for (const violation of violations) {
       console.error(`  - ${violation}`);
     }
