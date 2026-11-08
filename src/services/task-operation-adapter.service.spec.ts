@@ -16,7 +16,7 @@ import { UserSessionService } from './user-session.service';
 import { WriteGuardService } from './write-guard.service';
 import { ActionQueueService } from './action-queue.service';
 import { AuthService } from './auth.service';
-import { Project, Task } from '../models';
+import { Attachment, Project, Task } from '../models';
 import { success } from '../utils/result';
 import { registerTaskOperationAdapterCoreMutationsSpecs } from './task-operation-adapter-core-mutations.spec-helpers';
 import { registerTaskOperationAdapterDurableMutationsSpecs } from './task-operation-adapter-durable-mutations.spec-helpers';
@@ -60,6 +60,8 @@ const createProject = (overrides: Partial<Project> = {}): Project => ({
 let mockProjectsSignal = signal<Project[]>([]);
 let mockActiveProjectIdSignal = signal<string | null>(null);
 let mockProjectOwnerGeneration = 0;
+let mockSessionGeneration = 1;
+let mockAuthIdentityFence = 'auth-fence-user-1';
 
 const mockProjectStateService = {
   projects: () => mockProjectsSignal(),
@@ -223,6 +225,9 @@ const mockUiStateService = {
 };
 const mockUserSessionService = {
   isHintOnlyStartupPlaceholderVisible: vi.fn(() => false),
+  getCurrentSessionGeneration: vi.fn(() => mockSessionGeneration),
+  isSessionContextCurrent: vi.fn((generation: number, userId: string | null) =>
+    generation === mockSessionGeneration && userId === mockAuthService.currentUserId()),
 };
 const mockWriteGuardService = {
   isExportOnly: vi.fn(() => false),
@@ -248,6 +253,7 @@ const mockActionQueueService = {
 
 const mockAuthService = {
   currentUserId: vi.fn(() => 'user-1'),
+  captureAuthIdentityFence: vi.fn(() => mockAuthIdentityFence),
 };
 
 const mockRecorderService = {
@@ -301,6 +307,8 @@ describe('TaskOperationAdapterService - moveTaskToStage', () => {
     
     mockProjectsSignal.set([project]);
     mockProjectOwnerGeneration = 0;
+    mockSessionGeneration = 1;
+    mockAuthIdentityFence = 'auth-fence-user-1';
     mockActiveProjectIdSignal.set('proj-1');
     mockUserSessionService.isHintOnlyStartupPlaceholderVisible.mockReturnValue(false);
     mockWriteGuardService.isExportOnly.mockReturnValue(false);
@@ -613,6 +621,40 @@ describe('TaskOperationAdapterService - moveTaskToStage', () => {
     mockTaskOperationService: () => mockTaskOperationService,
     mockUiStateService: () => mockUiStateService,
     mockRecorderService: () => mockRecorderService,
+  });
+
+  it('同一用户 session generation 轮换期间附件写入应 fail closed', async () => {
+    const attachment: Attachment = {
+      id: 'att-session-rotation',
+      type: 'file',
+      name: 'session-rotation.txt',
+      url: 'https://example.com/session-rotation.txt',
+      mimeType: 'text/plain',
+      size: 4,
+      createdAt: '2026-06-01T00:00:00.000Z',
+    };
+    const task = createTask({ id: 'task-session-rotation', attachments: [] });
+    mockProjectsSignal.set([createProject({ id: 'project-session-rotation', tasks: [task] })]);
+    mockProjectOwnerGeneration = 0;
+    mockActiveProjectIdSignal.set('project-session-rotation');
+    let release!: () => void;
+    mockActionQueueService.enqueueDurablyForOwner.mockReturnValueOnce(new Promise<string>(resolve => {
+      release = () => resolve('queued-session-rotation');
+    }));
+
+    const completion = service.addTaskAttachmentToProject(
+      'project-session-rotation',
+      'task-session-rotation',
+      attachment,
+      { operationId: 'operation-session-rotation' },
+    );
+    await vi.waitFor(() => expect(mockActionQueueService.enqueueDurablyForOwner).toHaveBeenCalledOnce());
+    mockSessionGeneration = 2;
+    release();
+
+    await expect(completion).resolves.toBe(false);
+    expect(mockSyncCoordinatorService.saveOfflineSnapshotAndWait).not.toHaveBeenCalled();
+    expect(mockProjectStateService.updateProjects).not.toHaveBeenCalled();
   });
 
   registerTaskOperationAdapterProjectAttachmentSpecs({

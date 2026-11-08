@@ -25,6 +25,8 @@ import type { AttachmentUploadPayload, QueuedAction } from './action-queue.types
 import { AttachmentUploadOutboxService } from './attachment-upload-outbox.service';
 import type { QueuedAttachmentUploadReceipt } from './attachment-upload-queue.helpers';
 import { ProjectStateService, type ActiveProjectOwner } from './project-state.service';
+import type { TaskProjectAttachmentOwnerFence } from './task-operation-attachment-project.helpers';
+import { UserSessionService } from './user-session.service';
 import { Attachment } from '../models';
 import { ATTACHMENT_CONFIG } from '../config/attachment.config';
 import { extractAttachmentItemsFromZip, type AttachmentImportZipLimits } from './attachment-import-zip.helpers';
@@ -152,7 +154,7 @@ interface AttachmentImportRun {
   ownerFence: AttachmentImportOwnerFence;
 }
 
-interface AttachmentImportOwnerFence extends AttachmentUploadOwnerFence {
+interface AttachmentImportOwnerFence extends AttachmentUploadOwnerFence, TaskProjectAttachmentOwnerFence {
   readonly ownerUserId: string;
   readonly projectOwner: ActiveProjectOwner;
 }
@@ -177,6 +179,7 @@ export class AttachmentImportService {
   private readonly auth = inject(AuthService);
   private readonly supabase = inject(SupabaseClientService);
   private readonly projectState = inject(ProjectStateService, { optional: true });
+  private readonly userSession = inject(UserSessionService, { optional: true });
   private readonly resume = inject(AttachmentImportResumeService, { optional: true })
     ?? new AttachmentImportResumeService();
   private readonly zipLimits: AttachmentImportZipLimits = {
@@ -248,11 +251,26 @@ export class AttachmentImportService {
       && typeof this.projectState.captureActiveProjectOwner === 'function'
       ? this.projectState.captureActiveProjectOwner()
       : { projectId, generation: 0 };
+    const authIdentityFence = typeof this.auth.captureAuthIdentityFence === 'function'
+      ? this.auth.captureAuthIdentityFence()
+      : `${userId}:${projectOwner.generation}`;
+    const sessionGeneration = this.userSession
+      && typeof this.userSession.getCurrentSessionGeneration === 'function'
+      ? this.userSession.getCurrentSessionGeneration()
+      : -1;
     const ownerFence: AttachmentImportOwnerFence = Object.freeze({
       ownerUserId: userId,
       projectOwner,
+      authIdentityFence,
+      sessionGeneration,
+      operationId: '',
       isCurrent: () => (
         this.auth.currentUserId() === userId
+        && (typeof this.auth.captureAuthIdentityFence !== 'function'
+          || this.auth.captureAuthIdentityFence() === authIdentityFence)
+        && (!this.userSession
+          || typeof this.userSession.isSessionContextCurrent !== 'function'
+          || this.userSession.isSessionContextCurrent(sessionGeneration, userId))
         && (!this.projectState
           || typeof this.projectState.isActiveProjectOwnerCurrent !== 'function'
           || this.projectState.isActiveProjectOwnerCurrent(projectOwner))
@@ -818,7 +836,7 @@ export class AttachmentImportService {
       projectId,
       item.taskId,
       attachment,
-      { operationId },
+      { operationId, ownerFence: { ...ownerFence, operationId } },
     );
     if (!written || !ownerFence.isCurrent()) {
       const compensationStatus = await this.compensateQueuedUpload(queuedUpload);

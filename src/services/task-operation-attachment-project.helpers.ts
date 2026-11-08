@@ -4,6 +4,8 @@ import type { ActiveProjectOwner } from './project-state.service';
 export interface TaskProjectAttachmentOwnerFence {
   readonly ownerUserId: string;
   readonly projectOwner: ActiveProjectOwner;
+  readonly authIdentityFence: string;
+  readonly sessionGeneration: number;
   readonly operationId: string;
   isCurrent: () => boolean;
 }
