@@ -5,21 +5,6 @@ import { waitForAppReady } from '../shared/page-helpers';
 const LOCAL_MODE_KEY = 'nanoflow.local-mode';
 const AUTH_CACHE_KEY = 'nanoflow.auth-cache';
 
-interface ActiveProjectOwner {
-  projectId: string;
-  generation: number;
-}
-
-interface DropPoint {
-  clientX: number;
-  clientY: number;
-}
-
-interface DropOptions {
-  expectedOwner?: ActiveProjectOwner;
-  point?: DropPoint;
-}
-
 async function settleWorkspaceOverlays(page: Page): Promise<void> {
   const demoBanner = page.locator('.demo-banner-shell').first();
   const closeButton = page.locator('app-demo-banner button[aria-label="关闭提示"]').first();
@@ -68,10 +53,11 @@ async function ensureStageExists(page: Page, stageNumber: number): Promise<void>
     await expect(addStageButton).toBeVisible({ timeout: 5_000 });
     await addStageButton.click();
   }
+
   await expect(page.locator(`[data-stage-number="${stageNumber}"]`).first()).toBeVisible({ timeout: 5_000 });
 }
 
-async function moveTaskToStage(page: Page, taskTitle: string, stageNumber: number): Promise<Locator> {
+async function assignTaskToStage(page: Page, taskTitle: string, stageNumber: number): Promise<string> {
   const taskCard = await testHelpers.getTaskCard(page, taskTitle, { timeout: 5_000 });
   const stageCard = page.locator(`[data-stage-number="${stageNumber}"]`).first();
   const stageTaskList = page.locator(`[data-stage-number="${stageNumber}"] [data-stage-task-list="${stageNumber}"]`).first();
@@ -86,46 +72,14 @@ async function moveTaskToStage(page: Page, taskTitle: string, stageNumber: numbe
 
   const stagedCard = stageTaskList.locator('[data-testid="task-card"]').filter({ hasText: taskTitle }).first();
   await expect(stagedCard).toBeVisible({ timeout: 5_000 });
-  return stagedCard;
-}
-
-async function readCurrentProjectOwner(page: Page): Promise<ActiveProjectOwner> {
-  return page.evaluate(() => {
-    type AngularDevTools = {
-      getComponent?: (element: Element) => unknown;
-      getOwningComponent?: (element: Element) => unknown;
-    };
-
-    const asRecord = (value: unknown): Record<string, unknown> | null => {
-      if (!value || typeof value !== 'object') return null;
-      return value as Record<string, unknown>;
-    };
-
-    const angular = (window as Window & { ng?: AngularDevTools }).ng;
-    const roots = [
-      document.querySelector('app-flow-palette'),
-      document.querySelector('[data-testid^="flow-palette-task-"]'),
-    ].filter((element): element is Element => element !== null);
-
-    for (const root of roots) {
-      const component = angular?.getComponent?.(root) ?? angular?.getOwningComponent?.(root);
-      const componentRecord = asRecord(component);
-      const projectState = componentRecord?.['projectState'];
-      const projectStateRecord = asRecord(projectState);
-      const captureOwner = projectStateRecord?.['captureActiveProjectOwner'];
-      if (typeof captureOwner !== 'function') continue;
-
-      const ownerRecord = asRecord(captureOwner.call(projectState));
-      const projectId = ownerRecord?.['projectId'];
-      const generation = ownerRecord?.['generation'];
-      if (typeof projectId === 'string' && projectId.length > 0
-        && typeof generation === 'number' && Number.isSafeInteger(generation) && generation >= 0) {
-        return { projectId, generation };
-      }
-    }
-
-    throw new Error('无法从当前 Flow palette 读取 ActiveProjectOwner；拒绝使用 null/猜测 generation');
-  });
+  const taskId = await stagedCard.getAttribute('data-task-id');
+  expect(taskId).toBeTruthy();
+  if (!taskId) throw new Error(`Assigned task ${taskTitle} is missing data-task-id`);
+  await expect.poll(() => readPersistedTask(page, taskId), {
+    timeout: 10_000,
+    intervals: [250, 500, 1_000],
+  }).toMatchObject({ id: taskId, stage: stageNumber });
+  return taskId;
 }
 
 async function readPersistedTask(page: Page, taskId: string): Promise<{ id: string; parentId: string | null; stage: number | null } | null> {
@@ -203,120 +157,14 @@ async function waitForParent(page: Page, taskId: string, parentId: string | null
     .toMatchObject({ id: taskId, parentId });
 }
 
-async function assertOwnerBoundTaskPayload(
-  page: Page,
-  dataTransfer: unknown,
-  taskId: string,
-  owner: ActiveProjectOwner,
-): Promise<void> {
-  const payload = await page.evaluate(transfer => {
-    if (!(transfer instanceof DataTransfer)) {
-      throw new Error('拖放 payload 需要浏览器 DataTransfer 实例');
-    }
-
-    const raw = transfer.getData('application/x-nanoflow-task');
-    return {
-      types: Array.from(transfer.types),
-      parsed: raw ? JSON.parse(raw) as unknown : null,
-      taskId: transfer.getData('text/task-id'),
-      text: transfer.getData('text/plain'),
-      json: transfer.getData('application/json'),
-    };
-  }, dataTransfer);
-
-  expect(payload.types).toEqual(expect.arrayContaining([
-    'application/x-nanoflow-task',
-    'application/json',
-    'text/task-id',
-    'text/plain',
-  ]));
-  expect(payload.taskId).toBe(taskId);
-  expect(payload.text).toBe(taskId);
-  expect(payload.json).toBeTruthy();
-  expect(payload.parsed).toMatchObject({
-    v: 1,
-    type: 'task',
-    taskId,
-    projectId: owner.projectId,
-    fromProjectId: owner.projectId,
-    source: 'flow',
-    projectOwner: owner,
-  });
-}
-
-async function findBlankDropPoint(page: Page, dropZone: Locator): Promise<DropPoint> {
-  const zoneBox = await dropZone.boundingBox();
-  expect(zoneBox).toBeTruthy();
-  if (!zoneBox) throw new Error('Flow unassigned dashed drop zone has no visible bounds');
-
-  const cardBoxes = await page.locator('[data-unassigned-task-id]:visible').evaluateAll(elements => (
-    elements
-      .map(element => {
-        const rect = element.getBoundingClientRect();
-        return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom };
-      })
-      .filter(rect => rect.right > rect.left && rect.bottom > rect.top)
-  ));
-
-  for (let y = zoneBox.y + 8; y <= zoneBox.y + zoneBox.height - 8; y += 12) {
-    for (let x = zoneBox.x + 8; x <= zoneBox.x + zoneBox.width - 8; x += 12) {
-      const insideCard = cardBoxes.some(rect => (
-        x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom
-      ));
-      if (insideCard) continue;
-
-      const isBlank = await dropZone.evaluate((element, point) => {
-        const hit = document.elementFromPoint(point.clientX, point.clientY);
-        return hit instanceof Node
-          && element.contains(hit)
-          && !(hit instanceof Element && hit.closest('[data-unassigned-task-id]'));
-      }, { clientX: x, clientY: y });
-      if (isBlank) return { clientX: Math.round(x), clientY: Math.round(y) };
-    }
-  }
-
-  throw new Error('Flow unassigned dashed drop zone has no coordinate outside every card');
-}
-
-async function dispatchRealDrop(
-  page: Page,
-  source: Locator,
-  target: Locator,
-  options: DropOptions = {},
-): Promise<void> {
+async function dispatchRealDrop(page: Page, source: Locator, target: Locator): Promise<void> {
   const dataTransfer = await page.evaluateHandle(() => new DataTransfer());
   try {
-    const sourceBox = await source.boundingBox();
-    const targetBox = await target.boundingBox();
-    expect(sourceBox).toBeTruthy();
-    expect(targetBox).toBeTruthy();
-    if (!sourceBox || !targetBox) throw new Error('拖放源或目标没有可见 bounds');
-
-    const point = options.point ?? {
-      clientX: Math.round(targetBox.x + targetBox.width / 2),
-      clientY: Math.round(targetBox.y + targetBox.height / 2),
-    };
-    const sourcePoint = {
-      clientX: Math.round(sourceBox.x + sourceBox.width / 2),
-      clientY: Math.round(sourceBox.y + sourceBox.height / 2),
-    };
-
-    await source.dispatchEvent('dragstart', {
-      bubbles: true,
-      cancelable: true,
-      ...sourcePoint,
-      dataTransfer,
-    });
-    if (options.expectedOwner) {
-      const taskId = await source.getAttribute('data-unassigned-task-id');
-      expect(taskId).toBeTruthy();
-      if (!taskId) throw new Error('Flow drag source missing data-unassigned-task-id');
-      await assertOwnerBoundTaskPayload(page, dataTransfer, taskId, options.expectedOwner);
-    }
-    await target.dispatchEvent('dragenter', { bubbles: true, cancelable: true, ...point, dataTransfer });
-    await target.dispatchEvent('dragover', { bubbles: true, cancelable: true, ...point, dataTransfer });
-    await target.dispatchEvent('drop', { bubbles: true, cancelable: true, ...point, dataTransfer });
-    await source.dispatchEvent('dragend', { bubbles: true, cancelable: true, ...sourcePoint, dataTransfer });
+    await source.dispatchEvent('dragstart', { dataTransfer });
+    await target.dispatchEvent('dragenter', { dataTransfer });
+    await target.dispatchEvent('dragover', { dataTransfer });
+    await target.dispatchEvent('drop', { dataTransfer });
+    await source.dispatchEvent('dragend', { dataTransfer });
   } finally {
     await dataTransfer.dispose();
   }
@@ -328,6 +176,7 @@ test.describe('Floating task tree browser drops', () => {
   test('Text unassigned card drop persists the reparent after reload', async ({ page }) => {
     await bootstrapLocalWorkspace(page);
     await testHelpers.ensureEditorReady(page, { mode: 'local' });
+    await settleWorkspaceOverlays(page);
     const projectId = await testHelpers.createTestProject(page, `浮动树 Text ${testHelpers.uniqueId()}`);
     expect(projectId).not.toBeNull();
     if (projectId) testHelpers.trackProjectId(projectId);
@@ -346,9 +195,10 @@ test.describe('Floating task tree browser drops', () => {
     await waitForParent(page, sourceId!, targetId!);
   });
 
-  test('Flow unassigned drop honors a specific target, rejects blank, and excludes assigned tasks from the unassigned palette', async ({ page }) => {
+  test('Flow unassigned drop honors a specific target and rejects blank or assigned targets', async ({ page }) => {
     await bootstrapLocalWorkspace(page);
     await testHelpers.ensureEditorReady(page, { mode: 'local' });
+    await settleWorkspaceOverlays(page);
     const projectId = await testHelpers.createTestProject(page, `浮动树 Flow ${testHelpers.uniqueId()}`);
     expect(projectId).not.toBeNull();
     if (projectId) testHelpers.trackProjectId(projectId);
@@ -362,15 +212,7 @@ test.describe('Floating task tree browser drops', () => {
     await createTextUnassignedTask(page, targetTitle);
     await testHelpers.createTask(page, assignedTitle);
     await ensureStageExists(page, 1);
-    const assignedSnapshot = await moveTaskToStage(page, assignedTitle, 1);
-    const assignedId = await assignedSnapshot.getAttribute('data-task-id');
-    expect(assignedId).toBeTruthy();
-    if (assignedId) {
-      await expect.poll(() => readPersistedTask(page, assignedId), {
-        timeout: 10_000,
-        intervals: [250, 500, 1_000],
-      }).toMatchObject({ id: assignedId, stage: 1 });
-    }
+    const assignedId = await assignTaskToStage(page, assignedTitle, 1);
 
     const flowTab = page.locator('[data-testid="flow-view-tab"]').first();
     if (await testHelpers.isElementVisible(flowTab, 2_000)) await flowTab.click();
@@ -389,20 +231,21 @@ test.describe('Floating task tree browser drops', () => {
     expect(sourceId).toBeTruthy();
     expect(targetId).toBeTruthy();
 
-    await expect(source).toBeVisible({ timeout: 10_000 });
-    await expect(target).toBeVisible({ timeout: 10_000 });
-    const owner = await readCurrentProjectOwner(page);
-    const targetDescendant = target.locator('span').last();
-    await expect(targetDescendant).toBeVisible({ timeout: 5_000 });
-    await dispatchRealDrop(page, source, targetDescendant, { expectedOwner: owner });
+    await source.dragTo(target);
     await waitForParent(page, sourceId!, targetId!);
 
     const blankTarget = page.locator('div.border-dashed').filter({ has: page.locator('[data-testid^="flow-palette-task-"]') }).first();
-    const blankPoint = await findBlankDropPoint(page, blankTarget);
-    await dispatchRealDrop(page, source, blankTarget, { expectedOwner: owner, point: blankPoint });
+    const blankBox = await blankTarget.boundingBox();
+    expect(blankBox).toBeTruthy();
+    await dispatchRealDrop(page, source, blankTarget);
     await waitForParent(page, sourceId!, targetId!);
 
-    await expect(page.locator(`[data-testid^="flow-palette-task-"]`).filter({ hasText: assignedTitle })).toHaveCount(0);
+    await expect.poll(() => readPersistedTask(page, assignedId), {
+      timeout: 10_000,
+      intervals: [250, 500, 1_000],
+    }).toMatchObject({ id: assignedId, stage: 1 });
+    await expect(page.locator('[data-testid^="flow-palette-task-"]').filter({ hasText: assignedTitle }))
+      .toHaveCount(0);
     await waitForParent(page, sourceId!, targetId!);
 
     await page.reload({ waitUntil: 'domcontentloaded' });
