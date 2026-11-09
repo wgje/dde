@@ -10,7 +10,7 @@ const cachePath = 'src/app/core/external-sources/external-source-cache.service.t
 const servicePath = 'src/app/core/external-sources/external-source-link.service.ts';
 const marker = '-- FINAL CONVERGENCE: 20260731000000 external source link operation identity';
 const banner = '-- ============================================================\n-- 初始化完成';
-const initPreimage = '0603f73bc13facfdd4f48a008c2bf66900414a5bdf81fc30a21ff98ad7a3bb42';
+const initPreimage = '6e3ca05759184db0250eab7f29e0f4a25155d3615efb484f26e9d8aa2a394a77';
 const widgetMarker = '-- FINAL CONVERGENCE: 20260729000000 widget black box action idempotency';
 const quotaMarker = '-- FINAL CONVERGENCE: 20260730000000 transcription usage quota immutability';
 const widgetHash = 'b8c0e4eaf5598216f2efc5afb8b0841879fc36de03e32939f6b2ac457b539ff1';
@@ -139,12 +139,12 @@ describe('external source link operation identity convergence', () => {
   it('requires every terminal pending mutation to carry operation identity', () => {
     const cache = normalize(read(cachePath));
     const service = normalize(read(servicePath));
-    expect(cache).toContain('removependinglink ( linkid : string , operationid : string )');
+    expect(cache).toMatch(/removependinglink[\s\S]{0,200}operationid/);
     expect(cache).toContain('recordpendingfailure ( linkid : string , operationid : string , errorcode : string ,');
     expect(cache).toContain('replacependinglinkforretry');
     expect(cache).toContain('restorependinglinksnapshot');
-    expect(service).toContain('restorependinglinksnapshot ( linkid , current . operationid , snapshot . previouspending )');
-    expect(service).toContain('removependinglink ( retryentry . link . id , retryentry . operationid )');
+    expect(service).toContain('restorependinglinksnapshot ( linkid , current . operationid , snapshot . previouspending , ownerid )');
+    expect(service).toContain('removependinglink ( retryentry . link . id , retryentry . operationid , token . ownerid )');
     expect(service).toContain('recordpendingfailure ( retryentry . link . id , retryentry . operationid , result . errorcode )');
     expect(service.indexOf('replacependinglinkforretry')).toBeLessThan(
       service.indexOf('client , pendingentry . link , token . ownerid , pendingentry . operationid'),

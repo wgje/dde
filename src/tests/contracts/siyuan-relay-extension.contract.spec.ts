@@ -173,28 +173,28 @@ describe('SiYuan Relay extension contracts', () => {
     const allowed = Array.from(allowedBlock.matchAll(/'([^']+)'/g)).map((m) => m[1]).sort();
 
     expect(allowed).toEqual([
+      'nanoflow.siyuan.get-config-status',
+      'nanoflow.siyuan.get-preview',
       'nanoflow.siyuan.ping',
-      'nanoflow.siyuan.v3.get-config-status',
-      'nanoflow.siyuan.v3.get-preview',
-      'nanoflow.siyuan.v3.set-config',
-      'nanoflow.siyuan.v3.test-connection',
+      'nanoflow.siyuan.set-config',
+      'nanoflow.siyuan.test-connection',
     ]);
-    expect(allowed).not.toContain('nanoflow.siyuan.set-config');
-    expect(allowed).not.toContain('nanoflow.siyuan.get-preview');
+    expect(allowed).not.toContain('nanoflow.siyuan.v3.set-config');
+    expect(allowed).not.toContain('nanoflow.siyuan.v3.get-preview');
 
     // 每一个 allowed type 都必须能映射到一个 response type
     for (const requestType of allowed) {
       expect(contentScript).toContain(`'${requestType}'`);
     }
-    expect(contentScript).toContain("'nanoflow.siyuan.v3.set-config-result'");
-    expect(contentScript).toContain("'nanoflow.siyuan.v3.config-status-result'");
+    expect(contentScript).toContain("'nanoflow.siyuan.set-config-result'");
+    expect(contentScript).toContain("'nanoflow.siyuan.config-status-result'");
   });
 
   it('background.js handles set-config and get-config-status, but never returns token plaintext', () => {
     const background = read('extensions/siyuan-relay/src/background.js');
 
-    expect(background).toContain("message.type === 'nanoflow.siyuan.v3.set-config'");
-    expect(background).toContain("message.type === 'nanoflow.siyuan.v3.get-config-status'");
+    expect(background).toContain("message.type === 'nanoflow.siyuan.set-config'");
+    expect(background).toContain("message.type === 'nanoflow.siyuan.get-config-status'");
 
     // get-config-status 的 data 字段只能包含 baseUrl / hasToken。
     const statusBlock = background.match(/async function getConfigStatus[\s\S]*?\n\}/);
@@ -253,10 +253,10 @@ describe('SiYuan Relay extension contracts', () => {
   it('page-side SiyuanExtensionProvider speaks the same message types as the extension', () => {
     const provider = read('src/app/core/external-sources/siyuan/siyuan-extension-provider.ts');
 
-    expect(provider).toContain("'nanoflow.siyuan.v3.set-config'");
-    expect(provider).toContain("'nanoflow.siyuan.v3.set-config-result'");
-    expect(provider).toContain("'nanoflow.siyuan.v3.get-config-status'");
-    expect(provider).toContain("'nanoflow.siyuan.v3.config-status-result'");
+    expect(provider).toContain("'nanoflow.siyuan.set-config'");
+    expect(provider).toContain("'nanoflow.siyuan.set-config-result'");
+    expect(provider).toContain("'nanoflow.siyuan.get-config-status'");
+    expect(provider).toContain("'nanoflow.siyuan.config-status-result'");
 
     // pushConfig 的 payload 只允许包含 baseUrl 和（可选的）token，
     // 防止未来误加字段被 content-script 静默放行后透传给扩展。
@@ -269,7 +269,7 @@ describe('SiYuan Relay extension contracts', () => {
   it('owner A credentials cannot execute a get-preview request captured for owner B', async () => {
     const relay = createBackgroundHarness();
     await relay.send({
-      type: 'nanoflow.siyuan.v3.set-config',
+      type: 'nanoflow.siyuan.set-config',
       requestId: 'set-owner-a',
       ownerUserId: 'owner-a',
       configIssuedAt: 100,
@@ -277,7 +277,7 @@ describe('SiYuan Relay extension contracts', () => {
     });
 
     const response = await relay.send({
-      type: 'nanoflow.siyuan.v3.get-preview',
+      type: 'nanoflow.siyuan.get-preview',
       requestId: 'preview-owner-b',
       ownerUserId: 'owner-b',
       payload: { blockId: '20260426123456-abc1234' },
@@ -299,7 +299,7 @@ describe('SiYuan Relay extension contracts', () => {
     });
 
     const response = await relay.send({
-      type: 'nanoflow.siyuan.v3.get-preview',
+      type: 'nanoflow.siyuan.get-preview',
       requestId: 'legacy-preview',
       ownerUserId: 'owner-b',
       payload: { blockId: '20260426123456-abc1234' },
@@ -312,14 +312,14 @@ describe('SiYuan Relay extension contracts', () => {
   it('A-B-A restores the credential keyed to A instead of reusing B', async () => {
     const relay = createBackgroundHarness();
     await relay.send({
-      type: 'nanoflow.siyuan.v3.set-config',
+      type: 'nanoflow.siyuan.set-config',
       requestId: 'set-a',
       ownerUserId: 'owner-a',
       configIssuedAt: 100,
       payload: { baseUrl: 'http://127.0.0.1:6806', token: 'token-a' },
     });
     await relay.send({
-      type: 'nanoflow.siyuan.v3.set-config',
+      type: 'nanoflow.siyuan.set-config',
       requestId: 'set-b',
       ownerUserId: 'owner-b',
       configIssuedAt: 200,
@@ -327,7 +327,7 @@ describe('SiYuan Relay extension contracts', () => {
     });
 
     const response = await relay.send({
-      type: 'nanoflow.siyuan.v3.get-preview',
+      type: 'nanoflow.siyuan.get-preview',
       requestId: 'preview-a-again',
       ownerUserId: 'owner-a',
       payload: { blockId: '20260426123456-abc1234' },
@@ -348,14 +348,14 @@ describe('SiYuan Relay extension contracts', () => {
   it('a late owner A config write cannot replace owner B credentials', async () => {
     const relay = createBackgroundHarness();
     await relay.send({
-      type: 'nanoflow.siyuan.v3.set-config',
+      type: 'nanoflow.siyuan.set-config',
       requestId: 'set-b-first',
       ownerUserId: 'owner-b',
       configIssuedAt: 200,
       payload: { baseUrl: 'http://127.0.0.1:6806', token: 'token-b' },
     });
     await relay.send({
-      type: 'nanoflow.siyuan.v3.set-config',
+      type: 'nanoflow.siyuan.set-config',
       requestId: 'late-set-a',
       ownerUserId: 'owner-a',
       configIssuedAt: 100,
@@ -363,7 +363,7 @@ describe('SiYuan Relay extension contracts', () => {
     });
 
     const response = await relay.send({
-      type: 'nanoflow.siyuan.v3.get-preview',
+      type: 'nanoflow.siyuan.get-preview',
       requestId: 'preview-b-after-late-a',
       ownerUserId: 'owner-b',
       payload: { blockId: '20260426123456-abc1234' },
@@ -380,14 +380,14 @@ describe('SiYuan Relay extension contracts', () => {
   it('an older A config arriving last cannot overwrite a newer A config', async () => {
     const relay = createBackgroundHarness();
     await relay.send({
-      type: 'nanoflow.siyuan.v3.set-config',
+      type: 'nanoflow.siyuan.set-config',
       requestId: 'new-a-config',
       ownerUserId: 'owner-a',
       configIssuedAt: 200,
       payload: { baseUrl: 'http://127.0.0.1:6806', token: 'new-token-a' },
     });
     await relay.send({
-      type: 'nanoflow.siyuan.v3.set-config',
+      type: 'nanoflow.siyuan.set-config',
       requestId: 'old-a-config-arrived-late',
       ownerUserId: 'owner-a',
       configIssuedAt: 100,
@@ -395,7 +395,7 @@ describe('SiYuan Relay extension contracts', () => {
     });
 
     const response = await relay.send({
-      type: 'nanoflow.siyuan.v3.get-preview',
+      type: 'nanoflow.siyuan.get-preview',
       requestId: 'preview-a-after-stale-write',
       ownerUserId: 'owner-a',
       payload: { blockId: '20260426123456-abc1234' },
@@ -409,7 +409,7 @@ describe('SiYuan Relay extension contracts', () => {
     }
   });
 
-  it('does not apply legacy unversioned set-config messages to global or owner storage', async () => {
+  it('applies current owner-scoped set-config messages without global storage writes', async () => {
     const relay = createBackgroundHarness({
       baseUrl: 'http://127.0.0.1:6806',
       token: 'legacy-token',
@@ -424,21 +424,27 @@ describe('SiYuan Relay extension contracts', () => {
     });
 
     expect(response).toMatchObject({
-      type: 'nanoflow.siyuan.v3.preview-result',
+      type: 'nanoflow.siyuan.set-config-result',
       requestId: 'legacy-set-config',
-      ok: false,
-      errorCode: 'unknown',
+      ownerUserId: 'owner-a',
+      ok: true,
     });
-    expect(relay.storage.get('baseUrl')).toBe('http://127.0.0.1:6806');
-    expect(relay.storage.get('token')).toBe('legacy-token');
-    expect(relay.storage.has('nanoflow.siyuan.owner.owner-a')).toBe(false);
+    expect(relay.storage.has('baseUrl')).toBe(false);
+    expect(relay.storage.has('token')).toBe(false);
+    expect(relay.storage.has('nanoflow.siyuan.owner.owner-a')).toBe(true);
+    expect(relay.storage.get('nanoflow.siyuan.owner.owner-a')).toMatchObject({
+      ownerUserId: 'owner-a',
+      baseUrl: 'http://localhost:6806',
+      token: 'new-token',
+      configIssuedAt: 300,
+    });
   });
 
   it('rejects unsupported set-config payload fields before storage writes', async () => {
     const relay = createBackgroundHarness();
 
     const response = await relay.send({
-      type: 'nanoflow.siyuan.v3.set-config',
+      type: 'nanoflow.siyuan.set-config',
       requestId: 'set-config-extra-field',
       ownerUserId: 'owner-a',
       configIssuedAt: 300,
@@ -446,7 +452,7 @@ describe('SiYuan Relay extension contracts', () => {
     });
 
     expect(response).toMatchObject({
-      type: 'nanoflow.siyuan.v3.set-config-result',
+      type: 'nanoflow.siyuan.set-config-result',
       requestId: 'set-config-extra-field',
       ownerUserId: 'owner-a',
       ok: false,
@@ -482,7 +488,7 @@ describe('SiYuan Relay extension contracts', () => {
     });
 
     const olderWrite = relay.send({
-      type: 'nanoflow.siyuan.v3.set-config',
+      type: 'nanoflow.siyuan.set-config',
       requestId: 'older-write',
       ownerUserId: 'owner-a',
       configIssuedAt: 200,
@@ -491,14 +497,14 @@ describe('SiYuan Relay extension contracts', () => {
     await firstWriteStarted.promise;
 
     const newerWrite = relay.send({
-      type: 'nanoflow.siyuan.v3.set-config',
+      type: 'nanoflow.siyuan.set-config',
       requestId: 'newer-write',
       ownerUserId: 'owner-a',
       configIssuedAt: 300,
       payload: { baseUrl: 'http://localhost:6806', token: 'newer-token-a' },
     });
     const otherOwnerWrite = await relay.send({
-      type: 'nanoflow.siyuan.v3.set-config',
+      type: 'nanoflow.siyuan.set-config',
       requestId: 'other-owner-write',
       ownerUserId: 'owner-b',
       configIssuedAt: 100,
