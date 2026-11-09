@@ -39,6 +39,7 @@
           },
           "configurations": {
             "production": {
+              "aot": true,
               "outputHashing": "all",
               "serviceWorker": "ngsw-config.json",
               "optimization": {

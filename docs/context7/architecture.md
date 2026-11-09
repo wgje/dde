@@ -15,6 +15,8 @@ source_paths:
 
 NanoFlow is an Angular 19 standalone-component application using Angular Signals for state, IndexedDB for local persistence, Supabase for cloud services, and GoJS for graph rendering.
 
+Production builds use AOT explicitly. Standalone signal inputs are declared with `input()` and should not be layered with the legacy `@Input` decorator; this keeps lazy-loaded components free of runtime decorator metadata.
+
 ## Stack Baseline
 
 | Layer | Technology |
