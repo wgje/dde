@@ -103,8 +103,8 @@ export class AuthPasswordRecoveryService {
     const client = this.createRecoveryClient(requestStorageKey, localStorage);
     let completed = false;
     try {
-      const redirect = new URL('/reset-password', origin);
-      redirect.searchParams.set('recovery_nonce', nonce);
+      const redirect = new URL('/', origin);
+      redirect.hash = `/reset-password?${new URLSearchParams({ recovery_nonce: nonce })}`;
       const { error } = await client.auth.resetPasswordForEmail(email, {
         redirectTo: redirect.toString(),
       });
@@ -507,12 +507,18 @@ export class AuthPasswordRecoveryService {
 
   private parseCurrentCallback(): { nonce: string; payload: RecoveryPayload } | null {
     const url = new URL(window.location.href);
-    const nonce = url.searchParams.get('recovery_nonce');
+    const hashRoute = url.hash.startsWith('#/') ? url.hash.slice(1) : null;
+    const hashRouteQueryIndex = hashRoute?.indexOf('?') ?? -1;
+    const hashRouteParams = hashRouteQueryIndex >= 0
+      ? new URLSearchParams(hashRoute?.slice(hashRouteQueryIndex + 1))
+      : null;
+    const nonce = url.searchParams.get('recovery_nonce')
+      ?? hashRouteParams?.get('recovery_nonce');
     if (!nonce) return null;
-    const code = url.searchParams.get('code');
+    const code = url.searchParams.get('code') ?? hashRouteParams?.get('code');
     if (code) return { nonce, payload: { kind: 'pkce', code } };
 
-    const hash = new URLSearchParams(url.hash.replace(/^#/, ''));
+    const hash = hashRouteParams ?? new URLSearchParams(url.hash.replace(/^#/, ''));
     const accessToken = hash.get('access_token');
     const refreshToken = hash.get('refresh_token');
     if (hash.get('type') !== 'recovery' || !accessToken || !refreshToken) return null;
@@ -674,11 +680,28 @@ export class AuthPasswordRecoveryService {
 
   private scrubRecoveryUrl(): void {
     const url = new URL(window.location.href);
-    for (const key of ['recovery_nonce', 'code', 'error', 'error_code', 'error_description']) {
+    const sensitiveParams = [
+      'recovery_nonce', 'code', 'error', 'error_code', 'error_description',
+      'access_token', 'refresh_token', 'type',
+    ];
+    for (const key of sensitiveParams) {
       url.searchParams.delete(key);
     }
-    url.hash = '';
-    window.history.replaceState(null, '', `${url.pathname}${url.search}`);
+
+    if (url.hash.startsWith('#/')) {
+      const route = url.hash.slice(1);
+      const queryIndex = route.indexOf('?');
+      const routePath = queryIndex >= 0 ? route.slice(0, queryIndex) : route;
+      const routeParams = new URLSearchParams(queryIndex >= 0 ? route.slice(queryIndex + 1) : '');
+      for (const key of sensitiveParams) routeParams.delete(key);
+      url.hash = `${routePath}${routeParams.size > 0 ? `?${routeParams.toString()}` : ''}`;
+    } else {
+      const hashParams = new URLSearchParams(url.hash.replace(/^#/, ''));
+      for (const key of sensitiveParams) hashParams.delete(key);
+      url.hash = hashParams.size > 0 ? hashParams.toString() : '';
+    }
+
+    window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
   }
 
   private ledgerKey(nonce: string): string {

@@ -13,6 +13,14 @@ vi.mock('@supabase/supabase-js', () => ({
   createClient: createClientMock,
 }));
 
+vi.mock('../environments/environment', () => ({
+  environment: {
+    production: false,
+    supabaseUrl: 'https://auth-session-isolation.supabase.co',
+    supabaseAnonKey: 'sb_publishable_abcdefghijklmnopqrstuv_12345678',
+  },
+}));
+
 type RecoveryStorage = {
   getItem: (key: string) => string | null | Promise<string | null>;
   setItem: (key: string, value: string) => void | Promise<void>;
@@ -191,7 +199,12 @@ describe('AuthPasswordRecoveryService', () => {
   async function issueRecovery(service: AuthPasswordRecoveryService): Promise<string> {
     await service.requestPasswordReset('user@example.com', window.location.origin);
     const redirect = new URL(resetRedirectTo ?? '');
-    const nonce = redirect.searchParams.get('recovery_nonce');
+    const routeQueryIndex = redirect.hash.indexOf('?');
+    const routeParams = new URLSearchParams(routeQueryIndex >= 0
+      ? redirect.hash.slice(routeQueryIndex + 1)
+      : '');
+    const nonce = redirect.searchParams.get('recovery_nonce')
+      ?? routeParams.get('recovery_nonce');
     expect(nonce).toBeTruthy();
     return nonce ?? '';
   }
@@ -205,15 +218,33 @@ describe('AuthPasswordRecoveryService', () => {
     const service = createService();
     localStorage.setItem(primaryStorageKey, 'primary-session-b');
     const nonce = await issueRecovery(service);
-    window.history.replaceState(null, '', `/reset-password?recovery_nonce=${nonce}&code=code-a`);
+    const redirect = new URL(resetRedirectTo ?? '');
+    expect(redirect.hash).toBe(`#/reset-password?recovery_nonce=${nonce}`);
+    window.history.replaceState(null, '', `/#/reset-password?recovery_nonce=${nonce}&code=code-a`);
 
     await expect(service.prepareFromCurrentUrl()).resolves.toBe(true);
+    expect(window.location.hash).toBe('#/reset-password');
+    expect(window.location.search).toBe('');
     await expect(service.completePasswordReset('new-password')).resolves.toEqual({
       cleanupPending: false,
     });
 
     expect(localStorage.getItem(primaryStorageKey)).toBe('primary-session-b');
     expect(clients.every(client => client.storageKey !== primaryStorageKey)).toBe(true);
+    expect(clients.every(client => client.dispose.mock.calls.length === 1)).toBe(true);
+  });
+
+  it('accepts the hash-routed PKCE callback and scrubs secrets without leaving the reset route', async () => {
+    const service = createService();
+    const nonce = await issueRecovery(service);
+    window.history.replaceState(null, '', `/?code=code-a#/reset-password?recovery_nonce=${nonce}`);
+
+    await expect(service.prepareFromCurrentUrl()).resolves.toBe(true);
+    expect(window.location.hash).toBe('#/reset-password');
+    expect(window.location.search).toBe('');
+    expect(clients).toHaveLength(2);
+    expect(clients[1].storageKey).not.toBe(primaryStorageKey);
+    await service.dispose();
     expect(clients.every(client => client.dispose.mock.calls.length === 1)).toBe(true);
   });
 
