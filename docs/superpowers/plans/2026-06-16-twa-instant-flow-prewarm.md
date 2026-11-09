@@ -730,4 +730,3 @@ git commit -m "test: guard flow prewarm startup boundaries"
 - [ ] Text -> Flow E2E waits for prewarm ready and then switches to visible diagram.
 - [ ] `npm run perf:guard` proves Flow did not re-enter forbidden initial preload/static paths.
 - [ ] Targeted Vitest, app TypeScript, and mobile E2E checks pass.
-
