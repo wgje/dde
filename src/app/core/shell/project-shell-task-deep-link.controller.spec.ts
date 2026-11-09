@@ -98,6 +98,7 @@ describe('ProjectShellTaskDeepLinkController', () => {
       degradeToWorkspaceOnMissing: true,
     });
     await Promise.resolve();
+    await Promise.resolve();
 
     expect(result).toBe('workspace');
     expect(navigate).toHaveBeenCalledWith(['/projects']);

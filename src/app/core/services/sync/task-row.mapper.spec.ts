@@ -113,7 +113,7 @@ describe('mapTaskRowToTask', () => {
     expect(omittedLegacyTask.attentionMeta).toBeUndefined();
   });
 
-  it('marks task content as source-missing when the row omits content', () => {
+  it('fails closed when the row omits content', () => {
     const localReporter: TaskRowMappingReporter = {
       warnContentMissing: vi.fn(),
       captureContentMissing: vi.fn(),
@@ -126,10 +126,9 @@ describe('mapTaskRowToTask', () => {
     });
     delete row.content;
 
-    const task = mapTaskRowToTask(row, localReporter);
-
-    expect(task.content).toBe('');
-    expect(hasTaskContentMissingFromSource(task)).toBe(true);
+    expect(() => mapTaskRowToTask(row, localReporter)).toThrowError(
+      /missing required fields.*content/i,
+    );
     expect(localReporter.warnContentMissing).toHaveBeenCalledWith(
       expect.objectContaining({ taskId: 'task-missing-content' }),
     );
@@ -138,7 +137,7 @@ describe('mapTaskRowToTask', () => {
     );
   });
 
-  it('recovers when content is explicitly undefined on the row', () => {
+  it('fails closed when content is explicitly undefined on the row', () => {
     const localReporter: TaskRowMappingReporter = {
       warnContentMissing: vi.fn(),
       captureContentMissing: vi.fn(),
@@ -150,10 +149,9 @@ describe('mapTaskRowToTask', () => {
       value: undefined,
     });
 
-    const task = mapTaskRowToTask(row, localReporter);
-
-    expect(task.content).toBe('');
-    expect(hasTaskContentMissingFromSource(task)).toBe(true);
+    expect(() => mapTaskRowToTask(row, localReporter)).toThrowError(
+      /missing required fields.*content/i,
+    );
     expect(localReporter.warnContentMissing).toHaveBeenCalledWith(
       expect.objectContaining({ taskId: 'task-undefined-content' }),
     );
