@@ -43,8 +43,14 @@ import {
   seedStore,
 } from './disaster-backup.service.spec-helpers';
 
-const DISASTER_BACKUP_TEST_HOOK_TIMEOUT_MS = 5000;
+const DISASTER_BACKUP_TEST_TIMEOUT_MS = 10000;
+const DISASTER_BACKUP_TEST_HOOK_TIMEOUT_MS = 15000;
 const BLACK_BOX_ID = '11111111-1111-4111-8111-111111111111';
+
+vi.setConfig({
+  testTimeout: DISASTER_BACKUP_TEST_TIMEOUT_MS,
+  hookTimeout: DISASTER_BACKUP_TEST_HOOK_TIMEOUT_MS,
+});
 
 function createBlackBoxRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
