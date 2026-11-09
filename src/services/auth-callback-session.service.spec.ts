@@ -18,6 +18,18 @@ vi.mock('@supabase/supabase-js', async importOriginal => ({
   createClient: createClientMock,
 }));
 
+vi.mock('../environments/environment', async importOriginal => {
+  const original = await importOriginal<typeof import('../environments/environment')>();
+  return {
+    ...original,
+    environment: {
+      ...original.environment,
+      supabaseUrl: 'https://auth-callback-test.supabase.co',
+      supabaseAnonKey: 'test-anon-key',
+    },
+  };
+});
+
 afterAll(() => {
   vi.doUnmock('@supabase/supabase-js');
   vi.resetModules();
