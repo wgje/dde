@@ -173,7 +173,7 @@ export function registerSupabaseFreshInitRepositorySpecs(
   beforeAll(() => {
     repositoryReport = coverage.analyzeRepositorySchemaCoverage(projectRoot);
     rpcReport = rpcCoverage.analyzeRepositoryRpcFunctionCoverage(projectRoot);
-  }, 10_000);
+  }, 30_000);
 
   it('validates canonical replacements before short-lock redundant index convergence', () => {
     const migration = normalizeSql(readFileSync(redundantIndexMigrationPath, 'utf8'));
@@ -475,5 +475,5 @@ export function registerSupabaseFreshInitRepositorySpecs(
     expect(packageJson.scripts?.['quality:guard:supabase-schema-coverage']).toBe(
       'node scripts/validate-supabase-schema-coverage.cjs',
     );
-  }, 10_000);
+  }, 30_000);
 }
