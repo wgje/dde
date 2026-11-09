@@ -37,12 +37,12 @@ describe('android host contract', () => {
     const launchFlow = sliceBetween(
       launcher,
       'private fun launchFromCurrentIntent() {',
-      '\n  private fun resetReactiveRefreshGateIfNeeded()',
+      '\n  private fun widgetLaunchCoordinator()',
     );
 
     expect(launcher).toContain('class NanoflowTwaLauncherActivity : LauncherActivity()');
     expect(launcher).toContain('override fun shouldLaunchImmediately(): Boolean = false');
-    expect(launcher).toContain('logLaunchStarted()');
+    expect(launcher).toContain('logLaunchStarted(preparedLaunch.uri, preparedLaunch.request)');
     expect(launcher).toContain('launchTwa()');
     expect(launcher).toContain('widget_twa_launch_started');
     expect(launcher).not.toContain('widget_twa_launch_timeout');
@@ -97,6 +97,7 @@ describe('android host contract', () => {
     const contract = readText('android/app/src/main/java/app/nanoflow/host/NanoflowBootstrapContract.kt');
     const repository = readText('android/app/src/main/java/app/nanoflow/host/NanoflowWidgetRepository.kt');
     const bootstrapActivity = readText('android/app/src/main/java/app/nanoflow/host/NanoflowWidgetBootstrapActivity.kt');
+    const bootstrapCoordinator = readText('android/app/src/main/java/app/nanoflow/host/NanoflowWidgetBootstrapCoordinator.kt');
     const bindingService = readText('src/services/widget-binding.service.ts');
     const workspaceShell = readText('src/workspace-shell.component.ts');
     // shell graph 装配已下切：委托入口保留在 controller-graph.factory，
@@ -124,7 +125,7 @@ describe('android host contract', () => {
     expect(repository).toContain('widget_bootstrap_callback_accepted');
     expect(repository).toContain('widget_bootstrap_callback_rejected');
     expect(repository).not.toContain('widget-register');
-    expect(bootstrapActivity).toContain('consumeBootstrapUri');
+    expect(bootstrapCoordinator).toContain('consume = repository::consumeBootstrapUri');
     expect(bootstrapActivity).toContain('returnToWidgetHostSurface');
     expect(bootstrapActivity).toContain('Intent.ACTION_MAIN');
     expect(bootstrapActivity).toContain('Intent.CATEGORY_HOME');
@@ -155,7 +156,10 @@ describe('android host contract', () => {
     expect(startupEntryOptions).toMatch(
       /completeAndroidBootstrap:\s*\(?request\)?\s*=>\s*options\.widgetBinding\.completeAndroidBootstrap\(request\)/,
     );
-    expect(androidWidgetLazyLoad).toContain('completeAndroidWidgetBootstrap: bootstrapRequest => this.complete(bootstrapRequest)');
+    expect(androidWidgetLazyLoad).toContain(
+      'completeAndroidWidgetBootstrap: (bootstrapRequest, generation) =>',
+    );
+    expect(androidWidgetLazyLoad).toContain('this.complete(bootstrapRequest, generation)');
   });
 
   it('keeps Android dirty push handling compatible with both payload variants', () => {
@@ -229,8 +233,8 @@ describe('android host contract', () => {
 
     expect(receiver).toContain('stateToken: String? = null');
     expect(receiver).toContain('nanoflow://widget/actions/$appWidgetId/$listKind$identitySuffix');
-    expect(receiver).toContain('!shouldForceFullUpdate(model)');
-    expect(receiver).toContain('private fun shouldForceFullUpdate(model: WidgetRenderModel): Boolean');
+    expect(receiver).toContain('!shouldForceNanoflowWidgetFullUpdate(model)');
+    expect(receiver).toContain('internal fun shouldForceNanoflowWidgetFullUpdate(model: WidgetRenderModel): Boolean');
     expect(receiver).toContain('if (model.sizeTier == WidgetSizeTier.SMALL)');
     expect(receiver).toContain('if (!model.isGateMode)');
     expect(receiver).toContain('if (model.contentCards.firstOrNull()?.isGateEmptyState == true)');
@@ -244,12 +248,13 @@ describe('android host contract', () => {
 
   it('primes web Gate sync when Android widget opens the workspace', () => {
     const startupEntryOptions = readText('src/app/core/shell/workspace-shell-startup-entry-options.factory.ts');
-    const startupEntryIntent = readText('src/app/core/shell/workspace-shell-startup-entry-intent.controller.ts');
+    const widgetWorkspaceGate = readText('src/app/core/shell/workspace-shell-widget-workspace-gate.controller.ts');
     const probe = readText('src/services/focus-startup-probe.service.ts');
 
     expect(startupEntryOptions).toContain('primeWidgetWorkspaceGateSync: () =>');
     expect(startupEntryOptions).toContain('options.focusStartupProbe.primeWidgetWorkspaceGateSync()');
-    expect(startupEntryIntent).toContain('this.options.primeWidgetWorkspaceGateSync()');
+    expect(widgetWorkspaceGate).toContain('this.options.primeWidgetWorkspaceGateSync()');
+    expect(widgetWorkspaceGate).toContain('this.refreshFocusSessionFromCloud(currentUserId)');
     expect(probe).toContain('primeWidgetWorkspaceGateSync()');
     expect(probe).toContain("source: remoteFirst ? 'widget-open-workspace' : options.source");
   });
@@ -262,30 +267,31 @@ describe('android host contract', () => {
     expect(store).toContain('readPendingFocusActiveHint');
     expect(store).toContain('clearPendingFocusActiveHint');
     expect(repository).toContain('FOCUS_HINT_GRACE_MS');
-    expect(repository).toContain('reconcileRecentFocusHint');
+    expect(repository).toContain('resolveEffectiveSummaryWithFocusHint');
     expect(repository).toContain('cloud-pending-local-hint');
-    expect(repository).toContain('store.persistPendingFocusActiveHint(appWidgetId, hintActive)');
-    expect(repository).toContain('reconcileRecentFocusHint(appWidgetId, normalizedSummary, cachedSummary)');
+    expect(repository).toContain('store.clearPendingFocusActiveHint(appWidgetId)');
+    expect(repository).toContain('hintProjection = resolveEffectiveSummaryWithFocusHint(appWidgetId, normalizedSummary)');
   });
 
   it('keeps optimistic focus wait order from being overwritten by stale summary refreshes', () => {
     const store = readText('android/app/src/main/java/app/nanoflow/host/NanoflowWidgetStore.kt');
     const repository = readText('android/app/src/main/java/app/nanoflow/host/NanoflowWidgetRepository.kt');
 
-    expect(store).toContain('persistPendingFocusMutation');
     expect(store).toContain('readPendingFocusMutation');
-    expect(store).toContain('clearPendingFocusMutation');
     expect(repository).toContain('FOCUS_MUTATION_GRACE_MS');
-    expect(repository).toContain('reconcilePendingFocusMutation');
+    expect(repository).toContain('resolvePendingFocusMutation');
     expect(repository).toContain('cloud-pending-local-focus-mutation');
-    expect(repository).toContain('store.persistPendingFocusMutation(appWidgetId, FOCUS_MUTATION_WAIT)');
-    expect(repository).toContain('reconcilePendingFocusMutation(appWidgetId, normalizedSummary, cachedSummary)');
+    expect(repository).toContain('pendingFocusMutationActionKey(appWidgetId)');
+    expect(repository).toContain('pendingFocusMutationIssuedAtKey(appWidgetId)');
+    expect(repository).toContain('this[pendingFocusMutationActionKey(appWidgetId)] = FOCUS_MUTATION_WAIT');
+    expect(repository).toContain('clearExpectedAuthoritativeFocusState');
   });
 
   it('keeps focus widget complete/wait actions local-first and refreshable', () => {
     const layout = readText('android/app/src/main/res/layout/nano_widget_large.xml');
     const factory = readText('android/app/src/main/java/app/nanoflow/host/NanoflowWidgetActionFactory.kt');
     const receiver = readText('android/app/src/main/java/app/nanoflow/host/NanoflowWidgetReceiver.kt');
+    const focusMutationCoordinator = readText('android/app/src/main/java/app/nanoflow/host/NanoflowWidgetFocusMutationCoordinator.kt');
     const renderer = readText('android/app/src/main/java/app/nanoflow/host/NanoflowWidgetRenderer.kt');
     const strings = readText('android/app/src/main/res/values/strings.xml');
     const repository = readText('android/app/src/main/java/app/nanoflow/host/NanoflowWidgetRepository.kt');
@@ -303,31 +309,28 @@ describe('android host contract', () => {
     expect(strings).toContain('name="nanoflow_widget_focus_wait_menu_label"');
     expect(receiver).toContain('R.id.nano_widget_focus_actions_list');
     expect(receiver).toContain('R.id.nano_widget_focus_wait_presets_list');
-    expect(receiver).toContain('completeFrontFocusTask');
-    expect(receiver).toContain('suspendFrontFocusTask');
+    expect(receiver).toContain('NanoflowWidgetFocusMutationProcessCoordinator.submitFocusAction');
+    expect(focusMutationCoordinator).toContain('repository.completeFrontFocusTask');
+    expect(focusMutationCoordinator).toContain('repository.suspendFrontFocusTask');
     expect(repository).toContain('applyOptimisticFocusCompletion');
     expect(repository).toContain('applyOptimisticFocusWait');
     expect(worker).toContain('scheduleFocusWaitReminder');
   });
 
   it('rolls back optimistic wait preset state when remote wait submission is rejected', () => {
-    const receiver = readText('android/app/src/main/java/app/nanoflow/host/NanoflowWidgetReceiver.kt');
-    const branchStart = receiver.indexOf('NanoflowWidgetActionFactory.FOCUS_ACTION_WAIT_PRESET ->');
-    const branchEnd = receiver.indexOf('else -> {', branchStart);
-    const waitPresetBranch = receiver.slice(branchStart, branchEnd);
-    const reminderCallCount = waitPresetBranch.match(/scheduleFocusWaitReminder/g)?.length ?? 0;
+    const coordinator = readText('android/app/src/main/java/app/nanoflow/host/NanoflowWidgetFocusMutationCoordinator.kt');
+    const waitStart = coordinator.indexOf('private suspend fun executeWait(');
+    const waitEnd = coordinator.indexOf('private suspend fun executeSelectTask(', waitStart);
+    const waitFlow = coordinator.slice(waitStart, waitEnd);
 
-    expect(waitPresetBranch).toContain('repository.applyOptimisticFocusWait');
-    expect(waitPresetBranch).toContain('repository.suspendFrontFocusTask');
-    expect(waitPresetBranch).toContain('focus-wait-front-retry');
-    expect(waitPresetBranch).toContain('repository.rollbackOptimisticFocusPromotion(appWidgetId, optimisticSnapshot)');
-    expect(waitPresetBranch).toMatch(
-      /if \(success\) \{[\s\S]*NanoflowWidgetRefreshWorker\.scheduleFocusWaitReminder/,
-    );
-    expect(waitPresetBranch).toMatch(
-      /else \{[\s\S]*repository\.rollbackOptimisticFocusPromotion\(appWidgetId, optimisticSnapshot\)[\s\S]*nanoflow_widget_focus_promote_failed_toast/,
-    );
-    expect(reminderCallCount).toBe(1);
+    expect(waitFlow).toContain('repository.applyOptimisticFocusWait');
+    expect(waitFlow).toContain('repository.suspendFrontFocusTask');
+    expect(waitFlow).toContain('rollbackFocus(context, repository, appWidgetId, optimisticSnapshot, generation)');
+    expect(coordinator).toContain('repository.rollbackOptimisticFocusPromotion(appWidgetId, snapshot)');
+    expect(waitFlow).toContain('focus-wait-front-retry');
+    expect(waitFlow).toContain('focus-wait-front", waitMinutes');
+    expect(coordinator).toContain('delivery.waitReminderMinutes?.let');
+    expect(coordinator).toContain('NanoflowWidgetRefreshWorker.scheduleFocusWaitReminder');
   });
 
   it('keeps the focus widget advertised as a 4x2 launcher widget', () => {
@@ -376,7 +379,8 @@ describe('android host contract', () => {
     const store = readText('android/app/src/main/java/app/nanoflow/host/NanoflowWidgetStore.kt');
     const repository = readText('android/app/src/main/java/app/nanoflow/host/NanoflowWidgetRepository.kt');
 
-    expect(store).toContain('securePreferences.getString("binding.widgetToken", null)?.trim()?.takeIf { it.isNotBlank() } ?: return null');
+    expect(store).toContain('private fun readSecureBinding(): StoredWidgetBinding?');
+    expect(store).toContain('securePreferences.getString("binding.widgetToken", null)?.trim()?.takeIf(String::isNotEmpty)');
     expect(store).toContain('.putString("binding.widgetToken", normalizedWidgetToken)');
     expect(repository).toContain('"WIDGET_TOKEN_REQUIRED",');
     expect(repository).toContain('val normalizedBearerToken = bearerToken.trim()');
