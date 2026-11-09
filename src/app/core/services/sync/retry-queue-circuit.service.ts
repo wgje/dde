@@ -4,10 +4,10 @@ import { RetryQueueLegacyReviewLayer } from './retry-queue-legacy-review.service
 
 export abstract class RetryQueueCircuitLayer extends RetryQueueLegacyReviewLayer {
   // ==================== 熔断器 ====================
-  
+
   /** 【P2-19 修复】从 sessionStorage 恢复熔断器状态 */
   protected readonly CIRCUIT_STORAGE_KEY = 'nanoflow.circuit-breaker';
-  
+
   protected loadCircuitState(): void {
     try {
       const stored = sessionStorage.getItem(this.CIRCUIT_STORAGE_KEY);
@@ -27,7 +27,7 @@ export abstract class RetryQueueCircuitLayer extends RetryQueueLegacyReviewLayer
       }
     } catch { /* ignore */ }
   }
-  
+
   protected saveCircuitState(): void {
     try {
       sessionStorage.setItem(this.CIRCUIT_STORAGE_KEY, JSON.stringify({
@@ -37,14 +37,14 @@ export abstract class RetryQueueCircuitLayer extends RetryQueueLegacyReviewLayer
       }));
     } catch { /* ignore */ }
   }
-  
+
   /**
    * 从 Error 对象推断错误类型（用于未携带 errorType 的异常）
    */
   protected classifyErrorType(error: Error): string {
     return classifyErrorTypePure(error);
   }
-  
+
   checkCircuitBreaker(): boolean {
     if (this.circuitState === 'closed') return true;
     if (this.circuitState === 'open') {

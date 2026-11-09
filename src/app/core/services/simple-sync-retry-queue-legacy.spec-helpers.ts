@@ -137,7 +137,7 @@ export function registerSimpleSyncRetryQueueLegacySpecs(
 
       // 调用容量检查
       mockRetryQueueService.checkCapacityWarning();
-      
+
       // 情况恶化时应该记录 Sentry（即使在冷却期内）
       expect(mockSentryLazyLoaderService.captureMessage).toHaveBeenCalledWith(
         'RetryQueue capacity warning',
@@ -148,7 +148,7 @@ export function registerSimpleSyncRetryQueueLegacySpecs(
           })
         })
       );
-      
+
       // Toast 只在冷却时间过后显示（减少用户打扰）
       // 在冷却期内情况恶化时不显示 Toast
       expect(mockToast.error).toHaveBeenCalledTimes(0);
@@ -190,7 +190,7 @@ export function registerSimpleSyncRetryQueueLegacySpecs(
       mockLoggerCategory.warn.mockClear();
       mockRetryQueueService.lastWarningTime = 0;
       mockRetryQueueService.lastWarningPercent = 0;
-      
+
       // 设置离线状态（防止触发 processRetryQueue 清空队列）
       service['syncStateService'].update({ isOnline: false, sessionExpired: false });
 
@@ -207,7 +207,7 @@ export function registerSimpleSyncRetryQueueLegacySpecs(
 
       // 调用容量检查
       mockRetryQueueService.checkCapacityWarning();
-      
+
       // 验证记录了队列容量警告日志（包含诊断信息）
       expect(mockLoggerCategory.warn).toHaveBeenCalledWith(
         'RetryQueue 容量警告',
@@ -232,10 +232,10 @@ export function registerSimpleSyncRetryQueueLegacySpecs(
       mockLoggerCategory.warn.mockClear();
       mockRetryQueueService.lastWarningTime = 0;
       mockRetryQueueService.lastWarningPercent = 0;
-      
+
       // Mock processRetryQueue 以防止它修改 isSyncing 状态
       const processRetryQueueSpy = vi.spyOn(service as unknown as { processRetryQueue: () => Promise<void> }, 'processRetryQueue').mockImplementation(() => Promise.resolve());
-      
+
       // 模拟 isSyncing 卡住的状态（通过 syncState signal 设置）
       // 【修复 2026-02-02】新增 isProcessingQueue 为 false，模拟状态不一致情况
       service['syncStateService'].update({ isOnline: true, sessionExpired: false, isSyncing: true });
@@ -254,19 +254,19 @@ export function registerSimpleSyncRetryQueueLegacySpecs(
 
       // 调用容量检查
       mockRetryQueueService.checkCapacityWarning();
-      
+
       // 【修复 2026-02-02】验证记录了 isSyncing 状态不一致警告
       expect(mockLoggerCategory.warn).toHaveBeenCalledWith(
         'isSyncing 状态不一致，重置',
         expect.objectContaining({ percentUsed: 92 })
       );
-      
+
       // 验证 isSyncing 被重置
       expect(service['syncState']().isSyncing).toBe(false);
-      
+
       // 验证 processRetryQueue 被调用（强制处理尝试）
       expect(processRetryQueueSpy).toHaveBeenCalled();
-      
+
       // 恢复 spy
       processRetryQueueSpy.mockRestore();
     });
@@ -281,7 +281,7 @@ export function registerSimpleSyncRetryQueueLegacySpecs(
       ] as unknown as RetryQueueItem[];
 
       const breakdown = mockRetryQueueService.getTypeBreakdown();
-      
+
       expect(breakdown).toEqual({
         task: 2,
         project: 1,
@@ -289,49 +289,49 @@ export function registerSimpleSyncRetryQueueLegacySpecs(
       });
     });
   });
-  
+
   // ==================== P0 修复：Session Expired 阻止队列溢出 ====================
   // 【技术债务重构】此测试组部分测试依赖于子服务内部行为，需要重新设计
   describe.skip('【P0 修复】Session Expired 导致队列溢出', () => {
-    
+
     it('addToRetryQueue 应在 sessionExpired 时跳过添加', () => {
       // 设置会话过期状态
       service['syncStateService'].update({ sessionExpired: true });
-      
+
       const initialQueueLength = mockRetryQueueService.queue.length;
       const task = createMockTask();
-      
+
       // 尝试添加到重试队列
       service.addToRetryQueue('task', 'upsert', task, 'project-1');
-      
+
       // 验证队列长度未变化
       expect(mockRetryQueueService.queue.length).toBe(initialQueueLength);
-      
+
       // 验证记录了跳过日志
       expect(mockLoggerCategory.debug).toHaveBeenCalledWith(
         '会话已过期，跳过添加到重试队列',
         expect.objectContaining({ type: 'task', dataId: task.id })
       );
     });
-    
+
     it('addToRetryQueue 应在会话正常时正常添加', () => {
       // 确保会话正常
       service['syncStateService'].update({ sessionExpired: false });
-      
+
       const initialQueueLength = mockRetryQueueService.queue.length;
       const task = createMockTask({ id: 'new-task-for-queue' });
-      
+
       // 添加到重试队列
       service.addToRetryQueue('task', 'upsert', task, 'project-1');
-      
+
       // 验证队列长度增加
       expect(mockRetryQueueService.queue.length).toBe(initialQueueLength + 1);
     });
-    
+
     it('resetSessionExpired 应正确重置会话状态', () => {
       // 设置会话过期状态
       service['syncStateService'].update({ sessionExpired: true });
-      
+
       // 添加一些队列项
       mockRetryQueueService.queue = [{
         id: 'test-item',
@@ -342,43 +342,43 @@ export function registerSimpleSyncRetryQueueLegacySpecs(
         retryCount: 0,
         createdAt: Date.now()
       }];
-      
+
       // 调用重置方法
       service.resetSessionExpired();
-      
+
       // 验证会话状态被重置
       expect(service.syncState().sessionExpired).toBe(false);
-      
+
       // 验证记录了恢复日志
       expect(mockLoggerCategory.info).toHaveBeenCalledWith(
         '会话状态已重置',
         expect.objectContaining({ previousQueueLength: 1 })
       );
     });
-    
+
     it('resetSessionExpired 应在会话未过期时不做任何操作', () => {
       // 确保会话正常
       service['syncStateService'].update({ sessionExpired: false });
-      
+
       // 清空日志 mock
       mockLoggerCategory.info.mockClear();
-      
+
       // 调用重置方法
       service.resetSessionExpired();
-      
+
       // 验证没有记录日志（因为没有需要重置的状态）
       expect(mockLoggerCategory.info).not.toHaveBeenCalledWith(
         '会话状态已重置',
         expect.anything()
       );
     });
-    
+
     it('startRetryLoop 应在 sessionExpired 时跳过处理', async () => {
       vi.useFakeTimers();
-      
+
       // 设置会话过期状态
       service['syncStateService'].update({ sessionExpired: true, isOnline: true });
-      
+
       // 添加队列项
       mockRetryQueueService.queue = [{
         id: 'test-item',
@@ -389,19 +389,19 @@ export function registerSimpleSyncRetryQueueLegacySpecs(
         retryCount: 0,
         createdAt: Date.now()
       }];
-      
+
       // 创建 processRetryQueue spy
       const processRetryQueueSpy = vi.spyOn(service as unknown as { processRetryQueue: () => Promise<void> }, 'processRetryQueue');
-      
+
       // 前进一个重试间隔
       vi.advanceTimersByTime(5000);
-      
+
       // 验证 processRetryQueue 没有被调用（因为 sessionExpired 在 setInterval 回调中被检查）
       // 注意：实际上 processRetryQueue 可能被调用，但它会立即返回
       // 我们验证队列项没有被处理（retryCount 没有增加）
       const queueItem = mockRetryQueueService.queue[0];
       expect(queueItem.retryCount).toBe(0);
-      
+
       vi.useRealTimers();
     });
   });

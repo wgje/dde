@@ -29,18 +29,18 @@ type RetryQueueIdbLoadResult = { clean: PersistedRetryQueueItem[]; dirtyKeys: st
 export abstract class RetryQueueStorageLayer extends RetryQueueRunnerLayer {
   protected saveDebounceWriter: LocalBackupUiRestoreWriterHandle | null = null;
   // ==================== IndexedDB 支持 ====================
-  
+
   /**
    * 初始化 IndexedDB
    */
   protected async initDb(): Promise<IDBDatabase | null> {
     if (this.db) return this.db;
     if (this.idbUnsupported) return null;
-    
+
     if (!this.dbInitPromise) {
       this.dbInitPromise = this.createDbInitPromise();
     }
-    
+
     return this.dbInitPromise;
   }
 
@@ -104,7 +104,7 @@ export abstract class RetryQueueStorageLayer extends RetryQueueRunnerLayer {
     store.createIndex('type', 'type', { unique: false });
     this.logger.info('IndexedDB store 创建成功');
   }
-  
+
   /**
    * 从存储加载队列（优先 IndexedDB，降级 localStorage）
    */
@@ -202,7 +202,7 @@ export abstract class RetryQueueStorageLayer extends RetryQueueRunnerLayer {
     this.checkCapacityWarning();
     this.syncPendingCountToState();
   }
-  
+
   /** readonly complete 后发布 IndexedDB 结果，脏条目再由独立事务清理。 */
   protected async loadFromIdb(db: IDBDatabase): Promise<PersistedRetryQueueItem[] | null> {
     return new Promise((resolve) => {
@@ -279,7 +279,7 @@ export abstract class RetryQueueStorageLayer extends RetryQueueRunnerLayer {
     if (!envelope) return [];
     return this.extractLoadableLocalStorageItems(envelope.items);
   }
-  
+
   /**
    * 保存队列到存储（防抖版）
    * 在 500ms 内的多次调用会合并为一次实际写入操作
@@ -347,7 +347,7 @@ export abstract class RetryQueueStorageLayer extends RetryQueueRunnerLayer {
   private async saveToStorageImmediateCore(): Promise<boolean> {
     try {
       const db = await this.initDb();
-      
+
       if (db) {
         const fallbackSnapshot = this.readIdbFallbackEnvelopeSnapshot();
         const saveCapture: RetryQueueIdbSaveCapture = {};
@@ -360,7 +360,7 @@ export abstract class RetryQueueStorageLayer extends RetryQueueRunnerLayer {
           return true;
         }
       }
-      
+
       // 降级到 localStorage
       return this.saveToLocalStorage({ unresolvedIdbFallback: true });
     } catch (e) {
@@ -373,7 +373,7 @@ export abstract class RetryQueueStorageLayer extends RetryQueueRunnerLayer {
       }
     }
   }
-  
+
   /**
    * 同步保存（用于 beforeunload）
    */
@@ -384,7 +384,7 @@ export abstract class RetryQueueStorageLayer extends RetryQueueRunnerLayer {
       },
     );
   }
-  
+
   /**
    * 保存到 IndexedDB
    */
@@ -397,7 +397,7 @@ export abstract class RetryQueueStorageLayer extends RetryQueueRunnerLayer {
         const transaction = db.transaction(this.DB_CONFIG.storeName, 'readwrite');
         const store = transaction.objectStore(this.DB_CONFIG.storeName);
         let items = this.getPersistedItems();
-        
+
         transaction.oncomplete = () => {
           this.logger.debug('保存到 IndexedDB 成功', {
             count: items.length,
@@ -406,7 +406,7 @@ export abstract class RetryQueueStorageLayer extends RetryQueueRunnerLayer {
           });
           resolve(true);
         };
-        
+
         transaction.onerror = () => {
           this.logger.error('保存到 IndexedDB 失败', transaction.error);
           resolve(false);
@@ -460,7 +460,7 @@ export abstract class RetryQueueStorageLayer extends RetryQueueRunnerLayer {
       resolve(false);
     }
   }
-  
+
   /**
    * 保存到 localStorage
    */
@@ -468,7 +468,7 @@ export abstract class RetryQueueStorageLayer extends RetryQueueRunnerLayer {
     options: { unresolvedIdbFallback?: boolean } = {},
   ): boolean {
     if (typeof localStorage === 'undefined') return false;
-    
+
     try {
       const items = this.mergeLocalStorageItemsForFallback(this.getPersistedItems());
       const minifiedItems = items.map(item => this.minifyItem(item));
@@ -485,9 +485,9 @@ export abstract class RetryQueueStorageLayer extends RetryQueueRunnerLayer {
         savedAt,
         ...(nextProof ? { idbFallbackProof: nextProof } : {}),
       };
-      
+
       const json = JSON.stringify(data);
-      
+
       // 检查大小
       if (json.length > SYNC_CONFIG.RETRY_QUEUE_SIZE_LIMIT_BYTES) {
         this.enterPressureMode('storage_size_limit');
@@ -498,7 +498,7 @@ export abstract class RetryQueueStorageLayer extends RetryQueueRunnerLayer {
         this.toast.error('本地存储压力过高', '同步队列写入已冻结，请释放存储空间');
         return false;
       }
-      
+
       localStorage.setItem(this.STORAGE_KEY, json);
       if ((this.queuePressureReason() ?? '').startsWith('storage_')) {
         this.clearPressureMode();
@@ -786,7 +786,7 @@ export abstract class RetryQueueStorageLayer extends RetryQueueRunnerLayer {
       item.data.id,
     ].join('::');
   }
-  
+
   /**
    * 压缩队列项（移除不必要的数据以节省空间）
    *

@@ -57,9 +57,9 @@ export function registerSimpleSyncBatchRetrySingleFlightSpecs(
 
     it('saveProjectToCloud 应该返回 BatchSyncService 的结果', async () => {
       const project = createMockProject({ id: 'project-1', tasks: [], connections: [] });
-      mockBatchSync.saveProjectToCloud = vi.fn().mockResolvedValue({ 
-        success: false, 
-        conflict: true 
+      mockBatchSync.saveProjectToCloud = vi.fn().mockResolvedValue({
+        success: false,
+        conflict: true
       });
 
       const result = await service.saveProjectToCloud(project, 'test-user-id');

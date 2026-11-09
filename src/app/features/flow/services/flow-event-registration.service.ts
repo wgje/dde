@@ -14,7 +14,7 @@ import * as go from 'gojs';
 
 /**
  * 流程图事件注册服务
- * 
+ *
  * 负责注册所有 GoJS 图表事件回调：
  * - 节点点击
  * - 连接线点击
@@ -82,15 +82,15 @@ export class FlowEventRegistrationService {
    */
   registerLinkClickHandler(): void {
     this.eventService.onLinkClick((linkData, x, y, isDoubleClick = false) => {
-      this.logger.debug('onLinkClick 回调触发', { 
-        linkData, 
+      this.logger.debug('onLinkClick 回调触发', {
+        linkData,
         isCrossTree: linkData?.isCrossTree,
-        x, 
+        x,
         y,
         isMobile: this.uiState.isMobile(),
         isDoubleClick
       });
-      
+
       // 移动端：单击打开编辑器（预览模式），长按/双击显示操作菜单
       if (this.uiState.isMobile()) {
         if (isDoubleClick) {
@@ -100,7 +100,7 @@ export class FlowEventRegistrationService {
         } else {
           // 单击：打开编辑器，先进入预览模式
           // 用户在预览模式下点击预览区域才会进入编辑模式
-          this.logger.debug('移动端单击：打开连接编辑器（预览模式）', { 
+          this.logger.debug('移动端单击：打开连接编辑器（预览模式）', {
             isCrossTree: linkData?.isCrossTree,
             from: linkData.from,
             to: linkData.to
@@ -170,12 +170,12 @@ export class FlowEventRegistrationService {
   registerLinkRelinkHandler(refreshDiagram: () => void): void {
     this.eventService.onLinkRelink(async (linkType, relinkInfo, _x, _y, gojsLink) => {
       this.logger.debug('onLinkRelink 回调触发', { linkType, relinkInfo });
-      
+
       // 移除 GoJS 中的临时连接线（实际数据由 store 管理）
       this.diagram.removeLink(gojsLink);
-      
+
       const { changedEnd, oldFromId, oldToId, newFromId, newToId } = relinkInfo;
-      
+
       // GoJS 连接线已被移除：无论 store 变更结果是 success/cancelled/error 还是抛出异常，
       // 都必须从 store 重新渲染，否则失败路径会让原有连接线从画布上凭空消失（图/store 漂移）
       try {
@@ -186,10 +186,10 @@ export class FlowEventRegistrationService {
             await this.relinkService.handleParentChildRelink(newToId, oldFromId, newFromId);
           } else {
             // to 端（子端/下游端点）被改变
-            this.logger.debug('父子连接 to 端重连', { 
-              parentId: newFromId, 
-              oldChildId: oldToId, 
-              newTargetId: newToId 
+            this.logger.debug('父子连接 to 端重连', {
+              parentId: newFromId,
+              oldChildId: oldToId,
+              newTargetId: newToId
             });
             await this.relinkService.handleParentChildRelinkToEnd(newFromId, oldToId, newToId);
           }

@@ -315,9 +315,9 @@
 -- ============================================================
 -- NanoFlow 数据库初始化脚本 (一次性导入)
 -- ============================================================
--- 
+--
 -- 用法：在 Supabase SQL Editor 中执行此脚本完成所有数据库配置
--- 
+--
 -- 包含：
 --   1. 核心表结构 (projects, tasks, connections, user_preferences)
 --   2. RLS 安全策略
@@ -372,7 +372,7 @@ SET search_path TO 'pg_catalog', 'public'
 AS $$
   SELECT EXISTS (
     SELECT 1 FROM public.projects p
-    WHERE p.id = p_project_id 
+    WHERE p.id = p_project_id
     AND p.owner_id = public.current_user_id()
   )
 $$;
@@ -387,7 +387,7 @@ SET search_path TO 'pg_catalog', 'public'
 AS $$
   SELECT EXISTS (
     SELECT 1 FROM public.projects p
-    WHERE p.id = p_project_id 
+    WHERE p.id = p_project_id
     AND p.owner_id = public.current_user_id()
   )
 $$;
@@ -421,7 +421,7 @@ CREATE TABLE IF NOT EXISTS public.projects (
 );
 
 -- 添加新列（兼容已有表）
-DO $$ 
+DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'projects' AND column_name = 'version') THEN
     ALTER TABLE public.projects ADD COLUMN version INTEGER DEFAULT 1;
@@ -472,7 +472,7 @@ ALTER TABLE public.project_members ENABLE ROW LEVEL SECURITY;
 -- UNIQUE(project_id, user_id) 覆盖 project_id；后续 user-first 复合索引覆盖 user_id。
 -- 【添加】invited_by FK 约束索引（2026-03-18 v6.3.0: Advisor 全量解决）
 CREATE INDEX IF NOT EXISTS idx_project_members_invited_by ON public.project_members(invited_by);
-COMMENT ON INDEX idx_project_members_invited_by IS 
+COMMENT ON INDEX idx_project_members_invited_by IS
   'FK enforcement: invited_by references auth.users(id). ON DELETE SET NULL.';
 
 
@@ -563,7 +563,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_connections_project_source_target_active
   WHERE deleted_at IS NULL;
 
 -- 兼容旧表
-DO $$ 
+DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'connections' AND column_name = 'title') THEN
     ALTER TABLE public.connections ADD COLUMN title TEXT;
@@ -656,32 +656,32 @@ ALTER TABLE public.user_preferences ENABLE ROW LEVEL SECURITY;
 CREATE TABLE IF NOT EXISTS public.black_box_entries (
   -- 主键：由客户端 crypto.randomUUID() 生成
   id UUID PRIMARY KEY,
-  
+
   -- 外键关联
   project_id UUID REFERENCES public.projects(id) ON DELETE CASCADE,
   user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
-  
+
   -- 内容
   content TEXT NOT NULL,
-  
+
   -- 【2026-03-04 新增】专注控制台就地创建元数据
   focus_meta JSONB DEFAULT NULL,
-  
+
   -- 时间字段
   date DATE NOT NULL DEFAULT CURRENT_DATE,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW(),
   completed_at TIMESTAMPTZ DEFAULT NULL,
-  
+
   -- 状态字段
   is_read BOOLEAN NOT NULL DEFAULT FALSE,
   is_completed BOOLEAN NOT NULL DEFAULT FALSE,
   is_archived BOOLEAN NOT NULL DEFAULT FALSE,
-  
+
   -- 跳过/稍后提醒
   snooze_until DATE DEFAULT NULL,
   snooze_count INTEGER NOT NULL DEFAULT 0,
-  
+
   -- 软删除
   deleted_at TIMESTAMPTZ DEFAULT NULL
 );
@@ -870,14 +870,14 @@ GRANT ALL ON TABLE public.black_box_entries TO service_role;
 CREATE TABLE IF NOT EXISTS public.transcription_usage (
   -- 主键：由 Edge Function 使用 crypto.randomUUID() 生成
   id UUID PRIMARY KEY,
-  
+
   -- 外键关联
   user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
-  
+
   -- 使用量数据
   date DATE NOT NULL DEFAULT CURRENT_DATE,
   audio_seconds INTEGER DEFAULT 0,
-  
+
   -- 时间戳
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -917,7 +917,7 @@ ALTER TABLE public.transcription_usage ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS "transcription_usage_select_policy" ON public.transcription_usage;
 DROP POLICY IF EXISTS "transcription_usage_select" ON public.transcription_usage;
-CREATE POLICY "transcription_usage_select" ON public.transcription_usage 
+CREATE POLICY "transcription_usage_select" ON public.transcription_usage
   FOR SELECT TO authenticated USING ((SELECT auth.uid()) = user_id);
 
 -- INSERT/UPDATE/DELETE 由 Edge Function 使用 service_role 执行，无需用户策略
@@ -1478,7 +1478,7 @@ DECLARE
 BEGIN
   v_attachment_id := p_attachment->>'id';
   IF v_attachment_id IS NULL THEN RAISE EXCEPTION 'Attachment must have an id'; END IF;
-  
+
   SELECT project_id, attachments INTO v_project_id, v_current_attachments
   FROM public.tasks
   WHERE id = p_task_id
@@ -1486,11 +1486,11 @@ BEGIN
   IF NOT FOUND THEN RAISE EXCEPTION 'Task not found: %', p_task_id; END IF;
   IF NOT public.user_is_project_owner(v_project_id) THEN RAISE EXCEPTION 'not authorized'; END IF;
   IF v_current_attachments IS NULL THEN v_current_attachments := '[]'::JSONB; END IF;
-  
+
   IF EXISTS (SELECT 1 FROM jsonb_array_elements(v_current_attachments) AS elem WHERE elem->>'id' = v_attachment_id) THEN
     RETURN TRUE;
   END IF;
-  
+
   UPDATE public.tasks
   SET attachments = v_current_attachments || p_attachment, updated_at = NOW()
   WHERE id = p_task_id;
@@ -1513,10 +1513,10 @@ BEGIN
   IF NOT FOUND THEN RAISE EXCEPTION 'Task not found: %', p_task_id; END IF;
   IF NOT public.user_is_project_owner(v_project_id) THEN RAISE EXCEPTION 'not authorized'; END IF;
   IF v_current_attachments IS NULL OR jsonb_array_length(v_current_attachments) = 0 THEN RETURN TRUE; END IF;
-  
+
   SELECT COALESCE(jsonb_agg(elem), '[]'::JSONB) INTO v_new_attachments
   FROM jsonb_array_elements(v_current_attachments) AS elem WHERE elem->>'id' != p_attachment_id;
-  
+
   UPDATE public.tasks
   SET attachments = v_new_attachments, updated_at = NOW()
   WHERE id = p_task_id;
@@ -1805,26 +1805,26 @@ DECLARE
   old_id_to_new_id JSONB := '{}'::jsonb;
 BEGIN
   -- 获取项目数据
-  SELECT * INTO project_record 
-  FROM public.projects 
+  SELECT * INTO project_record
+  FROM public.projects
   WHERE id = p_project_id;
-  
+
   IF NOT FOUND THEN
     error_list := array_append(error_list, 'Project not found: ' || p_project_id::text);
     RETURN QUERY SELECT 0, 0, error_list;
     RETURN;
   END IF;
-  
+
   -- 检查是否已迁移
   IF project_record.migrated_to_v2 = TRUE THEN
     error_list := array_append(error_list, 'Project already migrated');
     RETURN QUERY SELECT 0, 0, error_list;
     RETURN;
   END IF;
-  
+
   -- 获取 tasks 数组
   task_data := COALESCE(project_record.data->'tasks', '[]'::jsonb);
-  
+
   -- 迁移每个任务
   FOR task_record IN SELECT * FROM jsonb_array_elements(task_data)
   LOOP
@@ -1834,13 +1834,13 @@ BEGIN
         (task_record->>'id')::uuid,
         gen_random_uuid()
       );
-      
+
       -- 存储 ID 映射
       old_id_to_new_id := old_id_to_new_id || jsonb_build_object(
-        task_record->>'id', 
+        task_record->>'id',
         task_id::text
       );
-      
+
       -- 插入任务（如果不存在）
       INSERT INTO public.tasks (
         id,
@@ -1875,13 +1875,13 @@ BEGIN
         COALESCE((task_record->>'y')::NUMERIC, 0),
         task_record->>'shortId',
         task_record->>'priority',
-        CASE WHEN task_record->>'dueDate' IS NOT NULL 
-             THEN (task_record->>'dueDate')::TIMESTAMP WITH TIME ZONE 
+        CASE WHEN task_record->>'dueDate' IS NOT NULL
+             THEN (task_record->>'dueDate')::TIMESTAMP WITH TIME ZONE
              ELSE NULL END,
         COALESCE(task_record->'tags', '[]'::jsonb),
         COALESCE(task_record->'attachments', '[]'::jsonb),
-        CASE WHEN task_record->>'deletedAt' IS NOT NULL 
-             THEN (task_record->>'deletedAt')::TIMESTAMP WITH TIME ZONE 
+        CASE WHEN task_record->>'deletedAt' IS NOT NULL
+             THEN (task_record->>'deletedAt')::TIMESTAMP WITH TIME ZONE
              ELSE NULL END,
         COALESCE(
           (task_record->>'createdDate')::TIMESTAMP WITH TIME ZONE,
@@ -1889,36 +1889,36 @@ BEGIN
         )
       )
       ON CONFLICT (id) DO NOTHING;
-      
+
       task_count := task_count + 1;
-      
+
     EXCEPTION WHEN OTHERS THEN
-      error_list := array_append(error_list, 
+      error_list := array_append(error_list,
         'Error migrating task: ' || SQLERRM || ' - ' || task_record::text
       );
     END;
   END LOOP;
-  
+
   -- 更新 parent_id 关系
   FOR task_record IN SELECT * FROM jsonb_array_elements(task_data)
   LOOP
     IF task_record->>'parentId' IS NOT NULL THEN
       BEGIN
-        UPDATE public.tasks 
+        UPDATE public.tasks
         SET parent_id = (old_id_to_new_id->>(task_record->>'parentId'))::UUID
         WHERE id = (old_id_to_new_id->>(task_record->>'id'))::UUID
         AND project_id = p_project_id;
       EXCEPTION WHEN OTHERS THEN
-        error_list := array_append(error_list, 
+        error_list := array_append(error_list,
           'Error updating parent_id: ' || SQLERRM
         );
       END;
     END IF;
   END LOOP;
-  
+
   -- 获取 connections 数组
   conn_data := COALESCE(project_record.data->'connections', '[]'::jsonb);
-  
+
   -- 迁移每个连接
   FOR conn_record IN SELECT * FROM jsonb_array_elements(conn_data)
   LOOP
@@ -1936,21 +1936,21 @@ BEGIN
         conn_record->>'description'
       )
       ON CONFLICT (project_id, source_id, target_id) DO NOTHING;
-      
+
       conn_count := conn_count + 1;
-      
+
     EXCEPTION WHEN OTHERS THEN
-      error_list := array_append(error_list, 
+      error_list := array_append(error_list,
         'Error migrating connection: ' || SQLERRM || ' - ' || conn_record::text
       );
     END;
   END LOOP;
-  
+
   -- 标记项目已迁移
-  UPDATE public.projects 
+  UPDATE public.projects
   SET migrated_to_v2 = TRUE
   WHERE id = p_project_id;
-  
+
   RETURN QUERY SELECT task_count, conn_count, error_list;
 END; $$;
 
@@ -1971,15 +1971,15 @@ DECLARE
   project_record RECORD;
   migration_result RECORD;
 BEGIN
-  FOR project_record IN 
-    SELECT id, title 
-    FROM public.projects 
+  FOR project_record IN
+    SELECT id, title
+    FROM public.projects
     WHERE migrated_to_v2 = FALSE OR migrated_to_v2 IS NULL
   LOOP
-    SELECT * INTO migration_result 
+    SELECT * INTO migration_result
     FROM migrate_project_data_to_v2(project_record.id);
-    
-    RETURN QUERY SELECT 
+
+    RETURN QUERY SELECT
       project_record.id,
       project_record.title,
       migration_result.tasks_migrated,
@@ -2080,21 +2080,21 @@ DECLARE
   total_deleted INTEGER := 0;
 BEGIN
   cutoff_date := NOW() - (retention_days || ' days')::INTERVAL;
-  
-  FOR task_record IN 
+
+  FOR task_record IN
     SELECT t.id AS task_id, t.project_id, t.attachments, p.owner_id
     FROM tasks t JOIN projects p ON t.project_id = p.id
     WHERE t.attachments IS NOT NULL AND jsonb_array_length(t.attachments) > 0
   LOOP
     FOR attachment IN SELECT * FROM jsonb_array_elements(task_record.attachments) LOOP
       IF attachment->>'deletedAt' IS NOT NULL AND (attachment->>'deletedAt')::TIMESTAMPTZ < cutoff_date THEN
-        paths_to_delete := array_append(paths_to_delete, 
+        paths_to_delete := array_append(paths_to_delete,
           task_record.owner_id || '/' || task_record.project_id || '/' || task_record.task_id || '/' || (attachment->>'id')
         );
         total_deleted := total_deleted + 1;
       END IF;
     END LOOP;
-    
+
     UPDATE tasks SET attachments = (
       SELECT jsonb_agg(att) FROM jsonb_array_elements(task_record.attachments) AS att
       WHERE att->>'deletedAt' IS NULL OR (att->>'deletedAt')::TIMESTAMPTZ >= cutoff_date
@@ -2103,7 +2103,7 @@ BEGIN
       WHERE att->>'deletedAt' IS NOT NULL AND (att->>'deletedAt')::TIMESTAMPTZ < cutoff_date
     );
   END LOOP;
-  
+
   RETURN QUERY SELECT total_deleted, paths_to_delete;
 END; $$;
 
@@ -2168,7 +2168,7 @@ DROP POLICY IF EXISTS "Project members can view attachments" ON storage.objects;
 -- ============================================
 -- 完成！
 -- ============================================
--- 
+--
 -- 数据库表：
 --   ✓ projects          - 项目
 --   ✓ project_members   - 项目成员（协作预留）
@@ -2217,11 +2217,11 @@ DO $$
 BEGIN
   -- 删除旧约束（如果存在）然后添加新约束
   ALTER TABLE user_preferences DROP CONSTRAINT IF EXISTS user_preferences_layout_direction_check;
-  ALTER TABLE user_preferences ADD CONSTRAINT user_preferences_layout_direction_check 
+  ALTER TABLE user_preferences ADD CONSTRAINT user_preferences_layout_direction_check
     CHECK (layout_direction IS NULL OR layout_direction IN ('ltr', 'rtl'));
-    
+
   ALTER TABLE user_preferences DROP CONSTRAINT IF EXISTS user_preferences_floating_window_pref_check;
-  ALTER TABLE user_preferences ADD CONSTRAINT user_preferences_floating_window_pref_check 
+  ALTER TABLE user_preferences ADD CONSTRAINT user_preferences_floating_window_pref_check
     CHECK (floating_window_pref IS NULL OR floating_window_pref IN ('auto', 'fixed'));
 EXCEPTION
   WHEN duplicate_object THEN NULL;
@@ -2261,9 +2261,9 @@ ALTER TABLE public.tasks REPLICA IDENTITY FULL;
 ALTER TABLE public.connections REPLICA IDENTITY FULL;
 
 -- 验证配置（可选，用于调试）
--- SELECT 
---   n.nspname as schemaname, 
---   c.relname as tablename, 
+-- SELECT
+--   n.nspname as schemaname,
+--   c.relname as tablename,
 --   CASE c.relreplident
 --     WHEN 'd' THEN 'DEFAULT (primary key)'
 --     WHEN 'n' THEN 'NOTHING'
@@ -2272,7 +2272,7 @@ ALTER TABLE public.connections REPLICA IDENTITY FULL;
 --   END as replica_identity
 -- FROM pg_class c
 -- JOIN pg_namespace n ON n.oid = c.relnamespace
--- WHERE n.nspname = 'public' 
+-- WHERE n.nspname = 'public'
 -- AND c.relname IN ('projects', 'tasks', 'connections');
 -- ============================================================
 -- [MIGRATION] 20251212_hardening_and_indexes.sql
@@ -2687,28 +2687,28 @@ BEGIN
   IF p_task_ids IS NULL OR array_length(p_task_ids, 1) IS NULL THEN
     RETURN result;
   END IF;
-  
+
   -- 速率限制检查
   IF array_length(p_task_ids, 1) > max_tasks_per_call THEN
     RAISE EXCEPTION 'Too many tasks in single request. Maximum: %', max_tasks_per_call;
   END IF;
-  
+
   -- 检查并更新调用次数
   INSERT INTO public.purge_rate_limits (user_id, call_count, window_start)
   VALUES (current_user_id, 1, now())
   ON CONFLICT (user_id) DO UPDATE SET
-    call_count = CASE 
-      WHEN purge_rate_limits.window_start < now() - interval '1 minute' 
-      THEN 1 
-      ELSE purge_rate_limits.call_count + 1 
+    call_count = CASE
+      WHEN purge_rate_limits.window_start < now() - interval '1 minute'
+      THEN 1
+      ELSE purge_rate_limits.call_count + 1
     END,
-    window_start = CASE 
-      WHEN purge_rate_limits.window_start < now() - interval '1 minute' 
-      THEN now() 
-      ELSE purge_rate_limits.window_start 
+    window_start = CASE
+      WHEN purge_rate_limits.window_start < now() - interval '1 minute'
+      THEN now()
+      ELSE purge_rate_limits.window_start
     END
   RETURNING call_count INTO rate_limit_record;
-  
+
   IF rate_limit_record.call_count > max_calls_per_minute THEN
     RAISE EXCEPTION 'Rate limit exceeded. Maximum % calls per minute', max_calls_per_minute;
   END IF;
@@ -2736,21 +2736,21 @@ BEGIN
         NULLIF(SUBSTRING((attachment->>'name') FROM '\\.([^.]+)$'), ''),
         'bin'
       );
-      
+
       attachment_paths := array_append(
         attachment_paths,
-        v_owner_id::text || '/' || 
-        p_project_id::text || '/' || 
-        task_record.task_id::text || '/' || 
+        v_owner_id::text || '/' ||
+        p_project_id::text || '/' ||
+        task_record.task_id::text || '/' ||
         (attachment->>'id') || '.' || file_ext
       );
-      
+
       IF attachment->>'thumbnailUrl' IS NOT NULL THEN
         attachment_paths := array_append(
           attachment_paths,
-          v_owner_id::text || '/' || 
-          p_project_id::text || '/' || 
-          task_record.task_id::text || '/' || 
+          v_owner_id::text || '/' ||
+          p_project_id::text || '/' ||
+          task_record.task_id::text || '/' ||
           (attachment->>'id') || '_thumb.webp'
         );
       END IF;
@@ -2889,8 +2889,8 @@ CREATE OR REPLACE VIEW public.active_tasks AS
 SELECT t.*
 FROM public.tasks t
 WHERE NOT EXISTS (
-  SELECT 1 
-  FROM public.task_tombstones tt 
+  SELECT 1
+  FROM public.task_tombstones tt
   WHERE tt.task_id = t.id
 )
 AND t.deleted_at IS NULL;
@@ -2903,13 +2903,13 @@ COMMENT ON VIEW public.active_tasks IS '
 客户端应优先使用此视图而非直接查询 tasks 表，以避免已删除任务复活。
 此视图解决了以下问题：
 1. 永久删除的任务在其他设备上复活
-2. 软删除的任务在其他设备上复活  
+2. 软删除的任务在其他设备上复活
 3. 待分配任务（stage = null）的删除也会在其他设备上恢复
 ';
 
 -- 1.1) 创建 active_connections 视图：对应 active_tasks（2026-01-07 补齐）
 CREATE OR REPLACE VIEW public.active_connections AS
-SELECT 
+SELECT
     c.id,
     c.project_id,
     c.source_id,
@@ -2921,8 +2921,8 @@ SELECT
     c.deleted_at
 FROM public.connections c
 WHERE NOT EXISTS (
-    SELECT 1 
-    FROM public.connection_tombstones ct 
+    SELECT 1
+    FROM public.connection_tombstones ct
     WHERE ct.connection_id = c.id
 )
 AND c.deleted_at IS NULL;
@@ -2978,7 +2978,7 @@ BEGIN
   SELECT COUNT(*) INTO inconsistent_count
   FROM public.task_tombstones tt
   INNER JOIN public.tasks t ON t.id = tt.task_id;
-  
+
   IF inconsistent_count > 0 THEN
     RAISE WARNING 'Found % tasks that exist in both tasks and task_tombstones tables. Consider running cleanup.', inconsistent_count;
   END IF;
@@ -3104,11 +3104,11 @@ CREATE TRIGGER check_version_increment
 -- ============================================================================
 
 -- 添加 tasks 表的 id 索引用于批量更新
-CREATE INDEX IF NOT EXISTS idx_tasks_id_project_id 
+CREATE INDEX IF NOT EXISTS idx_tasks_id_project_id
 ON public.tasks(id, project_id);
 
 -- 添加 connections 表的复合索引用于批量删除
-CREATE INDEX IF NOT EXISTS idx_connections_source_target 
+CREATE INDEX IF NOT EXISTS idx_connections_source_target
 ON public.connections(source_id, target_id);
 
 -- ============================================================================
@@ -3133,10 +3133,10 @@ COMMENT ON TABLE public.user_preferences IS '用户偏好表 - REPLICA IDENTITY 
 -- ============================================
 -- 为 connections 表添加软删除支持
 -- 日期: 2025-12-20
--- 
+--
 -- 目的：支持跨树连接的软删除同步
 -- 解决问题：在一个设备上删除的连接，在其他设备上会因为同步逻辑问题而"复活"
--- 
+--
 -- 解决方案：使用 deleted_at 字段标记软删除状态，而不是物理删除
 -- 这样删除操作可以正确同步到所有设备
 -- ============================================
@@ -3146,7 +3146,7 @@ ALTER TABLE public.connections
   ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP WITH TIME ZONE DEFAULT NULL;
 
 -- 2. 创建索引以加速查询未删除的连接
-CREATE INDEX IF NOT EXISTS idx_connections_deleted_at 
+CREATE INDEX IF NOT EXISTS idx_connections_deleted_at
   ON public.connections (deleted_at)
   WHERE deleted_at IS NULL;
 
@@ -3167,17 +3167,17 @@ BEGIN
     END IF;
     RAISE EXCEPTION 'Task must have either title or content (task_id: %)', NEW.id;
   END IF;
-  
+
   -- 规则 2: stage 必须非负（如果有值）
   IF NEW.stage IS NOT NULL AND NEW.stage < 0 THEN
     RAISE EXCEPTION 'Invalid stage value: % (must be >= 0)', NEW.stage;
   END IF;
-  
+
   -- 规则 3: rank 必须是正数（如果有值）
   IF NEW.rank IS NOT NULL AND NEW.rank < 0 THEN
     RAISE EXCEPTION 'Invalid rank value: % (must be >= 0)', NEW.rank;
   END IF;
-  
+
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
@@ -3232,11 +3232,11 @@ GRANT EXECUTE ON FUNCTION public.safe_delete_tasks(uuid[], uuid) TO authenticate
 -- ============================================
 -- 注释
 -- ============================================
-COMMENT ON FUNCTION public.safe_delete_tasks(uuid[], uuid) IS 
+COMMENT ON FUNCTION public.safe_delete_tasks(uuid[], uuid) IS
   '安全的批量删除任务 RPC。限制：单次最多删除 50 条或 50% 的任务。';
-COMMENT ON FUNCTION public.validate_task_data() IS 
+COMMENT ON FUNCTION public.validate_task_data() IS
   '任务数据校验触发器。确保 title/content 不同时为空，stage/rank 为有效值。';
-COMMENT ON TABLE public.circuit_breaker_logs IS 
+COMMENT ON TABLE public.circuit_breaker_logs IS
   '熔断操作审计日志。记录所有批量删除操作（包括被阻止和成功的）。';
 -- ============================================================
 -- [MIGRATION] 20260101000001_connection_tombstones.sql (已移至早期位置)
@@ -3248,7 +3248,7 @@ COMMENT ON TABLE public.circuit_breaker_logs IS
 -- ============================================================
 -- batch_upsert_tasks 函数：批量 upsert 任务主字段，附件变更仅允许走专用 RPC
 -- 用于批量操作的事务保护（≥20 个任务）
--- 
+--
 -- v6.0.0 修正：新增 parking_meta, expected_minutes, cognitive_load, wait_minutes 支持
 --              新增安全校验：TEXT 长度限制、数值范围约束
 -- v5.2.3 修正：移除不存在的 owner_id 列引用，通过 project.owner_id 进行权限校验
@@ -3407,7 +3407,7 @@ COMMENT ON FUNCTION public.batch_upsert_tasks IS 'Owner-only batch upsert for ta
 -- [MIGRATION] 20260101000003_optimistic_lock_strict_mode.sql
 -- ============================================================
 -- 乐观锁强化：版本冲突从警告改为拒绝
--- 
+--
 -- 变更说明：
 -- 1. 修改 check_version_increment() 函数，启用严格模式
 -- 2. 版本回退时直接抛出异常，拒绝更新
@@ -3420,7 +3420,7 @@ COMMENT ON FUNCTION public.check_version_increment IS 'Strict optimistic lock: r
 -- ============================================
 -- 附件数量服务端限制
 -- 日期：2026-01-01
--- 
+--
 -- 问题背景：
 -- - 客户端限制可被绕过（通过直接 API 调用）
 -- - 需要在服务端强制执行附件数量限制
@@ -3438,7 +3438,7 @@ BEGIN
     created_at TIMESTAMPTZ DEFAULT now(),
     updated_at TIMESTAMPTZ DEFAULT now()
   );
-  
+
   -- 插入附件数量限制配置
   INSERT INTO public.app_config (key, value, description)
   VALUES ('max_attachments_per_task', '20', '每个任务最大附件数量')
@@ -3453,7 +3453,7 @@ CREATE POLICY "app_config_select" ON public.app_config
   USING (true);
 
 -- 更新 append_task_attachment 函数，添加数量限制检查
-COMMENT ON FUNCTION public.purge_tasks_v3 IS 
+COMMENT ON FUNCTION public.purge_tasks_v3 IS
 '永久删除任务并返回附件存储路径。客户端需要调用 Storage API 删除返回的路径。';
 -- ============================================================
 -- [MIGRATION] 20260102000001_virus_scan_and_rls_fix.sql
@@ -3486,7 +3486,7 @@ CREATE TABLE IF NOT EXISTS public.attachment_scans (
   error_message TEXT,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-  
+
   -- 约束
   CONSTRAINT valid_status CHECK (status IN ('pending', 'scanning', 'clean', 'threat_detected', 'failed', 'quarantined', 'skipped')),
   CONSTRAINT attachment_scans_user_file_key UNIQUE (user_id, file_id)
@@ -3738,7 +3738,7 @@ CREATE TABLE IF NOT EXISTS public.quarantined_files (
 CREATE INDEX IF NOT EXISTS idx_quarantined_files_expires_at ON public.quarantined_files(expires_at);
 -- 【添加】quarantined_by FK 约束索引（2026-03-18 v6.3.0: Advisor 全量解决）
 CREATE INDEX IF NOT EXISTS idx_quarantined_files_quarantined_by ON public.quarantined_files(quarantined_by);
-COMMENT ON INDEX idx_quarantined_files_quarantined_by IS 
+COMMENT ON INDEX idx_quarantined_files_quarantined_by IS
   'FK enforcement: quarantined_by references auth.users(id). ON DELETE SET NULL.';
 ALTER TABLE public.quarantined_files ENABLE ROW LEVEL SECURITY;
 
@@ -3932,21 +3932,21 @@ BEGIN
   -- 通过 project.owner_id 关联查询（tasks 表没有 user_id 列）
   RETURN json_build_object(
     'pending', (
-      SELECT COUNT(*) 
+      SELECT COUNT(*)
       FROM public.tasks t
       JOIN public.projects p ON t.project_id = p.id
-      WHERE p.owner_id = current_user_id 
+      WHERE p.owner_id = current_user_id
         AND p.deleted_at IS NULL
-        AND t.status = 'active' 
+        AND t.status = 'active'
         AND t.deleted_at IS NULL
     ),
     'completed', (
-      SELECT COUNT(*) 
+      SELECT COUNT(*)
       FROM public.tasks t
       JOIN public.projects p ON t.project_id = p.id
-      WHERE p.owner_id = current_user_id 
+      WHERE p.owner_id = current_user_id
         AND p.deleted_at IS NULL
-        AND t.status = 'completed' 
+        AND t.status = 'completed'
         AND t.deleted_at IS NULL
     ),
     'projects', (SELECT COUNT(*) FROM public.projects WHERE owner_id = current_user_id AND deleted_at IS NULL)
@@ -3955,7 +3955,7 @@ END;
 $$;
 
 -- 添加函数注释
-COMMENT ON FUNCTION public.get_dashboard_stats() IS 
+COMMENT ON FUNCTION public.get_dashboard_stats() IS
   'Dashboard 统计聚合函数 - 返回用户的待处理任务数、已完成任务数和项目数。
    通过 project.owner_id 关联查询（tasks 表没有 user_id 列）。
    使用 SECURITY INVOKER 保持 projects/tasks RLS 生效。';
@@ -3969,11 +3969,11 @@ REVOKE EXECUTE ON FUNCTION public.get_dashboard_stats() FROM anon, public;
 -- ============================================
 -- RLS 策略 initplan 优化审计修复
 -- 日期: 2026-01-03
--- 
+--
 -- 问题: connection_tombstones 表的 RLS 策略未使用 (select auth.uid())
 -- 影响: 每行都会重复计算 auth.uid()，影响性能
 -- 解决: 使用 initplan 缓存 auth.uid() 值
--- 
+--
 -- @see docs/plan_save.md Phase 1.4
 -- ============================================
 
@@ -4008,10 +4008,10 @@ COMMENT ON POLICY "connection_tombstones_insert" ON public.connection_tombstones
 -- ============================================================
 -- 添加 get_server_time RPC 函数
 -- ============================================================
--- 
+--
 -- 用途：为客户端提供服务端时间，用于时钟偏移检测
 -- 被调用：clock-sync.service.ts
--- 
+--
 -- 版本: 1.0.0
 -- 日期: 2026-01-03
 -- ============================================================
@@ -4043,12 +4043,12 @@ GRANT EXECUTE ON FUNCTION public.get_server_time() TO anon;
 -- ============================================================
 -- 性能优化：批量加载 RPC 函数
 -- ============================================================
--- 
+--
 -- 优化目标：
 --   - 将 4+ 个 API 请求合并为 1 个 RPC 调用
 --   - 减少 70% 的网络往返时间
 --   - 首屏加载时间提升 3-4 秒
--- 
+--
 -- 版本: 1.0.0
 -- 日期: 2026-01-26
 -- ============================================================
@@ -4068,16 +4068,16 @@ DECLARE
 BEGIN
   -- 获取当前用户 ID
   v_user_id := auth.uid();
-  
+
   -- 权限检查：个人版仅允许 owner 访问
   IF NOT public.user_has_project_access(p_project_id) THEN
     RAISE EXCEPTION 'Access denied to project %', p_project_id;
   END IF;
-  
+
   -- 构建完整项目数据（单次查询）
   SELECT json_build_object(
     'project', (
-      SELECT row_to_json(p.*) 
+      SELECT row_to_json(p.*)
       FROM (
         SELECT id, owner_id, title, description, created_date, updated_at, deleted_at, version
         FROM public.projects WHERE id = p_project_id
@@ -4086,9 +4086,9 @@ BEGIN
     'tasks', COALESCE((
       SELECT json_agg(row_to_json(t.*))
       FROM (
-        SELECT id, title, content, stage, parent_id, "order", rank, status, x, y, 
+        SELECT id, title, content, stage, parent_id, "order", rank, status, x, y,
                updated_at, deleted_at, short_id
-        FROM public.tasks 
+        FROM public.tasks
         WHERE project_id = p_project_id
         ORDER BY stage NULLS LAST, "order"
       ) t
@@ -4097,27 +4097,27 @@ BEGIN
       SELECT json_agg(row_to_json(c.*))
       FROM (
         SELECT id, source_id, target_id, title, description, deleted_at, updated_at
-        FROM public.connections 
+        FROM public.connections
         WHERE project_id = p_project_id
       ) c
     ), '[]'::json),
     'task_tombstones', COALESCE((
       SELECT json_agg(task_id)
-      FROM public.task_tombstones 
+      FROM public.task_tombstones
       WHERE project_id = p_project_id
     ), '[]'::json),
     'connection_tombstones', COALESCE((
       SELECT json_agg(connection_id)
-      FROM public.connection_tombstones 
+      FROM public.connection_tombstones
       WHERE project_id = p_project_id
     ), '[]'::json)
   ) INTO v_result;
-  
+
   RETURN v_result;
 END;
 $$;
 
-COMMENT ON FUNCTION public.get_full_project_data(UUID) IS 
+COMMENT ON FUNCTION public.get_full_project_data(UUID) IS
   '批量加载项目完整数据，合并 4+ 请求为 1 个，性能提升 70%';
 
 -- 权限设置
@@ -4138,25 +4138,25 @@ DECLARE
   v_user_id UUID;
 BEGIN
   v_user_id := auth.uid();
-  
+
   SELECT json_build_object(
     'projects', COALESCE((
       SELECT json_agg(row_to_json(p.*))
       FROM (
         SELECT id, owner_id, title, description, created_date, updated_at, deleted_at, version
-        FROM public.projects 
+        FROM public.projects
         WHERE owner_id = v_user_id AND deleted_at IS NULL AND updated_at > p_since_timestamp
         ORDER BY updated_at DESC
       ) p
     ), '[]'::json),
     'server_time', now()
   ) INTO v_result;
-  
+
   RETURN v_result;
 END;
 $$;
 
-COMMENT ON FUNCTION public.get_user_projects_meta(TIMESTAMPTZ) IS 
+COMMENT ON FUNCTION public.get_user_projects_meta(TIMESTAMPTZ) IS
   '增量加载用户项目列表，支持增量同步';
 
 -- 权限设置
@@ -4194,24 +4194,24 @@ DECLARE
   v_user_id UUID;
 BEGIN
   v_user_id := auth.uid();
-  
+
   SELECT json_build_object(
     'projects', COALESCE((
       SELECT json_agg(row_to_json(p.*) ORDER BY p.updated_at DESC)
       FROM (
         SELECT id, owner_id, title, description, created_date, updated_at, deleted_at, version
-        FROM public.projects 
+        FROM public.projects
         WHERE owner_id = v_user_id AND deleted_at IS NULL AND updated_at > p_since_timestamp
       ) p
     ), '[]'::json),
     'server_time', now()
   ) INTO v_result;
-  
+
   RETURN v_result;
 END;
 $$;
 
-COMMENT ON FUNCTION public.get_all_projects_data(TIMESTAMPTZ) IS 
+COMMENT ON FUNCTION public.get_all_projects_data(TIMESTAMPTZ) IS
   '已退役的 owner-only 项目 JSON 聚合；客户端改用 keyset 项目查询与 list_project_heads_since';
 
 REVOKE ALL ON FUNCTION public.get_all_projects_data(TIMESTAMPTZ)
@@ -4233,7 +4233,7 @@ DECLARE
   v_user_id UUID;
 BEGIN
   v_user_id := auth.uid();
-  
+
   SELECT json_build_object(
     'projects', COALESCE((
       SELECT json_agg(json_build_object(
@@ -4253,7 +4253,7 @@ BEGIN
       ) ORDER BY p.updated_at DESC)
       FROM (
         SELECT *
-        FROM public.projects 
+        FROM public.projects
         WHERE owner_id = v_user_id
           AND deleted_at IS NULL
         ORDER BY updated_at DESC
@@ -4263,7 +4263,7 @@ BEGIN
     'total', (SELECT COUNT(*) FROM public.projects WHERE owner_id = v_user_id AND deleted_at IS NULL),
     'server_time', now()
   ) INTO v_result;
-  
+
   RETURN v_result;
 END;
 $$;
@@ -4275,10 +4275,10 @@ COMMENT ON FUNCTION public.get_projects_list(INT, INT) IS
 REVOKE ALL ON FUNCTION public.get_projects_list(INT, INT)
   FROM PUBLIC, anon, authenticated, service_role;
 
-CREATE INDEX IF NOT EXISTS idx_tasks_project_order 
+CREATE INDEX IF NOT EXISTS idx_tasks_project_order
   ON public.tasks(project_id, stage, "order");
 
-CREATE INDEX IF NOT EXISTS idx_connections_project 
+CREATE INDEX IF NOT EXISTS idx_connections_project
   ON public.connections(project_id);
 
 -- ============================================================

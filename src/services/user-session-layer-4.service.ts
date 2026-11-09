@@ -95,12 +95,12 @@ export abstract class UserSessionLayer4 extends UserSessionLayer3 {
   }
 
 
-  
+
   /** 合并单个项目数据（LWW 竞态保护） */
   protected async mergeSingleProject(cloudProject: Project, userId: string): Promise<void> {
     const currentProjects = this.projectState.getProjectsWithCurrentData();
     const localProject = currentProjects.find(project => project.id === cloudProject.id);
-    
+
     if (!localProject) {
       // 新项目，直接添加
       this.projectState.setProjects([...currentProjects, cloudProject]);
@@ -121,26 +121,26 @@ export abstract class UserSessionLayer4 extends UserSessionLayer3 {
         restoredTaskCount,
       });
     }
-    
+
     // 【LWW 竞态保护 2026-01-27】
     // 检查是否有本地未同步的修改（脏数据）
     const hasPendingChanges = this.syncCoordinator.hasPendingChangesForProject(cloudProject.id, userId);
-    
+
     if (hasPendingChanges) {
       this.logger.debug('检测到本地未同步修改，使用 LWW 合并');
       // 逐个任务比较 updatedAt，保留最新的
       const mergedTasks = this.mergeTasksWithLWW(localProject.tasks, normalizedCloudProject.tasks);
       const mergedConnections = this.mergeConnectionsWithLWW(
-        localProject.connections, 
+        localProject.connections,
         normalizedCloudProject.connections
       );
-      
+
       const mergedProject: Project = {
         ...normalizedCloudProject,
         tasks: mergedTasks,
         connections: mergedConnections
       };
-      
+
       const updatedProjects = currentProjects.map((p: Project) =>
         p.id === cloudProject.id ? mergedProject : p
       );
@@ -503,7 +503,7 @@ export abstract class UserSessionLayer4 extends UserSessionLayer3 {
   }
 
 
-  
+
   /** 后台静默同步云端数据（不阻塞 UI，Delta Sync 优先） */
   protected async startBackgroundSync(
     userId: string,
@@ -531,14 +531,14 @@ export abstract class UserSessionLayer4 extends UserSessionLayer3 {
   }
 
 
-  
+
   /** 将本地数据迁移到云端（首次登录场景） */
   protected async migrateLocalToCloud(localProjects: Project[], userId: string): Promise<void> {
     this.logger.info('首次登录，迁移本地离线数据到云端');
-    
+
     let syncedCount = 0;
     const failedProjects: string[] = [];
-    
+
     for (const project of localProjects) {
       this.logger.debug('迁移项目', { projectId: project.id, name: project.name });
       const rebalanced = this.layoutService.rebalance(project);
@@ -551,14 +551,14 @@ export abstract class UserSessionLayer4 extends UserSessionLayer3 {
         this.logger.warn('项目迁移失败', { name: project.name, result });
       }
     }
-    
+
     if (syncedCount > 0) {
       this.toastService.success(
         '本地数据已同步',
         `已将 ${syncedCount} 个项目同步到云端`
       );
     }
-    
+
     if (failedProjects.length > 0) {
       this.toastService.warning(
         '部分项目同步失败',
