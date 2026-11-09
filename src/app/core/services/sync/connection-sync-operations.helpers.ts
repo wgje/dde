@@ -82,7 +82,7 @@ export type ConnectionReplayRetryHandler = (
 
 export function createConnectionReplayRetryHandler(options: {
   request: { replayFence?: ConnectionActionQueueReplayFence; replayHandoff?: boolean };
-  enqueue: ConnectionReplayRetryHandler;
+  enqueueRetry: ConnectionReplayRetryHandler;
   enqueueFromActionQueue: (
     fence: ConnectionActionQueueReplayFence,
   ) => Promise<{ status: 'current' | 'committed' | 'deferred' }>;
@@ -97,7 +97,7 @@ export function createConnectionReplayRetryHandler(options: {
   ) => {
     const fence = options.request.replayFence;
     if (!fence) {
-      return await options.enqueue(
+      return await options.enqueueRetry(
         connection, projectId, sourceUserId, allowWhenSessionExpired, operationId, lastFailure,
       );
     }

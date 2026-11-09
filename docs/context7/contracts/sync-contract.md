@@ -115,6 +115,13 @@ RetryQueue behavior:
 - handles capacity using durable-first strategy
 - exposes terminal or rejected states when replay cannot proceed
 
+Connection replay keeps two retry paths explicit: the unfenced callback is named
+`enqueueRetry`, while an ActionQueue replay fence uses
+`ConnectionRetryEnqueueService.enqueueConnectionUpsertFromActionQueue()` and
+the durable `RetryQueueService.commitConnectionReplay()` path. The callback
+name does not change behavior; it prevents the durable ActionQueue contract
+guard from confusing a retry callback with the legacy synchronous queue API.
+
 ## Local Backup Restore Contract
 
 The settings restore is an owner-scoped transaction across local persistence layers. It must keep writers quiescent while stages run, preserve queue `operationId` values, and compensate in reverse stage order when a stage fails.

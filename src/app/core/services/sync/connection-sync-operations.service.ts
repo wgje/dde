@@ -112,7 +112,7 @@ export class ConnectionSyncOperationsService {
   private createConnectionRetryHandler(request: ConnectionPushRequest) {
     return createConnectionReplayRetryHandler({
       request,
-      enqueue: this.enqueueConnectionRetry,
+      enqueueRetry: this.enqueueConnectionRetry,
       enqueueFromActionQueue: fence =>
         this.connectionRetryEnqueue.enqueueConnectionUpsertFromActionQueue(fence),
     });
