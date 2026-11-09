@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 
 const transcribeFunctionPath = 'supabase/functions/transcribe/index.ts';
 const cleanupFunctionPath = 'supabase/functions/cleanup-attachments/index.ts';
+const cleanupOutboxPath = 'supabase/functions/cleanup-attachments/cleanup-outbox.ts';
 const virusScanFunctionPath = 'supabase/functions/virus-scan/index.ts';
 const virusScanConfigPath = 'src/config/virus-scan.config.ts';
 const supabaseConfigPath = 'supabase/config.toml';
@@ -265,14 +266,19 @@ describe('transcription quota and maintenance hardening contract', () => {
 
   it('claims expired attachment rows with updated_at CAS before deleting Storage objects', () => {
     const source = readWorkspaceFile(cleanupFunctionPath);
-    const dbUpdateIndex = source.indexOf('.from("tasks")');
-    const storageRemoveIndex = source.indexOf('.from("attachments")');
+    const outbox = readWorkspaceFile(cleanupOutboxPath);
+    const claimIndex = source.lastIndexOf('await claimTaskAttachmentCleanup(');
+    const drainIndex = source.indexOf('await drainAttachmentCleanupOutbox(');
 
-    expect(dbUpdateIndex).toBeGreaterThanOrEqual(0);
-    expect(storageRemoveIndex).toBeGreaterThanOrEqual(0);
-    expect(dbUpdateIndex).toBeLessThan(storageRemoveIndex);
+    expect(claimIndex).toBeGreaterThanOrEqual(0);
+    expect(drainIndex).toBeGreaterThanOrEqual(0);
+    expect(claimIndex).toBeLessThan(drainIndex);
     expect(source).toContain('claimedAttachmentsToDelete');
-    expect(source).toContain('.eq("updated_at", taskState.updatedAt)');
+    expect(outbox).toContain('claim_task_attachment_cleanup');
+    expect(outbox).toContain('p_expected_updated_at: request.expectedUpdatedAt');
+    expect(outbox).toContain('client.storage.from(job.bucket).remove');
+    expect(outbox).toContain('complete_attachment_cleanup_job');
+    expect(outbox).toContain('fail_attachment_cleanup_job');
     expect(source).toContain('Skipped DB update - task changed during cleanup');
   });
 
@@ -293,14 +299,14 @@ describe('transcription quota and maintenance hardening contract', () => {
 
   it('logs no-op attachment cleanup runs so the scan cursor advances even without expired attachments', () => {
     const source = readWorkspaceFile(cleanupFunctionPath);
-    const noExpiredBlock = blockAfter(source, 'if (attachmentsToDelete.length === 0)');
-    const returnIndex = noExpiredBlock.indexOf('return new Response');
-    const beforeReturn = noExpiredBlock.slice(0, returnIndex);
+    const logIndex = source.indexOf('await logCleanup(');
+    const noExpiredIndex = source.indexOf('attachmentsToDelete.length === 0');
 
-    expect(returnIndex).toBeGreaterThanOrEqual(0);
-    expect(beforeReturn).toContain('await logCleanup');
-    expect(beforeReturn).toContain('nextCursor');
-    expect(beforeReturn).toContain('tasksProcessed');
+    expect(logIndex).toBeGreaterThanOrEqual(0);
+    expect(noExpiredIndex).toBeGreaterThanOrEqual(0);
+    expect(logIndex).toBeLessThan(noExpiredIndex);
+    expect(source).toContain('nextCursor');
+    expect(source).toContain('tasksProcessed');
   });
 
   it('uses non-persistent service-role Supabase clients in Edge Functions', () => {
@@ -361,10 +367,15 @@ describe('transcription quota and maintenance hardening contract', () => {
 
     expect(normalized).toContain("const { error: saveError } = await supabase.from('attachment_scans').upsert");
     expect(normalized).toContain("if (saveError) { throw new Error(`Failed to save scan result:");
-    expect(normalized).toContain('const { data: existing, error: lookupError } = await supabase');
-    expect(normalized).toContain('if (lookupError) {');
-    expect(normalized).toContain('const { error: updateError } = await supabase');
-    expect(normalized).toContain('if (updateError) {');
+    const markFailureIndex = source.indexOf('async function markRescanFailed(');
+    expect(markFailureIndex).toBeGreaterThanOrEqual(0);
+    const markFailureSource = normalize(source.slice(markFailureIndex));
+    expect(markFailureSource).toContain('.update({');
+    expect(markFailureSource).toContain('status: SCAN_STATUS.FAILED');
+    expect(markFailureSource).toContain(".eq('rescan_token', rescanToken)");
+    expect(markFailureSource).toContain(".eq('status', SCAN_STATUS.SCANNING)");
+    expect(markFailureSource).toContain('failureUpdateError');
+    expect(markFailureSource).toContain('return !!updatedScan');
   });
 
   it('virus scan status lookups use a narrow projection on service-role reads', () => {

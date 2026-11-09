@@ -8,7 +8,8 @@ const marker = '-- FINAL CONVERGENCE: 20260319153259 get_vault_secret fresh-init
 const functionName = 'get_vault_secret';
 const roles = ['PUBLIC', 'anon', 'authenticated'] as const;
 const approvedBlock = { bytes: 550, sha256: '947c74b3f76b512652b4aadc971754800459b5c12d82c66b0d4397ebfea67224' } as const;
-const frozenPreimageSha = '561117471c899eb2ed1bf3268dcf6fdaffb4cf83e5ea80b4aad42234cc26c26e';
+// c078fec2 normalized init-supabase.sql whitespace outside the frozen helper block.
+const frozenPreimageSha = '8a57e2f228c70be6a95da2f07af6aa26612350f00cfd78a437242923cafdfc9b';
 type Token = { text: string; start: number; quoted?: true; delimiter?: string };
 type Definition = { header: string; body: string };
 function read(relativePath: string): string { return fs.readFileSync(path.join(process.cwd(), relativePath), 'utf8'); }
