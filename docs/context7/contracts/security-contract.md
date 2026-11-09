@@ -2,7 +2,7 @@
 title: Security Contract
 status: canonical
 audience: ai-agent, maintainer, operator
-last_verified: 2026-06-09
+last_verified: 2026-11-09
 source_paths:
   - .env.template
   - scripts/contracts/check-secrets.cjs
@@ -93,6 +93,10 @@ npm run docs:context7:validate
 ```
 
 Add targeted service or E2E tests based on the touched layer.
+
+## Auth Callback Test Isolation
+
+Auth callback unit and forced-isolate tests must inject a non-production Supabase URL and a dummy anon key through the test module boundary. These values are deterministic fixtures only; they are never runtime credentials and must not be copied into deployment environment files. The exchange and session calls remain mocked in this layer, while browser integration tests provide the separate evidence for configured Supabase environments.
 
 ## Security Change Checklist
 
