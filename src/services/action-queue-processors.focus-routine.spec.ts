@@ -448,26 +448,32 @@ describe('ActionQueueProcessorsService focus and routine processors', () => {
     expect(mockActionQueueService.moveToDeadLetter).toHaveBeenCalled();
   });
 
-  it('processor should catch exceptions and return structured failure', async () => {
-    mockSyncService.pushTask.mockRejectedValueOnce(new Error('network error'));
+  it('task:create should defer a durable replay when its queue context is missing', async () => {
     const handler = getProcessor('task:create');
 
     const result = await handler({
+      id: '11111111-1111-4111-8111-111111111111',
+      operationId: '22222222-2222-4222-8222-222222222222',
+      type: 'create',
+      entityType: 'task',
+      entityId: 't-1',
       payload: { task: { id: 't-1' }, projectId: 'p-1', sourceUserId: 'test-user' },
     });
 
     expect(result).toEqual({
-      outcome: 'failed',
+      outcome: 'defer-retry',
       error: expect.objectContaining({
-        message: 'network error',
+        code: 'SYNC_TASK_WRITE_FAILED',
         details: expect.objectContaining({
-          reason: 'task-processor-failed',
+          reason: 'task-sync-failed',
           actionType: 'task:create',
           taskId: 't-1',
           projectId: 'p-1',
         }),
       }),
     });
-    expect(mockLoggerCategory.error).toHaveBeenCalled();
+    expect(mockSyncService.pushTask).not.toHaveBeenCalled();
+    expect(mockActionQueueService.markActionSyncedRemotely).not.toHaveBeenCalled();
+    expect(mockActionQueueService.moveToDeadLetter).not.toHaveBeenCalled();
   });
 });

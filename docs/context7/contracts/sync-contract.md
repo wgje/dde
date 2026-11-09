@@ -2,7 +2,7 @@
 title: Sync Contract
 status: canonical
 audience: ai-agent, maintainer
-last_verified: 2026-11-04
+last_verified: 2026-11-09
 source_paths:
   - src/config/sync.config.ts
   - src/app/core/services/sync/
@@ -125,6 +125,15 @@ Connection replay keeps two retry paths explicit: the unfenced callback is named
 the durable `RetryQueueService.commitConnectionReplay()` path. The callback
 name does not change behavior; it prevents the durable ActionQueue contract
 guard from confusing a retry callback with the legacy synchronous queue API.
+
+ActionQueue processor tests run with shared Vitest modules in some matrix lanes.
+Their harness reset must clear one-shot mock return queues for `findItemForOwner`
+and `isQueueViewCurrent` before restoring the normal defaults. A stale one-shot
+value must never change a later owner's retry payload or queue-view decision.
+When a durable task processor lacks its required `QueueProcessorContext`, it
+fails closed by returning `defer-retry` with `SYNC_TASK_WRITE_FAILED`; it must
+not perform a remote write, acknowledge the action as synced, or move it to a
+dead-letter terminal state.
 
 ## Local Backup Restore Contract
 

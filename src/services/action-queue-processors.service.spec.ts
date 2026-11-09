@@ -39,6 +39,21 @@ describe('ActionQueueProcessorsService', () => {
     resetActionQueueTaskReplayMocks();
   });
 
+  it('clears queued one-time owner and queue-view mock results when resetting the shared harness', () => {
+    mockActionQueueService.isQueueViewCurrent.mockReturnValueOnce(false);
+    mockRetryQueueService.findItemForOwner.mockReturnValueOnce({
+      type: 'project',
+      data: { id: 'stale-project' },
+      sourceUserId: 'stale-owner',
+      taskIdsToDelete: [],
+    });
+
+    setupActionQueueProcessorsHarness();
+
+    expect(mockActionQueueService.isQueueViewCurrent()).toBe(true);
+    expect(mockRetryQueueService.findItemForOwner('project', 'stale-project', 'stale-owner')).toBeUndefined();
+  });
+
   // ── Registration ───────────────────────────────────────────
 
   it('should register 17 processors', () => {

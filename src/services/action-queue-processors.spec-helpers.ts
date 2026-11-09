@@ -194,11 +194,13 @@ function resetProcessorHarnessMocks(): void {
   mockSyncService.markSyncRecoveredIfIdle.mockReset();
   mockRetryQueueService.removeByProjectIdDurablyForOwner.mockReset();
   mockRetryQueueService.removeByProjectIdDurablyForOwner.mockResolvedValue(true);
+  mockRetryQueueService.findItemForOwner.mockReset();
   mockRetryQueueService.findItemForOwner.mockReturnValue(undefined);
   mockConflictStorageService.saveConflict.mockResolvedValue(true);
   mockActionQueueService.getCurrentQueueViewGeneration.mockReturnValue(1);
   mockActionQueueService.getProjectMutationViewGeneration.mockReset();
   mockActionQueueService.getProjectMutationViewGeneration.mockReturnValue(0);
+  mockActionQueueService.isQueueViewCurrent.mockReset();
   mockActionQueueService.isQueueViewCurrent.mockReturnValue(true);
   mockActionQueueService.getCurrentOwnerStorageLoadState.mockReset();
   mockActionQueueService.getCurrentOwnerStorageLoadState.mockReturnValue('loading');
