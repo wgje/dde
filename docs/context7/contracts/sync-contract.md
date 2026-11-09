@@ -115,6 +115,12 @@ RetryQueue behavior:
 - handles capacity using durable-first strategy
 - exposes terminal or rejected states when replay cannot proceed
 
+Attachment replay fence tests wait for the observable upload-start call before
+switching owner or releasing a deferred upload. This keeps the test aligned
+with the asynchronous queue boundary while preserving the production fence:
+after an owner change, the original owner's attachment bytes, task metadata,
+retry handoff, and pending-upload removal remain untouched.
+
 The task-row mapper contract test covers this rejection path.`n`nRemote task rows without a string content field are rejected before tombstone
 materialization. They must not be normalized into an empty body, because that
 would turn an incomplete response into visible data loss.
