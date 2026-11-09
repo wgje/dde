@@ -15,7 +15,7 @@ on:
         type: choice
         options: [production, preview]
       deploy:
-        description: 'Actually upload to Cloudflare Pages'
+        description: 'Actually upload to Cloudflare Pages (manual override; automatic uploads are paused)'
         required: true
         default: false
         type: boolean
@@ -75,7 +75,10 @@ jobs:
     env:
       DEPLOYMENT_TARGET: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') && 'production' || (github.event_name == 'workflow_dispatch' && inputs.target == 'production' && 'production' || 'preview') }}
       GITHUB_ENVIRONMENT_NAME: ${{ (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.target == 'preview')) && 'NanoFlow-Preview' || '' }}
-      SHOULD_DEPLOY: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'pull_request' || github.event.inputs.deploy == 'true' }}
+      # Quota hold: push and pull_request events build and validate, but never
+      # upload to Cloudflare. A workflow_dispatch with deploy=true is the only
+      # remaining upload path until automatic deployment is explicitly resumed.
+      SHOULD_DEPLOY: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.deploy == 'true' }}
 
     steps:
       - name: Checkout
