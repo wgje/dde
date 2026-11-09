@@ -414,3 +414,4 @@ function main() {
 }
 if (require.main === module) main();
 module.exports = { generateArtifactManifest, main, readCandidateCensus };
+Object.defineProperty(module.exports, 'sharedIdentityBytes', { value: sharedIdentityBytes });

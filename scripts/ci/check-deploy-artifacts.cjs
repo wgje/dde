@@ -37,7 +37,7 @@ const {
   parseNgsw, projectStats, requiredCacheableBrowserOutputs, validateNgswPost, sameArtifactIdentity,
   readBrowserFiles, canonicalDigest,
 } = require('../lib/artifact-stats-evidence.cjs');
-const { readCandidateCensus } = require('../generate-artifact-manifest.cjs');
+const { readCandidateCensus, sharedIdentityBytes } = require('../generate-artifact-manifest.cjs');
 
 const REPO_ROOT = path.resolve(__dirname, '../..');
 const DIST = path.resolve(process.env.ARTIFACT_DIST_DIR || path.join(REPO_ROOT, 'dist', 'browser'));
@@ -560,10 +560,24 @@ try {
   }
   const finalFiles = [...browserEvidence.entries()]
     .filter(([requestPath]) => requestPath !== '/artifact-manifest.json')
-    .map(([requestPath, record]) => ({ path: requestPath, bytes: record.size, sha256: record.sha256 }))
+    .map(([requestPath, record]) => {
+      const identityBytes = sharedIdentityBytes({ requestPath, bytes: record.bytes });
+      return {
+        path: requestPath,
+        bytes: identityBytes.length,
+        sha256: crypto.createHash('sha256').update(identityBytes).digest('hex'),
+      };
+    })
     .sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
   const diskFinalFiles = [...manifestDiskFiles.entries()]
-    .map(([requestPath, record]) => ({ path: requestPath, bytes: record.content.length, sha256: crypto.createHash('sha256').update(record.content).digest('hex') }))
+    .map(([requestPath, record]) => {
+      const identityBytes = sharedIdentityBytes({ requestPath, bytes: record.content });
+      return {
+        path: requestPath,
+        bytes: identityBytes.length,
+        sha256: crypto.createHash('sha256').update(identityBytes).digest('hex'),
+      };
+    })
     .sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
   const shared = metrics.sharedIdentity;
   const sharedKeys = 'candidateSetDigest,fileCount,filesDigest,readerReceiptId,stable';

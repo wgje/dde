@@ -128,15 +128,25 @@ describe('ProjectStateService restore quiescence', () => {
     let prepare: ReturnType<typeof quiescenceService.prepare> | null = null;
 
     try {
-      writer = localBackupUiRestoreWriterQuiescence.runAsync(ownerUserId, 'project-state', async () => {
+      writer = localBackupUiRestoreWriterQuiescence.runAsync(ownerUserId, 'project-state', async continuation => {
         markWriteStarted();
         await heldWrite;
-        service.updateProjects(projects => projects.map(project => ({ ...project, name: 'finished' })));
+        service.updateProjects(
+          projects => projects.map(project => ({ ...project, name: 'finished' })),
+          undefined,
+          continuation,
+        );
       });
       await writeStarted;
       prepare = quiescenceService.prepare(ownerUserId);
       const sentinelKey = getLocalBackupUiRestoreQuiescenceSentinelStorageKey(ownerUserId);
       await vi.waitFor(() => expect(localStorage.getItem(sentinelKey)).not.toBeNull());
+
+      expect(() => service.updateProjects(projects => projects.map(project => ({
+        ...project,
+        name: 'unrelated same-owner write',
+      })))).toThrow(LocalBackupUiRestoreWriterPausedError);
+      expect(service.projects()[0]?.name).toBe('Project');
 
       releaseWrite();
       await writer;

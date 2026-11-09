@@ -2,7 +2,7 @@
 title: 私有部署
 status: canonical
 audience: operator
-last_verified: 2026-07-15
+last_verified: 2026-11-09
 category: deploy-operate
 source_paths:
   - README.md
@@ -14,6 +14,7 @@ source_paths:
   - src/app/shared/modals/config-help-modal.component.ts
   - src/services/supabase-client-configuration.ts
   - vercel.json
+  - .github/workflows/vercel-prebuilt-recovery.yml
   - netlify.toml
   - railway.json
 ---
@@ -25,6 +26,7 @@ NanoFlow 当前主线适合部署成私人使用的 PWA。前端可以部署到�
 ## 本文内容
 
 - [选择部署平台](#选择部署平台)
+- [暂停 Vercel Git 自动部署](#暂停-vercel-git-自动部署)
 - [先确认谁该修复配置](#先确认谁该修复配置)
 - [配置前端环境](#配置前端环境)
 - [配置错误的排查顺序](#配置错误的排查顺序)
@@ -44,6 +46,19 @@ NanoFlow 当前主线适合部署成私人使用的 PWA。前端可以部署到�
 | Railway | 特定部署备选 | 需要沿用已有 Railway 配置 |
 
 建议只选一个主平台长期维护。多个平台同时跑会让环境变量、缓存、域名和回滚排查更复杂。
+
+## 暂停 Vercel Git 自动部署
+
+当前仓库在 `vercel.json` 中设置 `git.deploymentEnabled: false`，暂停
+Vercel Git integration 对所有分支的自动部署。这个开关不会删除 Vercel
+项目，也不会阻止手动 CLI 发布或 Dashboard 发布。
+
+需要恢复 Vercel 时，优先使用 `.github/workflows/vercel-prebuilt-recovery.yml`
+的手动运行入口：选择 `deploy=true`，并将确认值设为
+`DEPLOY_VERCEL_PREBUILT`。workflow 会先构建和校验 prebuilt artifact，随后
+执行 `vercel deploy --prebuilt --prod`。不要把
+`scripts/vercel-ignore-step.sh` 当成关闭 Git 自动部署的开关；它只决定一次
+构建是否可以被 Vercel 忽略。
 
 ## 先确认谁该修复配置
 

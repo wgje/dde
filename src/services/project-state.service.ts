@@ -7,7 +7,10 @@ import { SUPERSCRIPT_DIGITS } from '../config';
 import { AUTH_CONFIG } from '../config/auth.config';
 import { summarizeMarkdownTodos } from '../utils/markdown-todo';
 import { AuthService } from './auth.service';
-import { localBackupUiRestoreWriterQuiescence } from './local-backup-ui-restore-writer-quiescence.service';
+import {
+  localBackupUiRestoreWriterQuiescence,
+  type LocalBackupUiRestoreWriterContinuation,
+} from './local-backup-ui-restore-writer-quiescence.service';
 import type {
   ConnectionStoreStateSnapshot,
   ProjectStoreStateSnapshot,
@@ -438,18 +441,22 @@ export class ProjectStateService {
    * 直接更新项目列表
    * 同时更新 ProjectStore、TaskStore、ConnectionStore
    */
-  setProjects(projects: Project[], ownerUserId?: string): void {
+  setProjects(
+    projects: Project[],
+    ownerUserId?: string,
+    continuation?: LocalBackupUiRestoreWriterContinuation,
+  ): void {
     const owner = this.resolveWriteOwner(ownerUserId);
     this.runGuardedProjectStateMutation(() => {
       assertUniqueAuthoritativeIds(projects);
       const snapshot = this.captureStoreSnapshot();
       try {
-        this.replaceProjects(projects, owner);
+        this.replaceProjects(projects, owner, continuation);
       } catch (error) {
         this.restoreStoreSnapshot(snapshot, owner);
         throw error;
       }
-    }, owner);
+    }, owner, continuation);
   }
 
   replaceProjectsForRestore(ownerUserId: string, projects: Project[]): void {
@@ -460,11 +467,15 @@ export class ProjectStateService {
     this.resolveWriteOwner(ownerUserId);
   }
 
-  private replaceProjects(projects: Project[], ownerUserId: string): void {
+  private replaceProjects(
+    projects: Project[],
+    ownerUserId: string,
+    continuation?: LocalBackupUiRestoreWriterContinuation,
+  ): void {
     const incomingProjectIds = new Set(projects.map(project => project.id));
     const activeProjectId = this.projectStore.activeProjectId();
     if (activeProjectId && !incomingProjectIds.has(activeProjectId)) {
-      this.setActiveProjectId(null, ownerUserId);
+      this.setActiveProjectId(null, ownerUserId, continuation);
     }
     this.taskStore.clearProjectsExcept(incomingProjectIds);
     this.connectionStore.clearProjectsExcept(incomingProjectIds);
@@ -532,22 +543,34 @@ export class ProjectStateService {
    * 更新项目列表
    * 兼容旧的 updater 模式
    */
-  updateProjects(updater: (projects: Project[]) => Project[], ownerUserId?: string): void {
+  updateProjects(
+    updater: (projects: Project[]) => Project[],
+    ownerUserId?: string,
+    continuation?: LocalBackupUiRestoreWriterContinuation,
+  ): void {
     // ProjectStore 只保证项目壳元数据最新；tasks/connections 的权威状态在独立 Store。
     // updater 若从陈旧壳开始，会把旧 stage/parentId 或缺失任务重新灌回 TaskStore。
     const currentProjects = this.getProjectsWithCurrentData();
     const updatedProjects = updater(currentProjects);
-    this.setProjects(updatedProjects, ownerUserId);
+    this.setProjects(updatedProjects, ownerUserId, continuation);
   }
 
-  updateProjectsForOwner(ownerUserId: string, updater: (projects: Project[]) => Project[]): void {
-    this.updateProjects(updater, ownerUserId);
+  updateProjectsForOwner(
+    ownerUserId: string,
+    updater: (projects: Project[]) => Project[],
+    continuation?: LocalBackupUiRestoreWriterContinuation,
+  ): void {
+    this.updateProjects(updater, ownerUserId, continuation);
   }
 
   /**
    * 设置活动项目 ID
    */
-  setActiveProjectId(projectId: string | null, ownerUserId?: string): void {
+  setActiveProjectId(
+    projectId: string | null,
+    ownerUserId?: string,
+    continuation?: LocalBackupUiRestoreWriterContinuation,
+  ): void {
     const owner = this.resolveWriteOwner(ownerUserId);
     this.runGuardedProjectStateMutation(() => {
       const previousProjectId = this.projectStore.activeProjectId();
@@ -557,11 +580,15 @@ export class ProjectStateService {
         listener(previousProjectId, projectId);
       }
       this.projectStore.activeProjectId.set(projectId);
-    }, owner);
+    }, owner, continuation);
   }
 
-  setActiveProjectIdForOwner(ownerUserId: string, projectId: string | null): void {
-    this.setActiveProjectId(projectId, ownerUserId);
+  setActiveProjectIdForOwner(
+    ownerUserId: string,
+    projectId: string | null,
+    continuation?: LocalBackupUiRestoreWriterContinuation,
+  ): void {
+    this.setActiveProjectId(projectId, ownerUserId, continuation);
   }
 
   captureActiveProjectOwner(): ActiveProjectOwner {
@@ -702,8 +729,13 @@ export class ProjectStateService {
   private runGuardedProjectStateMutation<T>(
     write: () => T,
     ownerUserId = this.resolveProjectStateOwnerUserId(),
+    continuation?: LocalBackupUiRestoreWriterContinuation,
   ): T {
-    return localBackupUiRestoreWriterQuiescence.guardSync(ownerUserId, 'project-state', write);
+    return continuation
+      ? localBackupUiRestoreWriterQuiescence.runContinuationSync(
+        ownerUserId, 'project-state', continuation, write,
+      )
+      : localBackupUiRestoreWriterQuiescence.guardSync(ownerUserId, 'project-state', write);
   }
   
   /**

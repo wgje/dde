@@ -47,8 +47,13 @@ export interface LocalBackupUiRestoreWriterIdentity {
   leaseExpiresAt: string;
 }
 
+export interface LocalBackupUiRestoreWriterContinuation {
+  readonly identity: LocalBackupUiRestoreWriterIdentity;
+}
+
 export interface LocalBackupUiRestoreWriterHandle {
   identity(): LocalBackupUiRestoreWriterIdentity;
+  continuation(): LocalBackupUiRestoreWriterContinuation;
   renew(): void;
   release(): void;
 }
@@ -176,6 +181,7 @@ class LocalBackupUiRestoreWriterLease {
   toHandle(): LocalBackupUiRestoreWriterHandle {
     return {
       identity: () => ({ ...this.current }),
+      continuation: () => ({ identity: { ...this.current } }),
       renew: () => this.renew(),
       release: () => this.release(),
     };
@@ -219,16 +225,34 @@ export function runLocalBackupUiRestoreWriterContinuationSync<T>(
   ownerUserId: string,
   source: LocalBackupUiRestoreWriterSource,
   write: () => T,
+): T;
+export function runLocalBackupUiRestoreWriterContinuationSync<T>(
+  ownerUserId: string,
+  source: LocalBackupUiRestoreWriterSource,
+  continuation: LocalBackupUiRestoreWriterContinuation,
+  write: () => T,
+): T;
+export function runLocalBackupUiRestoreWriterContinuationSync<T>(
+  ownerUserId: string,
+  source: LocalBackupUiRestoreWriterSource,
+  continuationOrWrite: LocalBackupUiRestoreWriterContinuation | (() => T),
+  maybeWrite?: () => T,
 ): T {
-  const handle = beginLocalBackupUiRestoreWriter(ownerUserId, source, {
-    allowContinuationOfActiveWriter: true,
-    heartbeat: false,
-  });
-  try {
-    return write();
-  } finally {
-    handle.release();
+  if (typeof continuationOrWrite === 'function') {
+    const handle = beginLocalBackupUiRestoreWriter(ownerUserId, source, {
+      allowContinuationOfActiveWriter: true,
+      heartbeat: false,
+    });
+    try {
+      return continuationOrWrite();
+    } finally {
+      handle.release();
+    }
   }
+  const write = maybeWrite;
+  if (!write) throw new Error('local backup UI restore continuation callback is required');
+  assertWriterContinuation(ownerUserId, source, continuationOrWrite);
+  return write();
 }
 
 export function beginLocalBackupUiRestoreWriterContinuation(
@@ -305,6 +329,22 @@ function assertWriterMayContinue(
   }
 }
 
+function assertWriterContinuation(
+  ownerUserId: string,
+  source: LocalBackupUiRestoreWriterSource,
+  continuation: LocalBackupUiRestoreWriterContinuation,
+): void {
+  const identity = continuation.identity;
+  const sentinel = readQuiescenceSentinel(ownerUserId);
+  const active = localActiveWriters.get(activeWriterStorageKey(ownerUserId, identity.runId));
+  if (!active || !hasSameIdentity(active, identity) || identity.ownerUserId !== ownerUserId
+    || identity.source !== source || !sentinel
+    || (sentinel.state !== 'pausing' && sentinel.state !== 'quiesced')
+    || sentinel.leaseExpiresAt === null || Date.parse(sentinel.leaseExpiresAt) <= Date.now()) {
+    throw new LocalBackupUiRestoreWriterPausedError(ownerUserId);
+  }
+}
+
 function hasPreparedWriterAuthorization(
   ownerUserId: string,
   restoreRunId: string,
@@ -325,7 +365,7 @@ function preparedAuthorizationKey(
 
 function readQuiescenceSentinel(
   ownerUserId: string,
-): { ownerUserId: string; runId: string; state: string } | null {
+): { ownerUserId: string; runId: string; state: string; leaseExpiresAt: string | null } | null {
   const raw = requireLocalStorage().getItem(
     getLocalBackupUiRestoreQuiescenceSentinelStorageKey(ownerUserId),
   );
@@ -335,12 +375,13 @@ function readQuiescenceSentinel(
     || value['ownerUserId'] !== ownerUserId
     || !isNonEmptyString(value['runId'])
     || !isNonEmptyString(value['state'])) {
-    return { ownerUserId, runId: '', state: 'malformed' };
+    return { ownerUserId, runId: '', state: 'malformed', leaseExpiresAt: null };
   }
   return {
     ownerUserId,
     runId: value['runId'],
     state: value['state'],
+    leaseExpiresAt: isIsoTimestamp(value['leaseExpiresAt']) ? value['leaseExpiresAt'] : null,
   };
 }
 

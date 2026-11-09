@@ -20,6 +20,7 @@ import {
   type VerifyProjectConflictLocalHandoffInput,
 } from './conflict-storage.helpers';
 import { applyPendingProjectActionsToSnapshot } from './user-session-pending-project-actions.helpers';
+import type { LocalBackupUiRestoreWriterContinuation } from './local-backup-ui-restore-writer-quiescence.service';
 import { createDerivedSyncOperationId } from '../utils/sync-operation-id';
 
 export interface ProjectConflictRetrySettlementInput extends LocalHandoffIdentity {
@@ -103,7 +104,10 @@ export interface ProjectConflictRetrySettlementOptions {
     input: AdvanceProjectConflictLocalHandoffInput,
   ) => Promise<ProjectConflictLocalHandoffMutationResult>;
   persistOwnerSnapshot: (input: ProjectConflictRetrySettlementInput) => Promise<boolean>;
-  publishResolvedProject: (input: ProjectConflictRetrySettlementInput) => void;
+  publishResolvedProject: (
+    input: ProjectConflictRetrySettlementInput,
+    continuation?: LocalBackupUiRestoreWriterContinuation,
+  ) => void;
   clearCompletedConflict: (input: ProjectConflictRetrySettlementInput) => Promise<boolean>;
   removeCompletedAction: (input: LocalHandoffIdentity) => Promise<LocalHandoffQueueMutationResult>;
   now: () => string;
@@ -114,6 +118,7 @@ export class ProjectOperationConflictRetrySettlementController {
 
   async settle(
     input: ProjectConflictRetrySettlementInput,
+    continuation?: LocalBackupUiRestoreWriterContinuation,
   ): Promise<ProjectConflictRetrySettlementResult> {
     if (!this.options.isFenceCurrent(input)) return 'stale';
     const reservation = await this.options.reserveConflictLocalHandoff({
@@ -137,7 +142,7 @@ export class ProjectOperationConflictRetrySettlementController {
     if (reservedAction.status !== 'committed' || !reservedAction.action) return 'retry';
     let state = reservedAction.action.localHandoff?.state;
     if (state === 'reserved') {
-      const prepared = await this.prepareAndPublish(input);
+      const prepared = await this.prepareAndPublish(input, continuation);
       if (prepared !== 'complete') return prepared;
       if (!this.options.isFenceCurrent(input)) return 'stale';
       const effectsApplied = await this.transitionAction(input, 'reserved', 'effects-applied');
@@ -167,6 +172,7 @@ export class ProjectOperationConflictRetrySettlementController {
 
   private async prepareAndPublish(
     input: ProjectConflictRetrySettlementInput,
+    continuation?: LocalBackupUiRestoreWriterContinuation,
   ): Promise<ProjectConflictRetrySettlementResult> {
     const verified = await this.options.verifyConflictReservation({
       ...this.identity(input),
@@ -183,7 +189,7 @@ export class ProjectOperationConflictRetrySettlementController {
     });
     if (!this.options.isFenceCurrent(input)) return 'stale';
     if (reverified.status !== 'committed') return 'retry';
-    this.options.publishResolvedProject(input);
+    this.options.publishResolvedProject(input, continuation);
     return 'complete';
   }
 
@@ -237,7 +243,11 @@ export interface ProjectConflictHandoffSettlementDeps {
   getCurrentProjects: () => Project[];
   getPendingProjectActions: (projectId: string) => QueuedAction[];
   persistProjects: (projects: Project[], ownerUserId: string) => Promise<void>;
-  publishProjects: (projects: Project[], ownerUserId: string) => void;
+  publishProjects: (
+    projects: Project[],
+    ownerUserId: string,
+    continuation?: LocalBackupUiRestoreWriterContinuation,
+  ) => void;
   reserveConflictLocalHandoff: ProjectConflictRetrySettlementOptions['reserveConflictLocalHandoff'];
   transitionActionLocalHandoff: ProjectConflictRetrySettlementOptions['transitionActionLocalHandoff'];
   verifyConflictReservation: ProjectConflictRetrySettlementOptions['verifyConflictReservation'];
@@ -250,12 +260,13 @@ export interface ProjectConflictHandoffSettlementDeps {
 export type ProjectConflictHandoffSettlement = (
   input: ProjectConflictRetrySettlementInput,
   additionalFence?: () => boolean,
+  continuation?: LocalBackupUiRestoreWriterContinuation,
 ) => Promise<ProjectConflictRetrySettlementResult>;
 
 export function createProjectConflictHandoffSettlement(
   deps: ProjectConflictHandoffSettlementDeps,
 ): ProjectConflictHandoffSettlement {
-  return async (input, additionalFence = () => true) => {
+  return async (input, additionalFence = () => true, continuation) => {
     const isCurrent = (): boolean => additionalFence() && deps.isFenceCurrent(input);
     const buildProjects = (): Project[] => {
       const current = deps.getCurrentProjects();
@@ -281,12 +292,13 @@ export function createProjectConflictHandoffSettlement(
           return false;
         }
       },
-      publishResolvedProject: () => deps.publishProjects(buildProjects(), input.ownerUserId),
+      publishResolvedProject: (_input, continuation) =>
+        deps.publishProjects(buildProjects(), input.ownerUserId, continuation),
       clearCompletedConflict: async () => (await deps.clearCompletedConflict(input)).status === 'committed',
       removeCompletedAction: deps.removeCompletedAction,
       now: deps.now,
     });
-    return controller.settle(input);
+    return controller.settle(input, continuation);
   };
 }
 
@@ -305,8 +317,15 @@ export interface ActionQueueProjectConflictHandoffDeps {
   getCurrentProjects: () => Project[];
   getPendingProjectActions: (projectId: string) => QueuedAction[];
   persistProjects: (projects: Project[], ownerUserId: string) => Promise<void>;
-  publishProjects: (projects: Project[], ownerUserId: string) => void;
-  runProjectStateMutation: <T>(ownerUserId: string, write: () => Promise<T>) => Promise<T>;
+  publishProjects: (
+    projects: Project[],
+    ownerUserId: string,
+    continuation?: LocalBackupUiRestoreWriterContinuation,
+  ) => void;
+  runProjectStateMutation: <T>(
+    ownerUserId: string,
+    write: (continuation?: LocalBackupUiRestoreWriterContinuation) => Promise<T>,
+  ) => Promise<T>;
   reserveConflictLocalHandoff: ProjectConflictRetrySettlementOptions['reserveConflictLocalHandoff'];
   transitionActionLocalHandoff: ProjectConflictRetrySettlementOptions['transitionActionLocalHandoff'];
   verifyConflictReservation: ProjectConflictRetrySettlementOptions['verifyConflictReservation'];
@@ -374,7 +393,8 @@ export function createActionQueueProjectConflictHandoffSettlement(
           return false;
         }
       },
-      publishResolvedProject: () => deps.publishProjects(buildProjects(), settlementInput.ownerUserId),
+      publishResolvedProject: (_input, continuation) =>
+        deps.publishProjects(buildProjects(), settlementInput.ownerUserId, continuation),
       clearCompletedConflict: async () =>
         (await deps.clearCompletedConflict(identity)).status === 'committed',
       removeCompletedAction: deps.removeCompletedAction,
@@ -382,7 +402,7 @@ export function createActionQueueProjectConflictHandoffSettlement(
     });
     return deps.runProjectStateMutation(
       settlementInput.ownerUserId,
-      () => controller.settle(settlementInput),
+      continuation => controller.settle(settlementInput, continuation),
     );
   };
 }

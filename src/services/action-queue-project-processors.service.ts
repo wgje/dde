@@ -87,7 +87,8 @@ export class ActionQueueProjectProcessorsService implements OnDestroy {
     getCurrentProjects: () => this.projectState.getProjectsWithCurrentData(),
     getPendingProjectActions: projectId => this.actionQueue.getPendingActionsForProject(projectId),
     persistProjects: (projects, ownerUserId) => this.projectData.saveOfflineSnapshotAndWait(projects, ownerUserId),
-    publishProjects: (projects, ownerUserId) => this.projectState.updateProjects(() => projects, ownerUserId),
+    publishProjects: (projects, ownerUserId, continuation) =>
+      this.projectState.updateProjects(() => projects, ownerUserId, continuation),
     runProjectStateMutation: (ownerUserId, write) =>
       localBackupUiRestoreWriterQuiescence.runAsync(ownerUserId, 'project-state', write),
     reserveConflictLocalHandoff: input => this.conflictStorage.reserveProjectConflictLocalHandoff(input),

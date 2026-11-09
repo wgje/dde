@@ -2,9 +2,10 @@
 title: Compatibility Matrix
 status: canonical
 audience: ai-agent, maintainer, operator
-last_verified: 2026-06-09
+last_verified: 2026-11-09
 source_paths:
   - package.json
+  - package-lock.json
   - angular.json
   - playwright.config.ts
   - vitest.config.mts
@@ -20,7 +21,7 @@ This page states the supported development and runtime baseline for NanoFlow.
 | Component | Supported baseline | Notes |
 | --- | --- | --- |
 | Node.js | `>= 22.14.0` | Required by `package.json`. |
-| npm | bundled with supported Node | Use package lock. |
+| npm | npm 10.x bundled with the Node 22 CI baseline | Keep `package-lock.json` synchronized with the manifest and validate it with the same npm major used by CI. |
 | Angular | `19.2.x` | Standalone components and Signals. |
 | TypeScript | `~5.8.0` | Strict typing expected. |
 | Vite | `^6.2.0` | Used by Angular tooling. |
@@ -35,6 +36,29 @@ This page states the supported development and runtime baseline for NanoFlow.
 | Android Chrome / TWA | supported | Android widget path uses TWA host. |
 | iOS Safari | supported with constraints | Audio MIME fallback required. |
 | Desktop widget runtime | retired | Do not reintroduce as active path without ADR. |
+
+## CI Lockfile Contract
+
+GitHub Actions installs the project with Node 22 and `npm ci` (some deployment
+jobs add `--prefer-offline --no-audit`). `npm ci` treats `package-lock.json` as
+frozen input: the lockfile must describe the same dependency graph as
+`package.json`, including optional peer edges, or the install fails before tests
+run. Generate and validate lockfile changes with the npm major used by the CI
+baseline rather than relying on a newer local npm serializer.
+
+The current lockfile records the optional peer graph required by
+`@napi-rs/wasm-runtime`: `@emnapi/core@1.11.3` and
+`@emnapi/runtime@1.11.3` are parallel optional peers. Only
+`@emnapi/core@1.11.3` depends on `@emnapi/wasi-threads@1.2.3`;
+`@emnapi/runtime@1.11.3` has no `wasi-threads` edge. Keeping all three entries
+and their peer metadata in the lockfile prevents npm 10 CI installs from
+rejecting an otherwise unchanged manifest.
+
+Validate lockfile reachability with `npm ls --package-lock-only --all`: this
+must return no `problems`. On hosts that omit the optional `wasm32-wasi`
+parent package, an installed-tree `npm ls` can report the platform-pruned peer
+packages as extraneous; that platform result does not indicate a missing or
+inconsistent lockfile edge.
 
 ## Cloud Services
 

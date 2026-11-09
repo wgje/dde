@@ -11,6 +11,7 @@ import {
   runLocalBackupUiRestoreWriterContinuationSync,
   runWithLocalBackupUiRestoreWriterAuthorization,
   trackLocalBackupUiRestoreWriterPromise,
+  type LocalBackupUiRestoreWriterContinuation,
   type LocalBackupUiRestoreWriterSource,
 } from './local-backup-ui-restore-writer-quiescence-tracker';
 import { LOCAL_BACKUP_UI_RESTORE_MARKER_KIND } from './local-backup-ui-restore-journal';
@@ -20,6 +21,7 @@ export {
   LocalBackupUiRestoreWriterPausedError,
   getLocalBackupUiRestoreQuiescenceSentinelStorageKey,
   type LocalBackupUiRestoreWriterSource,
+  type LocalBackupUiRestoreWriterContinuation,
 } from './local-backup-ui-restore-writer-quiescence-tracker';
 
 export const LOCAL_BACKUP_UI_RESTORE_QUIESCENCE_MARKER_KIND =
@@ -101,18 +103,38 @@ export class LocalBackupUiRestoreWriterQuiescenceService {
   async runAsync<T>(
     ownerUserId: string,
     source: LocalBackupUiRestoreWriterSource,
-    write: () => Promise<T>,
+    write: (continuation: LocalBackupUiRestoreWriterContinuation) => Promise<T>,
   ): Promise<T> {
     const active = beginLocalBackupUiRestoreWriter(ownerUserId, source, { leaseMs: this.leaseMs });
     try {
-      return await write();
+      return await write(active.continuation());
     } finally {
       active.release();
     }
   }
 
-  runContinuationSync<T>(ownerUserId: string, source: LocalBackupUiRestoreWriterSource, write: () => T): T {
-    return runLocalBackupUiRestoreWriterContinuationSync(ownerUserId, source, write);
+  runContinuationSync<T>(
+    ownerUserId: string,
+    source: LocalBackupUiRestoreWriterSource,
+    write: () => T,
+  ): T;
+  runContinuationSync<T>(
+    ownerUserId: string,
+    source: LocalBackupUiRestoreWriterSource,
+    continuation: LocalBackupUiRestoreWriterContinuation,
+    write: () => T,
+  ): T;
+  runContinuationSync<T>(
+    ownerUserId: string,
+    source: LocalBackupUiRestoreWriterSource,
+    continuationOrWrite: LocalBackupUiRestoreWriterContinuation | (() => T),
+    write?: () => T,
+  ): T {
+    if (typeof continuationOrWrite === 'function') {
+      return runLocalBackupUiRestoreWriterContinuationSync(ownerUserId, source, continuationOrWrite);
+    }
+    if (!write) throw new Error('local backup UI restore continuation callback is required');
+    return runLocalBackupUiRestoreWriterContinuationSync(ownerUserId, source, continuationOrWrite, write);
   }
 
   runContinuationAsync<T>(ownerUserId: string, source: LocalBackupUiRestoreWriterSource,

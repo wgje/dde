@@ -2,12 +2,14 @@
 title: Operations and Security
 status: canonical
 audience: ai-agent, maintainer, operator
-last_verified: 2026-06-09
+last_verified: 2026-11-09
 source_paths:
   - .env.template
   - supabase/migrations/
   - supabase/functions/
   - scripts/contracts/check-secrets.cjs
+  - vercel.json
+  - .github/workflows/vercel-prebuilt-recovery.yml
 ---
 
 # Operations and Security
@@ -25,6 +27,15 @@ Supported or fallback targets:
 - Vercel
 - Netlify
 - Railway
+
+Vercel Git-triggered deployments are paused in `vercel.json` with
+`git.deploymentEnabled: false`. This disables automatic deployments for all
+branches through the Vercel Git integration; it does not remove the project or
+disable manual releases. Manual Vercel CLI deployments, Dashboard deployments,
+and the guarded `.github/workflows/vercel-prebuilt-recovery.yml` workflow remain
+available. The recovery workflow only deploys after a manual dispatch with
+`deploy=true` and `confirm=DEPLOY_VERCEL_PREBUILT`, then uses
+`vercel deploy --prebuilt --prod`.
 
 Required frontend environment variables for cloud features:
 

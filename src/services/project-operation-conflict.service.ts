@@ -17,7 +17,10 @@ import { ChangeTrackerService } from './change-tracker.service';
 import { ProjectConflictCaptureService } from './project-conflict-capture.service';
 import { ProjectConflictDirectSyncService } from './project-conflict-direct-sync.service';
 import { createProjectConflictHandoffSettlement } from './project-operation-conflict-retry-settlement.controller';
-import { localBackupUiRestoreWriterQuiescence } from './local-backup-ui-restore-writer-quiescence.service';
+import {
+  localBackupUiRestoreWriterQuiescence,
+  type LocalBackupUiRestoreWriterContinuation,
+} from './local-backup-ui-restore-writer-quiescence.service';
 import { Project } from '../models';
 import {
   captureConflictFingerprint,
@@ -78,9 +81,10 @@ export class ProjectOperationConflictService {
     getCurrentProjects: () => this.projectState.getProjectsWithCurrentData(),
     getPendingProjectActions: projectId => this.actionQueue.getPendingActionsForProject(projectId),
     persistProjects: (projects, ownerUserId) => this.projectData.saveOfflineSnapshotAndWait(projects, ownerUserId),
-    publishProjects: (projects, ownerUserId) => this.projectState.updateProjects(
+    publishProjects: (projects, ownerUserId, continuation) => this.projectState.updateProjects(
       () => projects,
       ownerUserId,
+      continuation,
     ),
     reserveConflictLocalHandoff: input => this.conflictStorage.reserveProjectConflictLocalHandoff(input),
     transitionActionLocalHandoff: input => this.actionQueue.transitionLocalHandoffStrictlyForOwner(input),
@@ -365,7 +369,12 @@ export class ProjectOperationConflictService {
     return localBackupUiRestoreWriterQuiescence.runAsync(
       ownerUserId,
       'project-state',
-      () => this.finalizeResolvedConflictUnderWriter(options, context, resolvedProject),
+      continuation => this.finalizeResolvedConflictUnderWriter(
+        options,
+        context,
+        resolvedProject,
+        continuation,
+      ),
     );
   }
 
@@ -373,9 +382,10 @@ export class ProjectOperationConflictService {
     options: ResolveConflictInternalOptions,
     context: ConflictResolutionContext,
     resolvedProject: Project,
+    continuation: LocalBackupUiRestoreWriterContinuation,
   ): Promise<boolean> {
     if (options.finalizeAsRemote) {
-      if (!this.finalizeRemoteResolvedConflict(context, resolvedProject)) return false;
+      if (!this.finalizeRemoteResolvedConflict(context, resolvedProject, continuation)) return false;
       return this.clearResolvedConflictSaveState(
         this.toResolvedConflictSaveContext(
           context,
@@ -397,20 +407,38 @@ export class ProjectOperationConflictService {
       )) {
         return false;
       }
-      this.finalizeResolvedProject(context.projectId, resolvedProject, { pendingSync: false }, context.sessionContext.ownerUserId);
+      this.finalizeResolvedProject(
+        context.projectId,
+        resolvedProject,
+        { pendingSync: false },
+        context.sessionContext.ownerUserId,
+        undefined,
+        continuation,
+      );
       return this.clearResolvedConflictSaveState(this.toResolvedConflictSaveContext(context, resolvedProject, AUTH_CONFIG.LOCAL_MODE_USER_ID));
     }
 
     const saveContext = this.toResolvedConflictSaveContext(context, resolvedProject, userId);
-    return this.persistResolvedConflictDurably(saveContext, options.backgroundPersist);
+    return this.persistResolvedConflictDurably(saveContext, options.backgroundPersist, continuation);
   }
 
-  private finalizeRemoteResolvedConflict(context: ConflictResolutionContext, resolvedProject: Project): boolean {
+  private finalizeRemoteResolvedConflict(
+    context: ConflictResolutionContext,
+    resolvedProject: Project,
+    continuation: LocalBackupUiRestoreWriterContinuation,
+  ): boolean {
     if (!this.isProjectSessionContextCurrent(context.sessionContext, 'resolveConflict:finalize-remote', context.projectId)) {
       return false;
     }
 
-    this.finalizeResolvedProject(context.projectId, resolvedProject, { pendingSync: false }, context.sessionContext.ownerUserId);
+    this.finalizeResolvedProject(
+      context.projectId,
+      resolvedProject,
+      { pendingSync: false },
+      context.sessionContext.ownerUserId,
+      undefined,
+      continuation,
+    );
     return true;
   }
 
@@ -436,6 +464,7 @@ export class ProjectOperationConflictService {
   private async persistResolvedConflictDurably(
     context: ResolvedConflictSaveContext,
     background: boolean,
+    continuation?: LocalBackupUiRestoreWriterContinuation,
   ): Promise<boolean> {
     const { sessionContext } = context;
     if (!sessionContext.authFence
@@ -453,7 +482,11 @@ export class ProjectOperationConflictService {
         taskIdsToDelete: context.pendingTaskDeleteIds,
         taskDeleteBaseUpdatedAtMap: context.pendingTaskDeleteBaseUpdatedAtMap ?? {},
         background,
-      }, this.settleProjectConflictHandoff);
+      }, (input, additionalFence) => this.settleProjectConflictHandoff(
+        input,
+        additionalFence,
+        continuation,
+      ));
       if (!this.isProjectSessionContextCurrent(sessionContext, 'resolveConflict:after-durable-sync', context.projectId)) {
         return false;
       }
@@ -543,6 +576,7 @@ export class ProjectOperationConflictService {
     options: { version?: number; pendingSync: boolean },
     ownerUserId: string | null,
     preservedActionId?: string,
+    continuation?: LocalBackupUiRestoreWriterContinuation,
   ): void {
     this.projectState.updateProjects(projects => {
       const hasExistingProject = projects.some(current => current.id === projectId);
@@ -558,7 +592,7 @@ export class ProjectOperationConflictService {
           ? mergeResolvedProjectState(current, project, options)
           : current
       );
-    }, ownerUserId ?? AUTH_CONFIG.LOCAL_MODE_USER_ID);
+    }, ownerUserId ?? AUTH_CONFIG.LOCAL_MODE_USER_ID, continuation);
     this.projectData.saveOfflineSnapshot(
       this.projectState.getProjectsWithCurrentData(),
       ownerUserId ?? AUTH_CONFIG.LOCAL_MODE_USER_ID,

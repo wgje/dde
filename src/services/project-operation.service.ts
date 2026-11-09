@@ -28,7 +28,10 @@ import { type ConflictResolutionPlan } from './conflict-resolution.types';
 import { AUTH_CONFIG } from '../config/auth.config';
 import { EnqueueParams } from './action-queue.types';
 import { blockProjectMutation } from './project-operation-write-guard.helpers';
-import { localBackupUiRestoreWriterQuiescence } from './local-backup-ui-restore-writer-quiescence.service';
+import {
+  localBackupUiRestoreWriterQuiescence,
+  type LocalBackupUiRestoreWriterContinuation,
+} from './local-backup-ui-restore-writer-quiescence.service';
 
 interface ProjectOperationSessionContext {
   sessionGeneration: number;
@@ -91,7 +94,7 @@ export class ProjectOperationService {
 
   private runProjectStateMutation<T>(
     sessionContext: ProjectOperationSessionContext,
-    mutation: () => Promise<T>,
+    mutation: (continuation: LocalBackupUiRestoreWriterContinuation) => Promise<T>,
   ): Promise<T> {
     const ownerUserId = sessionContext.userId ?? AUTH_CONFIG.LOCAL_MODE_USER_ID;
     const authenticatedOwnerUserId = this.authService.currentUserId()
@@ -114,7 +117,7 @@ export class ProjectOperationService {
     sessionContext: ProjectOperationSessionContext,
     updateProjects?: (projects: Project[]) => Project[],
   ): Promise<{ success: boolean; error?: string }> {
-    return this.runProjectStateMutation(sessionContext, async () => {
+    return this.runProjectStateMutation(sessionContext, async continuation => {
       if (!this.isSessionContextCurrent(sessionContext)) {
         return this.discardStaleProjectOperation(snapshotId);
       }
@@ -138,6 +141,7 @@ export class ProjectOperationService {
         this.projectState.updateProjectsForOwner(
           sessionContext.userId ?? AUTH_CONFIG.LOCAL_MODE_USER_ID,
           updateProjects,
+          continuation,
         );
       }
       this.finalizeDurableLocalProjectMutation(snapshotId, sessionContext.userId);
@@ -289,12 +293,15 @@ export class ProjectOperationService {
     if (blocked) return blocked;
 
     const sessionContext = this.captureSessionContext();
-    return this.runProjectStateMutation(sessionContext, () => this.addProjectUnderWriter(project, sessionContext));
+    return this.runProjectStateMutation(sessionContext, continuation =>
+      this.addProjectUnderWriter(project, sessionContext, continuation),
+    );
   }
 
   private async addProjectUnderWriter(
     project: Project,
     sessionContext: ProjectOperationSessionContext,
+    continuation: LocalBackupUiRestoreWriterContinuation,
   ): Promise<{ success: boolean; error?: string }> {
     const balanced = this.layoutService.rebalance(project);
     const userId = sessionContext.userId;
@@ -341,10 +348,12 @@ export class ProjectOperationService {
     this.projectState.updateProjectsForOwner(
       sessionContext.userId ?? AUTH_CONFIG.LOCAL_MODE_USER_ID,
       addProjectUpdater,
+      continuation,
     );
     this.projectState.setActiveProjectIdForOwner(
       sessionContext.userId ?? AUTH_CONFIG.LOCAL_MODE_USER_ID,
       localProject.id,
+      continuation,
     );
     this.finalizeDurableLocalProjectMutation(snapshot.id, sessionContext.userId);
     return { success: true };
@@ -363,7 +372,7 @@ export class ProjectOperationService {
     const sessionContext = this.captureSessionContext();
     return this.runProjectStateMutation(
       sessionContext,
-      () => this.deleteProjectUnderWriter(projectId, options, sessionContext),
+      continuation => this.deleteProjectUnderWriter(projectId, options, sessionContext, continuation),
     );
   }
 
@@ -371,6 +380,7 @@ export class ProjectOperationService {
     projectId: string,
     options: { canPublishUi?: () => boolean },
     sessionContext: ProjectOperationSessionContext,
+    continuation: LocalBackupUiRestoreWriterContinuation,
   ): Promise<{ success: boolean; error?: string }> {
     const userId = sessionContext.userId;
     const isCloudBackedUser = !!userId && userId !== AUTH_CONFIG.LOCAL_MODE_USER_ID;
@@ -417,12 +427,14 @@ export class ProjectOperationService {
     this.projectState.updateProjectsForOwner(
       sessionContext.userId ?? AUTH_CONFIG.LOCAL_MODE_USER_ID,
       deleteProjectUpdater,
+      continuation,
     );
 
     if (this.projectState.activeProjectId() === projectId) {
       this.projectState.setActiveProjectIdForOwner(
         sessionContext.userId ?? AUTH_CONFIG.LOCAL_MODE_USER_ID,
         deleteProjectUpdater(this.currentProjects())[0]?.id ?? null,
+        continuation,
       );
     }
 
@@ -516,18 +528,19 @@ export class ProjectOperationService {
     if (!isCloudBackedUser || !userId) {
       return this.runProjectStateMutation(
         sessionContext,
-        () => this.persistImportedLocalProject(snapshot.id, localProject, sessionContext),
+        continuation => this.persistImportedLocalProject(snapshot.id, localProject, sessionContext, continuation),
       );
     }
 
     return this.runProjectStateMutation(
       sessionContext,
-      () => this.persistImportedCloudProject(
+      continuation => this.persistImportedCloudProject(
         snapshot.id,
         localProject,
         !!existingProject,
         userId,
         sessionContext,
+        continuation,
       ),
     );
   }
@@ -536,6 +549,7 @@ export class ProjectOperationService {
     snapshotId: string,
     localProject: Project,
     sessionContext: ProjectOperationSessionContext,
+    continuation: LocalBackupUiRestoreWriterContinuation,
   ): Promise<{ success: boolean; error?: string }> {
     const upsertProjectUpdater = (projects: Project[]) => this.upsertProjectList(projects, localProject);
     const failure = await this.persistProjectSnapshotBeforeCommit(
@@ -552,6 +566,7 @@ export class ProjectOperationService {
     this.projectState.updateProjectsForOwner(
       sessionContext.userId ?? AUTH_CONFIG.LOCAL_MODE_USER_ID,
       upsertProjectUpdater,
+      continuation,
     );
     this.finalizeDurableLocalProjectMutation(snapshotId, sessionContext.userId);
     return { success: true };
@@ -563,6 +578,7 @@ export class ProjectOperationService {
     hasExistingProject: boolean,
     userId: string,
     sessionContext: ProjectOperationSessionContext,
+    continuation: LocalBackupUiRestoreWriterContinuation,
   ): Promise<{ success: boolean; error?: string }> {
     const importQueueAction: EnqueueParams = {
       type: hasExistingProject ? 'update' : 'create',
@@ -597,15 +613,20 @@ export class ProjectOperationService {
     if (!this.isSessionContextCurrent(sessionContext)) {
       return this.discardStaleProjectOperation(snapshotId);
     }
-    this.upsertLocalProject(localProject, sessionContext.userId ?? AUTH_CONFIG.LOCAL_MODE_USER_ID);
+    this.upsertLocalProject(localProject, sessionContext.userId ?? AUTH_CONFIG.LOCAL_MODE_USER_ID, continuation);
     this.finalizeDurableLocalProjectMutation(snapshotId, sessionContext.userId);
     return { success: true };
   }
 
-  private upsertLocalProject(localProject: Project, ownerUserId: string): void {
+  private upsertLocalProject(
+    localProject: Project,
+    ownerUserId: string,
+    continuation: LocalBackupUiRestoreWriterContinuation,
+  ): void {
     this.projectState.updateProjectsForOwner(
       ownerUserId,
       projects => this.upsertProjectList(projects, localProject),
+      continuation,
     );
   }
 

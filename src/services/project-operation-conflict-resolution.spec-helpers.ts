@@ -6,7 +6,10 @@ import type { ProjectOperationConflictResolutionSpecContext } from './project-op
 import { registerProjectOperationConflictResolutionStaleCleanupSpecs } from './project-operation-conflict-resolution-stale-cleanup.spec-helpers';
 import { isSyncOperationId } from '../utils/sync-operation-id';
 import { getLocalBackupUiRestoreQuiescenceSentinelStorageKey } from './local-backup-ui-restore-writer-quiescence-tracker';
-import { LocalBackupUiRestoreWriterQuiescenceService } from './local-backup-ui-restore-writer-quiescence.service';
+import {
+  LocalBackupUiRestoreWriterPausedError,
+  LocalBackupUiRestoreWriterQuiescenceService,
+} from './local-backup-ui-restore-writer-quiescence.service';
 type UpdateProjectsMock = Parameters<typeof replayProjectUpdates>[0];
 export type { ProjectOperationConflictResolutionSpecContext } from './project-operation-conflict-resolution.spec-context';
 export function registerProjectOperationConflictResolutionSpecs(
@@ -76,6 +79,24 @@ export function registerProjectOperationConflictResolutionSpecs(
       const quiescenceService = new LocalBackupUiRestoreWriterQuiescenceService({ pollIntervalMs: 1 });
       const localProject = createProject({ id: 'proj-local-conflict', name: 'Local Conflict', syncSource: 'local-only' });
       const resolvedProject = createProject({ id: 'proj-local-conflict', name: 'Resolved Local Conflict', syncSource: 'local-only' });
+      let appliedUpdateCount = 0;
+      const updateProjects = mockProjectState.updateProjects as unknown as (
+        updater: (projects: Project[]) => Project[],
+        ownerUserId?: string,
+        continuation?: unknown,
+      ) => void;
+      mockProjectState.updateProjects.mockImplementation((...args: unknown[]) => {
+        const [updater, ownerUserId, continuation] = args as [
+          (projects: Project[]) => Project[],
+          string | undefined,
+          unknown,
+        ];
+        if (localStorage.getItem(sentinelKey) !== null && !continuation) {
+          throw new LocalBackupUiRestoreWriterPausedError(ownerUserId ?? AUTH_CONFIG.LOCAL_MODE_USER_ID);
+        }
+        appliedUpdateCount += 1;
+        updater([]);
+      });
       mockConflictStorage.getConflict.mockResolvedValue({
         projectId: 'proj-local-conflict',
         localProject,
@@ -111,11 +132,159 @@ export function registerProjectOperationConflictResolutionSpecs(
         await vi.waitFor(() => expect(localStorage.getItem(sentinelKey)).not.toBeNull());
         await new Promise(resolve => setTimeout(resolve, 10));
         expect(restorePrepared).toBe(false);
+        expect(() => updateProjects(
+          projects => projects.map(project => ({
+            ...project,
+            name: 'unrelated same-owner write',
+          })),
+          ownerUserId,
+        )).toThrow(LocalBackupUiRestoreWriterPausedError);
+        expect(appliedUpdateCount).toBe(0);
 
         snapshotWrite.resolve();
         await expect(resultPromise).resolves.toBe(true);
-        expect(mockProjectState.updateProjects).toHaveBeenCalledOnce();
+        expect(mockProjectState.updateProjects).toHaveBeenCalledTimes(2);
+        expect(appliedUpdateCount).toBe(1);
+        expect(mockProjectState.updateProjects).toHaveBeenLastCalledWith(
+          expect.any(Function),
+          ownerUserId,
+          expect.objectContaining({
+            identity: expect.objectContaining({
+              ownerUserId,
+              source: 'project-state',
+            }),
+          }),
+        );
         expect(mockConflictStorage.deleteConflict).toHaveBeenCalledWith('proj-local-conflict', ownerUserId);
+        prepared = await preparing;
+        expect(restorePrepared).toBe(true);
+      } finally {
+        snapshotWrite.resolve();
+        await resultPromise?.catch(() => false);
+        if (preparing && !prepared) prepared = await preparing.catch(() => null);
+        await prepared?.abortBeforeMutation();
+      }
+    });
+    it('云端 direct conflict 在 restore quiescence 期间应携带 continuation 发布', async () => {
+      const snapshotWrite = createDeferred<void>();
+      const ownerUserId = 'user-1';
+      const sentinelKey = getLocalBackupUiRestoreQuiescenceSentinelStorageKey(ownerUserId);
+      localStorage.removeItem(sentinelKey);
+      const quiescenceService = new LocalBackupUiRestoreWriterQuiescenceService({ pollIntervalMs: 1 });
+      const localProject = createProject({ id: 'proj-cloud-conflict', name: 'Cloud Local', pendingSync: true });
+      const resolvedProject = createProject({ id: 'proj-cloud-conflict', name: 'Cloud Resolved', pendingSync: true });
+      let appliedUpdateCount = 0;
+      const updateProjects = mockProjectState.updateProjects as unknown as (
+        updater: (projects: Project[]) => Project[],
+        ownerUserId?: string,
+        continuation?: unknown,
+      ) => void;
+      mockProjectState.updateProjects.mockImplementation((...args: unknown[]) => {
+        const [updater, updateOwnerUserId, continuation] = args as [
+          (projects: Project[]) => Project[],
+          string | undefined,
+          unknown,
+        ];
+        if (localStorage.getItem(sentinelKey) !== null && !continuation) {
+          throw new LocalBackupUiRestoreWriterPausedError(
+            updateOwnerUserId ?? ownerUserId,
+          );
+        }
+        appliedUpdateCount += 1;
+        updater([]);
+      });
+
+      const settlementStorage = mockConflictStorage as unknown as Record<string, unknown>;
+      settlementStorage.reserveProjectConflictLocalHandoff = vi.fn()
+        .mockResolvedValue({ status: 'committed', reservationId: 'reservation-cloud' });
+      settlementStorage.verifyProjectConflictLocalHandoffReservation = vi.fn()
+        .mockResolvedValue({ status: 'committed' });
+      settlementStorage.advanceProjectConflictLocalHandoff = vi.fn()
+        .mockResolvedValue({ status: 'committed' });
+      const deleteCompletedConflict = vi.fn().mockResolvedValue({ status: 'committed' });
+      settlementStorage.deleteCompletedProjectConflictLocalHandoff = deleteCompletedConflict;
+      const settlementQueue = mockActionQueue as unknown as Record<string, unknown>;
+      settlementQueue.getPendingActionsForProject = vi.fn(() => []);
+      settlementQueue.transitionLocalHandoffStrictlyForOwner = vi.fn(
+        async (input: { nextState: string }) => ({
+          status: 'committed',
+          action: { localHandoff: { state: input.nextState } },
+        }),
+      );
+      settlementQueue.removeCompletedLocalHandoffStrictlyForOwner = vi.fn()
+        .mockResolvedValue({ status: 'committed' });
+
+      mockConflictStorage.getConflict.mockResolvedValue({
+        projectId: localProject.id,
+        localProject,
+        remoteProject: createProject({ id: localProject.id, name: 'Cloud Remote', version: 3 }),
+      });
+      mockProjectState.getProject.mockReturnValue(localProject);
+      mockUserSession.currentUserId.mockReturnValue(ownerUserId);
+      mockSyncCoordinator.resolveConflict.mockResolvedValueOnce({ ok: true, value: resolvedProject });
+      mockSyncCoordinator.core.saveOfflineSnapshotAndWait.mockReturnValueOnce(snapshotWrite.promise);
+      mockProjectConflictDirectSync.executeDurably.mockImplementationOnce(async (...args: unknown[]) => {
+        const [durableInput, settle] = args as [
+          { resolvedProject: Project; ownerUserId: string; sessionGeneration: number; authFence: string },
+          (
+            input: Record<string, unknown>,
+            additionalFence: () => boolean,
+          ) => Promise<'complete' | 'retry' | 'stale'>,
+        ];
+        const settled = await settle({
+          ownerUserId: durableInput.ownerUserId,
+          sessionGeneration: durableInput.sessionGeneration,
+          authFence: durableInput.authFence,
+          projectId: durableInput.resolvedProject.id,
+          actionId: 'action-cloud',
+          operationId: 'operation-cloud',
+          payloadDigest: 'payload-cloud',
+          conflictFingerprint: 'fingerprint-cloud',
+          reservationId: 'reservation-cloud',
+          resolvedProject: durableInput.resolvedProject,
+        }, () => true);
+        return { status: settled === 'complete' ? 'complete' : 'stale' };
+      });
+
+      let resultPromise: Promise<boolean> | null = null;
+      let preparing: ReturnType<typeof quiescenceService.prepare> | null = null;
+      let prepared: Awaited<ReturnType<typeof quiescenceService.prepare>> | null = null;
+      let restorePrepared = false;
+      try {
+        resultPromise = service.resolveConflict(localProject.id, 'local');
+        await vi.waitFor(() => {
+          expect(mockSyncCoordinator.core.saveOfflineSnapshotAndWait).toHaveBeenCalledWith(
+            expect.any(Array),
+            ownerUserId,
+          );
+        });
+        expect(mockProjectState.updateProjects).not.toHaveBeenCalled();
+
+        preparing = quiescenceService.prepare(ownerUserId).then(handle => {
+          restorePrepared = true;
+          return handle;
+        });
+        await vi.waitFor(() => expect(localStorage.getItem(sentinelKey)).not.toBeNull());
+        await new Promise(resolve => setTimeout(resolve, 10));
+        expect(restorePrepared).toBe(false);
+        expect(() => updateProjects(projects => projects, ownerUserId))
+          .toThrow(LocalBackupUiRestoreWriterPausedError);
+        expect(appliedUpdateCount).toBe(0);
+
+        snapshotWrite.resolve();
+        await expect(resultPromise).resolves.toBe(true);
+        expect(appliedUpdateCount).toBe(1);
+        expect(mockProjectState.updateProjects).toHaveBeenLastCalledWith(
+          expect.any(Function),
+          ownerUserId,
+          expect.objectContaining({
+            identity: expect.objectContaining({
+              ownerUserId,
+              source: 'project-state',
+            }),
+          }),
+        );
+        expect(deleteCompletedConflict).toHaveBeenCalled();
         prepared = await preparing;
         expect(restorePrepared).toBe(true);
       } finally {
