@@ -157,7 +157,16 @@ describe('撤销功能集成测试', () => {
           useValue: {
             activeProject: () => projectsSignal()[0],
             activeProjectId: () => projectsSignal()[0]?.id || null,
+            captureActiveProjectOwner: () => ({
+              projectId: projectsSignal()[0]?.id ?? null,
+              generation: 0,
+            }),
+            isActiveProjectOwnerCurrent: (owner: { projectId: string | null; generation: number }) =>
+              owner.projectId === (projectsSignal()[0]?.id ?? null) && owner.generation === 0,
+            assertWriteOwner: vi.fn(),
             getProjectsWithCurrentData: () => projectsSignal(),
+            getProjectWithCurrentData: (projectId: string) =>
+              projectsSignal().find(project => project.id === projectId),
             getTask: (taskId: string) => projectsSignal()[0]?.tasks.find((t: Task) => t.id === taskId),
             updateProjects: (fn: (projects: Project[]) => Project[]) => {
               projectsSignal.update(fn);
