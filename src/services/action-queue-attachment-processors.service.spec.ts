@@ -244,9 +244,7 @@ describe('ActionQueueAttachmentProcessorsService', () => {
     });
     harness.uploadQueuedAttachment.mockReturnValueOnce(deferredUpload);
     const processing = harness.processor(harness.action);
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(harness.uploadQueuedAttachment).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(harness.uploadQueuedAttachment).toHaveBeenCalledTimes(1));
     currentOwnerUserId = 'user-2';
     harness.sessionRuntimeReset.resetAll('owner-change');
     resolveUpload(harness.uploadedAttachment);
