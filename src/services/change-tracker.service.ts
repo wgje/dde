@@ -1,16 +1,34 @@
 /** ChangeTrackerService - 变更追踪服务，实现增量更新：脏标记 + 项目级聚合 + 变更合并 */
-import { Injectable, inject, signal, computed } from '@angular/core';
+import { Injectable, computed, inject, signal } from '@angular/core';
 import { Task, Connection } from '../models';
 import { SYNC_CONFIG } from '../config';
+import { AUTH_CONFIG } from '../config/auth.config';
+import { AuthService } from './auth.service';
 import { LoggerService } from './logger.service';
 import {
   EntityType,
   ChangeRecord,
-  ConnectionDeleteSummary,
   ProjectChangeSummary,
-  FieldLockData
+  ChangeValidationResult,
+  DataLossRiskSummary,
 } from './change-tracker.types';
-
+import {
+  buildChangeReport,
+  collectDataLossRisks,
+  validateProjectChanges,
+} from './change-tracker-validation.helpers';
+import {
+  CHANGE_TRACKER_FIELD_LOCKS_STORAGE_KEY,
+  CHANGE_TRACKER_PENDING_CHANGES_STORAGE_KEY,
+  getChangeRecordRevision,
+  restoreFieldLocks,
+  restorePendingChangeRecords,
+  serializeFieldLocks,
+  serializePendingChanges,
+} from './change-tracker-persistence.helpers';
+import { ChangeTrackerFieldLockController } from './change-tracker-field-lock.controller';
+import type { FieldLockValue } from './change-tracker-field-lock.helpers';
+import { collectProjectChangeBuckets } from './change-tracker-project-change-buckets';
 // 重新导出类型以保持向后兼容
 export type {
   ChangeType,
@@ -18,28 +36,50 @@ export type {
   ChangeRecord,
   ConnectionDeleteSummary,
   ProjectChangeSummary,
-  FieldLockData
+  FieldLockData,
+  ChangeValidationResult,
+  DataLossRisk,
+  DataLossRiskSummary
 } from './change-tracker.types';
 
 @Injectable({
   providedIn: 'root'
 })
 export class ChangeTrackerService {
+  private readonly authService = inject(AuthService);
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('ChangeTracker');
   
   /** 待同步的变更记录，Key: `${projectId}:${entityType}:${entityId}` */
-  private pendingChanges = new Map<string, ChangeRecord>();
+  private readonly pendingChangesState = new Map<string, ChangeRecord>();
   /** 单调递增修订号：区分同一毫秒内的多次本地编辑 */
   private changeRevision = 0;
   /** 字段级操作锁，防止用户操作期间被远程更新覆盖。Key: `${projectId}:${taskId}:${field}` */
-  private fieldLocks = new Map<string, number | FieldLockData>();
+  private readonly fieldLocks = new Map<string, FieldLockValue>();
+  private readonly activeOwnerUserId = signal<string | null>(null);
   /** 字段锁超时（30s）- 弱网环境兑底 */
   private static readonly FIELD_LOCK_TIMEOUT_MS = 30000;
+  private readonly fieldLockController = new ChangeTrackerFieldLockController({
+    fieldLocks: this.fieldLocks,
+    logger: this.logger,
+    persistFieldLocks: () => this.persistFieldLocks(),
+    defaultLockTimeoutMs: ChangeTrackerService.FIELD_LOCK_TIMEOUT_MS,
+  });
   private changeCount = signal(0);
-  readonly pendingChangeCount = computed(() => this.changeCount());
+  readonly pendingChangeCount = computed(() =>
+    this.resolveExpectedSyncOwnerUserId() === this.activeOwnerUserId() ? this.changeCount() : 0
+  );
   private lastChangeAt = signal(0);
-  readonly lastChangeTimestamp = computed(() => this.lastChangeAt());
+  readonly lastChangeTimestamp = computed(() =>
+    this.resolveExpectedSyncOwnerUserId() === this.activeOwnerUserId() ? this.lastChangeAt() : 0
+  );
+
+  constructor() { this.activateOwnerScope(this.resolveExpectedSyncOwnerUserId()); }
+
+  private get pendingChanges(): Map<string, ChangeRecord> {
+    this.ensureExpectedOwnerScope();
+    return this.pendingChangesState;
+  }
 
   /** 标记任务创建 */
   trackTaskCreate(projectId: string, task: Task): void {
@@ -103,7 +143,7 @@ export class ChangeTrackerService {
     this.logger.debug('追踪任务更新', { projectId, taskId: task.id, fields: changedFields });
   }
   /** 标记任务删除 */
-  trackTaskDelete(projectId: string, taskId: string): void {
+  trackTaskDelete(projectId: string, taskId: string, taskBeforeDelete?: Task): void {
     const key = this.makeKey(projectId, 'task', taskId);
     
     const existing = this.pendingChanges.get(key);
@@ -117,7 +157,8 @@ export class ChangeTrackerService {
         entityType: 'task',
         changeType: 'delete',
         projectId,
-        ...this.createChangeStamp()
+        ...this.createChangeStamp(),
+        data: taskBeforeDelete,
       });
     }
     
@@ -226,88 +267,43 @@ export class ChangeTrackerService {
   }
   /** 获取项目的变更摘要 */
   getProjectChanges(projectId: string): ProjectChangeSummary {
-    const tasksToCreate: Task[] = [];
-    const tasksToUpdate: Task[] = [];
-    const taskIdsToDelete: string[] = [];
-    const connectionsToCreate: Connection[] = [];
-    const connectionsToUpdate: Connection[] = [];
-    const connectionsToDelete: ConnectionDeleteSummary[] = [];
-    const invalidConnectionDeleteKeys: string[] = [];
-    // 【流量优化 2026-01-12】收集每个任务的变更字段
-    const taskUpdateFieldsById: Record<string, string[] | undefined> = {};
-    
-    this.pendingChanges.forEach((record, recordKey) => {
-      if (record.projectId === projectId) {
-        if (record.entityType === 'task') {
-          switch (record.changeType) {
-            case 'create':
-              if (record.data) tasksToCreate.push(record.data as Task);
-              break;
-            case 'update':
-              if (record.data) {
-                tasksToUpdate.push(record.data as Task);
-                // 记录该任务变更的字段
-                taskUpdateFieldsById[record.entityId] = record.changedFields;
-              }
-              break;
-            case 'delete':
-              taskIdsToDelete.push(record.entityId);
-              break;
-          }
-        } else if (record.entityType === 'connection') {
-          switch (record.changeType) {
-            case 'create':
-              if (record.data) connectionsToCreate.push(record.data as Connection);
-              break;
-            case 'update':
-              if (record.data) connectionsToUpdate.push(record.data as Connection);
-              break;
-            case 'delete': {
-              const conn = record.data as Partial<Connection> | undefined;
-              if (conn?.id && conn.source && conn.target) {
-                connectionsToDelete.push({
-                  id: conn.id,
-                  source: conn.source,
-                  target: conn.target,
-                });
-              } else {
-                invalidConnectionDeleteKeys.push(recordKey);
-                this.logger.error('连接删除记录缺少显式 id，已丢弃非法待同步项', {
-                  projectId,
-                  entityId: record.entityId,
-                });
-              }
-              break;
-            }
-          }
-        }
-      }
-    });
+    const buckets = collectProjectChangeBuckets(
+      projectId,
+      this.pendingChanges,
+      ({ record }) => {
+        this.logger.error('连接删除记录缺少显式 id，已丢弃非法待同步项', {
+          projectId,
+          entityId: record.entityId,
+        });
+      },
+    );
 
-    if (invalidConnectionDeleteKeys.length > 0) {
-      for (const invalidKey of invalidConnectionDeleteKeys) {
+    if (buckets.invalidConnectionDeleteKeys.length > 0) {
+      for (const invalidKey of buckets.invalidConnectionDeleteKeys) {
         this.pendingChanges.delete(invalidKey);
       }
       this.updateCounters();
     }
     
     const totalChanges = 
-      tasksToCreate.length + tasksToUpdate.length + taskIdsToDelete.length +
-      connectionsToCreate.length + connectionsToUpdate.length + connectionsToDelete.length;
+      buckets.tasksToCreate.length + buckets.tasksToUpdate.length + buckets.taskIdsToDelete.length +
+      buckets.connectionsToCreate.length + buckets.connectionsToUpdate.length + buckets.connectionsToDelete.length;
     
     return {
       projectId,
-      tasksToCreate,
-      tasksToUpdate,
-      taskIdsToDelete,
-      connectionsToCreate,
-      connectionsToUpdate,
-      connectionsToDelete,
+      tasksToCreate: buckets.tasksToCreate,
+      tasksToUpdate: buckets.tasksToUpdate,
+      taskIdsToDelete: buckets.taskIdsToDelete,
+      taskDeleteBaseUpdatedAtMap: buckets.taskDeleteBaseUpdatedAtMap,
+      connectionsToCreate: buckets.connectionsToCreate,
+      connectionsToUpdate: buckets.connectionsToUpdate,
+      connectionsToDelete: buckets.connectionsToDelete,
       hasChanges: totalChanges > 0,
       totalChanges,
-      taskUpdateFieldsById
+      taskUpdateFieldsById: buckets.taskUpdateFieldsById
     };
   }
+
   /** 检查项目是否有待同步的变更 */
   hasProjectChanges(projectId: string): boolean {
     return this.getProjectChanges(projectId).hasChanges;
@@ -350,7 +346,7 @@ export class ChangeTrackerService {
     const key = this.makeKey(projectId, 'task', taskId);
     const record = this.pendingChanges.get(key);
     if (!record) return true;
-    if (this.getRecordRevision(record) > notNewerThanRevision) {
+    if (getChangeRecordRevision(record) > notNewerThanRevision) {
       return false;
     }
     this.pendingChanges.delete(key);
@@ -362,7 +358,7 @@ export class ChangeTrackerService {
     const key = this.makeKey(projectId, 'connection', connectionId);
     const record = this.pendingChanges.get(key);
     if (!record) return true;
-    if (this.getRecordRevision(record) > notNewerThanRevision) {
+    if (getChangeRecordRevision(record) > notNewerThanRevision) {
       return false;
     }
     this.pendingChanges.delete(key);
@@ -389,13 +385,11 @@ export class ChangeTrackerService {
   }
 
   getCurrentChangeRevision(): number {
+    this.ensureExpectedOwnerScope();
     return this.changeRevision;
   }
 
-  /**
-   * 获取单个实体的待同步变更（带保护窗口）
-   * 超过保护窗口的脏记录会自动清理，避免长期偏向本地。
-   */
+  /** 获取单个实体的待同步变更；超龄记录自动清理。 */
   getPendingChange(
     projectId: string,
     entityType: EntityType,
@@ -423,15 +417,16 @@ export class ChangeTrackerService {
     return record;
   }
 
-  /**
-   * 清理超过保护窗口的历史脏记录
-   */
-  pruneExpiredChanges(maxAgeMs = SYNC_CONFIG.DIRTY_PROTECTION_WINDOW_MS): number {
+  /** 清理超龄记录，同时允许 durable queue 认领仍需保护的记录。 */
+  pruneExpiredChanges(
+    maxAgeMs = SYNC_CONFIG.DIRTY_PROTECTION_WINDOW_MS,
+    preserveExpired: (record: ChangeRecord) => boolean = () => false,
+  ): number {
     const now = Date.now();
     let cleaned = 0;
     const keysToDelete: string[] = [];
     this.pendingChanges.forEach((record, key) => {
-      if (now - record.timestamp > maxAgeMs) {
+      if (now - record.timestamp > maxAgeMs && !preserveExpired(record)) {
         keysToDelete.push(key);
       }
     });
@@ -467,7 +462,7 @@ export class ChangeTrackerService {
       const key = this.makeKey(record.projectId, record.entityType, record.entityId);
       const normalizedRecord: ChangeRecord = {
         ...record,
-        revision: this.getRecordRevision(record),
+        revision: getChangeRecordRevision(record),
       };
       this.changeRevision = Math.max(this.changeRevision, normalizedRecord.revision ?? 0);
       this.pendingChanges.set(key, normalizedRecord);
@@ -480,138 +475,34 @@ export class ChangeTrackerService {
   validateChanges(
     projectId: string,
     currentTasks: Task[],
-    currentConnections: Connection[]
-  ): {
-    valid: boolean;
-    warnings: string[];
-    errors: string[];
-    recommendations: string[];
-  } {
-    const warnings: string[] = [];
-    const errors: string[] = [];
-    const recommendations: string[] = [];
-
+    _currentConnections: Connection[]
+  ): ChangeValidationResult {
     const changes = this.getProjectChanges(projectId);
-    if (!changes.hasChanges) {
-      return { valid: true, warnings, errors, recommendations };
-    }
+    const validation = validateProjectChanges(changes, currentTasks);
+    this.logValidationResult(projectId, changes.totalChanges, validation.warnings, validation.errors);
+    return validation;
+  }
 
-    const currentTaskMap = new Map(currentTasks.map(t => [t.id, t]));
-    const _currentConnectionSet = new Set(
-      currentConnections.map(c => `${c.source}|${c.target}`)
-    );
-
-    // 1. 验证待删除的任务
-    for (const taskId of changes.taskIdsToDelete) {
-      if (!currentTaskMap.has(taskId)) {
-        warnings.push(
-          `待删除的任务 ${taskId} 在当前项目中不存在，可能已被其他操作删除`
-        );
-      }
-    }
-
-    // 2. 验证待更新的任务
-    for (const task of changes.tasksToUpdate) {
-      if (!currentTaskMap.has(task.id)) {
-        errors.push(
-          `待更新的任务 ${task.id} 在当前项目中不存在，无法执行更新操作`
-        );
-      }
-    }
-
-    // 3. 验证待创建的任务
-    for (const task of changes.tasksToCreate) {
-      if (currentTaskMap.has(task.id)) {
-        warnings.push(
-          `待创建的任务 ${task.id} 已存在，将执行更新操作而非创建`
-        );
-      }
-    }
-
-    // 4. 验证连接引用的任务存在性
-    const allTaskIds = new Set(currentTasks.map(t => t.id));
-    
-    // 添加待创建的任务ID
-    for (const task of changes.tasksToCreate) {
-      allTaskIds.add(task.id);
-    }
-    
-    // 移除待删除的任务ID
-    for (const taskId of changes.taskIdsToDelete) {
-      allTaskIds.delete(taskId);
-    }
-
-    // 检查待创建的连接
-    for (const conn of changes.connectionsToCreate) {
-      if (!allTaskIds.has(conn.source)) {
-        errors.push(
-          `连接 ${conn.source}->${conn.target} 的源任务 ${conn.source} 不存在`
-        );
-      }
-      if (!allTaskIds.has(conn.target)) {
-        errors.push(
-          `连接 ${conn.source}->${conn.target} 的目标任务 ${conn.target} 不存在`
-        );
-      }
-    }
-
-    // 检查待更新的连接
-    for (const conn of changes.connectionsToUpdate) {
-      if (!allTaskIds.has(conn.source)) {
-        errors.push(
-          `待更新连接 ${conn.source}->${conn.target} 的源任务 ${conn.source} 不存在`
-        );
-      }
-      if (!allTaskIds.has(conn.target)) {
-        errors.push(
-          `待更新连接 ${conn.source}->${conn.target} 的目标任务 ${conn.target} 不存在`
-        );
-      }
-    }
-
-    // 5. 检查孤儿任务（父任务被删除但子任务未被删除）
-    const deletedTaskIds = new Set(changes.taskIdsToDelete);
-    for (const task of currentTasks) {
-      if (task.parentId && deletedTaskIds.has(task.parentId)) {
-        if (!deletedTaskIds.has(task.id)) {
-          warnings.push(
-            `任务 ${task.id} 的父任务 ${task.parentId} 将被删除，子任务将变为孤儿任务`
-          );
-          recommendations.push(
-            `建议将任务 ${task.id} 一并删除，或重新指定父任务`
-          );
-        }
-      }
-    }
-
-    // 6. 检查变更量是否异常
-    const totalTasks = currentTasks.length;
-    const changeRatio = changes.totalChanges / Math.max(totalTasks, 1);
-    
-    if (changeRatio > 0.8 && totalTasks > 20) {
-      recommendations.push(
-        `变更比例过高 (${(changeRatio * 100).toFixed(1)}%)，建议考虑使用全量同步以提高可靠性`
-      );
-    }
-
-    const valid = errors.length === 0;
-
-    if (!valid) {
+  private logValidationResult(
+    projectId: string,
+    changeCount: number,
+    warnings: string[],
+    errors: string[],
+  ): void {
+    if (errors.length > 0) {
       this.logger.error('变更验证失败', {
         projectId,
         errors,
         warnings,
-        changes: changes.totalChanges
+        changes: changeCount
       });
     } else if (warnings.length > 0) {
       this.logger.warn('变更验证通过但有警告', {
         projectId,
         warnings,
-        changes: changes.totalChanges
+        changes: changeCount
       });
     }
-
-    return { valid, warnings, errors, recommendations };
   }
 
   /**
@@ -619,35 +510,7 @@ export class ChangeTrackerService {
    */
   generateChangeReport(projectId: string): string {
     const changes = this.getProjectChanges(projectId);
-    
-    if (!changes.hasChanges) {
-      return `项目 ${projectId}: 无待同步变更`;
-    }
-
-    const lines: string[] = [
-      `项目 ${projectId} 变更摘要:`,
-      `  总变更数: ${changes.totalChanges}`,
-      ``,
-      `  任务变更:`,
-      `    - 待创建: ${changes.tasksToCreate.length}`,
-      `    - 待更新: ${changes.tasksToUpdate.length}`,
-      `    - 待删除: ${changes.taskIdsToDelete.length}`,
-      ``,
-      `  连接变更:`,
-      `    - 待创建: ${changes.connectionsToCreate.length}`,
-      `    - 待更新: ${changes.connectionsToUpdate.length}`,
-      `    - 待删除: ${changes.connectionsToDelete.length}`
-    ];
-
-    if (changes.tasksToCreate.length > 0) {
-      lines.push(``, `  待创建任务ID: ${changes.tasksToCreate.map(t => t.id).join(', ')}`);
-    }
-
-    if (changes.taskIdsToDelete.length > 0) {
-      lines.push(``, `  待删除任务ID: ${changes.taskIdsToDelete.join(', ')}`);
-    }
-
-    return lines.join('\n');
+    return buildChangeReport(changes);
   }
 
   /**
@@ -657,77 +520,9 @@ export class ChangeTrackerService {
     projectId: string,
     currentTasks: Task[],
     currentConnections: Connection[]
-  ): {
-    hasRisk: boolean;
-    risks: Array<{
-      type: 'task-missing' | 'connection-orphan' | 'parent-child-inconsistency' | 'duplicate-operation';
-      severity: 'low' | 'medium' | 'high';
-      description: string;
-      affectedEntities: string[];
-    }>;
-  } {
-    const risks: Array<{
-      type: 'task-missing' | 'connection-orphan' | 'parent-child-inconsistency' | 'duplicate-operation';
-      severity: 'low' | 'medium' | 'high';
-      description: string;
-      affectedEntities: string[];
-    }> = [];
-
+  ): DataLossRiskSummary {
     const changes = this.getProjectChanges(projectId);
-    const currentTaskMap = new Map(currentTasks.map(t => [t.id, t]));
-
-    // 检测1: 更新不存在的任务（高风险）
-    const missingTasks = changes.tasksToUpdate.filter(t => !currentTaskMap.has(t.id));
-    if (missingTasks.length > 0) {
-      risks.push({
-        type: 'task-missing',
-        severity: 'high',
-        description: '尝试更新不存在的任务，可能导致数据丢失',
-        affectedEntities: missingTasks.map(t => t.id)
-      });
-    }
-
-    // 检测2: 连接引用的任务被删除（中风险）
-    const deletedTaskIds = new Set(changes.taskIdsToDelete);
-    const orphanConnections = currentConnections.filter(
-      c => deletedTaskIds.has(c.source) || deletedTaskIds.has(c.target)
-    );
-    if (orphanConnections.length > 0) {
-      risks.push({
-        type: 'connection-orphan',
-        severity: 'medium',
-        description: '任务删除后关联的连接将变为孤儿连接',
-        affectedEntities: orphanConnections.map(c => `${c.source}->${c.target}`)
-      });
-    }
-
-    // 检测3: 父子任务不一致（中风险）
-    const childTasksOfDeletedParents: string[] = [];
-    for (const task of currentTasks) {
-      if (task.parentId && deletedTaskIds.has(task.parentId) && !deletedTaskIds.has(task.id)) {
-        childTasksOfDeletedParents.push(task.id);
-      }
-    }
-    if (childTasksOfDeletedParents.length > 0) {
-      risks.push({
-        type: 'parent-child-inconsistency',
-        severity: 'medium',
-        description: '父任务被删除但子任务保留，可能破坏层级结构',
-        affectedEntities: childTasksOfDeletedParents
-      });
-    }
-
-    // 检测4: 重复操作（低风险但需要注意）
-    const duplicateCreates = changes.tasksToCreate.filter(t => currentTaskMap.has(t.id));
-    if (duplicateCreates.length > 0) {
-      risks.push({
-        type: 'duplicate-operation',
-        severity: 'low',
-        description: '尝试创建已存在的任务，将自动转为更新操作',
-        affectedEntities: duplicateCreates.map(t => t.id)
-      });
-    }
-
+    const risks = collectDataLossRisks(changes, currentTasks, currentConnections);
     const hasRisk = risks.some(r => r.severity === 'high' || r.severity === 'medium');
 
     if (hasRisk) {
@@ -747,111 +542,40 @@ export class ChangeTrackerService {
 
   /** 锁定任务的特定字段（用户开始操作时调用） */
   lockTaskField(taskId: string, projectId: string, field: string, durationMs?: number): void {
-    const key = this.makeFieldLockKey(projectId, taskId, field);
-    // 存储格式：高 32 位为锁定时间戳，低 32 位为超时时长
-    // 为简化实现，使用 Map 存储 {timestamp, duration} 对象
-    const lockData = {
-      timestamp: Date.now(),
-      duration: durationMs ?? ChangeTrackerService.FIELD_LOCK_TIMEOUT_MS
-    };
-    this.fieldLocks.set(key, lockData);
-    this.logger.debug('锁定任务字段', { taskId, projectId, field, durationMs: lockData.duration });
+    this.ensureExpectedOwnerScope();
+    this.fieldLockController.lockTaskField(taskId, projectId, field, durationMs);
   }
+
   /** 解锁任务的特定字段 */
   unlockTaskField(taskId: string, projectId: string, field: string): void {
-    const key = this.makeFieldLockKey(projectId, taskId, field);
-    this.fieldLocks.delete(key);
-    this.logger.debug('解锁任务字段', { taskId, projectId, field });
+    this.ensureExpectedOwnerScope();
+    this.fieldLockController.unlockTaskField(taskId, projectId, field);
   }
+
   /** 解锁任务的所有字段 */
   unlockAllTaskFields(taskId: string, projectId: string): void {
-    const prefix = `${projectId}:${taskId}:`;
-    const keysToDelete: string[] = [];
-    this.fieldLocks.forEach((_lockData, key) => {
-      if (key.startsWith(prefix)) {
-        keysToDelete.push(key);
-      }
-    });
-    for (const key of keysToDelete) {
-      this.fieldLocks.delete(key);
-    }
-    if (keysToDelete.length > 0) {
-      this.logger.debug('解锁任务所有字段', { taskId, projectId, fieldCount: keysToDelete.length });
-    }
+    this.ensureExpectedOwnerScope();
+    this.fieldLockController.unlockAllTaskFields(taskId, projectId);
   }
+
   /** 检查任务的特定字段是否被锁定（考虑超时自动解锁） */
   isTaskFieldLocked(taskId: string, projectId: string, field: string): boolean {
-    const key = this.makeFieldLockKey(projectId, taskId, field);
-    const lockData = this.fieldLocks.get(key) as FieldLockData | number | undefined;
-    
-    if (!lockData) {
-      return false;
-    }
-    
-    // 支持新格式（带 duration）和旧格式（纯时间戳）的兼容
-    const timestamp = typeof lockData === 'number' ? lockData : lockData.timestamp;
-    const duration = typeof lockData === 'number' 
-      ? ChangeTrackerService.FIELD_LOCK_TIMEOUT_MS 
-      : lockData.duration;
-    
-    // 检查是否超时（防止死锁）
-    const elapsed = Date.now() - timestamp;
-    if (elapsed > duration) {
-      this.fieldLocks.delete(key);
-      this.logger.warn('字段锁超时自动解锁', { taskId, projectId, field, elapsed, duration });
-      return false;
-    }
-    
-    return true;
+    this.ensureExpectedOwnerScope();
+    return this.fieldLockController.isTaskFieldLocked(taskId, projectId, field);
   }
+
   /** 获取任务被锁定的字段列表 */
   getLockedFields(taskId: string, projectId: string): string[] {
-    const prefix = `${projectId}:${taskId}:`;
-    const lockedFields: string[] = [];
-    const now = Date.now();
-    
-    this.fieldLocks.forEach((lockData, key) => {
-      if (key.startsWith(prefix)) {
-        // 支持新格式（带 duration）和旧格式（纯时间戳）的兼容
-        const timestamp = typeof lockData === 'number' ? lockData : (lockData as FieldLockData).timestamp;
-        const duration = typeof lockData === 'number' 
-          ? ChangeTrackerService.FIELD_LOCK_TIMEOUT_MS 
-          : (lockData as FieldLockData).duration;
-        
-        // 检查超时
-        if (now - timestamp <= duration) {
-          const field = key.substring(prefix.length);
-          lockedFields.push(field);
-        } else {
-          // 清理过期锁
-          this.fieldLocks.delete(key);
-        }
-      }
-    });
-    
-    return lockedFields;
+    this.ensureExpectedOwnerScope();
+    return this.fieldLockController.getLockedFields(taskId, projectId);
   }
+
   /** 清理项目的所有字段锁 */
   clearProjectFieldLocks(projectId: string): void {
-    const prefix = `${projectId}:`;
-    const keysToDelete: string[] = [];
-    this.fieldLocks.forEach((_lockData, key) => {
-      if (key.startsWith(prefix)) {
-        keysToDelete.push(key);
-      }
-    });
-    for (const key of keysToDelete) {
-      this.fieldLocks.delete(key);
-    }
-    if (keysToDelete.length > 0) {
-      this.logger.debug('清理项目字段锁', { projectId, lockCount: keysToDelete.length });
-    }
+    this.ensureExpectedOwnerScope();
+    this.fieldLockController.clearProjectFieldLocks(projectId);
   }
   // ========== 辅助方法 ==========
-
-  private makeFieldLockKey(projectId: string, taskId: string, field: string): string {
-    return `${projectId}:${taskId}:${field}`;
-  }
 
   private createChangeStamp(): Pick<ChangeRecord, 'timestamp' | 'revision'> {
     return {
@@ -865,12 +589,177 @@ export class ChangeTrackerService {
     return this.changeRevision;
   }
 
-  private getRecordRevision(record: ChangeRecord): number {
-    return typeof record.revision === 'number' && Number.isFinite(record.revision)
-      ? record.revision
-      : record.timestamp;
+  private resolveExpectedSyncOwnerUserId(): string {
+    return this.authService.currentUserId()?.trim()
+      || this.authService.persistedOwnerHint?.()?.trim()
+      || AUTH_CONFIG.LOCAL_MODE_USER_ID;
   }
-  
+
+  private ensureExpectedOwnerScope(): string {
+    const ownerUserId = this.resolveExpectedSyncOwnerUserId();
+    this.activateOwnerScope(ownerUserId);
+    return ownerUserId;
+  }
+
+  private activateOwnerScope(ownerUserId: string): void {
+    const previousOwnerUserId = this.activeOwnerUserId();
+    if (previousOwnerUserId === ownerUserId) return;
+    this.reportLegacyOwnerlessSnapshots();
+    if (previousOwnerUserId) {
+      this.persistPendingChangesForOwner(previousOwnerUserId);
+      this.persistFieldLocksForOwner(previousOwnerUserId);
+    }
+    this.pendingChangesState.clear();
+    this.fieldLocks.clear();
+    this.changeRevision = 0;
+    this.activeOwnerUserId.set(ownerUserId);
+    this.restorePendingChanges(ownerUserId);
+    this.restoreFieldLocks(ownerUserId);
+    this.refreshOwnerCountersAfterRestore();
+  }
+
+  private restorePendingChanges(ownerUserId: string): void {
+    const storage = this.getLocalStorage();
+    const storageKey = this.getOwnerStorageKey(CHANGE_TRACKER_PENDING_CHANGES_STORAGE_KEY, ownerUserId);
+    const raw = storage?.getItem(storageKey);
+    if (!storage || !raw) return;
+    try {
+      if (!this.validateSnapshotOwner(storage, storageKey, raw, ownerUserId)) return;
+      const { changes, maxRevision } = restorePendingChangeRecords(raw);
+      for (const normalizedRecord of changes) {
+        this.pendingChangesState.set(
+          this.makeKey(normalizedRecord.projectId, normalizedRecord.entityType, normalizedRecord.entityId),
+          normalizedRecord,
+        );
+      }
+      this.changeRevision = Math.max(this.changeRevision, maxRevision);
+      if (changes.length > 0) {
+        this.logger.info('恢复 owner-scoped 待同步变更记录', { ownerUserId, count: changes.length });
+      }
+    } catch (error) {
+      this.logger.warn('恢复 owner-scoped 待同步变更记录失败', { ownerUserId, error });
+    }
+  }
+
+  private restoreFieldLocks(ownerUserId: string): void {
+    const storage = this.getLocalStorage();
+    const storageKey = this.getOwnerStorageKey(CHANGE_TRACKER_FIELD_LOCKS_STORAGE_KEY, ownerUserId);
+    const raw = storage?.getItem(storageKey);
+    if (!storage || !raw) return;
+    try {
+      if (!this.validateSnapshotOwner(storage, storageKey, raw, ownerUserId)) return;
+      const { locks } = restoreFieldLocks(raw, Date.now(), ChangeTrackerService.FIELD_LOCK_TIMEOUT_MS);
+      for (const [key, lockData] of locks) this.fieldLocks.set(key, lockData);
+      if (locks.length > 0) {
+        this.logger.info('恢复 owner-scoped 字段锁记录', { ownerUserId, count: locks.length });
+      } else {
+        storage.removeItem(storageKey);
+      }
+    } catch (error) {
+      this.logger.warn('恢复 owner-scoped 字段锁记录失败', { ownerUserId, error });
+    }
+  }
+
+  private persistPendingChangesForOwner(ownerUserId: string): void {
+    const storage = ownerUserId === this.activeOwnerUserId() ? this.getLocalStorage() : null;
+    if (!storage) return;
+    const storageKey = this.getOwnerStorageKey(CHANGE_TRACKER_PENDING_CHANGES_STORAGE_KEY, ownerUserId);
+    try {
+      const changes = Array.from(this.pendingChangesState.values());
+      if (changes.length === 0) {
+        storage.removeItem(storageKey);
+        return;
+      }
+      storage.setItem(
+        storageKey,
+        this.serializeOwnerScopedSnapshot(ownerUserId, serializePendingChanges(changes)),
+      );
+    } catch (error) {
+      this.logger.warn('owner-scoped 待同步变更持久化失败', { ownerUserId, error });
+    }
+  }
+
+  private persistFieldLocks(): void {
+    this.persistFieldLocksForOwner(this.ensureExpectedOwnerScope());
+  }
+
+  private persistFieldLocksForOwner(ownerUserId: string): void {
+    const storage = ownerUserId === this.activeOwnerUserId() ? this.getLocalStorage() : null;
+    if (!storage) return;
+    const storageKey = this.getOwnerStorageKey(CHANGE_TRACKER_FIELD_LOCKS_STORAGE_KEY, ownerUserId);
+    try {
+      if (this.fieldLocks.size === 0) {
+        storage.removeItem(storageKey);
+        return;
+      }
+      storage.setItem(
+        storageKey,
+        this.serializeOwnerScopedSnapshot(
+          ownerUserId,
+          serializeFieldLocks(this.fieldLocks, ChangeTrackerService.FIELD_LOCK_TIMEOUT_MS),
+        ),
+      );
+    } catch (error) {
+      this.logger.warn('owner-scoped 字段锁持久化失败', { ownerUserId, error });
+    }
+  }
+
+  private getOwnerStorageKey(baseKey: string, ownerUserId: string): string { return `${baseKey}.${ownerUserId}`; }
+
+  private serializeOwnerScopedSnapshot(ownerUserId: string, serializedSnapshot: string): string {
+    return JSON.stringify({ ...(JSON.parse(serializedSnapshot) as Record<string, unknown>), ownerUserId });
+  }
+
+  private validateSnapshotOwner(
+    storage: Storage,
+    storageKey: string,
+    raw: string,
+    expectedOwnerUserId: string,
+  ): boolean {
+    const snapshot = JSON.parse(raw) as { ownerUserId?: unknown };
+    if (snapshot?.ownerUserId === expectedOwnerUserId) return true;
+    this.logger.warn('ChangeTracker owner-scoped 快照 owner 不匹配，保留原始字节并 fail closed', {
+      storageKey,
+      expectedOwnerUserId,
+      actualOwnerUserId: snapshot?.ownerUserId,
+    });
+    return false;
+  }
+
+  private reportLegacyOwnerlessSnapshots(): void {
+    const storage = this.getLocalStorage();
+    if (!storage) return;
+    try {
+      const retainedKeys = [
+        CHANGE_TRACKER_PENDING_CHANGES_STORAGE_KEY,
+        CHANGE_TRACKER_FIELD_LOCKS_STORAGE_KEY,
+      ].filter(storageKey => storage.getItem(storageKey) !== null);
+      if (retainedKeys.length > 0) {
+        this.logger.warn('存在 ownerless ChangeTracker legacy 快照；保留原始字节且不归属给当前 owner', {
+          retainedKeys,
+        });
+      }
+    } catch (error) {
+      this.logger.warn('检查 ownerless ChangeTracker legacy 快照失败', { error });
+    }
+  }
+
+  private refreshOwnerCountersAfterRestore(): void {
+    this.changeCount.set(this.pendingChangesState.size); this.lastChangeAt.set(this.pendingChangesState.size > 0 ? Date.now() : 0);
+  }
+
+  private getLocalStorage(): Storage | null {
+    let storage: Storage | null = null;
+    try {
+      if (typeof globalThis.localStorage !== 'undefined') {
+        storage = globalThis.localStorage;
+      }
+    } catch {
+      storage = null;
+    }
+    return storage;
+  }
+
   // ========== 其他辅助方法 ==========
   
   private makeKey(projectId: string, entityType: EntityType, entityId: string): string {
@@ -900,7 +789,9 @@ export class ChangeTrackerService {
   }
   
   private updateCounters(): void {
-    this.changeCount.set(this.pendingChanges.size);
+    const ownerUserId = this.ensureExpectedOwnerScope();
+    this.changeCount.set(this.pendingChangesState.size);
     this.lastChangeAt.set(Date.now());
+    this.persistPendingChangesForOwner(ownerUserId);
   }
 }

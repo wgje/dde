@@ -1,6 +1,22 @@
-import { Component, signal, computed, Output, EventEmitter, input, OnDestroy, ChangeDetectionStrategy } from '@angular/core';
+import {
+  afterNextRender,
+  ChangeDetectionStrategy,
+  Component,
+  computed,
+  ElementRef,
+  EventEmitter,
+  inject,
+  Injector,
+  input,
+  OnDestroy,
+  Output,
+  signal,
+  type AfterRenderRef,
+} from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
+
+let loginModalInstanceCounter = 0;
 
 @Component({
   selector: 'app-login-modal',
@@ -9,15 +25,21 @@ import { FormsModule } from '@angular/forms';
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div class="fixed inset-0 bg-black/30 z-50 flex items-center justify-center backdrop-blur-sm animate-fade-in p-4" (click)="close.emit()">
-      <div data-testid="login-modal" class="bg-white dark:bg-stone-900 rounded-xl shadow-2xl w-full max-w-sm p-6 animate-scale-in" (click)="$event.stopPropagation()">
+      <div
+        data-testid="login-modal"
+        role="dialog"
+        aria-modal="true"
+        [attr.aria-labelledby]="titleId"
+        class="bg-white dark:bg-stone-900 rounded-xl shadow-2xl w-full max-w-sm p-6 animate-scale-in"
+        (click)="$event.stopPropagation()">
         <div class="flex items-center gap-3 mb-5">
           <div class="w-10 h-10 rounded-full bg-indigo-100 dark:bg-indigo-900/30 flex items-center justify-center">
-            <svg class="w-5 h-5 text-indigo-600 dark:text-indigo-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+            <svg aria-hidden="true" class="w-5 h-5 text-indigo-600 dark:text-indigo-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
               <path stroke-linecap="round" stroke-linejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/>
             </svg>
           </div>
           <div>
-            <h3 class="text-lg font-semibold text-stone-800 dark:text-stone-200">
+            <h3 [id]="titleId" class="text-lg font-semibold text-stone-800 dark:text-stone-200">
               @if (isResetPasswordMode()) { 重置密码 }
               @else if (isSignupMode()) { 注册账号 }
               @else { 登录 }
@@ -35,12 +57,14 @@ import { FormsModule } from '@angular/forms';
           @if (isResetPasswordSent()) {
             <div class="text-center py-4">
               <div class="w-12 h-12 rounded-full bg-green-100 dark:bg-green-900/30 flex items-center justify-center mx-auto mb-3">
-                <svg class="w-6 h-6 text-green-600 dark:text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                <svg aria-hidden="true" class="w-6 h-6 text-green-600 dark:text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
                   <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/>
                 </svg>
               </div>
-              <p class="text-stone-700 dark:text-stone-300 text-sm mb-1">重置邮件已发送</p>
-              <p class="text-stone-500 dark:text-stone-400 text-xs">请查收邮件并点击链接重置密码</p>
+              <div role="status">
+                <p class="text-stone-700 dark:text-stone-300 text-sm mb-1">重置邮件已发送</p>
+                <p class="text-stone-500 dark:text-stone-400 text-xs">请查收邮件并点击链接重置密码</p>
+              </div>
               <button type="button" (click)="switchToLogin()" class="mt-4 px-4 py-2 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 rounded-lg text-sm">返回登录</button>
             </div>
           } @else {
@@ -53,7 +77,7 @@ import { FormsModule } from '@angular/forms';
                      autocomplete="email" required>
               
               @if (currentError) {
-                <div data-testid="auth-error" class="text-xs text-red-500 dark:text-red-400 bg-red-50 dark:bg-red-900/30 border border-red-100 dark:border-red-800 rounded-lg px-3 py-2">{{ currentError }}</div>
+                <div role="alert" data-testid="auth-error" class="text-xs text-red-500 dark:text-red-400 bg-red-50 dark:bg-red-900/30 border border-red-100 dark:border-red-800 rounded-lg px-3 py-2">{{ currentError }}</div>
               }
               
               <div class="flex gap-2 pt-2">
@@ -90,7 +114,8 @@ import { FormsModule } from '@angular/forms';
             </div>
             
             @if (currentError) {
-              <div class="text-xs bg-amber-50 dark:bg-amber-900/30 border border-amber-100 dark:border-amber-800 rounded-lg px-3 py-2"
+              <div [attr.role]="currentError?.includes('成功') ? 'status' : 'alert'"
+                   class="text-xs bg-amber-50 dark:bg-amber-900/30 border border-amber-100 dark:border-amber-800 rounded-lg px-3 py-2"
                    [ngClass]="{
                      'text-red-500 dark:text-red-400': !currentError?.includes('成功'),
                      'text-green-600 dark:text-green-400': currentError?.includes('成功')
@@ -124,7 +149,7 @@ import { FormsModule } from '@angular/forms';
             </div>
             
             @if (currentError) {
-              <div data-testid="auth-error" class="text-xs text-red-500 dark:text-red-400 bg-red-50 dark:bg-red-900/30 border border-red-100 dark:border-red-800 rounded-lg px-3 py-2">{{ currentError }}</div>
+              <div role="alert" data-testid="auth-error" class="text-xs text-red-500 dark:text-red-400 bg-red-50 dark:bg-red-900/30 border border-red-100 dark:border-red-800 rounded-lg px-3 py-2">{{ currentError }}</div>
             }
             
             <div class="flex flex-col gap-2 pt-2">
@@ -153,8 +178,9 @@ import { FormsModule } from '@angular/forms';
                 type="button" 
                 (click)="handleLocalMode()" 
                 data-testid="local-mode-btn"
-                class="w-full px-4 py-2.5 text-stone-600 dark:text-stone-400 bg-stone-50 dark:bg-stone-800 hover:bg-stone-100 dark:hover:bg-stone-700 border border-stone-200 dark:border-stone-600 rounded-lg transition-colors text-sm font-medium flex items-center justify-center gap-2">
-                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                class="w-full px-4 py-2.5 text-stone-600 dark:text-stone-400 bg-stone-50 dark:bg-stone-800 hover:bg-stone-100 dark:hover:bg-stone-700 border border-stone-200 dark:border-stone-600 rounded-lg transition-colors text-sm font-medium flex items-center justify-center gap-2 disabled:opacity-60"
+                [disabled]="isLoading()">
+                <svg aria-hidden="true" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
                   <path stroke-linecap="round" stroke-linejoin="round" d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
                 </svg>
                 本地模式（不同步云端）
@@ -168,6 +194,12 @@ import { FormsModule } from '@angular/forms';
   `
 })
 export class LoginModalComponent implements OnDestroy {
+  private readonly host = inject<ElementRef<HTMLElement>>(ElementRef);
+  private readonly injector = inject(Injector);
+  readonly titleId = `login-modal-title-${++loginModalInstanceCounter}`;
+  private focusRenderRef: AfterRenderRef | null = null;
+  private focusGeneration = 0;
+
   @Output() close = new EventEmitter<void>();
   @Output() login = new EventEmitter<{ email: string; password: string }>();
   @Output() signup = new EventEmitter<{ email: string; password: string; confirmPassword: string }>();
@@ -244,18 +276,33 @@ export class LoginModalComponent implements OnDestroy {
     this._internalError.set(null);
     this.password.set('');
     this.confirmPassword.set('');
+    this.scheduleModeFocus('signup-email');
   }
   
   switchToLogin() {
     this.isSignupMode.set(false);
     this.isResetPasswordMode.set(false);
     this._internalError.set(null);
+    this.scheduleModeFocus('login-email');
   }
   
   switchToResetPassword() {
     this.isResetPasswordMode.set(true);
     this.isSignupMode.set(false);
     this._internalError.set(null);
+    this.scheduleModeFocus('reset-email');
+  }
+
+  private scheduleModeFocus(fieldId: string): void {
+    const generation = ++this.focusGeneration;
+    this.focusRenderRef?.destroy();
+    this.focusRenderRef = afterNextRender({
+      write: () => {
+        this.focusRenderRef = null;
+        if (generation !== this.focusGeneration) return;
+        this.host.nativeElement.querySelector<HTMLElement>(`#${fieldId}`)?.focus({ preventScroll: true });
+      },
+    }, { injector: this.injector });
   }
   
   /** 获取当前显示的错误（外部传入优先，其次是内部错误） */
@@ -265,11 +312,15 @@ export class LoginModalComponent implements OnDestroy {
   
   handleLogin(event: Event) {
     event.preventDefault();
+    // 加载中禁止重复提交：按钮 disabled 挡不住回车提交表单，这里做入口守卫
+    if (this.isLoading()) return;
     this.login.emit({ email: this.email(), password: this.password() });
   }
   
   handleSignup(event: Event) {
     event.preventDefault();
+    // 加载中禁止重复提交（同 handleLogin）
+    if (this.isLoading()) return;
     this.signup.emit({ 
       email: this.email(), 
       password: this.password(), 
@@ -279,10 +330,12 @@ export class LoginModalComponent implements OnDestroy {
   
   handleResetPassword(event: Event) {
     event.preventDefault();
+    if (this.isLoading()) return;
     this.resetPassword.emit(this.email());
   }
   
   handleLocalMode() {
+    if (this.isLoading()) return;
     this.localMode.emit();
   }
   
@@ -310,6 +363,9 @@ export class LoginModalComponent implements OnDestroy {
    * 确保密码等敏感信息不会残留在内存中
    */
   ngOnDestroy() {
+    this.focusGeneration++;
+    this.focusRenderRef?.destroy();
+    this.focusRenderRef = null;
     this.resetFormState();
   }
 }

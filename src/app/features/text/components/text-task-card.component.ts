@@ -1,4 +1,4 @@
-import { Component, inject, ChangeDetectionStrategy, ElementRef, input, output, signal, viewChild, effect } from '@angular/core';
+import { Component, inject, ChangeDetectionStrategy, ElementRef, input, output, signal, viewChild, effect, computed, OnDestroy } from '@angular/core';
 import { CommonModule, DatePipe } from '@angular/common';
 import { DockEngineService } from '../../../../services/dock-engine.service';
 import { ProjectStateService, TaskConnectionInfo } from '../../../../services/project-state.service';
@@ -10,8 +10,13 @@ import { TextTaskEditorComponent } from './text-task-editor.component';
 import { TextViewTaskOpsService } from '../services/text-view-task-ops.service';
 import { handleMarkdownLinkAction } from '../../../../utils/markdown';
 import { clearActiveTextSelection, hasActiveTextSelection, isInteractiveSelectionTarget } from '../../../../utils/text-selection';
+import { buildTaskSidecarSummary } from '../../../../utils/task-sidecar';
 import type { TaskTouchStartPayload } from './text-view.types';
 import { KnowledgeAnchorComponent } from '../../../shared/components/knowledge-anchor/knowledge-anchor.component';
+
+const SIDECAR_PREVIEW_WIDTH_PX = 256;
+const SIDECAR_PREVIEW_MARGIN_PX = 8;
+const SIDECAR_PREVIEW_GAP_PX = 8;
 
 @Component({
   selector: 'app-text-task-card',
@@ -30,7 +35,10 @@ import { KnowledgeAnchorComponent } from '../../../shared/components/knowledge-a
       (dragend)="onDragEnd()"
       (dragover)="onDragOver($event)"
       (touchstart.passive)="onTouchStart($event)"
-      class="text-task-card relative min-w-0 bg-canvas/90 dark:bg-stone-800/90 border rounded-lg cursor-pointer hover:border-retro-muted/40 dark:hover:border-stone-600 transition-colors duration-150 group stack-card overflow-hidden"
+      class="text-task-card relative min-w-0 bg-canvas/90 dark:bg-stone-800/90 border rounded-lg cursor-pointer hover:border-retro-muted/40 dark:hover:border-stone-600 transition-colors duration-150 group stack-card"
+      [class.overflow-visible]="sidecarSummary().hasSignals"
+      [class.overflow-hidden]="!sidecarSummary().hasSignals"
+      [class.text-task-card--contains-paint]="!sidecarSummary().hasSignals"
       [ngClass]="cardClasses">
 
       <div class="flex min-w-0 items-start gap-2">
@@ -96,6 +104,35 @@ import { KnowledgeAnchorComponent } from '../../../shared/components/knowledge-a
                 No description
               </div>
             }
+            @if (sidecarSummary().hasSignals) {
+              <div
+                class="text-task-sidecar-trigger relative mt-1 inline-flex"
+                data-testid="text-task-sidecar"
+                (mouseenter)="showSidecarPreview($event)"
+                (mouseleave)="hideSidecarPreview()"
+                (focusin)="showSidecarPreview($event)"
+                (focusout)="hideSidecarPreview()">
+                <button
+                  type="button"
+                  data-testid="text-task-sidecar-trigger"
+                  class="inline-flex items-center gap-1 rounded-full border border-stone-200/70 bg-stone-50/70 px-1.5 py-0.5 text-[8px] font-medium text-stone-500 transition-colors hover:border-amber-300/80 hover:bg-amber-50/70 hover:text-amber-700 focus:outline-none focus:ring-1 focus:ring-amber-300/80 dark:border-stone-700/70 dark:bg-stone-800/70 dark:text-stone-400 dark:hover:border-amber-700/70 dark:hover:bg-amber-900/20 dark:hover:text-amber-300"
+                  aria-label="任务僚机摘要"
+                  [attr.aria-describedby]="sidecarPreviewDescriptionId()"
+                  (pointerdown)="$event.stopPropagation()"
+                  (click)="onSidecarTriggerClick($event)"
+                  (touchstart)="$event.stopPropagation()">
+                  <span class="h-1.5 w-1.5 rounded-full bg-amber-400/80 dark:bg-amber-500/80" aria-hidden="true"></span>
+                  <span>僚机</span>
+                  <span class="font-semibold text-stone-600 dark:text-stone-300">{{ sidecarSummary().badges.length }}</span>
+                </button>
+                <span
+                  class="sr-only"
+                  role="tooltip"
+                  [id]="sidecarPreviewDescriptionId()">
+                  {{ sidecarPreviewDescriptionText() }}
+                </span>
+              </div>
+            }
             <app-knowledge-anchor
               class="mt-1 block"
               [taskId]="task().id"
@@ -148,8 +185,12 @@ import { KnowledgeAnchorComponent } from '../../../shared/components/knowledge-a
   styles: [`
     .text-task-card {
       touch-action: pan-y pinch-zoom;
-      contain: layout paint;
+      contain: layout;
       backface-visibility: hidden;
+    }
+
+    .text-task-card--contains-paint {
+      contain: layout paint;
     }
 
     .text-task-drag-handle {
@@ -157,7 +198,7 @@ import { KnowledgeAnchorComponent } from '../../../shared/components/knowledge-a
     }
   `],
 })
-export class TextTaskCardComponent {
+export class TextTaskCardComponent implements OnDestroy {
   readonly dockEngine = inject(DockEngineService);
   readonly projectState = inject(ProjectStateService);
   private readonly toast = inject(ToastService);
@@ -182,6 +223,20 @@ export class TextTaskCardComponent {
   projectId = input<string | null>(null);
   connections = input<TaskConnectionInfo | null>(null);
   stageNumber = input(0);
+
+  readonly sidecarSummary = computed(() => buildTaskSidecarSummary(this.task(), {
+    isDocked: this.isDocked(),
+    isDockFocused: this.isDockFocused(),
+  }));
+  readonly sidecarPreviewLines = computed(() => this.sidecarSummary().tooltipLines);
+  readonly sidecarPreviewDescriptionId = computed(() =>
+    `text-task-sidecar-description-${this.toDomId(this.task().id)}`
+  );
+  readonly sidecarPreviewDescriptionText = computed(() => {
+    const lines = this.sidecarPreviewLines();
+    return lines.length > 0 ? `任务僚机摘要：${lines.join('；')}` : '任务僚机摘要';
+  });
+  private sidecarPreviewElement: HTMLElement | null = null;
 
   select = output<Task>();
   addSibling = output<void>();
@@ -221,6 +276,9 @@ export class TextTaskCardComponent {
         }
         prevTask = curr;
       });
+      effect(() => {
+        this.syncSidecarPreviewWithSummary();
+      });
     } catch {
       // SW chunk mismatch can lose injection context in rare cases.
     }
@@ -248,7 +306,7 @@ export class TextTaskCardComponent {
   }
 
   showMobileDragHandle(): boolean {
-    return this.isMobile() && !this.isSelected();
+    return this.isMobile();
   }
 
   isDocked(): boolean {
@@ -257,6 +315,179 @@ export class TextTaskCardComponent {
 
   isDockFocused(): boolean {
     return this.dockEngine.focusingEntry()?.taskId === this.task().id;
+  }
+
+  ngOnDestroy(): void {
+    this.hideSidecarPreview();
+  }
+
+  showSidecarPreview(event: Event): void {
+    if (this.sidecarPreviewLines().length === 0) return;
+    const trigger = event.currentTarget instanceof HTMLElement
+      ? event.currentTarget
+      : event.target instanceof HTMLElement
+        ? event.target
+        : null;
+    if (!trigger) return;
+
+    const preview = this.getOrCreateSidecarPreviewElement();
+    this.renderSidecarPreview(preview);
+    preview.style.visibility = 'hidden';
+    preview.style.opacity = '0';
+    preview.style.left = '0px';
+    preview.style.top = '0px';
+
+    const rect = trigger.getBoundingClientRect();
+    const previewRect = preview.getBoundingClientRect();
+    const previewWidth = previewRect.width || SIDECAR_PREVIEW_WIDTH_PX;
+    const previewHeight = Math.min(previewRect.height || SIDECAR_PREVIEW_MARGIN_PX, window.innerHeight - SIDECAR_PREVIEW_MARGIN_PX * 2);
+    let left = rect.right + SIDECAR_PREVIEW_GAP_PX;
+    if (left + previewWidth > window.innerWidth - SIDECAR_PREVIEW_MARGIN_PX) {
+      left = Math.max(SIDECAR_PREVIEW_MARGIN_PX, rect.left - SIDECAR_PREVIEW_GAP_PX - previewWidth);
+    }
+
+    const unclampedTop = rect.top + rect.height / 2 - previewHeight / 2;
+    const top = Math.min(
+      window.innerHeight - previewHeight - SIDECAR_PREVIEW_MARGIN_PX,
+      Math.max(SIDECAR_PREVIEW_MARGIN_PX, unclampedTop),
+    );
+
+    preview.style.left = `${left}px`;
+    preview.style.top = `${top}px`;
+    preview.style.visibility = 'visible';
+    preview.style.opacity = '1';
+  }
+
+  hideSidecarPreview(): void {
+    this.sidecarPreviewElement?.remove();
+    this.sidecarPreviewElement = null;
+  }
+
+  onSidecarTriggerClick(event: Event): void {
+    if (event.cancelable) {
+      event.preventDefault();
+    }
+    event.stopPropagation();
+
+    if (this.sidecarPreviewElement?.dataset['pinned'] === 'true') {
+      this.hideSidecarPreview();
+      return;
+    }
+
+    this.showSidecarPreview(event);
+    if (this.sidecarPreviewElement) {
+      this.sidecarPreviewElement.dataset['pinned'] = 'true';
+    }
+  }
+
+  private syncSidecarPreviewWithSummary(): void {
+    let hasSignals = false;
+    let hasPreviewLines = false;
+    try {
+      const summary = this.sidecarSummary();
+      hasSignals = summary.hasSignals;
+      hasPreviewLines = this.sidecarPreviewLines().length > 0;
+    } catch {
+      return;
+    }
+
+    if (!hasSignals || !hasPreviewLines) {
+      this.hideSidecarPreview();
+      return;
+    }
+
+    if (this.sidecarPreviewElement) {
+      this.renderSidecarPreview(this.sidecarPreviewElement);
+    }
+  }
+
+  private getOrCreateSidecarPreviewElement(): HTMLElement {
+    if (this.sidecarPreviewElement) return this.sidecarPreviewElement;
+
+    const element = document.createElement('div');
+    element.dataset['testid'] = 'text-task-sidecar-preview';
+    element.setAttribute('role', 'tooltip');
+    this.applySidecarPreviewFrameStyle(element);
+    document.body.appendChild(element);
+    this.sidecarPreviewElement = element;
+    return element;
+  }
+
+  private renderSidecarPreview(element: HTMLElement): void {
+    element.replaceChildren();
+
+    const header = document.createElement('div');
+    this.applySidecarPreviewHeaderStyle(header);
+    const dot = document.createElement('span');
+    this.applySidecarPreviewDotStyle(dot);
+    const title = document.createElement('span');
+    title.textContent = '任务僚机';
+    const count = document.createElement('span');
+    count.textContent = `${this.sidecarSummary().badges.length} 条`;
+    count.style.color = 'color-mix(in srgb, var(--theme-text, #57534e) 52%, transparent)';
+    header.append(dot, title, count);
+
+    const list = document.createElement('div');
+    list.style.maxHeight = '16rem';
+    list.style.overflowY = 'auto';
+    list.style.paddingRight = '0.25rem';
+    for (const line of this.sidecarPreviewLines()) {
+      const row = document.createElement('div');
+      row.textContent = line;
+      row.style.overflowWrap = 'anywhere';
+      list.appendChild(row);
+    }
+
+    element.append(header, list);
+  }
+
+  private applySidecarPreviewFrameStyle(element: HTMLElement): void {
+    Object.assign(element.style, {
+      position: 'fixed',
+      zIndex: '70',
+      width: `${SIDECAR_PREVIEW_WIDTH_PX}px`,
+      maxWidth: 'calc(100vw - 16px)',
+      maxHeight: 'calc(100vh - 16px)',
+      overflowY: 'auto',
+      pointerEvents: 'none',
+      borderRadius: '12px',
+      border: '1px solid color-mix(in srgb, var(--theme-border, #78716c) 65%, transparent)',
+      background: 'color-mix(in srgb, var(--theme-card-bg, #ffffff) 95%, transparent)',
+      color: 'var(--theme-text, #57534e)',
+      boxShadow: '0 10px 26px rgba(28, 25, 23, 0.16)',
+      padding: '8px',
+      fontSize: '10px',
+      lineHeight: '1.35',
+      backdropFilter: 'blur(8px)',
+      transition: 'opacity 120ms ease',
+    });
+  }
+
+  private applySidecarPreviewHeaderStyle(header: HTMLElement): void {
+    Object.assign(header.style, {
+      display: 'flex',
+      alignItems: 'center',
+      gap: '4px',
+      marginBottom: '2px',
+      color: 'var(--theme-muted, #78716c)',
+      fontSize: '9px',
+      fontWeight: '600',
+    });
+  }
+
+  private applySidecarPreviewDotStyle(dot: HTMLElement): void {
+    Object.assign(dot.style, {
+      width: '6px',
+      height: '6px',
+      borderRadius: '9999px',
+      background: '#f59e0b',
+      opacity: '0.82',
+      flexShrink: '0',
+    });
+  }
+
+  private toDomId(value: string): string {
+    return value.replace(/[^A-Za-z0-9_-]/g, '_');
   }
 
   onCardClick(event: Event) {
@@ -348,10 +579,6 @@ export class TextTaskCardComponent {
   }
 
   onDragHandleTouchStart(event: TouchEvent): void {
-    if (this.isSelected()) {
-      return;
-    }
-
     if (event.cancelable) {
       event.preventDefault();
     }

@@ -237,6 +237,12 @@ export interface FileValidationResult {
   warnings?: string[];
 }
 
+interface MagicNumberValidationResult {
+  valid: boolean;
+  detectedMimeType?: string;
+  error?: string;
+}
+
 /**
  * 文件验证错误代码
  */
@@ -278,13 +284,27 @@ export class FileTypeValidatorService {
    * @returns 验证结果
    */
   async validateFile(file: File): Promise<FileValidationResult> {
-    const extension = this.getExtension(file.name);
-    const declaredMimeType = file.type || 'application/octet-stream';
+    const result = this.createValidationResult(file);
+    if (this.rejectBasicFileProblem(file, result)) return result;
+    if (await this.rejectMagicNumberProblem(file, result)) return result;
+    if (this.rejectExtensionMimeProblem(file, result)) return result;
+
+    result.valid = true;
+    this.logger.debug('文件类型验证通过', {
+      fileName: file.name,
+      extension: result.extension,
+      mimeType: result.declaredMimeType,
+      detectedMimeType: result.detectedMimeType,
+    });
     
-    const result: FileValidationResult = {
+    return result;
+  }
+
+  private createValidationResult(file: File): FileValidationResult {
+    return {
       valid: false,
-      declaredMimeType,
-      extension,
+      declaredMimeType: file.type || 'application/octet-stream',
+      extension: this.getExtension(file.name),
       details: {
         extensionValid: false,
         mimeTypeValid: false,
@@ -293,105 +313,98 @@ export class FileTypeValidatorService {
       },
       warnings: [],
     };
+  }
 
-    // 空文件检查
+  private rejectBasicFileProblem(file: File, result: FileValidationResult): boolean {
+    const { extension, declaredMimeType } = result;
+
     if (file.size === 0) {
-      result.error = '文件为空';
-      result.errorCode = 'EMPTY_FILE';
-      this.logValidationFailure(file, result);
-      return result;
+      return this.rejectFile(file, result, '文件为空', 'EMPTY_FILE');
     }
 
-    // 1. 检查危险扩展名（黑名单优先）
     if (DANGEROUS_EXTENSIONS.has(extension)) {
-      result.error = `不允许上传 .${extension} 类型的文件`;
-      result.errorCode = 'DANGEROUS_EXTENSION';
-      this.logValidationFailure(file, result);
-      return result;
+      return this.rejectFile(file, result, `不允许上传 .${extension} 类型的文件`, 'DANGEROUS_EXTENSION');
     }
 
-    // 2. 检查危险 MIME 类型（黑名单优先）
     if (DANGEROUS_MIME_TYPES.has(declaredMimeType)) {
-      result.error = `不允许上传 ${declaredMimeType} 类型的文件`;
-      result.errorCode = 'DANGEROUS_MIME_TYPE';
-      this.logValidationFailure(file, result);
-      return result;
+      return this.rejectFile(file, result, `不允许上传 ${declaredMimeType} 类型的文件`, 'DANGEROUS_MIME_TYPE');
     }
 
-    // 3. 扩展名白名单验证
     result.details.extensionValid = ALLOWED_EXTENSIONS.has(extension);
     if (!result.details.extensionValid && !FILE_TYPE_VALIDATION_CONFIG.ALLOW_UNKNOWN_TYPES) {
-      result.error = `不支持的文件扩展名: .${extension}`;
-      result.errorCode = 'EXTENSION_NOT_ALLOWED';
-      this.logValidationFailure(file, result);
-      return result;
+      return this.rejectFile(file, result, `不支持的文件扩展名: .${extension}`, 'EXTENSION_NOT_ALLOWED');
     }
 
-    // 4. MIME 类型白名单验证
     result.details.mimeTypeValid = ALLOWED_MIME_TYPES.has(declaredMimeType);
     if (!result.details.mimeTypeValid && !FILE_TYPE_VALIDATION_CONFIG.ALLOW_UNKNOWN_TYPES) {
-      result.error = `不支持的文件类型: ${declaredMimeType}`;
-      result.errorCode = 'MIME_TYPE_NOT_ALLOWED';
-      this.logValidationFailure(file, result);
-      return result;
+      return this.rejectFile(file, result, `不支持的文件类型: ${declaredMimeType}`, 'MIME_TYPE_NOT_ALLOWED');
     }
 
-    // 5. 魔数验证（如果启用）
-    if (FILE_TYPE_VALIDATION_CONFIG.MAGIC_NUMBER_CHECK) {
-      try {
-        const magicResult = await this.validateMagicNumber(file);
-        result.details.magicNumberValid = magicResult.valid;
-        result.detectedMimeType = magicResult.detectedMimeType;
-        
-        if (!magicResult.valid) {
-          // 严格模式下，魔数不匹配直接拒绝
-          if (FILE_TYPE_VALIDATION_CONFIG.STRICT_MODE) {
-            result.error = magicResult.error || '文件内容与声明类型不匹配';
-            result.errorCode = 'MAGIC_NUMBER_MISMATCH';
-            this.logValidationFailure(file, result);
-            return result;
-          } else {
-            // 非严格模式，添加警告
-            result.warnings?.push(magicResult.error || '无法验证文件内容类型');
-          }
-        }
-      } catch (e) {
-        this.logger.warn('魔数验证失败', { fileName: file.name, error: e });
-        result.warnings?.push('无法读取文件进行内容验证');
-        // 读取错误不阻止上传，但记录警告
-      }
-    } else {
-      // 跳过魔数验证时，标记为有效
+    return false;
+  }
+
+  private async rejectMagicNumberProblem(file: File, result: FileValidationResult): Promise<boolean> {
+    if (!FILE_TYPE_VALIDATION_CONFIG.MAGIC_NUMBER_CHECK) {
       result.details.magicNumberValid = true;
+      return false;
     }
 
-    // 6. 一致性验证：检查扩展名与 MIME 类型是否匹配
-    if (FILE_TYPE_VALIDATION_CONFIG.REQUIRE_EXTENSION_MATCH) {
-      result.details.consistencyValid = this.checkExtensionMimeConsistency(extension, declaredMimeType);
-      if (!result.details.consistencyValid) {
-        if (FILE_TYPE_VALIDATION_CONFIG.STRICT_MODE) {
-          result.error = `文件扩展名 .${extension} 与类型 ${declaredMimeType} 不匹配`;
-          result.errorCode = 'EXTENSION_MIME_MISMATCH';
-          this.logValidationFailure(file, result);
-          return result;
-        } else {
-          result.warnings?.push(`文件扩展名与 MIME 类型不一致`);
-        }
+    try {
+      const magicResult = await this.validateMagicNumber(file);
+      result.details.magicNumberValid = magicResult.valid;
+      result.detectedMimeType = magicResult.detectedMimeType;
+
+      if (magicResult.valid) return false;
+      if (FILE_TYPE_VALIDATION_CONFIG.STRICT_MODE) {
+        return this.rejectFile(
+          file,
+          result,
+          magicResult.error || '文件内容与声明类型不匹配',
+          'MAGIC_NUMBER_MISMATCH',
+        );
       }
-    } else {
-      result.details.consistencyValid = true;
+
+      result.warnings?.push(magicResult.error || '无法验证文件内容类型');
+    } catch (e) {
+      this.logger.warn('魔数验证失败', { fileName: file.name, error: e });
+      result.warnings?.push('无法读取文件进行内容验证');
     }
 
-    // 全部验证通过
-    result.valid = true;
-    this.logger.debug('文件类型验证通过', {
-      fileName: file.name,
-      extension,
-      mimeType: declaredMimeType,
-      detectedMimeType: result.detectedMimeType,
-    });
-    
-    return result;
+    return false;
+  }
+
+  private rejectExtensionMimeProblem(file: File, result: FileValidationResult): boolean {
+    if (!FILE_TYPE_VALIDATION_CONFIG.REQUIRE_EXTENSION_MATCH) {
+      result.details.consistencyValid = true;
+      return false;
+    }
+
+    const { extension, declaredMimeType } = result;
+    result.details.consistencyValid = this.checkExtensionMimeConsistency(extension, declaredMimeType);
+    if (result.details.consistencyValid) return false;
+    if (!FILE_TYPE_VALIDATION_CONFIG.STRICT_MODE) {
+      result.warnings?.push('文件扩展名与 MIME 类型不一致');
+      return false;
+    }
+
+    return this.rejectFile(
+      file,
+      result,
+      `文件扩展名 .${extension} 与类型 ${declaredMimeType} 不匹配`,
+      'EXTENSION_MIME_MISMATCH',
+    );
+  }
+
+  private rejectFile(
+    file: File,
+    result: FileValidationResult,
+    error: string,
+    errorCode: FileValidationErrorCode,
+  ): true {
+    result.error = error;
+    result.errorCode = errorCode;
+    this.logValidationFailure(file, result);
+    return true;
   }
 
   /**
@@ -424,7 +437,7 @@ export class FileTypeValidatorService {
    * 验证文件魔数
    * 读取文件头部字节，与已知魔数签名比对
    */
-  private async validateMagicNumber(file: File): Promise<{ valid: boolean; detectedMimeType?: string; error?: string }> {
+  private async validateMagicNumber(file: File): Promise<MagicNumberValidationResult> {
     const extension = this.getExtension(file.name);
     
     // SVG 是文本格式，需要特殊处理
@@ -449,14 +462,9 @@ export class FileTypeValidatorService {
             return { valid: true, detectedMimeType: info.mimeType };
           }
           
-          // WebP 特殊处理：需要检查更多字节
-          if (magic === '52494646' && headerBytes.length >= 12) {
-            const webpSignature = this.bytesToHex(headerBytes.slice(8, 12));
-            if (webpSignature === '57454250') { // WEBP
-              if (extension === 'webp') {
-                return { valid: true, detectedMimeType: 'image/webp' };
-              }
-            }
+          const webpResult = this.validateWebpSignature(magic, headerBytes, extension);
+          if (webpResult) {
+            return webpResult;
           }
           
           // 魔数匹配但扩展名不匹配
@@ -482,12 +490,27 @@ export class FileTypeValidatorService {
     }
   }
 
+  private validateWebpSignature(
+    magic: string,
+    headerBytes: Uint8Array,
+    extension: string,
+  ): MagicNumberValidationResult | null {
+    if (magic !== '52494646' || headerBytes.length < 12) return null;
+    const webpSignature = this.bytesToHex(headerBytes.slice(8, 12));
+
+    if (webpSignature === '57454250' && extension === 'webp') {
+      return { valid: true, detectedMimeType: 'image/webp' };
+    }
+
+    return null;
+  }
+
   /**
    * 验证 SVG 文件
    * SVG 是 XML 文本格式，需要检查文本内容
    * 【P1-08 修复】增加 XSS 攻击向量检测
    */
-  private async validateSvg(file: File): Promise<{ valid: boolean; detectedMimeType?: string; error?: string }> {
+  private async validateSvg(file: File): Promise<MagicNumberValidationResult> {
     try {
       // 读取完整文件内容进行安全检查（SVG 通常不大）
       const fullText = await file.text();

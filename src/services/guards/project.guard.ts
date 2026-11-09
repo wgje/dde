@@ -10,6 +10,25 @@ import { guardLogger } from '../../utils/standalone-logger';
 /** 等待种子数据稳定（毫秒）- 让 loadProjects 内部初始化完成 */
 const SEED_DATA_STABILIZE_MS = 100;
 
+interface ProjectGuardSessionContext {
+  sessionGeneration: number;
+  userId: string | null;
+}
+
+function captureProjectGuardSession(userSession: UserSessionService): ProjectGuardSessionContext {
+  return {
+    sessionGeneration: userSession.getCurrentSessionGeneration(),
+    userId: userSession.currentUserId(),
+  };
+}
+
+function isProjectGuardSessionCurrent(
+  userSession: UserSessionService,
+  context: ProjectGuardSessionContext,
+): boolean {
+  return userSession.isSessionContextCurrent(context.sessionGeneration, context.userId);
+}
+
 /**
  * 【重构】本地优先的数据初始化检查
  * 
@@ -28,12 +47,14 @@ async function ensureDataAvailable(
   syncCoordinator: SyncCoordinatorService,
   userSession: UserSessionService,
   _toast: ToastService,
+  isSessionCurrent: () => boolean,
   _maxWaitMs: number = GUARD_CONFIG.DATA_INIT_TIMEOUT
 ): Promise<{ loaded: boolean; isFirstLoad: boolean }> {
   const startTime = Date.now();
   const checkInterval = 50; // 快速检查间隔
   const maxQuickWait = 200; // 最多等待 200ms 让本地数据加载完成
 
+  if (!isSessionCurrent()) return { loaded: false, isFirstLoad: false };
   userSession.prehydrateFromSnapshot();
   
   // 1. 快速检查：Store 中是否已有数据
@@ -48,6 +69,7 @@ async function ensureDataAvailable(
       return { loaded: true, isFirstLoad: false };
     }
     await new Promise(resolve => setTimeout(resolve, checkInterval));
+    if (!isSessionCurrent()) return { loaded: false, isFirstLoad: false };
   }
   
   // 3. 如果仍无数据，触发 loadProjects（会创建种子项目）
@@ -57,6 +79,7 @@ async function ensureDataAvailable(
     
     // 如果没有在加载，触发加载
     if (!isLoadingRemote) {
+      if (!isSessionCurrent()) return { loaded: false, isFirstLoad: false };
       // 不阻塞等待 - loadProjects 内部会先加载本地缓存/种子数据
       userSession.loadProjects().catch(() => {
         // 静默处理，loadProjects 内部已有兜底
@@ -64,6 +87,7 @@ async function ensureDataAvailable(
       
       // 再等待一小段时间让种子数据生成
         await new Promise(resolve => setTimeout(resolve, SEED_DATA_STABILIZE_MS));
+        if (!isSessionCurrent()) return { loaded: false, isFirstLoad: false };
     }
     
     // 如果还是没有数据，说明是首次加载或加载失败
@@ -85,6 +109,7 @@ async function waitForDataInit(
   syncCoordinator: SyncCoordinatorService,
   userSession: UserSessionService,
   toast: ToastService,
+  isSessionCurrent: () => boolean,
   maxWaitMs: number = GUARD_CONFIG.DATA_INIT_TIMEOUT
 ): Promise<{ loaded: boolean; reason?: string }> {
   const startTime = Date.now();
@@ -94,6 +119,7 @@ async function waitForDataInit(
   let loadTriggered = false;
   
   while (Date.now() - startTime < maxWaitMs) {
+    if (!isSessionCurrent()) return { loaded: false, reason: '会话已切换' };
     const projectCount = projectState.projects().length;
     const isLoadingRemote = syncCoordinator.isLoadingRemote();
 
@@ -108,7 +134,9 @@ async function waitForDataInit(
       loadTriggered = true;
       try {
         await userSession.loadProjects();
+        if (!isSessionCurrent()) return { loaded: false, reason: '会话已切换' };
       } catch (e) {
+        if (!isSessionCurrent()) return { loaded: false, reason: '会话已切换' };
         // 降级处理：loadProjects 内部已有兜底
         guardLogger.warn('ProjectGuard loadProjects 调用失败', e);
       }
@@ -132,6 +160,8 @@ async function waitForDataInit(
     // 等待一小段时间再检查
     await new Promise(resolve => setTimeout(resolve, checkInterval));
   }
+
+  if (!isSessionCurrent()) return { loaded: false, reason: '会话已切换' };
   
   // 超时，返回失败原因
   const elapsedSeconds = Math.round((Date.now() - startTime) / 1000);
@@ -139,6 +169,60 @@ async function waitForDataInit(
     loaded: false, 
     reason: `数据加载超时 (${elapsedSeconds}秒)，${lastCheckReason || '请检查网络连接'}` 
   };
+}
+
+interface ProjectGuardDependencies {
+  projectState: ProjectStateService;
+  syncCoordinator: SyncCoordinatorService;
+  userSession: UserSessionService;
+  router: Router;
+  toast: ToastService;
+}
+
+interface ProjectRouteEvaluationContext extends ProjectGuardDependencies {
+  projectId: string;
+  isSessionCurrent: () => boolean;
+}
+
+function injectProjectGuardDependencies(): ProjectGuardDependencies {
+  return {
+    projectState: inject(ProjectStateService),
+    syncCoordinator: inject(SyncCoordinatorService),
+    userSession: inject(UserSessionService),
+    router: inject(Router),
+    toast: inject(ToastService),
+  };
+}
+
+function readProjectRouteAccess(context: ProjectRouteEvaluationContext): {
+  existsAndAccessible: boolean;
+  canReject: boolean;
+} {
+  const project = context.projectState.getProject(context.projectId);
+  const canReject = context.userSession.canAuthoritativelyRejectProjectRoute();
+  const isAccessible = !canReject
+    || context.userSession.isProjectAuthoritativelyAccessible(context.projectId);
+  return { existsAndAccessible: !!project && isAccessible, canReject };
+}
+
+async function waitForProjectRouteAccess(context: ProjectRouteEvaluationContext): Promise<boolean> {
+  if (!context.syncCoordinator.isLoadingRemote()) return false;
+  const waitResult = await waitForDataInit(
+    context.projectState,
+    context.syncCoordinator,
+    context.userSession,
+    context.toast,
+    context.isSessionCurrent,
+    5000,
+  );
+  if (!context.isSessionCurrent() || !waitResult.loaded) return false;
+  return readProjectRouteAccess(context).existsAndAccessible;
+}
+
+function rejectProjectRoute(context: ProjectRouteEvaluationContext): false {
+  context.toast.error('项目不存在', '请求的项目可能已被删除或您没有访问权限');
+  void context.router.navigate(['/projects']);
+  return false;
 }
 
 /**
@@ -152,73 +236,34 @@ async function waitForDataInit(
  * 单用户场景：直接注入子服务获取项目数据
  */
 export const projectExistsGuard: CanActivateFn = async (route: ActivatedRouteSnapshot, _state) => {
-  const projectState = inject(ProjectStateService);
-  const syncCoordinator = inject(SyncCoordinatorService);
-  const userSession = inject(UserSessionService);
-  const router = inject(Router);
-  const toast = inject(ToastService);
-  
+  const dependencies = injectProjectGuardDependencies();
   const projectId = route.params['projectId'];
-  
-  // 如果没有项目 ID 参数，允许访问（可能是项目列表页）
-  if (!projectId) {
-    return true;
-  }
-  
-  // 【新策略】本地优先检查
-  const dataResult = await ensureDataAvailable(projectState, syncCoordinator, userSession, toast);
-  
-  // 快速检查项目是否存在于本地
-  let project = projectState.getProject(projectId);
-  const canAuthoritativelyRejectProjectRoute = userSession.canAuthoritativelyRejectProjectRoute();
-  const isAuthoritativelyAccessible = !canAuthoritativelyRejectProjectRoute
-    || userSession.isProjectAuthoritativelyAccessible(projectId);
-  
-  if (project && isAuthoritativelyAccessible) {
-    // 项目存在于本地缓存，立即放行
-    return true;
-  }
+  if (!projectId) return true;
 
-  // 启动阶段的项目目录尚未 authoritative 时，不要过早认定深链接不存在。
-  // 组件层会在目录真正 resolved 后再决定是否回退到 /projects。
-  if (!canAuthoritativelyRejectProjectRoute) {
-    return true;
-  }
-  
-  // 项目不在本地 - 这可能是：
-  // 1. 深链接访问（项目在云端但未同步）
-  // 2. 项目已被删除
-  // 3. 首次安装
-  
+  const sessionContext = captureProjectGuardSession(dependencies.userSession);
+  const isSessionCurrent = () => isProjectGuardSessionCurrent(
+    dependencies.userSession,
+    sessionContext,
+  );
+  const context = { ...dependencies, projectId, isSessionCurrent };
+  const dataResult = await ensureDataAvailable(
+    dependencies.projectState,
+    dependencies.syncCoordinator,
+    dependencies.userSession,
+    dependencies.toast,
+    isSessionCurrent,
+  );
+  if (!isSessionCurrent()) return false;
+
+  const access = readProjectRouteAccess(context);
+  if (access.existsAndAccessible || !access.canReject) return true;
   if (dataResult.isFirstLoad) {
-    // 首次安装，没有任何数据，重定向到项目列表
-    void router.navigate(['/projects']);
+    void dependencies.router.navigate(['/projects']);
     return false;
   }
-  
-  // 如果正在后台同步，等待同步完成后再检查一次
-  if (syncCoordinator.isLoadingRemote()) {
-    const waitResult = await waitForDataInit(projectState, syncCoordinator, userSession, toast, 5000); // 最多等 5 秒
-    
-    if (waitResult.loaded) {
-      // 重新检查项目是否存在
-      project = projectState.getProject(projectId);
-      const canRejectAfterWait = userSession.canAuthoritativelyRejectProjectRoute();
-      const isAccessibleAfterWait = !canRejectAfterWait
-        || userSession.isProjectAuthoritativelyAccessible(projectId);
-      
-      if (project && isAccessibleAfterWait) {
-        return true;
-      }
-    }
-  }
-  
-  // 项目确实不存在
-  // 【P2-11 备注】当前单用户场景不需要所有权验证；
-  // 若将来支持多用户协作，需在此添加 project.userId === currentUserId 校验
-  toast.error('项目不存在', '请求的项目可能已被删除或您没有访问权限');
-  void router.navigate(['/projects']);
-  return false;
+  if (await waitForProjectRouteAccess(context)) return true;
+  if (!isSessionCurrent()) return false;
+  return rejectProjectRoute(context);
 };
 
 // projectAccessGuard 别名已移除

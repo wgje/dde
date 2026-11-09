@@ -102,6 +102,7 @@ const ALLOWED_ORIGINS: string[] = (() => {
 })();
 
 const VERCEL_PREVIEW_PREFIX = 'dde-';
+const ALLOW_PREVIEW_ORIGINS = Deno.env.get('ALLOW_PREVIEW_ORIGINS') === 'true';
 
 export const DEFAULT_WIDGET_CAPABILITIES: WidgetCapabilityConfig = {
   widgetEnabled: true,
@@ -132,7 +133,46 @@ const PRIVATE_NO_STORE_HEADERS = {
   'Vary': 'Origin, Authorization',
 } as const;
 
-type SupabaseAdminClient = ReturnType<typeof createClient>;
+export const DEFAULT_WIDGET_REQUEST_BODY_MAX_BYTES = 1024 * 1024;
+
+type SupabaseErrorLike = { message: string; code?: string };
+type SupabaseMutationPayload = Record<string, unknown> | Record<string, unknown>[];
+
+interface SupabaseQueryResult<TData = unknown> {
+  data: TData | null;
+  error: SupabaseErrorLike | null;
+}
+
+interface SupabaseQueryBuilder<TData = unknown> extends PromiseLike<SupabaseQueryResult<TData>> {
+  select<TSelected = unknown[]>(columns: string): SupabaseQueryBuilder<TSelected>;
+  insert(values: SupabaseMutationPayload): SupabaseQueryBuilder<TData>;
+  update(values: Record<string, unknown>): SupabaseQueryBuilder<TData>;
+  upsert(values: SupabaseMutationPayload, options?: Record<string, unknown>): SupabaseQueryBuilder<TData>;
+  delete(): SupabaseQueryBuilder<TData>;
+  eq(column: string, value: unknown): SupabaseQueryBuilder<TData>;
+  neq(column: string, value: unknown): SupabaseQueryBuilder<TData>;
+  in(column: string, values: readonly unknown[]): SupabaseQueryBuilder<TData>;
+  is(column: string, value: unknown): SupabaseQueryBuilder<TData>;
+  lt(column: string, value: unknown): SupabaseQueryBuilder<TData>;
+  lte(column: string, value: unknown): SupabaseQueryBuilder<TData>;
+  gt(column: string, value: unknown): SupabaseQueryBuilder<TData>;
+  gte(column: string, value: unknown): SupabaseQueryBuilder<TData>;
+  order(column: string, options?: Record<string, unknown>): SupabaseQueryBuilder<TData>;
+  limit(count: number): SupabaseQueryBuilder<TData>;
+  maybeSingle<TRow = unknown>(): Promise<SupabaseQueryResult<TRow>>;
+  single<TRow = unknown>(): Promise<SupabaseQueryResult<TRow>>;
+}
+
+interface SupabaseAdminClient {
+  auth: {
+    getUser(token: string): Promise<{
+      data: { user: { id: string } | null };
+      error: SupabaseErrorLike | null;
+    }>;
+  };
+  from(table: string): SupabaseQueryBuilder;
+  rpc<TData = unknown>(fn: string, args?: Record<string, unknown>): Promise<SupabaseQueryResult<TData>>;
+}
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -504,7 +544,7 @@ async function readAppConfigValue(
     return null;
   }
 
-  return data?.value ?? null;
+  return isPlainObject(data) ? data.value ?? null : null;
 }
 
 export type WidgetTelemetryEvent =
@@ -581,7 +621,20 @@ export function createServiceRoleClient(): SupabaseAdminClient {
     throw new Error('Supabase service role environment is not configured');
   }
 
-  return createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+  return createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+    auth: { autoRefreshToken: false, persistSession: false },
+  }) as unknown as SupabaseAdminClient;
+}
+
+export function hasServiceRoleConfig(): boolean {
+  return Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY);
+}
+
+export function serviceNotConfiguredPayload(): { error: string; code: 'SERVICE_NOT_CONFIGURED' } {
+  return {
+    error: 'Supabase service configuration is not configured',
+    code: 'SERVICE_NOT_CONFIGURED',
+  };
 }
 
 export function getCorsHeaders(
@@ -596,12 +649,14 @@ export function getCorsHeaders(
       try {
         const parsed = new URL(origin);
         // Vercel 预览
-        if (parsed.hostname.startsWith(VERCEL_PREVIEW_PREFIX)
+        if (ALLOW_PREVIEW_ORIGINS
+          && parsed.protocol === 'https:'
+          && parsed.hostname.startsWith(VERCEL_PREVIEW_PREFIX)
           && parsed.hostname.endsWith('.vercel.app')) {
           isAllowed = true;
         }
         // Cloudflare Pages PR preview：*.nanoflow.pages.dev
-        if (!isAllowed && parsed.protocol === 'https:'
+        if (!isAllowed && ALLOW_PREVIEW_ORIGINS && parsed.protocol === 'https:'
           && parsed.hostname.endsWith('.nanoflow.pages.dev')) {
           isAllowed = true;
         }
@@ -642,6 +697,82 @@ export function jsonResponse(
       ...extraHeaders,
     },
   });
+}
+
+export class WidgetRequestBodyTooLargeError extends Error {
+  constructor(readonly maxBytes: number) {
+    super(`Widget request body exceeds ${maxBytes} bytes`);
+    this.name = 'WidgetRequestBodyTooLargeError';
+  }
+}
+
+function getContentLengthBytes(req: Request): number | null {
+  const contentLength = req.headers.get('content-length');
+  if (!contentLength) return null;
+
+  const bytes = Number.parseInt(contentLength, 10);
+  return Number.isFinite(bytes) && bytes >= 0 ? bytes : null;
+}
+
+function assertWidgetRequestBodyWithinLimit(req: Request, maxBytes: number): void {
+  const contentLengthBytes = getContentLengthBytes(req);
+  if (contentLengthBytes !== null && contentLengthBytes > maxBytes) {
+    throw new WidgetRequestBodyTooLargeError(maxBytes);
+  }
+}
+
+export function isWidgetRequestBodyTooLargeError(error: unknown): error is WidgetRequestBodyTooLargeError {
+  return error instanceof WidgetRequestBodyTooLargeError
+    || isPlainObject(error) && error.name === 'WidgetRequestBodyTooLargeError';
+}
+
+export async function readWidgetRequestText(
+  req: Request,
+  maxBytes = DEFAULT_WIDGET_REQUEST_BODY_MAX_BYTES,
+): Promise<string> {
+  assertWidgetRequestBodyWithinLimit(req, maxBytes);
+
+  if (!req.body) {
+    return '';
+  }
+
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+
+      totalBytes += value.byteLength;
+      if (totalBytes > maxBytes) {
+        await reader.cancel().catch(() => undefined);
+        throw new WidgetRequestBodyTooLargeError(maxBytes);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const combined = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    combined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+
+  return new TextDecoder().decode(combined);
+}
+
+export async function readWidgetRequestJson<T = unknown>(
+  req: Request,
+  maxBytes = DEFAULT_WIDGET_REQUEST_BODY_MAX_BYTES,
+): Promise<T> {
+  const text = await readWidgetRequestText(req, maxBytes);
+  return JSON.parse(text) as T;
 }
 
 export function getBearerToken(req: Request): string | null {

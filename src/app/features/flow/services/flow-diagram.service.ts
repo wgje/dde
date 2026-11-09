@@ -11,16 +11,42 @@ import { FlowTemplateService } from './flow-template.service';
 import { FlowLinkTemplateService } from './flow-link-template.service';
 import { FlowOverviewService } from './flow-overview.service';
 import { FlowDiagramDataService } from './flow-diagram-data.service';
+import { FlowDiagramFontRedrawService } from './flow-diagram-font-redraw.service';
+import { FlowTouchService } from './flow-touch.service';
+import {
+  FlowDiagramOverviewCoordinatorService,
+  type FlowDiagramOverviewRuntime,
+} from './flow-diagram-overview-coordinator.service';
+import type { FlowRelationDisplayMode } from './flow-diagram-config.service';
 import { flowTemplateEventHandlers } from './flow-template-events';
-import { getFlowStyles, FlowTheme } from '../../../../config/flow-styles';
+import { installDragOutOfBoundsTool } from './flow-drag-out-of-bounds.helpers';
+import { installFlowDiagramDropHandlers } from './flow-diagram-drop.helpers';
+import {
+  setupDesktopPanAndSelectTools,
+  setupMultiSelectClickTool,
+} from './flow-diagram-interaction-tools.helpers';
+import {
+  createFlowDiagram,
+  initializeFlowDiagramModel,
+  installFlowDiagramRouters,
+  setupFlowDiagramCommandInterception,
+} from './flow-diagram-setup.helpers';
+import {
+  applyFlowDiagramCanvasBackground,
+  refreshFlowDiagramTheme,
+} from './flow-diagram-theme.helpers';
+import {
+  isSafeFlowDiagramSize,
+} from './flow-diagram-view-state.helpers';
+import { FlowDiagramRecoveryController, type FlowDiagramHardRecoveryToken } from './flow-diagram-recovery.controller';
+import type { FlowTheme } from '../../../../config/flow-styles';
 import { Task } from '../../../../models';
 import { environment } from '../../../../environments/environment';
-import { UI_CONFIG, LAYOUT_CONFIG } from '../../../../config';
+import { UI_CONFIG } from '../../../../config';
 import { ProjectStateService } from '../../../../services/project-state.service';
-import { readTaskDragPayload } from '../../../../utils/task-drag-payload';
 import * as go from 'gojs';
-import { AvoidsLinksRouter } from '../vendor/AvoidsLinksRouter';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
+
 /**
  * FlowDiagramService - GoJS 图表核心服务（精简版）
  * 
@@ -41,8 +67,6 @@ import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader
   providedIn: 'root'
 })
 export class FlowDiagramService {
-  private static readonly MIN_SAFE_DIAGRAM_WIDTH = 220;
-  private static readonly MIN_SAFE_DIAGRAM_HEIGHT = 160;
   private static readonly MAX_HARD_RECOVERY_ATTEMPTS = 2;
 
   private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
@@ -63,30 +87,60 @@ export class FlowDiagramService {
   private readonly linkTemplateService = inject(FlowLinkTemplateService);
   private readonly overviewService = inject(FlowOverviewService);
   private readonly dataService = inject(FlowDiagramDataService);
+  private readonly fontRedrawService = inject(FlowDiagramFontRedrawService);
+  private readonly overviewCoordinator = inject(FlowDiagramOverviewCoordinatorService);
+  private readonly touchService = inject(FlowTouchService);
   
   // ========== 内部状态 ==========
   private diagram: go.Diagram | null = null;
   private diagramDiv: HTMLDivElement | null = null;
   private resizeObserver: ResizeObserver | null = null;
   private isDestroyed = false;
+  private hardRecoveryGeneration = 0;
+  private readonly hardRecoveryHold = signal<FlowDiagramHardRecoveryToken | null>(null);
   
-
-  /** Idle 小地图初始化句柄 */
-  private idleOverviewInitHandle: number | null = null;
-
   // ========== 定时器 ==========
   private resizeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
-  private resizeRecoveryRafId: number | null = null;
-  private resizeRecoveryArmed = false;
-  private lastRecoverableViewState: ViewState | null = null;
-  private lastStableViewState: ViewState | null = null;
-  private lastKnownDevicePixelRatio = 1;
-  private hardRecoveryAttemptCount = 0;
-  private hardRecoveryInProgress = false;
-  private overviewContainer: HTMLDivElement | null = null;
-  private shouldRestoreOverview = false;
-  private pendingOverviewRestore = false;
-  private recoveryFitFallbackUsed = false;
+  private readonly recovery = new FlowDiagramRecoveryController(
+    this.zone,
+    FlowDiagramService.MAX_HARD_RECOVERY_ATTEMPTS,
+    {
+      getDiagram: () => this.diagram,
+      getDiagramDiv: () => this.diagramDiv,
+      isDestroyed: () => this.isDestroyed,
+      getPersistedViewState: () => this.projectState.getViewState() as ViewState | null,
+      getSelectedNodeKeys: () => this.selectionService.getSelectedNodeKeys(),
+      getShouldRestoreOverview: () => this.overviewCoordinator.shouldRestore,
+      getOverviewContainer: () => this.overviewCoordinator.container,
+      updateDiagram: forceRefresh => this.updateDiagram(this.projectState.tasks(), forceRefresh),
+      applyHardRecoveryViewport: (viewState, complete) => this.dataService.applyHardRecoveryViewport(viewState, complete),
+      completeHardRecovery: proof => this.dataService.completeHardRecovery(proof),
+      abortHardRecovery: token => this.abortHardRecovery(token),
+      restoreOverviewAfterRecovery: container => this.restoreOverviewAfterRecovery(container),
+      attemptPendingOverviewRestore: () => this.attemptPendingOverviewRestore(),
+      teardownDiagramForRecovery: () => this.teardownDiagramForRecovery(),
+      initializeOutsideZone: (container, token) => this._initializeOutsideZone(container, token),
+      beginHardRecovery: () => this.beginHardRecovery(),
+      isHardRecoveryCurrent: token => this.isHardRecoveryCurrent(token),
+      releaseHardRecovery: token => this.releaseHardRecovery(token),
+      cleanupFailedHardRecovery: () => this.cleanupFailedHardDiagramRecovery(),
+      restoreDropHandler: () => {
+        if (this.diagramDropHandler) this.setupDropHandler(this.diagramDropHandler);
+      },
+      selectMultiple: keys => this.selectionService.selectMultiple(keys),
+      requestFitToContents: () => this.zoomService.fitToContents(),
+      requestCancelPendingViewStateSave: () => {
+        this.dataService.cancelPendingViewStateSave();
+        this.zoomService.cancelPendingViewStateSave();
+      },
+      saveViewState: () => this.dataService.saveViewState(),
+      refreshOverview: () => this.overviewService.refreshOverview(),
+      info: (message, context) => this.logger.info(message, context),
+      warn: (message, context) => this.logger.warn(message, context),
+      error: (message, context) => this.logger.error(message, context),
+      captureException: (error, context) => this.sentryLazyLoader.captureException(error, context),
+    },
+  );
   
   // ========== 僵尸模式 ==========
   private isSuspended = false;
@@ -98,12 +152,6 @@ export class FlowDiagramService {
   /** rAF 合并 ViewportBoundsChanged 的调度句柄（避免 panning 时每帧都跑视图持久化） */
   private viewportBoundsRafId: number | null = null;
 
-  // ========== 字体加载重绘 ==========
-  /** 字体加载完成事件的回调引用，用于销毁时清理 */
-  private fontLoadingDoneHandler: (() => void) | null = null;
-  /** 防止 loadingdone 事件短时间内多次触发 GoJS 重绘 */
-  private fontRedrawDebounceTimer: ReturnType<typeof setTimeout> | null = null;
-  
   // ========== 主题变化监听 ==========
   private themeChangeEffect = effect(() => {
     // 监听颜色模式变化，触发 GoJS 重绘
@@ -113,21 +161,15 @@ export class FlowDiagramService {
     // 只在 diagram 已初始化时重绘
     if (this.diagram && !this.isDestroyed && !this.isSuspended) {
       this.zone.runOutsideAngular(() => {
-        // 重新设置模板并更新绑定
-        this.templateService.setupNodeTemplate(this.diagram!);
-        this.linkTemplateService.setupLinkTemplate(this.diagram!);
-        
-        // 更新所有节点和连接线的绑定
-        this.diagram!.updateAllTargetBindings();
-        
-        // 更新画布背景色
-        const flowStyles = getFlowStyles(theme as FlowTheme, isDark ? 'dark' : 'light');
-        this.diagram!.div!.style.backgroundColor = flowStyles.canvas.background;
-        
-        // 更新 Overview（委托给 FlowOverviewService）
-        this.overviewService.updateTheme();
-        
-        this.logger.debug('主题变化触发 GoJS 重绘', { isDark, theme });
+        refreshFlowDiagramTheme({
+          diagram: this.diagram!,
+          theme: theme as FlowTheme,
+          isDark,
+          setupNodeTemplate: diagram => this.templateService.setupNodeTemplate(diagram as go.Diagram),
+          setupLinkTemplate: diagram => this.linkTemplateService.setupLinkTemplate(diagram as go.Diagram),
+          updateOverviewTheme: () => this.overviewService.updateTheme(),
+          debug: (message, context) => this.logger.debug(message, context),
+        });
       });
     }
   });
@@ -142,11 +184,27 @@ export class FlowDiagramService {
   }
   
   get isInitialized(): boolean {
+    const hold = this.hardRecoveryHold();
+    if (!hold) return this.diagram !== null && !this.isDestroyed;
+    if (this.projectState.isActiveProjectOwnerCurrent(hold.owner)) return false;
+    this.hardRecoveryHold.set(null);
+    this.dataService.abortHardRecovery();
     return this.diagram !== null && !this.isDestroyed;
+  }
+
+  get activeProjectId(): string | null {
+    return this.projectState.activeProjectId();
   }
   
   get isSuspendedMode(): boolean {
     return this.isSuspended;
+  }
+
+  private overviewRuntime(): FlowDiagramOverviewRuntime {
+    return {
+      isInitialized: () => this.isInitialized,
+      initializeOverview: (container) => this.initializeOverview(container),
+    };
   }
   
   // ========== 生命周期方法 ==========
@@ -165,8 +223,8 @@ export class FlowDiagramService {
       return false;
     }
 
-    this.hardRecoveryAttemptCount = 0;
-    this.hardRecoveryInProgress = false;
+    this.retireHardRecovery();
+    this.recovery.resetForInitialize(container);
     
     // 【性能关键】在 Angular Zone 外部创建和配置 GoJS Diagram
     // 避免 GoJS 内部事件（鼠标移动、canvas 重绘、工具切换等）触发不必要的变更检测
@@ -176,128 +234,16 @@ export class FlowDiagramService {
   /**
    * 在 NgZone 外部执行的 Diagram 初始化逻辑
    */
-  private _initializeOutsideZone(container: HTMLDivElement): boolean {
+  private _initializeOutsideZone(container: HTMLDivElement, recoveryToken?: FlowDiagramHardRecoveryToken): boolean {
     try {
-      this.isDestroyed = false;
-      this.diagramDiv = container;
-      this.resizeRecoveryArmed = !this.isSafeDiagramSize(container.clientWidth, container.clientHeight);
-      this.lastRecoverableViewState = null;
-      this.lastStableViewState = null;
-      this.lastKnownDevicePixelRatio = this.getDevicePixelRatio();
-      
-      if (environment.gojsLicenseKey) {
-        (go.Diagram as unknown as { licenseKey: string }).licenseKey = environment.gojsLicenseKey;
-      }
-      
-      const $ = go.GraphObject.make;
-      
-      // 创建 Diagram 实例
-      this.diagram = $(go.Diagram, container, {
-        "undoManager.isEnabled": false,
-        "animationManager.isEnabled": false,
-        "allowDrop": true,
-        layout: $(go.Layout),
-        "autoScale": go.Diagram.None,
-        "initialAutoScale": go.Diagram.None,
-        // 无限画布：使用 InfiniteScroll 模式，允许视口自由移动到任何位置
-        "scrollMode": go.Diagram.InfiniteScroll,
-        "scrollMargin": new go.Margin(Infinity, Infinity, Infinity, Infinity),
-        "draggingTool.isGridSnapEnabled": false,
-        "fixedBounds": new go.Rect(NaN, NaN, NaN, NaN),
-        "computePixelRatio": () => window.devicePixelRatio || 1,
-        // 减少 tooltip 悬停延迟（默认 850ms，改为 200ms）
-        "toolManager.hoverDelay": 200
-      });
-
+      this.prepareDiagramInitialization(container, recoveryToken);
+      this.diagram = createFlowDiagram(container);
       const isMobile = this.uiState.isMobile();
 
-      // 【关键】在设置模板之前先配置 ToolManager
-      // 某些移动端环境（Android 6.0 / Chrome Mobile）在 setupLinkTemplate 创建 contextMenu 时
-      // 会内部访问 contextMenuTool.isEnabled，如果此时未初始化会抛出错误
-      // 参见 Sentry: "Trying to set undefined property contextMenuTool.isEnabled"
-      if (this.diagram.toolManager.contextMenuTool) {
-        this.diagram.toolManager.contextMenuTool.isEnabled = false;
-      }
-      
-      // 委托给 FlowTemplateService / FlowLinkTemplateService 设置图层和模板
-      this.templateService.ensureDiagramLayers(this.diagram);
-      this.templateService.setupNodeTemplate(this.diagram);
-      this.linkTemplateService.setupLinkTemplate(this.diagram);
-      
-      // 配置工具行为：桌面端左键平移、右键框选；移动端保持原策略
-      if (isMobile) {
-        this.diagram.toolManager.dragSelectingTool.isEnabled = false;
-        this.diagram.toolManager.panningTool.isEnabled = true;
-      } else {
-        this.setupDesktopPanAndSelectTools(this.diagram);
-      }
-      this.setupMultiSelectClickTool(this.diagram);
-
-      // 【2026-03-04】自定义 DraggingTool：检测节点拖出画布边界，触发拖入停泊坞流程
-      if (!isMobile) {
-        this.setupDragOutOfBoundsTool(this.diagram);
-      }
-      
-      // 初始化模型
-      this.diagram!.model = new go.GraphLinksModel([], [], {
-        linkKeyProperty: 'key',
-        nodeKeyProperty: 'key',
-        linkFromPortIdProperty: 'fromPortId',
-        linkToPortIdProperty: 'toPortId',
-        // 【2026-02-25 性能优化】启用 link 分类模板
-        // 父子链接使用默认模板（无 label panel），跨树链接使用 'crossTree' 模板（含 label）
-        linkCategoryProperty: 'category'
-      });
-      
-      // 【补丁 A 2026-04-23】按配置装配 AvoidsLinksRouter（vendored 自 GoJS 官方扩展）。
-      // 仅在 LAYOUT_CONFIG.AUTO_LAYOUT_ENABLE_AVOIDS_LINKS_ROUTER 打开时生效，
-      // 且 router 内部会过滤 `!link.isOrthogonal` 的连线（默认 Bezier/Normal cross-tree 连线不受影响）。
-      // 打开此开关需配合把 cross-tree link template 的 routing 切到 go.Link.Orthogonal。
-      if (LAYOUT_CONFIG.AUTO_LAYOUT_ENABLE_AVOIDS_LINKS_ROUTER) {
-        this.diagram.routers.add(new AvoidsLinksRouter({
-          linkSpacing: LAYOUT_CONFIG.AUTO_LAYOUT_ROUTER_LINK_SPACING_PX,
-          avoidsNodes: true,
-        }));
-        this.logger.info('AvoidsLinksRouter 已装配', {
-          linkSpacing: LAYOUT_CONFIG.AUTO_LAYOUT_ROUTER_LINK_SPACING_PX,
-        });
-      }
-
-      // 【关键】拦截 GoJS 默认删除行为，强制单向数据流 (Store -> Signal -> Diagram)
-      // 这可以防止“脑裂”——GoJS 认为节点删了，但 Store 还没反应过来
-      this.setupDeleteKeyInterception();
-      
-      // 委托给 FlowEventService 设置事件监听
-      this.eventService.setDiagram(this.diagram, this.diagramDiv);
-      
-      // 添加视口变化监听（用于保存视图状态）
-      // 【修复 C-07】存储 handler 引用，dispose() 时显式移除，防止监听器泄漏
-      this.viewportBoundsHandler = () => {
-        this.handleViewportBoundsChanged();
-      };
-      this.diagram.addDiagramListener('ViewportBoundsChanged', this.viewportBoundsHandler);
-      
-      // 设置 ResizeObserver
-      this.setupResizeObserver();
-
-      // 将 diagram 实例传递给其他子服务
-      this.dataService.setDiagram(this.diagram);
-      this.layoutService.setDiagram(this.diagram);
-      this.selectionService.setDiagram(this.diagram);
-      this.zoomService.setDiagram(this.diagram);
-      this.zoomService.setViewStatePersistenceGuard(() => this.canPersistViewState());
-
-      // 恢复视图状态
-      this.dataService.restoreViewState();
-      
-      // 初始化时设置正确的画布背景色
-      this.applyCanvasBackground();
-      
-      // 【修复 2026-02-20】字体加载完成后强制重绘 GoJS Canvas
-      // Canvas 文本不受 CSS font-display: swap 影响，必须手动触发重绘
-      // 确保 LXGW WenKai Screen 字体就绪后 GoJS 使用正确字体度量渲染
-      this.schedulePostFontLoadRedraw();
-      
+      this.configureDiagramTemplatesAndTools(this.diagram, isMobile);
+      initializeFlowDiagramModel(this.diagram);
+      installFlowDiagramRouters(this.diagram, this.logger);
+      this.connectInitializedDiagram(this.diagram);
       this.error.set(null);
       this.logger.info('GoJS Diagram 初始化成功');
       return true;
@@ -309,159 +255,61 @@ export class FlowDiagramService {
     }
   }
 
-  /**
-   * 桌面端交互：左键平移视口、右键框选
-   */
-  private setupDesktopPanAndSelectTools(diagram: go.Diagram): void {
-    const panningTool = diagram.toolManager.panningTool;
-    const dragSelectTool = diagram.toolManager.dragSelectingTool;
+  private prepareDiagramInitialization(container: HTMLDivElement, recoveryToken?: FlowDiagramHardRecoveryToken): void {
+    this.isDestroyed = false;
+    this.diagramDiv = container;
+    this.recovery.resetForInitialize(container, recoveryToken);
 
-    // 左键在空白处拖拽视口
-    panningTool.isEnabled = true;
-    panningTool.canStart = function () {
-      if (!this.diagram || !this.isEnabled || this.diagram.isReadOnly) return false;
-
-      const e = this.diagram.lastInput;
-      if (!e || !e.left) return false;
-      // 允许 Ctrl/Cmd 按下时仍可拖动画布（常见“按住 Ctrl 临时平移/查看”的习惯）
-      // 保留 Shift/Alt：避免与其他修饰键交互冲突
-      if (e.shift || e.alt) return false;
-      if (e.targetDiagram !== this.diagram) return false;
-
-      // 避免拦截节点/连线的拖动
-      const part = this.diagram.findPartAt(e.documentPoint, true);
-      if (part && (part instanceof go.Node || part instanceof go.Link)) {
-        return false;
-      }
-
-      return this.diagram.allowHorizontalScroll || this.diagram.allowVerticalScroll;
-    };
-
-    // 右键拖拽框选
-    dragSelectTool.isEnabled = true;
-    dragSelectTool.isPartialInclusion = true;
-    dragSelectTool.canStart = function () {
-      if (!this.diagram || !this.isEnabled || this.diagram.isReadOnly) return false;
-
-      const e = this.diagram.lastInput;
-      if (!e || !e.right) return false;
-      if (e.targetDiagram !== this.diagram) return false;
-
-      const part = this.diagram.findPartAt(e.documentPoint, true);
-      if (part && (part instanceof go.Node || part instanceof go.Link)) {
-        return false;
-      }
-
-      return true;
-    };
+    if (environment.gojsLicenseKey) {
+      (go.Diagram as unknown as { licenseKey: string }).licenseKey = environment.gojsLicenseKey;
+    }
   }
 
-  /**
-   * 自定义点击选择行为
-   * - 在 GoJS 默认选择逻辑之前处理多选（Shift/Ctrl/Cmd 或移动端框选模式）
-   * - 解决默认 ClickSelectingTool 先清空选择、再触发节点 click 导致无法多选的问题
-   */
-  private setupMultiSelectClickTool(diagram: go.Diagram): void {
-    const clickTool = diagram.toolManager.clickSelectingTool;
-    const isMobileMode = this.uiState.isMobile();
-    // GoJS 类型声明将 standardMouseSelect 定义为无参方法，但实际会以 (e, obj) 调用
-    const originalStandardMouseSelect = (clickTool.standardMouseSelect as (e?: go.InputEvent, obj?: go.GraphObject | null) => void).bind(clickTool);
-    const originalStandardTouchSelect = ((clickTool as unknown as { standardTouchSelect?: (e?: go.InputEvent, obj?: go.GraphObject | null) => void }).standardTouchSelect)?.bind(clickTool);
-
-    (clickTool as unknown as { standardMouseSelect: (e?: go.InputEvent, obj?: go.GraphObject | null) => void }).standardMouseSelect = (e?: go.InputEvent, obj?: go.GraphObject | null) => {
-      // 如果事件已经被模板 click（或其他工具）处理过，避免重复切换导致“选中闪烁/失效”
-      if (e?.handled) return;
-
-      const dragSelectTool = diagram.toolManager.dragSelectingTool;
-      const lastInput = diagram.lastInput as go.InputEvent | null;
-      const domEvent = (e as go.InputEvent & { event?: MouseEvent | PointerEvent | KeyboardEvent })?.event;
-
-      // 移动端框选模式：点击节点时禁用默认单选，交给节点模板或下方逻辑处理
-      const isSelectModeActive = isMobileMode && Boolean(dragSelectTool && dragSelectTool.isEnabled);
-      if (isSelectModeActive && obj?.part instanceof go.Node) {
-        this.logger.debug('[standardMouseSelect] 框选模式激活', { nodeKey: obj.part.key, isSelected: obj.part.isSelected });
-        if (e) {
-          e.handled = true;
-        } else {
-          this.logger.warn('[FlowDiagram] 事件对象为 undefined，无法标记为已处理');
-        }
-        // 在事务中切换选中状态
-        diagram.startTransaction('toggle-selection');
-        obj.part.isSelected = !obj.part.isSelected;
-        diagram.commitTransaction('toggle-selection');
-        // 手动触发 ChangedSelection 事件
-        diagram.raiseDiagramEvent('ChangedSelection');
-        this.logger.debug('[toggle-selection] 切换选中状态完成', { 
-          nodeKey: obj.part.key, 
-          newState: obj.part.isSelected,
-          totalSelected: diagram.selection.count
-        });
-        return;
-      }
-
-      const shift = Boolean(e?.shift || lastInput?.shift || domEvent?.shiftKey);
-      const ctrl = Boolean(e?.control || lastInput?.control || (domEvent as MouseEvent | undefined)?.ctrlKey);
-      const meta = Boolean(e?.meta || lastInput?.meta || (domEvent as MouseEvent | undefined)?.metaKey);
-      // 桌面端：仅修饰键触发多选；移动端框选模式的点选在模板事件中处理
-      const wantsMultiSelect = shift || ctrl || meta;
-
-      if (wantsMultiSelect && obj?.part instanceof go.Node) {
-        if (e) {
-          e.handled = true;
-        } else {
-          this.logger.warn('[FlowDiagram] 多选模式下事件对象为 undefined');
-        }
-        diagram.startTransaction('multi-select');
-        obj.part.isSelected = !obj.part.isSelected;
-        diagram.commitTransaction('multi-select');
-        // 显式触发 ChangedSelection，确保 FlowSelectionService 同步（避免某些路径下事件不触发）
-        diagram.raiseDiagramEvent('ChangedSelection');
-        return;
-      }
-
-      // 防御性检查：避免将 undefined 传递给 GoJS 原始方法
-      if (e) {
-        originalStandardMouseSelect(e, obj);
-      } else {
-        // 某些编程式调用场景下事件可能为 undefined，这是可接受的
-        this.logger.debug('[FlowDiagram] 跳过 originalStandardMouseSelect 调用（事件为 undefined）');
-      }
-    };
-
-    // 移动端：触摸点击也会走 standardTouchSelect（不重写会导致先清空 selection，从而无法“点击追加多选”）
-    if (typeof originalStandardTouchSelect === 'function') {
-      (clickTool as unknown as { standardTouchSelect: (e?: go.InputEvent, obj?: go.GraphObject | null) => void }).standardTouchSelect = (e?: go.InputEvent, obj?: go.GraphObject | null) => {
-        const dragSelectTool = diagram.toolManager.dragSelectingTool;
-        const isSelectModeActive = isMobileMode && Boolean(dragSelectTool && dragSelectTool.isEnabled);
-
-        // 仅在移动端框选模式下启用"点选多选"
-        if (isSelectModeActive && obj?.part instanceof go.Node) {
-          if (e) {
-            e.handled = true;
-          } else {
-            this.logger.warn('[FlowDiagram] Touch 事件对象为 undefined');
-          }
-          // 在事务中切换选中状态
-          diagram.startTransaction('toggle-selection');
-          obj.part.isSelected = !obj.part.isSelected;
-          diagram.commitTransaction('toggle-selection');
-          // 手动触发 ChangedSelection 事件
-          diagram.raiseDiagramEvent('ChangedSelection');
-          this.logger.debug('[Touch toggle] 切换完成', { 
-            nodeKey: obj.part.key, 
-            newState: obj.part.isSelected,
-            totalSelected: diagram.selection.count
-          });
-          return;
-        }
-        // 防御性检查：避免将 undefined 传递给 GoJS 原始方法
-        if (e) {
-          originalStandardTouchSelect(e, obj);
-        } else {
-          this.logger.warn('[FlowDiagram] 跳过 originalStandardTouchSelect 调用（事件为 undefined）');
-        }
-      };
+  private configureDiagramTemplatesAndTools(diagram: go.Diagram, isMobile: boolean): void {
+    if (diagram.toolManager.contextMenuTool) {
+      diagram.toolManager.contextMenuTool.isEnabled = false;
     }
+
+    this.templateService.ensureDiagramLayers(diagram);
+    this.templateService.setupNodeTemplate(diagram);
+    this.linkTemplateService.setupLinkTemplate(diagram);
+
+    if (isMobile) {
+      diagram.toolManager.dragSelectingTool.isEnabled = false;
+      diagram.toolManager.panningTool.isEnabled = true;
+    } else {
+      setupDesktopPanAndSelectTools(diagram);
+    }
+
+    setupMultiSelectClickTool(diagram, this.uiState.isMobile(), this.logger);
+
+    if (!isMobile) {
+      this.setupDragOutOfBoundsTool(diagram);
+    }
+  }
+
+  private connectInitializedDiagram(diagram: go.Diagram): void {
+    setupFlowDiagramCommandInterception(diagram, this.logger);
+    this.eventService.setDiagram(diagram, this.diagramDiv);
+    this.viewportBoundsHandler = () => {
+      this.handleViewportBoundsChanged();
+    };
+    diagram.addDiagramListener('ViewportBoundsChanged', this.viewportBoundsHandler);
+
+    // 移动端拖拽幽灵监听必须跟随 diagram 实例接入：硬恢复原地重建后组件层不会再次
+    // initDiagram，若不在这里补装，SelectionMoved 幽灵清理会留在已销毁的旧实例上
+    //（installDiagramDragGhostListeners 自身幂等，组件层的重复安装会被跳过）
+    this.touchService.installDiagramDragGhostListeners(diagram, this.uiState.isMobile());
+
+    this.setupResizeObserver();
+    this.dataService.setDiagram(diagram);
+    this.layoutService.setDiagram(diagram);
+    this.selectionService.setDiagram(diagram);
+    this.zoomService.setDiagram(diagram);
+    this.zoomService.setViewStatePersistenceGuard(() => this.canPersistViewState());
+    this.dataService.restoreViewState();
+    this.applyCanvasBackground();
+    this.schedulePostFontLoadRedraw();
   }
 
   /**
@@ -478,90 +326,13 @@ export class FlowDiagramService {
    * 4. 还原节点原始位置，避免 GoJS 内部状态与 Store 不一致
    */
   private setupDragOutOfBoundsTool(diagram: go.Diagram): void {
-    const draggingTool = diagram.toolManager.draggingTool;
-    const self = this;
-
-    // 保存拖拽开始时各节点的初始位置，用于还原
-    let savedPositions: Map<string, go.Point> = new Map();
-    // 标志位：防止 dragOutOfBounds 重复触发
-    let hasFiredDragOut = false;
-
-    const originalDoActivate = draggingTool.doActivate.bind(draggingTool);
-    draggingTool.doActivate = function () {
-      savedPositions = new Map();
-      hasFiredDragOut = false;
-      // 记录所有选中节点的初始位置
-      diagram.selection.each((part: go.Part) => {
-        if (part instanceof go.Node && typeof part.key === 'string') {
-          savedPositions.set(part.key, part.location.copy());
-        }
-      });
-      originalDoActivate();
-    };
-
-    const originalDoMouseMove = draggingTool.doMouseMove.bind(draggingTool);
-    draggingTool.doMouseMove = function () {
-      if (hasFiredDragOut) return;
-
-      const e = diagram.lastInput;
-      if (!e || !self.diagramDiv) {
-        originalDoMouseMove();
-        return;
-      }
-
-      // 获取鼠标在浏览器窗口中的坐标
-      const divRect = self.diagramDiv.getBoundingClientRect();
-      const mouseClientX = divRect.left + e.viewPoint.x;
-      const mouseClientY = divRect.top + e.viewPoint.y;
-
-      // 检测鼠标是否超出画布边界（底部、左侧或右侧超出 40px 才触发，避免误触）
-      const outOfBoundsThreshold = 40;
-      const isOutBottom = mouseClientY > divRect.bottom + outOfBoundsThreshold;
-      const isOutLeft = mouseClientX < divRect.left - outOfBoundsThreshold;
-      const isOutRight = mouseClientX > divRect.right + outOfBoundsThreshold;
-      const isOutTop = mouseClientY < divRect.top - outOfBoundsThreshold;
-
-      if (isOutBottom || isOutLeft || isOutRight || isOutTop) {
-        hasFiredDragOut = true;
-
-        // 收集选中的任务 ID
-        const selectedTaskIds: string[] = [];
-        diagram.selection.each((part: go.Part) => {
-          if (part instanceof go.Node && typeof part.key === 'string') {
-            selectedTaskIds.push(part.key);
-          }
-        });
-
-        if (selectedTaskIds.length > 0) {
-          self.logger.info('节点拖出画布边界，启动拖入停泊坞流程', {
-            taskIds: selectedTaskIds,
-            count: selectedTaskIds.length,
-            direction: isOutBottom ? 'bottom' : isOutTop ? 'top' : isOutLeft ? 'left' : 'right',
-          });
-
-          // 取消 GoJS 内部拖拽
-          draggingTool.doCancel();
-
-          // 还原节点到原始位置（防止 GoJS 拖拽中途把节点位移了）
-          diagram.startTransaction('restore-drag-positions');
-          savedPositions.forEach((pos, key) => {
-            const node = diagram.findNodeForKey(key);
-            if (node) {
-              node.location = pos;
-            }
-          });
-          diagram.commitTransaction('restore-drag-positions');
-
-          // 触发拖入停泊坞流程（通过事件总线解耦）
-          flowTemplateEventHandlers.onNodesDragOutOfBounds?.(selectedTaskIds, mouseClientX, mouseClientY);
-        }
-        return;
-      }
-
-      originalDoMouseMove();
-    };
-
-    this.logger.debug('DraggingTool 边界检测已配置');
+    installDragOutOfBoundsTool(diagram, {
+      getDiagramDiv: () => this.diagramDiv,
+      logger: this.logger,
+      onNodesDragOutOfBounds: (selectedTaskIds, mouseClientX, mouseClientY) => {
+        flowTemplateEventHandlers.onNodesDragOutOfBounds?.(selectedTaskIds, mouseClientX, mouseClientY);
+      },
+    });
   }
   
   /**
@@ -628,23 +399,11 @@ export class FlowDiagramService {
   
   // ========== 小地图 ==========
   
-  /**
-   * 初始化小地图
-   * 
-   * 【重构完成】完全委托给 FlowOverviewService
-   * 内部保留的重复代码将在下一个 Sprint 中删除
-   */
   initializeOverview(container: HTMLDivElement): void {
     if (!this.diagram || this.isDestroyed) return;
 
-    this.overviewContainer = container;
-    this.shouldRestoreOverview = true;
-    this.pendingOverviewRestore = false;
-    
-    // 设置 OverviewService 的主图引用
+    this.overviewCoordinator.setInitializedContainer(container);
     this.overviewService.setDiagram(this.diagram);
-    
-    // 完全委托给 FlowOverviewService
     const isMobile = this.uiState.isMobile();
     this.overviewService.initializeOverview(container, isMobile);
   }
@@ -653,86 +412,26 @@ export class FlowDiagramService {
    * 应用画布背景色（根据当前主题）
    */
   private applyCanvasBackground(): void {
-    if (!this.diagram || !this.diagram.div) return;
-    
-    const theme = this.themeService.theme() as FlowTheme;
-    const isDark = this.themeService.isDark();
-    const flowStyles = getFlowStyles(theme, isDark ? 'dark' : 'light');
-    this.diagram.div.style.backgroundColor = flowStyles.canvas.background;
+    applyFlowDiagramCanvasBackground(
+      this.diagram,
+      this.themeService.theme() as FlowTheme,
+      this.themeService.isDark(),
+    );
   }
 
-  /**
-   * 【修复 2026-02-20】字体加载完成后强制重绘 GoJS Canvas
-   *
-   * 问题：GoJS 渲染到 <canvas>，Canvas 文本不受 CSS font-display: swap 影响。
-   * 当 GoJS 初始渲染时自定义字体 LXGW WenKai Screen 可能尚未加载完成，
-   * Canvas 会使用 fallback 字体（sans-serif）的度量绘制文本。
-   * 即使字体后续加载成功，已绘制的 Canvas 文本也不会自动更新。
-   *
-   * 解决方案（双保险）：
-   * 1. document.fonts.ready：等待首屏初始字体全部就绪后重绘
-   * 2. document.fonts loadingdone 事件：监听后续按需加载的字体子集就绪后重绘
-   *    （例如用户输入了罕用汉字，触发新的 unicode-range 子集下载）
-   */
   private schedulePostFontLoadRedraw(): void {
-    if (typeof document === 'undefined' || !document.fonts) return;
-
-    // 1. 首屏字体就绪后立即重绘
-    document.fonts.ready.then(() => {
-      this.redrawForFontChange();
-    });
-
-    // 2. 持续监听后续字体子集加载完成事件（带防抖）
-    this.fontLoadingDoneHandler = () => {
-      // 防抖：500ms 内的多次 loadingdone 事件只触发一次重绘
-      if (this.fontRedrawDebounceTimer) {
-        clearTimeout(this.fontRedrawDebounceTimer);
-      }
-      this.fontRedrawDebounceTimer = setTimeout(() => {
-        this.redrawForFontChange();
-        this.fontRedrawDebounceTimer = null;
-      }, 500);
-    };
-    document.fonts.addEventListener('loadingdone', this.fontLoadingDoneHandler);
+    this.fontRedrawService.schedulePostFontLoadRedraw(
+      () => this.diagram,
+      () => this.isDestroyed || this.isSuspended,
+    );
   }
 
-  /**
-   * 字体变化后强制 GoJS Canvas 重绘
-   * 让 TextBlock 重新度量并使用新加载的字体渲染
-   */
-  private redrawForFontChange(): void {
-    if (!this.diagram || this.isDestroyed || this.isSuspended) return;
-
-    this.zone.runOutsideAngular(() => {
-      this.diagram!.updateAllTargetBindings();
-      this.diagram!.requestUpdate();
-      this.logger.debug('字体变化，GoJS Canvas 已重绘');
-    });
-  }
-
-  /**
-   * 清理字体加载事件监听
-   */
   private cleanupFontLoadListener(): void {
-    if (this.fontLoadingDoneHandler && typeof document !== 'undefined' && document.fonts) {
-      document.fonts.removeEventListener('loadingdone', this.fontLoadingDoneHandler);
-      this.fontLoadingDoneHandler = null;
-    }
-    if (this.fontRedrawDebounceTimer) {
-      clearTimeout(this.fontRedrawDebounceTimer);
-      this.fontRedrawDebounceTimer = null;
-    }
+    this.fontRedrawService.cleanupFontLoadListener();
   }
   
-  /**
-   * 销毁小地图
-   * 
-   * 【重构完成】完全委托给 FlowOverviewService
-   */
   disposeOverview(): void {
-    this.shouldRestoreOverview = false;
-    this.pendingOverviewRestore = false;
-    // 完全委托给 FlowOverviewService
+    this.overviewCoordinator.markDisposed();
     this.overviewService.destroyOverview();
   }
   
@@ -741,17 +440,7 @@ export class FlowDiagramService {
   }
 
   public syncViewportMetrics(): void {
-    if (!this.diagram || !this.diagramDiv || this.isDestroyed || this.hardRecoveryInProgress) {
-      return;
-    }
-
-    const pixelRatioChanged = this.updateDevicePixelRatio();
-    this.handleDiagramContainerResize(
-      this.diagramDiv.clientWidth,
-      this.diagramDiv.clientHeight,
-      pixelRatioChanged,
-    );
-    this.attemptPendingOverviewRestore();
+    this.recovery.syncViewportMetrics();
   }
 
   /** 调度小地图初始化（idle 优先） */
@@ -763,58 +452,30 @@ export class FlowDiagramService {
     scheduleTimer: (cb: () => void, delay: number) => void,
     immediate = false
   ): void {
-    if (!isVisible || isCollapsed) {
-      this.shouldRestoreOverview = false;
-      return;
-    }
-
-    if (overviewDiv?.nativeElement) {
-      this.overviewContainer = overviewDiv.nativeElement;
-      this.shouldRestoreOverview = true;
-    }
-
-    const runInit = () => {
-      if (overviewDiv?.nativeElement && this.isInitialized) {
-        this.initializeOverview(overviewDiv.nativeElement);
-      }
-    };
-    if (immediate) { scheduleTimer(() => runInit(), 0); return; }
-    if (typeof requestIdleCallback !== 'undefined') {
-      if (typeof cancelIdleCallback !== 'undefined' && this.idleOverviewInitHandle !== null) {
-        cancelIdleCallback(this.idleOverviewInitHandle);
-      }
-      this.idleOverviewInitHandle = requestIdleCallback(() => {
-        this.idleOverviewInitHandle = null;
-        zone.run(() => runInit());
-      }, { timeout: 3000 });
-    } else {
-      scheduleTimer(() => runInit(), 300);
-    }
+    this.overviewCoordinator.scheduleOverviewInit(
+      overviewDiv,
+      isVisible,
+      isCollapsed,
+      zone,
+      scheduleTimer,
+      this.overviewRuntime(),
+      immediate,
+    );
   }
 
   cancelIdleOverviewInit(): void {
-    if (this.idleOverviewInitHandle !== null && typeof cancelIdleCallback !== 'undefined') {
-      cancelIdleCallback(this.idleOverviewInitHandle);
-      this.idleOverviewInitHandle = null;
-    }
+    this.overviewCoordinator.cancelIdleOverviewInit();
   }
 
   dispose(): void {
     this.isDestroyed = true;
-    this.resizeRecoveryArmed = false;
-    this.lastRecoverableViewState = null;
-    this.lastStableViewState = null;
-    this.lastKnownDevicePixelRatio = 1;
-    this.hardRecoveryAttemptCount = 0;
-    this.hardRecoveryInProgress = false;
-    this.overviewContainer = null;
-    this.shouldRestoreOverview = false;
-    this.pendingOverviewRestore = false;
-    this.recoveryFitFallbackUsed = false;
+    this.retireHardRecovery();
+    this.recovery.resetForDispose();
+    this.overviewCoordinator.reset();
     
     // 清理数据服务
     this.dataService.dispose();
-    this.templateService.closeSiyuanPopover();
+    this.templateService.closeSiyuanPopover(this.diagramDiv ?? this.diagram?.div);
     
     this.disposeOverview();
     this.clearAllTimers();
@@ -915,8 +576,15 @@ export class FlowDiagramService {
   /**
    * 更新图表数据
    */
-  updateDiagram(tasks: Task[], forceRefresh: boolean = false): void {
-    this.dataService.updateDiagram(tasks, forceRefresh);
+  updateDiagram(tasks: Task[], forceRefresh: boolean = false): boolean {
+    return this.dataService.updateDiagram(tasks, forceRefresh);
+  }
+
+  setRelationDisplayMode(mode: FlowRelationDisplayMode, focusedTaskId: string | null): void {
+    const changed = this.dataService.setRelationDisplayMode(mode, focusedTaskId);
+    if (changed && this.isInitialized) {
+      this.updateDiagram(this.projectState.tasks(), true);
+    }
   }
   
   // ========== 拖放支持 ==========
@@ -926,133 +594,42 @@ export class FlowDiagramService {
   private diagramDropHandler: ((taskData: Task, docPoint: go.Point) => void) | null = null;
 
   setupDropHandler(onDrop: (taskData: Task, docPoint: go.Point) => void): void {
-    if (!this.diagramDiv) return;
+    if (!this.diagram || !this.diagramDiv) return;
 
     this.diagramDropHandler = onDrop;
     
     // 【P1-11 修复】先清理旧的监听器，防止重复注册
     this.dropHandlerCleanup?.();
-    
-    const dragoverHandler = (e: DragEvent) => {
-      e.preventDefault();
-      if (e.dataTransfer) {
-        e.dataTransfer.dropEffect = 'move';
-      }
-    };
-    
-    const dropHandler = (e: DragEvent) => {
-      e.preventDefault();
-      if (!e.dataTransfer || !this.diagram || !this.diagramDiv) return;
 
-      try {
-        const payload = readTaskDragPayload(e.dataTransfer);
-        let task: Task | null = payload ? this.projectState.getTask(payload.taskId) ?? null : null;
-
-        if (!task) {
-          const jsonData = e.dataTransfer.getData("application/json");
-          const textData = e.dataTransfer.getData("text");
-          const data = jsonData || textData;
-          if (!data) return;
-
-          const trimmed = data.trim();
-          if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
-            const raw = JSON.parse(data) as Partial<Task> & { id?: unknown };
-            const candidateId = typeof raw.id === 'string' ? raw.id : null;
-            task = candidateId ? this.projectState.getTask(candidateId) ?? (raw as Task) : null;
-          } else {
-            task = this.projectState.getTask(trimmed) ?? null;
-          }
-        }
-
-        if (!task) return;
-
-        // 使用 DragEvent 的坐标计算准确的拖放位置
-        // diagram.lastInput.viewPoint 在拖放场景下可能不准确
-        const rect = this.diagramDiv.getBoundingClientRect();
-        const viewX = e.clientX - rect.left;
-        const viewY = e.clientY - rect.top;
-        const pt = new go.Point(viewX, viewY);
-        const loc = this.diagram.transformViewToDoc(pt);
-        onDrop(task, loc);
-      } catch (err) {
-        this.logger.error('Drop error:', err);
-        this.sentryLazyLoader.captureException(err, { tags: { operation: 'drop' } });
-      }
-    };
-    
-    this.diagramDiv.addEventListener('dragover', dragoverHandler);
-    this.diagramDiv.addEventListener('drop', dropHandler);
-    
-    // 保存清理函数
-    const div = this.diagramDiv;
-    this.dropHandlerCleanup = () => {
-      div.removeEventListener('dragover', dragoverHandler);
-      div.removeEventListener('drop', dropHandler);
-    };
+    this.dropHandlerCleanup = installFlowDiagramDropHandlers({
+      diagram: this.diagram,
+      diagramDiv: this.diagramDiv,
+      projectState: this.projectState,
+      logger: this.logger,
+      sentryLazyLoader: this.sentryLazyLoader,
+      onDrop,
+    });
   }
   
   // ========== 私有方法 ==========
-  
-  /**
-   * 【关键】拦截 GoJS 默认命令行为
-   * 
-   * 设计原则：强制单向数据流 (Store -> Signal -> Diagram)
-   * - 禁止 GoJS 直接删除/复制/粘贴节点，避免"脑裂"问题
-   * - Delete/Backspace 键触发自定义事件，由 Angular Service 处理
-   * - 所有数据操作必须先更新 Store，再由 Store 变化驱动 GoJS 刷新
-   * 
-   * 【2026-03-04 修复】禁用 GoJS 默认复制粘贴
-   * 根因：GoJS copy-paste 会创建带自动生成数字 key（如 -13）的幽灵节点，
-   * 这些节点不存在于 Store 中，选中后执行删除会导致 "任务不存在: -13" 错误。
-   */
-  private setupDeleteKeyInterception(): void {
-    if (!this.diagram) return;
-    
-    const diagram = this.diagram;
-    const originalDoKeyDown = diagram.commandHandler.doKeyDown.bind(diagram.commandHandler);
-    
-    // 禁止 GoJS 默认的删除选中项行为
-    diagram.commandHandler.canDeleteSelection = () => false;
-    
-    // 禁止 GoJS 默认的复制粘贴行为——防止创建幽灵节点
-    diagram.commandHandler.canCopySelection = () => false;
-    diagram.commandHandler.canPasteSelection = () => false;
-    
-    // 拦截 Delete/Backspace 键
-    diagram.commandHandler.doKeyDown = () => {
-      const e = diagram.lastInput;
-      if (e.key === 'Delete' || e.key === 'Backspace') {
-        // 触发自定义删除事件，由 FlowEventService 处理
-        // 通过事件总线解耦，避免循环依赖
-        this.logger.debug('拦截 Delete 键，触发自定义删除事件');
-        flowTemplateEventHandlers.onDeleteKeyPressed?.();
-        return; // 阻止 GoJS 默认删除
-      }
-      // 其他按键走默认逻辑
-      originalDoKeyDown();
-    };
-    
-    this.logger.info('GoJS 命令拦截已配置：删除/复制/粘贴行为已禁用');
-  }
   
   private setupResizeObserver(): void {
     if (!this.diagramDiv) return;
     
     this.resizeObserver = new ResizeObserver((entries) => {
-      if (this.isDestroyed || this.hardRecoveryInProgress) {
+      if (this.isDestroyed || this.recovery.isHardRecoveryInProgress) {
         return;
       }
 
       const latestEntry = entries[entries.length - 1];
       const entryWidth = latestEntry?.contentRect.width ?? this.diagramDiv?.clientWidth ?? 0;
       const entryHeight = latestEntry?.contentRect.height ?? this.diagramDiv?.clientHeight ?? 0;
-      const pixelRatioChanged = this.updateDevicePixelRatio();
 
-      if (pixelRatioChanged || !this.isSafeDiagramSize(entryWidth, entryHeight)) {
-        this.armResizeRecovery();
+      if (!isSafeFlowDiagramSize(entryWidth, entryHeight)) {
+        this.recovery.armResizeRecovery();
       }
 
-      if (this.resizeDebounceTimer) {
+      if (this.resizeDebounceTimer !== null) {
         clearTimeout(this.resizeDebounceTimer);
       }
       
@@ -1065,14 +642,11 @@ export class FlowDiagramService {
   }
   
   private clearAllTimers(): void {
-    if (this.resizeDebounceTimer) {
+    if (this.resizeDebounceTimer !== null) {
       clearTimeout(this.resizeDebounceTimer);
       this.resizeDebounceTimer = null;
     }
-    if (this.resizeRecoveryRafId !== null) {
-      cancelAnimationFrame(this.resizeRecoveryRafId);
-      this.resizeRecoveryRafId = null;
-    }
+    this.recovery.cancelScheduledRecovery();
     this.dataService.clearTimers();
   }
 
@@ -1084,258 +658,19 @@ export class FlowDiagramService {
     if (this.viewportBoundsRafId !== null) return;
     this.viewportBoundsRafId = requestAnimationFrame(() => {
       this.viewportBoundsRafId = null;
-      this.captureStableViewState();
-      if (!this.canPersistViewState()) {
+      this.recovery.captureStableViewState();
+      if (!this.recovery.canPersistViewState()) {
         return;
       }
       this.dataService.saveViewState();
     });
   }
 
-  private handleDiagramContainerResize(width: number, height: number, forceRecovery: boolean = false): void {
-    if (!this.diagram || !this.diagramDiv || this.isDestroyed) {
-      return;
-    }
-
-    if (forceRecovery) {
-      this.armResizeRecovery();
-    }
-
-    if (width <= 0 || height <= 0) {
-      this.armResizeRecovery();
-      return;
-    }
-
-    if (!this.isSafeDiagramSize(width, height)) {
-      this.armResizeRecovery();
-      return;
-    }
-
-    this.diagram.requestUpdate();
-
-    if (this.resizeRecoveryArmed || forceRecovery) {
-      this.scheduleResizeRecovery();
-      return;
-    }
-
-    this.captureStableViewState();
-  }
-
-  private scheduleResizeRecovery(): void {
-    if (!this.diagram || !this.diagramDiv || this.isDestroyed) {
-      return;
-    }
-
-    if (this.resizeRecoveryRafId !== null) {
-      cancelAnimationFrame(this.resizeRecoveryRafId);
-      this.resizeRecoveryRafId = null;
-    }
-
-    this.zone.runOutsideAngular(() => {
-      this.resizeRecoveryRafId = requestAnimationFrame(() => {
-        this.resizeRecoveryRafId = requestAnimationFrame(() => {
-          this.resizeRecoveryRafId = null;
-          this.recoverDiagramAfterUnsafeResize();
-        });
-      });
-    });
-  }
-
-  private recoverDiagramAfterUnsafeResize(): void {
-    if (!this.diagram || !this.diagramDiv || this.isDestroyed) {
-      return;
-    }
-
-    const width = this.diagramDiv.clientWidth;
-    const height = this.diagramDiv.clientHeight;
-    if (!this.isSafeDiagramSize(width, height)) {
-      return;
-    }
-
-    this.diagram.updateAllTargetBindings();
-    this.diagram.requestUpdate();
-
-    if (!this.restoreBestKnownViewState()) {
-      this.zoomService.fitToContents();
-    }
-
-    this.diagram.requestUpdate();
-    this.scheduleRecoveryVerification(true);
-  }
-
-  private captureStableViewState(): void {
-    if (!this.diagram || !this.canPersistViewState()) {
-      return;
-    }
-
-    const viewState: ViewState = {
-      scale: this.diagram.scale,
-      positionX: this.diagram.position.x,
-      positionY: this.diagram.position.y,
-    };
-
-    this.lastRecoverableViewState = viewState;
-
-    if (this.hasVisibleDiagramContent()) {
-      this.lastStableViewState = viewState;
-    }
-  }
-
-  private restoreBestKnownViewState(): boolean {
-    const stableViewState = this.normalizeViewState(this.lastStableViewState);
-
-    if (stableViewState) {
-      this.applyViewState(stableViewState);
-      return true;
-    }
-
-    const recoverableViewState = this.normalizeViewState(this.lastRecoverableViewState);
-    if (recoverableViewState) {
-      this.applyViewState(recoverableViewState);
-      return true;
-    }
-
-    const persistedViewState = this.normalizeViewState(this.projectState.getViewState() as ViewState | null);
-    if (persistedViewState) {
-      this.applyViewState(persistedViewState);
-      return true;
-    }
-
-    return false;
-  }
-
-  private armResizeRecovery(): void {
-    this.resizeRecoveryArmed = true;
-    this.recoveryFitFallbackUsed = false;
-    this.dataService.cancelPendingViewStateSave();
-    this.zoomService.cancelPendingViewStateSave();
-  }
-
-  private tryHardDiagramRecovery(): boolean {
-    if (!this.diagramDiv || !this.diagram || this.isDestroyed || this.hardRecoveryInProgress) {
-      return false;
-    }
-
-    if (typeof (this.diagram as go.Diagram & { clear?: unknown }).clear !== 'function') {
-      return false;
-    }
-
-    if (this.hardRecoveryAttemptCount >= FlowDiagramService.MAX_HARD_RECOVERY_ATTEMPTS) {
-      this.logger.warn('流程图原地重建次数已达上限，停止继续重试');
-      return false;
-    }
-
-    this.hardRecoveryAttemptCount += 1;
-    this.hardRecoveryInProgress = true;
-
-    const container = this.diagramDiv;
-    const selectionKeys = this.selectionService.getSelectedNodeKeys();
-    const recoveryViewState = this.getPreferredRecoveryViewState();
-    const shouldRestoreOverview = this.shouldRestoreOverview;
-    const overviewContainer = shouldRestoreOverview ? this.overviewContainer : null;
-
-    try {
-      this.logger.warn('普通恢复失败，开始原地重建 GoJS Diagram', {
-        attempt: this.hardRecoveryAttemptCount,
-      });
-
-      this.teardownDiagramForRecovery();
-
-      const initialized = this._initializeOutsideZone(container);
-      if (!initialized || !this.diagram) {
-        this.dataService.setDiagram(null);
-        this.layoutService.setDiagram(null);
-        this.selectionService.setDiagram(null);
-        this.zoomService.setDiagram(null);
-        this.hardRecoveryInProgress = false;
-        return false;
-      }
-
-      this.resizeRecoveryArmed = true;
-
-      this.updateDiagram(this.projectState.tasks(), true);
-
-      if (recoveryViewState) {
-        this.applyViewState(recoveryViewState);
-      } else {
-        this.zoomService.fitToContents();
-      }
-
-      this.diagram.requestUpdate();
-
-      if (selectionKeys.length > 0) {
-        this.selectionService.selectMultiple(selectionKeys);
-      }
-
-      if (this.diagramDropHandler) {
-        this.setupDropHandler(this.diagramDropHandler);
-      }
-
-      if (shouldRestoreOverview && overviewContainer) {
-        this.restoreOverviewAfterRecovery(overviewContainer);
-      }
-
-      this.scheduleRecoveryVerification(false);
-      return true;
-    } catch (error) {
-      this.hardRecoveryInProgress = false;
-      this.logger.error('流程图原地重建失败', error);
-      this.sentryLazyLoader.captureException(error, { tags: { operation: 'hardResizeRecovery' } });
-      return false;
-    }
-  }
-
-  private scheduleRecoveryVerification(allowHardRecovery: boolean): void {
-    if (!this.diagram || !this.diagramDiv || this.isDestroyed) {
-      return;
-    }
-
-    if (this.resizeRecoveryRafId !== null) {
-      cancelAnimationFrame(this.resizeRecoveryRafId);
-      this.resizeRecoveryRafId = null;
-    }
-
-    this.zone.runOutsideAngular(() => {
-      this.resizeRecoveryRafId = requestAnimationFrame(() => {
-        this.resizeRecoveryRafId = null;
-        this.completeRecoveryVerification(allowHardRecovery);
-      });
-    });
-  }
-
-  private completeRecoveryVerification(allowHardRecovery: boolean): void {
-    if (!this.diagram || !this.diagramDiv || this.isDestroyed) {
-      return;
-    }
-
-    if (!this.isSafeDiagramSize(this.diagramDiv.clientWidth, this.diagramDiv.clientHeight)) {
-      if (this.hardRecoveryInProgress) {
-        this.hardRecoveryInProgress = false;
-      }
-      return;
-    }
-
-    if (this.hasVisibleDiagramContent()) {
-      this.finishResizeRecovery();
-      return;
-    }
-
-    if (allowHardRecovery && this.tryHardDiagramRecovery()) {
-      return;
-    }
-
-    if (!allowHardRecovery && !this.recoveryFitFallbackUsed) {
-      this.recoveryFitFallbackUsed = true;
-      this.zoomService.fitToContents();
-      this.diagram.requestUpdate();
-      this.scheduleRecoveryVerification(false);
-      return;
-    }
-
-    this.resizeRecoveryArmed = true;
-    this.hardRecoveryInProgress = false;
-    this.recoveryFitFallbackUsed = false;
-    this.logger.warn('流程图在容器恢复后仍不可见，等待下一次恢复机会');
+  private cleanupFailedHardDiagramRecovery(): void {
+    this.dataService.setDiagram(null);
+    this.layoutService.setDiagram(null);
+    this.selectionService.setDiagram(null);
+    this.zoomService.setDiagram(null);
   }
 
   private teardownDiagramForRecovery(): void {
@@ -1355,6 +690,10 @@ export class FlowDiagramService {
     this.dataService.clearTimers();
     this.zoomService.cancelPendingViewStateSave();
     this.zoomService.setViewStatePersistenceGuard(null);
+    // 先按旧实例卸载幽灵监听并清掉残留幽灵元素，否则 FlowTouchService 持有的旧监听引用
+    // 会让重建后的 installDiagramDragGhostListeners 因幂等守卫拒绝在新实例上安装
+    this.touchService.uninstallDiagramDragGhostListeners(this.diagram);
+    this.touchService.endDiagramNodeDragGhost();
 
     if (!this.diagram) {
       return;
@@ -1375,184 +714,60 @@ export class FlowDiagramService {
     this.diagram = null;
   }
 
-  private getPreferredRecoveryViewState(): ViewState | null {
-    return this.normalizeViewState(this.lastStableViewState)
-      ?? this.normalizeViewState(this.lastRecoverableViewState)
-      ?? this.getCurrentViewStateSnapshot()
-      ?? this.normalizeViewState(this.projectState.getViewState() as ViewState | null);
-  }
-
-  private getCurrentViewStateSnapshot(): ViewState | null {
-    if (!this.diagram) {
-      return null;
-    }
-
-    return this.normalizeViewState({
-      scale: this.diagram.scale,
-      positionX: this.diagram.position.x,
-      positionY: this.diagram.position.y,
-    });
-  }
-
-  private finishResizeRecovery(): void {
-    if (!this.diagram || this.isDestroyed) {
-      return;
-    }
-
-    this.attemptPendingOverviewRestore();
-    this.overviewService.refreshOverview();
-    this.resizeRecoveryArmed = false;
-    this.hardRecoveryInProgress = false;
-    this.hardRecoveryAttemptCount = 0;
-    this.recoveryFitFallbackUsed = false;
-    this.captureStableViewState();
-
-    if (this.canPersistViewState()) {
-      this.dataService.saveViewState();
-    }
-  }
-
-  private updateDevicePixelRatio(): boolean {
-    const nextRatio = this.getDevicePixelRatio();
-    if (Math.abs(nextRatio - this.lastKnownDevicePixelRatio) < 0.001) {
-      return false;
-    }
-
-    const previousRatio = this.lastKnownDevicePixelRatio;
-    this.lastKnownDevicePixelRatio = nextRatio;
-    this.logger.info('检测到设备像素比变化，触发流程图恢复', {
-      previousRatio,
-      nextRatio,
-    });
-    return true;
-  }
-
-  private getDevicePixelRatio(): number {
-    if (typeof window === 'undefined') {
-      return 1;
-    }
-
-    const ratio = window.devicePixelRatio;
-    return Number.isFinite(ratio) && ratio > 0 ? ratio : 1;
-  }
-
   private restoreOverviewAfterRecovery(container: HTMLDivElement, retriesLeft: number = 3): void {
-    this.zone.runOutsideAngular(() => {
-      requestAnimationFrame(() => {
-        if (this.isDestroyed || !this.shouldRestoreOverview) {
-          return;
-        }
-
-        if (container.clientWidth <= 0 || container.clientHeight <= 0) {
-          this.pendingOverviewRestore = true;
-          if (retriesLeft > 0) {
-            this.restoreOverviewAfterRecovery(container, retriesLeft - 1);
-          }
-          return;
-        }
-
-        this.pendingOverviewRestore = false;
-        this.initializeOverview(container);
-      });
-    });
+    this.overviewCoordinator.restoreOverviewAfterRecovery(
+      container,
+      this.overviewRuntime(),
+      (callback) => this.zone.runOutsideAngular(() => requestAnimationFrame(callback)),
+      () => this.isDestroyed,
+      retriesLeft,
+    );
   }
 
   private attemptPendingOverviewRestore(): void {
-    if (!this.pendingOverviewRestore || !this.shouldRestoreOverview || !this.overviewContainer) {
-      return;
-    }
-
-    if (this.overviewService.isOverviewInitialized) {
-      this.pendingOverviewRestore = false;
-      return;
-    }
-
-    if (this.overviewContainer.clientWidth <= 0 || this.overviewContainer.clientHeight <= 0) {
-      return;
-    }
-
-    this.pendingOverviewRestore = false;
-    this.initializeOverview(this.overviewContainer);
-  }
-
-  private applyViewState(viewState: ViewState): void {
-    if (!this.diagram) {
-      return;
-    }
-
-    this.diagram.scale = viewState.scale;
-    this.diagram.position = new go.Point(viewState.positionX, viewState.positionY);
-  }
-
-  private normalizeViewState(viewState: ViewState | null | undefined): ViewState | null {
-    if (!viewState) {
-      return null;
-    }
-
-    if (
-      !Number.isFinite(viewState.scale) ||
-      viewState.scale <= 0 ||
-      viewState.scale > 4 ||
-      !Number.isFinite(viewState.positionX) ||
-      !Number.isFinite(viewState.positionY)
-    ) {
-      return null;
-    }
-
-    return {
-      scale: viewState.scale,
-      positionX: viewState.positionX,
-      positionY: viewState.positionY,
-    };
+    this.overviewCoordinator.attemptPendingOverviewRestore(
+      this.overviewRuntime(),
+      this.overviewService.isOverviewInitialized,
+    );
   }
 
   private canPersistViewState(): boolean {
-    if (!this.diagram || this.resizeRecoveryArmed || this.hardRecoveryInProgress) {
-      return false;
-    }
-
-    return this.isSafeDiagramSize(this.diagramDiv?.clientWidth ?? 0, this.diagramDiv?.clientHeight ?? 0)
-      && Number.isFinite(this.diagram.scale)
-      && this.diagram.scale > 0
-      && Number.isFinite(this.diagram.position.x)
-      && Number.isFinite(this.diagram.position.y);
+    return this.recovery.canPersistViewState();
+  }
+  private beginHardRecovery(): FlowDiagramHardRecoveryToken | null {
+    const owner = this.projectState.captureActiveProjectOwner();
+    if (!owner.projectId || !this.projectState.isActiveProjectOwnerCurrent(owner)
+      || !this.dataService.beginHardRecovery()) return null;
+    const token = { projectId: owner.projectId, generation: ++this.hardRecoveryGeneration, owner: Object.freeze({ ...owner }) };
+    this.hardRecoveryHold.set(token);
+    return token;
   }
 
-  private hasVisibleDiagramContent(): boolean {
-    if (!this.diagram) {
-      return false;
+  private isHardRecoveryCurrent(token: FlowDiagramHardRecoveryToken): boolean {
+    const current = this.hardRecoveryHold();
+    if (current && !this.projectState.isActiveProjectOwnerCurrent(current.owner)) {
+      this.hardRecoveryHold.set(null);
+      this.dataService.abortHardRecovery();
     }
-
-    const viewportBounds = this.diagram.viewportBounds;
-    if (!viewportBounds.isReal() || viewportBounds.width <= 0 || viewportBounds.height <= 0) {
-      return false;
-    }
-
-    const nodeCount = this.getDiagramNodeCount();
-    if (nodeCount === 0) {
-      return true;
-    }
-
-    const documentBounds = this.diagram.documentBounds;
-    if (!documentBounds.isReal() || documentBounds.width <= 0 || documentBounds.height <= 0) {
-      return false;
-    }
-
-    return viewportBounds.intersectsRect(documentBounds);
+    return this.hardRecoveryHold() === token
+      && this.projectState.isActiveProjectOwnerCurrent(token.owner);
   }
 
-  private getDiagramNodeCount(): number {
-    if (!this.diagram) {
-      return 0;
-    }
-
-    const diagramWithNodes = this.diagram as go.Diagram & { nodes?: { count?: number } };
-    return typeof diagramWithNodes.nodes?.count === 'number' ? diagramWithNodes.nodes.count : 0;
+  private releaseHardRecovery(token: FlowDiagramHardRecoveryToken): boolean {
+    if (!this.isHardRecoveryCurrent(token)) return false;
+    this.hardRecoveryHold.set(null);
+    return true;
   }
 
-  private isSafeDiagramSize(width: number, height: number): boolean {
-    return width >= FlowDiagramService.MIN_SAFE_DIAGRAM_WIDTH
-      && height >= FlowDiagramService.MIN_SAFE_DIAGRAM_HEIGHT;
+  private retireHardRecovery(): void {
+    if (this.hardRecoveryHold()) this.dataService.abortHardRecovery();
+    this.hardRecoveryHold.set(null);
+  }
+
+  private abortHardRecovery(token: FlowDiagramHardRecoveryToken): void {
+    if (this.hardRecoveryHold() !== token) return;
+    this.dataService.abortHardRecovery();
+    this.hardRecoveryHold.set(null);
   }
   
   private handleError(userMessage: string, error: unknown): void {

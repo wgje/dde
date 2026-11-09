@@ -1,14 +1,22 @@
-import { Injectable } from '@angular/core';
+import { inject, Injectable } from '@angular/core';
 import type { ColorMode, Project, Task, ThemeType } from '../models';
-import type { LaunchRouteIntent, LaunchSnapshot, LaunchSnapshotProject, LaunchSnapshotTask } from '../models/launch-shell';
+import type { LaunchSnapshot, LaunchSnapshotProject, LaunchSnapshotTask } from '../models/launch-shell';
+import {
+  LAUNCH_SNAPSHOT_VERSION_V1,
+  LAUNCH_SNAPSHOT_VERSION_V2,
+  normalizeLaunchSnapshot,
+} from './launch-snapshot-normalization.helpers';
+import {
+  beginLocalBackupUiRestoreWriter,
+  type LocalBackupUiRestoreWriterHandle,
+} from './local-backup-ui-restore-writer-quiescence-tracker';
+import { SessionRuntimeResetRegistry } from './session-runtime-reset.service';
 import { resolveRouteIntent } from '../utils/route-intent';
 
 export type { LaunchSnapshot, LaunchSnapshotProject, LaunchSnapshotTask } from '../models/launch-shell';
 
 const LAUNCH_SNAPSHOT_STORAGE_KEY_V1 = 'nanoflow.launch-snapshot.v1';
 const LAUNCH_SNAPSHOT_STORAGE_KEY_V2 = 'nanoflow.launch-snapshot.v2';
-const LAUNCH_SNAPSHOT_VERSION_V1 = 1 as const;
-const LAUNCH_SNAPSHOT_VERSION_V2 = 2 as const;
 const MAX_PROJECTS = 6;
 const MAX_TASKS_PER_PROJECT = 3;
 const PERSIST_DEBOUNCE_MS = 400;
@@ -30,8 +38,14 @@ type CaptureOptions = {
 })
 export class LaunchSnapshotService {
   private persistTimer: ReturnType<typeof setTimeout> | null = null;
+  private persistGeneration = 0;
   private pendingSnapshot: LaunchSnapshot | null = null;
   private pendingCaptureArgs: { projects: Project[]; options: CaptureOptions } | null = null;
+  private pendingWriter: { ownerUserId: string; handle: LocalBackupUiRestoreWriterHandle } | null = null;
+  private readonly unregisterSessionRuntimeReset = inject(SessionRuntimeResetRegistry).register(
+    'LaunchSnapshotService',
+    () => this.cancelPendingPersist(),
+  );
   private readonly pagehideListener = () => this.flushPendingPersist();
   private readonly visibilityChangeListener = () => {
     if (document.hidden) {
@@ -50,6 +64,9 @@ export class LaunchSnapshotService {
   }
 
   dispose(): void {
+    this.unregisterSessionRuntimeReset();
+    this.cancelPendingPersist();
+
     if (typeof window !== 'undefined') {
       window.removeEventListener('pagehide', this.pagehideListener);
     }
@@ -126,14 +143,10 @@ export class LaunchSnapshotService {
       return;
     }
 
+    this.beginPendingWriter(snapshot.userId ?? null);
     this.pendingSnapshot = snapshot;
-    if (this.persistTimer) {
-      clearTimeout(this.persistTimer);
-    }
-
-    this.persistTimer = setTimeout(() => {
-      this.flushPendingPersist();
-    }, PERSIST_DEBOUNCE_MS);
+    this.pendingCaptureArgs = null;
+    this.schedulePersistTimer(() => this.flushPendingPersist());
   }
 
   /**
@@ -141,33 +154,34 @@ export class LaunchSnapshotService {
    * 避免在每次信号变化时都做 sort/slice/map（capture 开销）。
    */
   schedulePersistDeferred(projects: Project[], options: CaptureOptions): void {
+    this.beginPendingWriter(options.userId ?? null);
+    this.pendingSnapshot = null;
     this.pendingCaptureArgs = { projects, options };
-    if (this.persistTimer) {
-      clearTimeout(this.persistTimer);
-    }
-
-    this.persistTimer = setTimeout(() => {
+    this.schedulePersistTimer(() => {
       if (this.pendingCaptureArgs) {
         const { projects: p, options: o } = this.pendingCaptureArgs;
         this.pendingCaptureArgs = null;
         this.pendingSnapshot = this.capture(p, o);
       }
       this.flushPendingPersist();
-    }, PERSIST_DEBOUNCE_MS);
+    });
   }
 
   cancelPendingPersist(): void {
-    if (this.persistTimer) {
+    this.persistGeneration += 1;
+    if (this.persistTimer !== null) {
       clearTimeout(this.persistTimer);
       this.persistTimer = null;
     }
 
     this.pendingCaptureArgs = null;
     this.pendingSnapshot = null;
+    this.releasePendingWriter();
   }
 
   flushPendingPersist(): void {
-    if (this.persistTimer) {
+    this.persistGeneration += 1;
+    if (this.persistTimer !== null) {
       clearTimeout(this.persistTimer);
       this.persistTimer = null;
     }
@@ -179,6 +193,7 @@ export class LaunchSnapshotService {
     }
 
     if (!this.pendingSnapshot || typeof localStorage === 'undefined') {
+      this.releasePendingWriter();
       return;
     }
 
@@ -192,142 +207,49 @@ export class LaunchSnapshotService {
       // localStorage 写入失败时静默降级，不阻断主流程。
     } finally {
       this.pendingSnapshot = null;
+      this.releasePendingWriter();
     }
+  }
+
+  private schedulePersistTimer(onElapsed: () => void): void {
+    if (this.persistTimer !== null) {
+      clearTimeout(this.persistTimer);
+    }
+
+    const generation = ++this.persistGeneration;
+    const timer = setTimeout(() => {
+      if (generation !== this.persistGeneration || timer !== this.persistTimer) {
+        return;
+      }
+      onElapsed();
+    }, PERSIST_DEBOUNCE_MS);
+    this.persistTimer = timer;
+  }
+
+  private beginPendingWriter(ownerUserId: string | null): void {
+    if (!ownerUserId) {
+      this.releasePendingWriter();
+      return;
+    }
+    if (this.pendingWriter?.ownerUserId === ownerUserId) {
+      this.pendingWriter.handle.renew();
+      return;
+    }
+    this.releasePendingWriter();
+    this.pendingWriter = {
+      ownerUserId,
+      handle: beginLocalBackupUiRestoreWriter(ownerUserId, 'launch-snapshot'),
+    };
+  }
+
+  private releasePendingWriter(): void {
+    const handle = this.pendingWriter?.handle ?? null;
+    this.pendingWriter = null;
+    handle?.release();
   }
 
   private normalize(value: unknown): LaunchSnapshot | null {
-    if (!value || typeof value !== 'object') {
-      return null;
-    }
-
-    const source = value as Partial<LaunchSnapshot>;
-    if (source.version !== LAUNCH_SNAPSHOT_VERSION_V1 && source.version !== LAUNCH_SNAPSHOT_VERSION_V2) {
-      return null;
-    }
-
-    const projects = Array.isArray(source.projects)
-      ? source.projects.map((project) => this.normalizeProject(project)).filter((project): project is LaunchSnapshotProject => !!project)
-      : [];
-
-    if (source.version === LAUNCH_SNAPSHOT_VERSION_V1) {
-      const activeProjectId = typeof source.activeProjectId === 'string' ? source.activeProjectId : null;
-      const preferredView = source.lastActiveView === 'flow' || source.lastActiveView === 'text'
-        ? source.lastActiveView
-        : null;
-      const currentProject = activeProjectId
-        ? projects.find((project) => project.id === activeProjectId) ?? null
-        : null;
-
-      return {
-        version: LAUNCH_SNAPSHOT_VERSION_V2,
-        savedAt: typeof source.savedAt === 'string' && source.savedAt ? source.savedAt : new Date().toISOString(),
-        activeProjectId,
-        lastActiveView: preferredView,
-        preferredView,
-        resolvedLaunchView: preferredView ?? 'text',
-        routeIntent: resolveRouteIntent(null, activeProjectId),
-        mobileDegraded: false,
-        degradeReason: null,
-        theme: source.theme ?? 'default',
-        colorMode: source.colorMode ?? 'system',
-        projects,
-        currentProject,
-      };
-    }
-
-    const activeProjectId = typeof source.activeProjectId === 'string' ? source.activeProjectId : null;
-    const preferredView = source.preferredView === 'flow' || source.preferredView === 'text'
-      ? source.preferredView
-      : source.lastActiveView === 'flow' || source.lastActiveView === 'text'
-        ? source.lastActiveView
-        : null;
-    const currentProject = this.normalizeProject(source.currentProject)
-      ?? (activeProjectId ? projects.find((project) => project.id === activeProjectId) ?? null : null);
-
-    return {
-      version: LAUNCH_SNAPSHOT_VERSION_V2,
-      savedAt: typeof source.savedAt === 'string' && source.savedAt ? source.savedAt : new Date().toISOString(),
-      userId: typeof source.userId === 'string' ? source.userId : null,
-      activeProjectId,
-      lastActiveView: source.lastActiveView === 'flow' || source.lastActiveView === 'text' ? source.lastActiveView : preferredView,
-      preferredView,
-      resolvedLaunchView: source.resolvedLaunchView === 'flow' || source.resolvedLaunchView === 'text'
-        ? source.resolvedLaunchView
-        : preferredView ?? 'text',
-      routeIntent: this.normalizeRouteIntent(source.routeIntent, activeProjectId),
-      mobileDegraded: source.mobileDegraded === true,
-      degradeReason: typeof source.degradeReason === 'string' ? source.degradeReason : null,
-      theme: source.theme ?? 'default',
-      colorMode: source.colorMode ?? 'system',
-      projects,
-      currentProject,
-    };
-  }
-
-  private normalizeProject(value: unknown): LaunchSnapshotProject | null {
-    if (!value || typeof value !== 'object') {
-      return null;
-    }
-
-    const source = value as Partial<LaunchSnapshotProject>;
-    if (typeof source.id !== 'string' || typeof source.name !== 'string') {
-      return null;
-    }
-
-    const recentTasks = Array.isArray(source.recentTasks)
-      ? source.recentTasks.map((task) => this.normalizeTask(task)).filter((task): task is LaunchSnapshotTask => !!task)
-      : [];
-
-    return {
-      id: source.id,
-      name: source.name,
-      description: typeof source.description === 'string' ? source.description : '',
-      updatedAt: typeof source.updatedAt === 'string' ? source.updatedAt : null,
-      taskCount: Number.isFinite(source.taskCount) ? Number(source.taskCount) : 0,
-      openTaskCount: Number.isFinite(source.openTaskCount) ? Number(source.openTaskCount) : 0,
-      recentTasks,
-    };
-  }
-
-  private normalizeTask(value: unknown): LaunchSnapshotTask | null {
-    if (!value || typeof value !== 'object') {
-      return null;
-    }
-
-    const source = value as Partial<LaunchSnapshotTask>;
-    if (
-      typeof source.id !== 'string' ||
-      typeof source.title !== 'string' ||
-      typeof source.displayId !== 'string' ||
-      (source.status !== 'active' && source.status !== 'completed' && source.status !== 'archived')
-    ) {
-      return null;
-    }
-
-    return {
-      id: source.id,
-      title: source.title,
-      displayId: source.displayId,
-      status: source.status,
-    };
-  }
-
-  private normalizeRouteIntent(value: unknown, activeProjectId: string | null): LaunchRouteIntent {
-    if (!value || typeof value !== 'object') {
-      return resolveRouteIntent(null, activeProjectId);
-    }
-
-    const source = value as Partial<LaunchRouteIntent>;
-    const kind = source.kind;
-    if (kind !== 'projects' && kind !== 'project' && kind !== 'text' && kind !== 'flow' && kind !== 'task') {
-      return resolveRouteIntent(null, activeProjectId);
-    }
-
-    return {
-      kind,
-      projectId: typeof source.projectId === 'string' ? source.projectId : activeProjectId,
-      taskId: typeof source.taskId === 'string' ? source.taskId : null,
-    };
+    return normalizeLaunchSnapshot(value);
   }
 
   private toV1Snapshot(snapshot: LaunchSnapshot): LaunchSnapshot {

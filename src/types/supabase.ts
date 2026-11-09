@@ -12,6 +12,31 @@ export type Database = {
   __InternalSupabase: {
     PostgrestVersion: "14.1"
   }
+  graphql_public: {
+    Tables: {
+      [_ in never]: never
+    }
+    Views: {
+      [_ in never]: never
+    }
+    Functions: {
+      graphql: {
+        Args: {
+          extensions?: Json
+          operationName?: string
+          query?: string
+          variables?: Json
+        }
+        Returns: Json
+      }
+    }
+    Enums: {
+      [_ in never]: never
+    }
+    CompositeTypes: {
+      [_ in never]: never
+    }
+  }
   public: {
     Tables: {
       app_config: {
@@ -40,8 +65,8 @@ export type Database = {
       }
       black_box_entries: {
         Row: {
-          content: string
           completed_at: string | null
+          content: string
           created_at: string | null
           date: string
           deleted_at: string | null
@@ -57,8 +82,8 @@ export type Database = {
           user_id: string | null
         }
         Insert: {
-          content: string
           completed_at?: string | null
+          content: string
           created_at?: string | null
           date?: string
           deleted_at?: string | null
@@ -74,8 +99,8 @@ export type Database = {
           user_id?: string | null
         }
         Update: {
-          content?: string
           completed_at?: string | null
+          content?: string
           created_at?: string | null
           date?: string
           deleted_at?: string | null
@@ -216,7 +241,7 @@ export type Database = {
           created_at?: string | null
           deleted_at?: string | null
           description?: string | null
-          id?: string
+          id: string
           project_id: string
           source_id: string
           target_id: string
@@ -456,7 +481,7 @@ export type Database = {
           data?: Json | null
           deleted_at?: string | null
           description?: string | null
-          id?: string
+          id: string
           migrated_to_v2?: boolean | null
           owner_id: string
           title?: string | null
@@ -603,6 +628,7 @@ export type Database = {
           entity_type: string
           operation_id: string
           payload_digest: string | null
+          replay_payload_digest: string | null
           protocol_version: number | null
           reject_reason: string | null
           result_payload: Json | null
@@ -619,6 +645,7 @@ export type Database = {
           entity_type: string
           operation_id: string
           payload_digest?: string | null
+          replay_payload_digest?: string | null
           protocol_version?: number | null
           reject_reason?: string | null
           result_payload?: Json | null
@@ -635,6 +662,7 @@ export type Database = {
           entity_type?: string
           operation_id?: string
           payload_digest?: string | null
+          replay_payload_digest?: string | null
           protocol_version?: number | null
           reject_reason?: string | null
           result_payload?: Json | null
@@ -997,7 +1025,7 @@ export type Database = {
           deleted_at?: string | null
           due_date?: string | null
           expected_minutes?: number | null
-          id?: string
+          id: string
           order?: number | null
           parent_id?: string | null
           parking_meta?: Json | null
@@ -1124,7 +1152,7 @@ export type Database = {
           created_at?: string | null
           floating_window_pref?: string | null
           focus_preferences?: Json | null
-          id?: string
+          id: string
           last_backup_proof_at?: string | null
           layout_direction?: string | null
           local_backup_enabled?: boolean | null
@@ -1149,6 +1177,50 @@ export type Database = {
           user_id?: string
         }
         Relationships: []
+      }
+      widget_black_box_action_receipts: {
+        Row: {
+          action: string
+          canonical_response: Json
+          created_at: string
+          device_id: string
+          entry_id: string
+          expires_at: string
+          operation_id: string
+          origin_binding_generation: number
+          user_id: string
+        }
+        Insert: {
+          action: string
+          canonical_response: Json
+          created_at?: string
+          device_id: string
+          entry_id: string
+          expires_at?: string
+          operation_id: string
+          origin_binding_generation: number
+          user_id: string
+        }
+        Update: {
+          action?: string
+          canonical_response?: Json
+          created_at?: string
+          device_id?: string
+          entry_id?: string
+          expires_at?: string
+          operation_id?: string
+          origin_binding_generation?: number
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "widget_black_box_action_receipts_device_id_fkey"
+            columns: ["device_id"]
+            isOneToOne: false
+            referencedRelation: "widget_devices"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       widget_devices: {
         Row: {
@@ -1754,6 +1826,17 @@ export type Database = {
       }
     }
     Functions: {
+      apply_widget_black_box_action: {
+        Args: {
+          p_action: string
+          p_device_id: string
+          p_entry_id: string
+          p_operation_id?: string
+          p_origin_binding_generation: number
+          p_user_id: string
+        }
+        Returns: Json
+      }
       append_task_attachment: {
         Args: { p_attachment: Json; p_task_id: string }
         Returns: boolean
@@ -1812,7 +1895,6 @@ export type Database = {
       }
       get_black_box_sync_watermark: { Args: never; Returns: string | null }
       get_dashboard_stats: { Args: never; Returns: Json }
-      get_full_project_data: { Args: { p_project_id: string }; Returns: Json }
       get_project_sync_watermark: {
         Args: { p_project_id: string }
         Returns: string | null
@@ -1931,10 +2013,17 @@ export type Database = {
         Args: { entity_key: string; payload: Json }
         Returns: string
       }
+      sync_increment_routine_completion: {
+        Args: { payload: Json }
+        Returns: Json
+      }
       sync_upsert_blackbox_entry: { Args: { payload: Json }; Returns: Json }
       sync_upsert_connection: { Args: { payload: Json }; Returns: Json }
+      sync_upsert_focus_session: { Args: { payload: Json }; Returns: Json }
       sync_upsert_project: { Args: { payload: Json }; Returns: Json }
+      sync_upsert_routine_task: { Args: { payload: Json }; Returns: Json }
       sync_upsert_task: { Args: { payload: Json }; Returns: Json }
+      sync_upsert_user_preferences: { Args: { payload: Json }; Returns: Json }
       user_accessible_project_ids: { Args: never; Returns: string[] }
       user_has_project_access: {
         Args: { p_project_id: string }
@@ -2083,8 +2172,10 @@ export type CompositeTypes<
     : never
 
 export const Constants = {
+  graphql_public: {
+    Enums: {},
+  },
   public: {
     Enums: {},
   },
 } as const
-

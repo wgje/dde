@@ -50,7 +50,7 @@ import { Task } from '../../../../models';
               </label>
             </div>
           } @else {
-            <p class="text-xs text-stone-400 dark:text-stone-500 mt-1">这将同时删除其所有子任务。</p>
+            <p class="text-xs text-stone-400 dark:text-stone-500 mt-1">该任务没有子任务。</p>
           }
         </div>
         <div class="flex border-t border-stone-100 dark:border-stone-700">

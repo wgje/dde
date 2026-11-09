@@ -12,14 +12,16 @@ describe('TaskSyncOperationsService - topologicalSortTasks', () => {
   const mockLogger = {
     warn: () => undefined,
     debug: () => undefined,
+    error: () => undefined,
   };
 
   const topologicalSortTasks = (tasks: Task[]): Task[] => {
-    const fn = (TaskSyncOperationsService as unknown as { prototype: Record<string, unknown> }).prototype[
-      'topologicalSortTasks'
-    ] as (this: { logger: typeof mockLogger }, tasks: Task[]) => Task[];
+    const prototype = (TaskSyncOperationsService as unknown as { prototype: Record<string, unknown> }).prototype;
+    const serviceLike = Object.create(prototype) as { logger: typeof mockLogger };
+    serviceLike.logger = mockLogger;
+    const fn = prototype['topologicalSortTasks'] as (this: typeof serviceLike, tasks: Task[]) => Task[];
 
-    return fn.call({ logger: mockLogger }, tasks);
+    return fn.call(serviceLike, tasks);
   };
 
   // 创建测试任务的辅助函数

@@ -1,0 +1,72 @@
+name: Refresh Context7 Docs
+
+on:
+  pull_request:
+    paths:
+      - context7.json
+      - llms.txt
+      - docs/context7/**
+      - package.json
+      - package-lock.json
+      - scripts/validate-context7-docs.cjs
+      - scripts/contracts/check-context7-coupled-changes.cjs
+      - src/**
+      - supabase/**
+      - angular.json
+      - playwright.config.ts
+      - vitest*.mts
+  push:
+    branches:
+      - main
+    paths:
+      - context7.json
+      - llms.txt
+      - docs/context7/**
+      - package.json
+      - package-lock.json
+      - scripts/validate-context7-docs.cjs
+      - scripts/contracts/check-context7-coupled-changes.cjs
+      - src/**
+      - supabase/**
+      - angular.json
+      - playwright.config.ts
+      - vitest*.mts
+  workflow_dispatch:
+
+jobs:
+  validate-and-refresh:
+    runs-on: ubuntu-latest
+    env:
+      HAS_CONTEXT7_API_KEY: ${{ secrets.CONTEXT7_API_KEY != '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.14.0
+
+      - name: Validate Context7 docs
+        run: |
+          node scripts/validate-context7-docs.cjs
+          node scripts/contracts/check-context7-coupled-changes.cjs --mode=staged-or-head
+
+      - name: Refresh Context7 library
+        if: ${{ env.HAS_CONTEXT7_API_KEY == 'true' }}
+        env:
+          CONTEXT7_API_KEY: ${{ secrets.CONTEXT7_API_KEY }}
+          CONTEXT7_LIBRARY_ID: ${{ vars.CONTEXT7_LIBRARY_ID || '/dydyde/dde' }}
+        run: |
+          response="$(curl --fail-with-body -sS -X POST https://context7.com/api/v1/refresh \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer ${CONTEXT7_API_KEY}" \
+            -d "{\"libraryName\":\"${CONTEXT7_LIBRARY_ID}\"}")"
+          test -n "${response}"
+          printf '%s\n' "${response}"
+
+      - name: Skip refresh notice
+        if: ${{ env.HAS_CONTEXT7_API_KEY != 'true' }}
+        run: echo "CONTEXT7_API_KEY is not configured; validation passed and refresh was skipped."

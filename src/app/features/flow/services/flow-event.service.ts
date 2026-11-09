@@ -21,24 +21,21 @@ import { LoggerService } from '../../../../services/logger.service';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { UiStateService } from '../../../../services/ui-state.service';
 import { flowTemplateEventHandlers } from './flow-template-events';
+import {
+  convertFlowViewPointToWindowCoords,
+  getFlowClickPositionFromEvent,
+  getFlowLinkClickPosition,
+} from './flow-event-geometry.helpers';
 import { GOJS_CONFIG } from '../../../../config';
 import type { GoJSLinkData } from '../../../../types/gojs-extended';
 import * as go from 'gojs';
-
-// ========== 自定义事件名称常量（供向后兼容） ==========
-export const FLOW_EVENTS = {
-  NODE_CLICKED: 'NodeClicked',
-  NODE_DOUBLE_CLICKED: 'NodeDoubleClicked',
-  LINK_CLICKED: 'LinkClicked',
-  LINK_DOUBLE_CLICKED: 'LinkDoubleClicked',
-  LINK_DELETE_REQUESTED: 'LinkDeleteRequested',
-  CROSS_TREE_LABEL_CLICKED: 'CrossTreeLabelClicked',
-} as const;
 
 /**
  * 节点点击回调
  */
 export type NodeClickCallback = (taskId: string, isDoubleClick: boolean) => void;
+
+export type SidecarToggleCallback = (taskId: string) => void;
 
 /**
  * 连接线点击回调
@@ -76,6 +73,20 @@ export interface LinkRelinkInfo {
   newToId: string;
 }
 
+interface LinkRelinkContext {
+  link: go.Link;
+  disconnectedNodeId: string;
+  newFromId: string;
+  newToId: string;
+  isCrossTree: boolean;
+}
+
+interface LinkGestureContext {
+  link: go.Link;
+  sourceId: string;
+  targetId: string;
+}
+
 /**
  * 连接线重连回调
  */
@@ -111,16 +122,22 @@ export class FlowEventService {
   
   // ========== 回调存储 ==========
   private nodeClickCallback: NodeClickCallback | null = null;
+  private sidecarToggleCallback: SidecarToggleCallback | null = null;
   private linkClickCallback: LinkClickCallback | null = null;
   private linkDeleteCallback: LinkDeleteCallback | null = null;
   private linkRelinkCallback: LinkRelinkCallback | null = null;
   private linkGestureCallback: LinkGestureCallback | null = null;
   private selectionMovedCallback: SelectionMovedCallback | null = null;
   private backgroundClickCallback: BackgroundClickCallback | null = null;
-  /** Alt+拖拽节点到停泊坞的回调 */
-  private altDragCallback: ((taskId: string, clientX: number, clientY: number) => void) | null = null;
-  /** 拖拽节点出画布边界的回调（支持多选拖入停泊坞） */
+  /** 拖拽节点出画布边界的回调（支持多选拖入停泊坞；单任务拖入停泊坞也走此路径） */
   private dragOutOfBoundsCallback: ((taskIds: string[], clientX: number, clientY: number) => void) | null = null;
+  /**
+   * Delete/Backspace 键回调。
+   * 必须走本服务的回调注册表而不是让注册方直接写 flowTemplateEventHandlers：
+   * 硬恢复（teardownDiagramForRecovery → 原地重建）会经 setDiagram(null) 清空全局模板处理器，
+   * 只有 setupTemplateEventHandlers 在新 diagram 接入时重接的处理器才能在恢复后存活
+   */
+  private deleteKeyCallback: (() => void) | null = null;
   
   // ========== 监听器追踪 ==========
   private registeredListeners: RegisteredListener[] = [];
@@ -134,8 +151,13 @@ export class FlowEventService {
    * 设置 Diagram 引用并初始化事件监听
    */
   setDiagram(diagram: go.Diagram | null, diagramDiv?: HTMLDivElement | null): void {
+    if (this.diagram !== diagram && this.positionSaveTimer !== null) {
+      clearTimeout(this.positionSaveTimer);
+      this.positionSaveTimer = null;
+    }
+
     // 清理旧的监听器和事件处理器
-    if (this.diagram && this.diagram !== diagram) {
+    if (this.diagram) {
       this.removeAllListeners(this.diagram);
       this.clearTemplateEventHandlers();
     }
@@ -157,16 +179,24 @@ export class FlowEventService {
   private setupTemplateEventHandlers(): void {
     // 节点点击
     flowTemplateEventHandlers.onNodeClick = (node: go.Node) => {
+      if (!this.isCurrentTemplatePart(node)) return;
       this.emitNodeClick(node.data?.key, false);
     };
     
     // 节点双击
     flowTemplateEventHandlers.onNodeDoubleClick = (node: go.Node) => {
+      if (!this.isCurrentTemplatePart(node)) return;
       this.emitNodeClick(node.data?.key, true);
+    };
+
+    flowTemplateEventHandlers.onSidecarToggle = (taskId: string, part?: go.Part) => {
+      if (part && !this.isCurrentTemplatePart(part)) return;
+      this.emitSidecarToggle(taskId);
     };
     
     // 连接线点击
     flowTemplateEventHandlers.onLinkClick = (link: go.Link) => {
+      if (!this.isCurrentTemplatePart(link)) return;
       const viewPoint = this.diagram?.lastInput?.viewPoint;
       const x = viewPoint?.x ?? 0;
       const y = viewPoint?.y ?? 0;
@@ -175,31 +205,37 @@ export class FlowEventService {
     
     // 连接线删除请求
     flowTemplateEventHandlers.onLinkDeleteRequest = (link: go.Link) => {
+      if (!this.isCurrentTemplatePart(link)) return;
       this.emitLinkDelete(link.data);
     };
     
     // 跨树连接标签点击
     flowTemplateEventHandlers.onCrossTreeLabelClick = (link: go.Link, viewX: number, viewY: number) => {
+      if (!this.isCurrentTemplatePart(link)) return;
       // 将 GoJS 视图坐标转换为浏览器窗口坐标
       const { windowX, windowY } = this.convertViewToWindowCoords(viewX, viewY);
       this.emitLinkClick(link.data, windowX, windowY, false);
     };
 
-    // Alt+拖拽节点到停泊坞 — 透传给 altDragCallback
-    flowTemplateEventHandlers.onNodeAltDragStart = (taskId: string, clientX: number, clientY: number) => {
-      if (this.altDragCallback) {
-        this.zone.run(() => this.altDragCallback!(taskId, clientX, clientY));
-      }
-    };
-
     // 拖拽节点出画布边界 — 多选拖入停泊坞
     flowTemplateEventHandlers.onNodesDragOutOfBounds = (taskIds: string[], clientX: number, clientY: number) => {
-      if (this.dragOutOfBoundsCallback) {
-        this.zone.run(() => this.dragOutOfBoundsCallback!(taskIds, clientX, clientY));
-      }
+      const callback = this.dragOutOfBoundsCallback;
+      if (!callback) return;
+      this.runEventCallback('dragOutOfBounds', () => callback(taskIds, clientX, clientY));
+    };
+
+    // Delete/Backspace 键 — 透传给 deleteKeyCallback（硬恢复重建 diagram 后由 setDiagram 自动重接）
+    flowTemplateEventHandlers.onDeleteKeyPressed = () => {
+      const callback = this.deleteKeyCallback;
+      if (!callback) return;
+      this.runEventCallback('deleteKey', () => callback());
     };
     
     this.logger.debug('模板事件处理器已注册');
+  }
+
+  private isCurrentTemplatePart(part: go.Part | null | undefined): boolean {
+    return !!this.diagram && part?.diagram === this.diagram;
   }
   
   /**
@@ -208,10 +244,10 @@ export class FlowEventService {
   private clearTemplateEventHandlers(): void {
     flowTemplateEventHandlers.onNodeClick = undefined;
     flowTemplateEventHandlers.onNodeDoubleClick = undefined;
+    flowTemplateEventHandlers.onSidecarToggle = undefined;
     flowTemplateEventHandlers.onLinkClick = undefined;
     flowTemplateEventHandlers.onLinkDeleteRequest = undefined;
     flowTemplateEventHandlers.onCrossTreeLabelClick = undefined;
-    flowTemplateEventHandlers.onNodeAltDragStart = undefined;
     flowTemplateEventHandlers.onNodesDragOutOfBounds = undefined;
     // 【修复 L-39】补充清理 onDeleteKeyPressed 和 onSelectionChanged
     flowTemplateEventHandlers.onDeleteKeyPressed = undefined;
@@ -228,26 +264,21 @@ export class FlowEventService {
    * @returns 浏览器窗口坐标
    */
   private convertViewToWindowCoords(viewX: number, viewY: number): { windowX: number; windowY: number } {
-    if (!this.diagram || !this.diagramDiv) {
-      // 降级：无法转换时直接返回原坐标
-      return { windowX: viewX, windowY: viewY };
-    }
-
-    // 获取 diagram div 相对于视口的位置
-    const rect = this.diagramDiv.getBoundingClientRect();
-    
-    // GoJS viewPoint 已经是相对于 canvas 左上角的像素坐标
-    // 加上 canvas 相对于视口的偏移即可得到窗口坐标
-    const windowX = rect.left + viewX;
-    const windowY = rect.top + viewY;
-
-    return { windowX, windowY };
+    return convertFlowViewPointToWindowCoords({
+      diagramDiv: this.diagramDiv,
+      viewX,
+      viewY,
+    });
   }
   
   // ========== 回调注册方法 ==========
   
   onNodeClick(callback: NodeClickCallback): void {
     this.nodeClickCallback = callback;
+  }
+
+  onSidecarToggle(callback: SidecarToggleCallback): void {
+    this.sidecarToggleCallback = callback;
   }
   
   onLinkClick(callback: LinkClickCallback): void {
@@ -275,10 +306,10 @@ export class FlowEventService {
   }
 
   /**
-   * 注册 Alt+拖拽节点回调（将任务拖入停泊坞）
+   * 注册 Delete/Backspace 键回调（GoJS commandHandler 拦截后触发）
    */
-  onAltDragStart(callback: (taskId: string, clientX: number, clientY: number) => void): void {
-    this.altDragCallback = callback;
+  onDeleteKey(callback: () => void): void {
+    this.deleteKeyCallback = callback;
   }
 
   /**
@@ -335,47 +366,42 @@ export class FlowEventService {
     
     // 移动端特殊处理：通过 ObjectSingleClicked/ObjectDoubleClicked 事件处理连接线和关联块标签的点击
     if (isMobile) {
-      this.addTrackedListener('ObjectSingleClicked', (e: go.DiagramEvent) => {
-        const subject = e.subject;
-        const part = subject?.part;
-        
-        this.logger.debug('移动端 ObjectSingleClicked', { 
-          subjectType: subject?.constructor?.name,
-          partType: part?.constructor?.name,
-          isLink: part instanceof go.Link,
-          hasData: !!part?.data
-        });
-        
-        // 检查是否点击了连接线或连接线上的元素（如关联块标签）
-        if (part instanceof go.Link && part.data) {
-          // 获取实际点击位置（优先使用 lastInput 的视图坐标）
-          const { x, y } = this.getClickPositionFromEvent(part);
-          this.logger.debug('移动端连接线/关联块单击', { x, y, linkData: part.data });
-          this.emitLinkClick(part.data, x, y, false);
-        }
-      });
-      
-      this.addTrackedListener('ObjectDoubleClicked', (e: go.DiagramEvent) => {
-        const subject = e.subject;
-        const part = subject?.part;
-        
-        this.logger.debug('移动端 ObjectDoubleClicked', { 
-          subjectType: subject?.constructor?.name,
-          partType: part?.constructor?.name,
-          isLink: part instanceof go.Link
-        });
-        
-        // 检查是否点击了连接线或连接线上的元素（如关联块标签）
-        if (part instanceof go.Link && part.data) {
-          // 获取实际点击位置
-          const { x, y } = this.getClickPositionFromEvent(part);
-          this.logger.debug('移动端连接线/关联块双击', { x, y, linkData: part.data });
-          this.emitLinkClick(part.data, x, y, true);
-        }
-      });
+      this.setupMobileLinkClickListeners();
     }
     
     this.logger.debug('事件监听器已设置');
+  }
+
+  private setupMobileLinkClickListeners(): void {
+    this.addTrackedListener('ObjectSingleClicked', (e: go.DiagramEvent) => {
+      this.handleMobileObjectClicked(e, false);
+    });
+
+    this.addTrackedListener('ObjectDoubleClicked', (e: go.DiagramEvent) => {
+      this.handleMobileObjectClicked(e, true);
+    });
+  }
+
+  private handleMobileObjectClicked(e: go.DiagramEvent, isDoubleClick: boolean): void {
+    const subject = e.subject;
+    const part = subject?.part;
+
+    this.logger.debug(isDoubleClick ? '移动端 ObjectDoubleClicked' : '移动端 ObjectSingleClicked', {
+      subjectType: subject?.constructor?.name,
+      partType: part?.constructor?.name,
+      isLink: part instanceof go.Link,
+      hasData: !!part?.data
+    });
+
+    if (!(part instanceof go.Link) || !part.data || !this.isCurrentTemplatePart(part)) return;
+
+    const { x, y } = this.getClickPositionFromEvent(part);
+    this.logger.debug(isDoubleClick ? '移动端连接线/关联块双击' : '移动端连接线/关联块单击', {
+      x,
+      y,
+      linkData: part.data
+    });
+    this.emitLinkClick(part.data, x, y, isDoubleClick);
   }
   
   // ========== 事件处理方法 ==========
@@ -386,7 +412,7 @@ export class FlowEventService {
   private handleSelectionMoved(e: go.DiagramEvent): void {
     const projectIdAtMove = this.projectState.activeProjectId();
     
-    if (this.positionSaveTimer) {
+    if (this.positionSaveTimer !== null) {
       clearTimeout(this.positionSaveTimer);
     }
     
@@ -421,9 +447,39 @@ export class FlowEventService {
    */
   private handleLinkGesture(e: go.DiagramEvent): void {
     if (!this.diagram || !this.diagramDiv) return;
-    
+
     const link = e.subject;
-    const linkingTool = this.diagram.toolManager.linkingTool as go.LinkingTool & { _originNode?: go.Node | null };
+    if (!(link instanceof go.Link)) return;
+
+    const context = this.createLinkGestureContext(e);
+    if (!context) {
+      // LinkDrawn 端点无法解析：新画的连接线没有 store 背书，留在模型里就是幽灵边。
+      // 按自连接相同的拒绝路径移除，并留下告警痕迹（正常绘制流程不可达，属于防御边界）
+      this.logger.warn('LinkDrawn 端点无法解析，已移除未持久化的连接线', {
+        linkData: link.data ?? null,
+      });
+      this.rejectLinkData(link.data);
+      return;
+    }
+
+    // 防止自连接
+    if (context.sourceId === context.targetId) {
+      this.rejectLinkData(context.link.data);
+      return;
+    }
+
+    const { x, y } = this.getLinkClickPosition(context.link);
+    this.emitLinkGesture(context.sourceId, context.targetId, x, y, context.link);
+  }
+
+  private createLinkGestureContext(e: go.DiagramEvent): LinkGestureContext | null {
+    const diagram = this.diagram;
+    if (!diagram) return null;
+
+    const link = e.subject;
+    if (!(link instanceof go.Link)) return null;
+
+    const linkingTool = diagram.toolManager.linkingTool as go.LinkingTool & { _originNode?: go.Node | null };
     const originNode = linkingTool.isActive && linkingTool._originNode instanceof go.Node
       ? linkingTool._originNode
       : null;
@@ -440,23 +496,13 @@ export class FlowEventService {
       });
     }
 
-    if (!sourceId || !targetId) return;
+    if (!sourceId || !targetId) return null;
 
-    // 防止自连接
-    if (sourceId === targetId) {
-      if (link?.data) {
-        const model = this.diagram.model as go.GraphLinksModel;
-        this.diagram.startTransaction('reject-self-link');
-        model.removeLinkData(link.data);
-        this.diagram.commitTransaction('reject-self-link');
-      } else if (link instanceof go.Link) {
-        this.diagram.remove(link);
-      }
-      return;
-    }
-    
-    const { x, y } = this.getLinkClickPosition(link);
-    this.emitLinkGesture(sourceId, targetId, x, y, link);
+    return {
+      link,
+      sourceId,
+      targetId,
+    };
   }
   
   /**
@@ -464,81 +510,104 @@ export class FlowEventService {
    */
   private handleLinkRelinked(e: go.DiagramEvent): void {
     if (!this.diagram || !this.diagramDiv) return;
-    
-    const link = e.subject;
-    const disconnectedPort = e.parameter;
-    const disconnectedNodeId = disconnectedPort?.part?.data?.key;
-    
-    const fromNode = link?.fromNode;
-    const toNode = link?.toNode;
-    const newFromId = fromNode?.data?.key;
-    const newToId = toNode?.data?.key;
-    
-    const linkData = link?.data;
-    const isCrossTree = linkData?.isCrossTree;
-    
+
+    const context = this.createLinkRelinkContext(e);
+    if (!context) {
+      // 端点/断开节点无法解析（正常 relink 工具流程不可达）：GoJS 模型已被 relink 工具变更，
+      // 这里不做模型回滚（缺少可信的旧端点，回滚可能造成二次变更），只留下告警痕迹；
+      // 画布会在下一次 store 驱动的 updateDiagram 刷新时与 store 对齐
+      this.logger.warn('LinkRelinked 端点无法解析，跳过 store 变更（画布将在下次刷新时与 store 对齐）', {
+        linkData: (e.subject instanceof go.Link ? e.subject.data : null) ?? null,
+      });
+      return;
+    }
+
     this.logger.debug('LinkRelinked 事件', {
+      disconnectedNodeId: context.disconnectedNodeId,
+      newFromId: context.newFromId,
+      newToId: context.newToId,
+      isCrossTree: context.isCrossTree
+    });
+
+    // 防止自连接
+    if (context.newFromId === context.newToId) {
+      this.rejectLinkData(context.link.data);
+      return;
+    }
+
+    const { x, y } = this.getLinkClickPosition(context.link);
+    const linkType: 'parent-child' | 'cross-tree' = context.isCrossTree ? 'cross-tree' : 'parent-child';
+    const relinkInfo = this.resolveLinkRelinkInfo(context);
+
+    if (this.linkRelinkCallback) {
+      this.emitLinkRelink(linkType, relinkInfo, x, y, context.link);
+    } else {
+      this.emitLinkGesture(context.newFromId, context.newToId, x, y, context.link);
+    }
+  }
+
+  private createLinkRelinkContext(e: go.DiagramEvent): LinkRelinkContext | null {
+    const link = e.subject;
+    if (!(link instanceof go.Link)) return null;
+
+    const disconnectedNodeId = e.parameter?.part?.data?.key;
+    const newFromId = link.fromNode?.data?.key;
+    const newToId = link.toNode?.data?.key;
+    if (!newFromId || !newToId || !disconnectedNodeId) return null;
+
+    return {
+      link,
       disconnectedNodeId,
       newFromId,
       newToId,
-      isCrossTree
-    });
-    
-    if (!newFromId || !newToId || !disconnectedNodeId) return;
-    
-    // 防止自连接
-    if (newFromId === newToId) {
-      if (link?.data) {
-        const model = this.diagram.model as go.GraphLinksModel;
-        this.diagram.startTransaction('reject-self-link');
-        model.removeLinkData(link.data);
-        this.diagram.commitTransaction('reject-self-link');
-      }
-      return;
+      isCrossTree: Boolean(link.data?.isCrossTree),
+    };
+  }
+
+  private resolveLinkRelinkInfo(context: LinkRelinkContext): LinkRelinkInfo {
+    // 权威判定被改变的端点：RelinkingTool.isForwards（true = 正在拖拽 to 端手柄）。
+    // 不能用"disconnectedNodeId 等于哪个新端点"倒推对端：手柄拖起又放回原端口时
+    // （常见的"改主意"手势）disconnected 与同端新端点相同，旧逻辑会误判成对端变更，
+    // 派发错误的迁移/替换操作并弹出虚假的失败/成功 toast。
+    // 按 isForwards 推导同端旧 ID 后，下游 oldParentId===newParentId /
+    // oldChildId===newTargetId / 跨树端点不变守卫会把同端口回放归类为 cancelled
+    const relinkingTool = this.diagram?.toolManager?.relinkingTool;
+    if (relinkingTool) {
+      return relinkingTool.isForwards
+        ? this.createRelinkInfo('to', context.newFromId, context.disconnectedNodeId, context)
+        : this.createRelinkInfo('from', context.disconnectedNodeId, context.newToId, context);
     }
-    
-    const { x, y } = this.getLinkClickPosition(link);
-    const linkType: 'parent-child' | 'cross-tree' = isCrossTree ? 'cross-tree' : 'parent-child';
-    
-    // 确定哪一端被改变
-    let changedEnd: 'from' | 'to';
-    let oldFromId: string;
-    let oldToId: string;
-    
-    if (disconnectedNodeId === newToId) {
-      changedEnd = 'from';
-      oldFromId = disconnectedNodeId;
-      oldToId = newToId;
-    } else if (disconnectedNodeId === newFromId) {
-      changedEnd = 'to';
-      oldFromId = newFromId;
-      oldToId = disconnectedNodeId;
-    } else {
-      const relinkingTool = this.diagram?.toolManager.relinkingTool;
-      if (relinkingTool?.isForwards) {
-        changedEnd = 'to';
-        oldFromId = newFromId;
-        oldToId = disconnectedNodeId;
-      } else {
-        changedEnd = 'from';
-        oldFromId = disconnectedNodeId;
-        oldToId = newToId;
-      }
+
+    // 工具不可用兜底：disconnected 与某个新端点相同说明该端被放回原端口（判定为同端，
+    // 下游守卫会归类为 cancelled）；端点全不相同时保持旧兜底语义按 from 端处理
+    if (context.disconnectedNodeId === context.newToId) {
+      return this.createRelinkInfo('to', context.newFromId, context.disconnectedNodeId, context);
     }
-    
-    const relinkInfo: LinkRelinkInfo = {
+    return this.createRelinkInfo('from', context.disconnectedNodeId, context.newToId, context);
+  }
+
+  private createRelinkInfo(
+    changedEnd: 'from' | 'to',
+    oldFromId: string,
+    oldToId: string,
+    context: LinkRelinkContext,
+  ): LinkRelinkInfo {
+    return {
       changedEnd,
       oldFromId,
       oldToId,
-      newFromId,
-      newToId
+      newFromId: context.newFromId,
+      newToId: context.newToId
     };
-    
-    if (this.linkRelinkCallback) {
-      this.emitLinkRelink(linkType, relinkInfo, x, y, link);
-    } else {
-      this.emitLinkGesture(newFromId, newToId, x, y, link);
-    }
+  }
+
+  private rejectLinkData(linkData: go.ObjectData | null | undefined): void {
+    if (!this.diagram || !linkData) return;
+
+    const model = this.diagram.model as go.GraphLinksModel;
+    this.diagram.startTransaction('reject-self-link');
+    model.removeLinkData(linkData);
+    this.diagram.commitTransaction('reject-self-link');
   }
   
   /**
@@ -546,71 +615,42 @@ export class FlowEventService {
    * 优先使用实际点击位置（lastInput），回退到连接线中点
    */
   private getClickPositionFromEvent(link: go.Link): { x: number; y: number } {
-    if (!this.diagram || !this.diagramDiv) {
-      return { x: 0, y: 0 };
-    }
-    
-    const rect = this.diagramDiv.getBoundingClientRect();
-    
-    // 优先使用 lastInput 的视图坐标（实际点击位置）
-    const lastInput = this.diagram.lastInput;
-    if (lastInput && lastInput.viewPoint) {
-      return {
-        x: rect.left + lastInput.viewPoint.x,
-        y: rect.top + lastInput.viewPoint.y
-      };
-    }
-    
-    // 回退到连接线中点
-    return this.getLinkClickPosition(link);
+    return getFlowClickPositionFromEvent({
+      diagram: this.diagram,
+      diagramDiv: this.diagramDiv,
+      link,
+    });
   }
   
   /**
    * 获取连接线中点位置（屏幕坐标）
    */
   private getLinkClickPosition(link: go.Link): { x: number; y: number } {
-    if (!this.diagram || !this.diagramDiv) {
-      return { x: 0, y: 0 };
-    }
-    
-    const midPoint = link.midPoint || link.toNode?.location;
-    if (!midPoint) {
-      return { x: 0, y: 0 };
-    }
-    
-    const viewPt = this.diagram.transformDocToView(midPoint);
-    const rect = this.diagramDiv.getBoundingClientRect();
-    
-    return {
-      x: rect.left + viewPt.x,
-      y: rect.top + viewPt.y
-    };
+    return getFlowLinkClickPosition({
+      diagram: this.diagram,
+      diagramDiv: this.diagramDiv,
+      link,
+    });
   }
   
   // ========== 事件分发方法 ==========
   
   emitNodeClick(taskId: string, isDoubleClick: boolean): void {
-    if (this.nodeClickCallback) {
-      this.zone.run(() => {
-        this.nodeClickCallback!(taskId, isDoubleClick);
-      });
-    }
+    const callback = this.nodeClickCallback;
+    if (!callback) return;
+    this.runEventCallback('nodeClick', () => callback(taskId, isDoubleClick));
   }
   
   emitLinkClick(linkData: GoJSLinkData, x: number, y: number, isDoubleClick?: boolean): void {
-    if (this.linkClickCallback) {
-      this.zone.run(() => {
-        this.linkClickCallback!(linkData, x, y, isDoubleClick);
-      });
-    }
+    const callback = this.linkClickCallback;
+    if (!callback) return;
+    this.runEventCallback('linkClick', () => callback(linkData, x, y, isDoubleClick));
   }
   
   emitLinkDelete(linkData: GoJSLinkData): void {
-    if (this.linkDeleteCallback) {
-      this.zone.run(() => {
-        this.linkDeleteCallback!(linkData);
-      });
-    }
+    const callback = this.linkDeleteCallback;
+    if (!callback) return;
+    this.runEventCallback('linkDelete', () => callback(linkData));
   }
   
   emitLinkRelink(
@@ -620,34 +660,63 @@ export class FlowEventService {
     y: number,
     gojsLink: go.Link
   ): void {
-    if (this.linkRelinkCallback) {
-      this.zone.run(() => {
-        this.linkRelinkCallback!(linkType, relinkInfo, x, y, gojsLink);
-      });
-    }
+    const callback = this.linkRelinkCallback;
+    if (!callback) return;
+    this.runEventCallback('linkRelink', () => callback(linkType, relinkInfo, x, y, gojsLink));
   }
 
   emitLinkGesture(sourceId: string, targetId: string, x: number, y: number, link: go.Link): void {
-    if (this.linkGestureCallback) {
-      this.zone.run(() => {
-        this.linkGestureCallback!(sourceId, targetId, x, y, link);
-      });
-    }
+    const callback = this.linkGestureCallback;
+    if (!callback) return;
+    this.runEventCallback('linkGesture', () => callback(sourceId, targetId, x, y, link));
   }
 
   emitSelectionMoved(movedNodes: Array<{ key: string; x: number; y: number; isUnassigned: boolean }>): void {
-    if (this.selectionMovedCallback) {
-      this.zone.run(() => {
-        this.selectionMovedCallback!(movedNodes);
+    const callback = this.selectionMovedCallback;
+    if (!callback) return;
+    this.runEventCallback('selectionMoved', () => callback(movedNodes));
+  }
+
+  emitBackgroundClick(): void {
+    const callback = this.backgroundClickCallback;
+    if (!callback) return;
+    this.runEventCallback('backgroundClick', () => callback());
+  }
+
+  private emitSidecarToggle(taskId: string): void {
+    const callback = this.sidecarToggleCallback;
+    if (!callback || !taskId) return;
+    this.runEventCallback('sidecarToggle', () => callback(taskId));
+  }
+
+  private runEventCallback(eventName: string, callback: () => unknown): void {
+    let result: unknown;
+    try {
+      result = this.zone.run(callback);
+    } catch (error) {
+      this.logEventCallbackFailure(eventName, error);
+      return;
+    }
+
+    if (this.isPromiseLike(result)) {
+      void Promise.resolve(result).catch(error => {
+        this.logEventCallbackFailure(eventName, error);
       });
     }
   }
 
-  emitBackgroundClick(): void {
-    if (this.backgroundClickCallback) {
-      this.zone.run(() => {
-        this.backgroundClickCallback!();
-      });
+  private isPromiseLike(value: unknown): value is PromiseLike<unknown> {
+    return typeof value === 'object'
+      && value !== null
+      && 'then' in value
+      && typeof (value as { then?: unknown }).then === 'function';
+  }
+
+  private logEventCallbackFailure(eventName: string, error: unknown): void {
+    try {
+      this.logger.warn('Flow 事件回调执行失败', { eventName, error });
+    } catch {
+      // Logger failures must not re-break event dispatch isolation.
     }
   }
   
@@ -688,13 +757,13 @@ export class FlowEventService {
    */
   clearCallbacks(): void {
     this.nodeClickCallback = null;
+    this.sidecarToggleCallback = null;
     this.linkClickCallback = null;
     this.linkDeleteCallback = null;
     this.linkRelinkCallback = null;
     this.linkGestureCallback = null;
     this.selectionMovedCallback = null;
     this.backgroundClickCallback = null;
-    this.altDragCallback = null;
     // 【修复 H-27】dragOutOfBoundsCallback 未在 clearCallbacks 中清除
     this.dragOutOfBoundsCallback = null;
   }
@@ -703,7 +772,7 @@ export class FlowEventService {
    * 完全清理
    */
   dispose(): void {
-    if (this.positionSaveTimer) {
+    if (this.positionSaveTimer !== null) {
       clearTimeout(this.positionSaveTimer);
       this.positionSaveTimer = null;
     }

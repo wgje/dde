@@ -22,6 +22,7 @@ import { LoggerService } from '../../../services/logger.service';
 import { ToastService } from '../../../services/toast.service';
 import { DynamicModalService, ModalRef } from '../../../services/dynamic-modal.service';
 import { SentryLazyLoaderService } from '../../../services/sentry-lazy-loader.service';
+import { classifyModalLoadFailure, getModalLoadFailureToast } from './modal-loader-flow';
 
 /**
  * 模态框类型映射
@@ -51,6 +52,9 @@ export class ModalLoaderService {
   
   /** 已加载的模态框缓存 */
   private readonly loadedModals = new Map<ModalType, Type<unknown>>();
+
+  /** 正在加载的模态框缓存，避免同类型入口并发触发重复 import/retry */
+  private readonly loadingModals = new Map<ModalType, Promise<Type<unknown>>>();
   
   /** 模态框加载超时时间（毫秒）- 手机端网络较慢，给予更长时间 */
   private readonly MODAL_LOAD_TIMEOUT = 15000;
@@ -199,7 +203,24 @@ export class ModalLoaderService {
     if (this.loadedModals.has(type)) {
       return this.loadedModals.get(type) as Type<T>;
     }
-    
+
+    const loadingModal = this.loadingModals.get(type);
+    if (loadingModal) {
+      return loadingModal as Promise<Type<T>>;
+    }
+
+    const loading = this.loadModalWithRetries(type, loader)
+      .finally(() => {
+        this.loadingModals.delete(type);
+      });
+    this.loadingModals.set(type, loading as Promise<Type<unknown>>);
+    return loading;
+  }
+
+  private async loadModalWithRetries<T>(
+    type: ModalType,
+    loader: () => Promise<Type<T>>
+  ): Promise<Type<T>> {
     // 带重试的加载逻辑
     let lastError: unknown;
     for (let attempt = 0; attempt <= this.MAX_RETRIES; attempt++) {
@@ -219,52 +240,57 @@ export class ModalLoaderService {
         lastError = error;
         this.logger.warn(`模态框加载失败 (尝试 ${attempt + 1}): ${type}`, error);
 
-        // 2026-05-15 修复：识别 stale-chunk（部署窗口）类失败，跳过剩余重试。
-        // 这类错误重试同一 URL 无意义，且不应上报 Sentry——是预期内的部署窗口，不是 bug。
-        if (this.isStaleChunkError(error)) {
-          this.logger.warn(`模态框 ${type} 命中 stale-chunk，停止重试并提示用户刷新`);
-          this.toast.warning(
-            '版本已更新',
-            '请刷新页面以加载最新组件',
-            {
-              duration: 0,
-              action: {
-                label: '立即刷新',
-                onClick: () => {
-                  try {
-                    location.reload();
-                  } catch {
-                    // SSR/测试环境无 location，忽略
-                  }
-                },
-              },
-            }
-          );
+        const decision = classifyModalLoadFailure({
+          attempt,
+          maxRetries: this.MAX_RETRIES,
+          staleChunk: this.isStaleChunkError(error),
+        });
+
+        if (decision.kind === 'stale-chunk') {
+          this.handleStaleChunkLoadFailure(type);
           throw error;
         }
 
-        // 如果还有重试机会，等待一段时间后重试
-        if (attempt < this.MAX_RETRIES) {
-          await this.delay(1000 * (attempt + 1)); // 递增延迟
+        if (decision.kind === 'retry') {
+          await this.delay(decision.delayMs);
         }
       }
     }
     
-    // 所有重试都失败，记录失败次数并显示友好提示
+    this.recordExhaustedModalLoadFailure(type, lastError);
+    throw lastError;
+  }
+
+  private handleStaleChunkLoadFailure(type: ModalType): void {
+    this.logger.warn(`模态框 ${type} 命中 stale-chunk，停止重试并提示用户刷新`);
+    this.toast.warning(
+      '版本已更新',
+      '请刷新页面以加载最新组件',
+      {
+        duration: 0,
+        action: {
+          label: '立即刷新',
+          onClick: () => {
+            try {
+              location.reload();
+            } catch {
+              // SSR/测试环境无 location，忽略
+            }
+          },
+        },
+      }
+    );
+  }
+
+  private recordExhaustedModalLoadFailure(type: ModalType, lastError: unknown): void {
     const failures = (this.failureCount.get(type) || 0) + 1;
     this.failureCount.set(type, failures);
-    
+
     this.logger.error(`模态框加载失败 (已重试${this.MAX_RETRIES}次): ${type}`, lastError);
     this.sentryLazyLoader.captureException(lastError, { tags: { operation: 'loadModal', modalType: type } });
-    
-    // 根据失败次数显示不同提示
-    if (failures >= 3) {
-      this.toast.error('网络连接不稳定', '建议稍后重试或检查网络连接');
-    } else {
-      this.toast.error('加载失败', '正在重试，请稍候...');
-    }
-    
-    throw lastError;
+
+    const toast = getModalLoadFailureToast(failures);
+    this.toast.error(toast.title, toast.message);
   }
   
   /**
@@ -321,6 +347,7 @@ export class ModalLoaderService {
    */
   clearCache(): void {
     this.loadedModals.clear();
+    this.loadingModals.clear();
   }
   
   // ========== 打开模态框方法（加载 + 渲染）==========
@@ -413,8 +440,9 @@ export class ModalLoaderService {
     message?: string; 
     itemName: string; 
     warning?: string; 
-  }): Promise<ModalRef<R>> {
+  }, canOpen: () => boolean = () => true): Promise<ModalRef<R> | null> {
     const component = await this.loadDeleteConfirmModal();
+    if (!canOpen()) return null;
     return this.dynamicModal.open(component, { data });
   }
 }

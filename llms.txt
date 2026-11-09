@@ -1,0 +1,138 @@
+# NanoFlow AI Retrieval Guide
+
+NanoFlow is an offline-first personal task workflow PWA. Use this file as the entry point for AI assistants and Context7-style retrievers.
+
+## Canonical Documentation
+
+- Root documentation index: `docs/context7/index.md`
+- Project map: `docs/context7/README.md`
+- Product overview: `docs/context7/overview.md`
+- Architecture: `docs/context7/architecture.md`
+- Data model: `docs/context7/data-model.md`
+- Sync and offline behavior: `docs/context7/sync-offline.md`
+- Feature workflows: `docs/context7/feature-workflows.md`
+- API and Edge Functions: `docs/context7/api-edge-functions.md`
+- Development and verification: `docs/context7/development.md`
+- Operations and security: `docs/context7/operations-security.md`
+- Agent implementation rules: `docs/context7/agent-rules.md`
+- Context7 maintenance: `docs/context7/context7-maintenance.md`
+- Source map for code navigation: `docs/context7/source-map.md`
+- Configuration reference: `docs/context7/reference/configuration-reference.md`
+- Service catalog: `docs/context7/reference/service-catalog.md`
+- Model field reference: `docs/context7/reference/model-field-reference.md`
+- Supabase schema reference: `docs/context7/reference/supabase-schema-reference.md`
+- Sync contract: `docs/context7/contracts/sync-contract.md`
+- Security contract: `docs/context7/contracts/security-contract.md`
+- UI lifecycle contract: `docs/context7/contracts/ui-lifecycle-contract.md`
+- Sync debugging runbook: `docs/context7/runbooks/sync-debugging.md`
+- Data recovery runbook: `docs/context7/runbooks/data-recovery.md`
+- Context7 publishing runbook: `docs/context7/runbooks/context7-publishing.md`
+- ADR for Context7 corpus: `docs/context7/adr/0001-context7-canonical-corpus.md`
+- ADR for offline-first LWW sync: `docs/context7/adr/0002-offline-first-lww-sync.md`
+- Context7 page metadata schema: `docs/context7/schemas/context7-doc-page.schema.json`
+- NanoFlow domain schema summary: `docs/context7/schemas/nanoflow-domain.schema.json`
+- Documentation quality gate: `docs/context7/quality/documentation-quality-gate.md`
+- Next.js parity checklist: `docs/context7/quality/nextjs-parity-checklist.md`
+- Machine-readable catalog: `docs/context7/catalog.json`
+- Glossary: `docs/context7/glossary.md`
+- Compatibility matrix: `docs/context7/compatibility-matrix.md`
+- Migration playbook: `docs/context7/migration-playbook.md`
+- Documentation contribution guide: `docs/context7/documentation-contribution.md`
+- Getting Started index: `docs/context7/01-getting-started/index.md`
+- Installation guide: `docs/context7/01-getting-started/01-installation.md`
+- Project structure guide: `docs/context7/01-getting-started/02-project-structure.md`
+- Core concepts guide: `docs/context7/01-getting-started/03-core-concepts.md`
+- Verification guide: `docs/context7/01-getting-started/04-verification.md`
+- Guides index: `docs/context7/02-guides/index.md`
+- AI agents guide: `docs/context7/02-guides/ai-agents.md`
+- Sync workflow guide: `docs/context7/02-guides/sync-workflow.md`
+- Focus and Parking guide: `docs/context7/02-guides/focus-parking-workflow.md`
+- Supabase operations guide: `docs/context7/02-guides/supabase-operations.md`
+- API reference index: `docs/context7/03-api-reference/index.md`
+- Stores API reference: `docs/context7/03-api-reference/stores.md`
+- Sync services API reference: `docs/context7/03-api-reference/sync-services.md`
+- Models API reference: `docs/context7/03-api-reference/models.md`
+- Edge Functions API reference: `docs/context7/03-api-reference/edge-functions.md`
+- Configuration API reference: `docs/context7/03-api-reference/configuration.md`
+- Architecture index: `docs/context7/04-architecture/index.md`
+- Runtime architecture: `docs/context7/04-architecture/runtime-architecture.md`
+- Sync architecture: `docs/context7/04-architecture/sync-architecture.md`
+- Security architecture: `docs/context7/04-architecture/security-architecture.md`
+- UI lifecycle architecture: `docs/context7/04-architecture/ui-lifecycle.md`
+- File conventions index: `docs/context7/05-file-conventions/index.md`
+- Angular file conventions: `docs/context7/05-file-conventions/angular-files.md`
+- Service file conventions: `docs/context7/05-file-conventions/service-files.md`
+- Supabase file conventions: `docs/context7/05-file-conventions/supabase-files.md`
+- Documentation file conventions: `docs/context7/05-file-conventions/documentation-files.md`
+- Error reference index: `docs/context7/06-errors/index.md`
+- Sync errors: `docs/context7/06-errors/sync-errors.md`
+- Auth and security errors: `docs/context7/06-errors/auth-security-errors.md`
+- UI runtime errors: `docs/context7/06-errors/ui-runtime-errors.md`
+- Examples index: `docs/context7/07-examples/index.md`
+- Add task field example: `docs/context7/07-examples/add-task-field.md`
+- Add Edge Function example: `docs/context7/07-examples/add-edge-function.md`
+- Add Context7 doc page example: `docs/context7/07-examples/add-context7-doc-page.md`
+- Migration index: `docs/context7/08-migration/index.md`
+- Versioning guide: `docs/context7/08-migration/versioning.md`
+- Schema migrations guide: `docs/context7/08-migration/schema-migrations.md`
+- Documentation migrations guide: `docs/context7/08-migration/docs-migrations.md`
+- Context7 documentation validator: `scripts/validate-context7-docs.cjs`
+- Context7 live consistency guard: `scripts/contracts/check-context7-coupled-changes.cjs`
+- Optional Context7 refresh workflow: `.github/workflows/context7-refresh.yml`
+
+## Retrieval Topics
+
+- "How does NanoFlow sync data?" -> `docs/context7/sync-offline.md`
+- "What are the core stores and services?" -> `docs/context7/architecture.md`
+- "What fields exist on Task, Project, Connection, Parking Dock, and Focus?" -> `docs/context7/data-model.md`
+- "How should an AI agent change code safely?" -> `docs/context7/agent-rules.md`
+- "Which commands verify changes?" -> `docs/context7/development.md`
+- "How are Supabase Edge Functions used?" -> `docs/context7/api-edge-functions.md`
+- "How is this repo configured for Context7?" -> `context7.json` and `docs/context7/context7-maintenance.md`
+- "Which source files should I inspect for a feature?" -> `docs/context7/source-map.md`
+- "What exact config values matter?" -> `docs/context7/reference/configuration-reference.md`
+- "Which service owns a behavior?" -> `docs/context7/reference/service-catalog.md`
+- "What fields exist and how are they persisted?" -> `docs/context7/reference/model-field-reference.md`
+- "What is the Supabase schema contract?" -> `docs/context7/reference/supabase-schema-reference.md`
+- "What invariants must sync preserve?" -> `docs/context7/contracts/sync-contract.md`
+- "What invariants must security preserve?" -> `docs/context7/contracts/security-contract.md`
+- "What invariants must UI lifecycle preserve?" -> `docs/context7/contracts/ui-lifecycle-contract.md`
+- "How do I debug sync?" -> `docs/context7/runbooks/sync-debugging.md`
+- "How do I recover missing data?" -> `docs/context7/runbooks/data-recovery.md`
+- "How do I publish or refresh Context7 docs?" -> `docs/context7/runbooks/context7-publishing.md`
+- "Why is Context7 limited to docs/context7?" -> `docs/context7/adr/0001-context7-canonical-corpus.md`
+- "Why offline-first LWW?" -> `docs/context7/adr/0002-offline-first-lww-sync.md`
+- "What quality bar should docs meet?" -> `docs/context7/quality/documentation-quality-gate.md`
+- "How do we match /vercel/next.js Context7 quality?" -> `docs/context7/quality/nextjs-parity-checklist.md`
+- "How do docs stay accurate while code changes?" -> `docs/context7/context7-maintenance.md` and `scripts/contracts/check-context7-coupled-changes.cjs`
+- "What does a term mean?" -> `docs/context7/glossary.md`
+- "What versions and platforms are supported?" -> `docs/context7/compatibility-matrix.md`
+- "How should migrations be performed?" -> `docs/context7/migration-playbook.md`
+- "How do I add a new Context7 doc page?" -> `docs/context7/documentation-contribution.md`
+- "Can a tool consume a machine-readable doc catalog?" -> `docs/context7/catalog.json`
+- "How do I get started from zero?" -> `docs/context7/01-getting-started/index.md`
+- "What is the API reference?" -> `docs/context7/03-api-reference/index.md`
+- "What are file conventions?" -> `docs/context7/05-file-conventions/index.md`
+- "What does this error mean?" -> `docs/context7/06-errors/index.md`
+- "Show me implementation examples." -> `docs/context7/07-examples/index.md`
+- "What is the migration/versioning policy?" -> `docs/context7/08-migration/index.md`
+- "How should I use the NanoFlow documentation corpus?" -> `docs/context7/index.md`
+
+## Non-Negotiable Rules
+
+- Entity IDs are client-generated strings. New entities use `crypto.randomUUID()`.
+- Writes are local-first and non-blocking. Failed remote writes enter retry queues.
+- Last-Write-Wins uses `updatedAt` / `updated_at`.
+- Soft deletes use `deletedAt` / `deleted_at`; tombstones must not be dropped casually.
+- Task sync queries must include `content`.
+- Angular Signals are the state baseline. Do not add global facade stores.
+- Mobile uses Text view by default. GoJS Flow is lazy and must not remain alive under `visibility:hidden`.
+- Secrets belong in Supabase Secrets or deployment environment variables, not frontend code.
+
+## Context7 Indexing Intent
+
+`context7.json` intentionally indexes only `docs/context7`. The rest of the repository contains source code, tests, generated output, archives, and long historical plans that are useful for development but noisy for external AI retrieval.
+
+## Live Consistency Intent
+
+When source, configuration, schema, migration, Supabase function, sync, security, or UI lifecycle behavior changes, the same change must update the relevant Context7 page. `npm run docs:context7:guard` enforces this by combining the structural validator with `scripts/contracts/check-context7-coupled-changes.cjs`.

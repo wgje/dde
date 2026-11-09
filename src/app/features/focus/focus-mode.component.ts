@@ -12,7 +12,8 @@ import {
   OnInit,
   OnDestroy,
   computed,
-  NgZone
+  NgZone,
+  ViewEncapsulation,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { GateOverlayComponent } from './components/gate/gate-overlay.component';
@@ -42,12 +43,11 @@ import { STARTUP_PERF_CONFIG } from '../../../config/startup-performance.config'
       </app-gate-overlay>
     }
   `,
-  changeDetection: ChangeDetectionStrategy.OnPush
+  styleUrl: './focus.animations.css',
+  encapsulation: ViewEncapsulation.None,
+  changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class FocusModeComponent implements OnInit, OnDestroy {
-  private static focusAnimationStyleLoaded = false;
-  private static focusAnimationStyleLoadPromise: Promise<void> | null = null;
-
   private readonly gateService = inject(GateService);
   private readonly blackBoxSyncService = inject(BlackBoxSyncService);
   private readonly logger = inject(LoggerService);
@@ -59,10 +59,12 @@ export class FocusModeComponent implements OnInit, OnDestroy {
   private visibilityHandler: (() => void) | null = null;
   /** 旧策略启动定时器（开关关闭时兼容） */
   private legacyInitialLoadTimer: ReturnType<typeof setTimeout> | null = null;
+  private legacyInitialLoadIdleCallback: number | null = null;
   /** 远端拉取延迟定时器（避免首屏请求竞争） */
   private remoteStartupPullTimer: ReturnType<typeof setTimeout> | null = null;
   /** 【修复 P3-07】版本号保证只有最新 pull 的结果可触发 gate check */
   private gateCheckVersion = 0;
+  private isDestroyed = false;
 
   // 计算属性 - 决定各组件是否可见
   readonly isGateVisible = computed(() => 
@@ -70,7 +72,7 @@ export class FocusModeComponent implements OnInit, OnDestroy {
   );
 
   ngOnInit(): void {
-    this.ensureFocusAnimationStyleLoaded();
+    this.isDestroyed = false;
     this.logger.debug('FocusMode', '初始化');
 
     // [DEV] 开发强制模式下跳过 loadFromLocal + checkGate，防止覆盖模拟数据
@@ -92,44 +94,22 @@ export class FocusModeComponent implements OnInit, OnDestroy {
     this.setupVisibilityListener();
   }
 
-  private ensureFocusAnimationStyleLoaded(): void {
-    void FocusModeComponent.preloadAssets().catch((error: unknown) => {
-      this.logger.warn(
-        'FocusMode',
-        'focus 动画样式按需加载失败，降级继续',
-        error instanceof Error ? error.message : String(error)
-      );
-    });
-  }
-
-  static preloadAssets(): Promise<void> {
-    if (FocusModeComponent.focusAnimationStyleLoaded) {
-      return Promise.resolve();
-    }
-    if (FocusModeComponent.focusAnimationStyleLoadPromise) {
-      return FocusModeComponent.focusAnimationStyleLoadPromise;
-    }
-
-    FocusModeComponent.focusAnimationStyleLoadPromise = import('./focus.animations.css')
-      .then(() => {
-        FocusModeComponent.focusAnimationStyleLoaded = true;
-      })
-      .catch((error: unknown) => {
-        FocusModeComponent.focusAnimationStyleLoaded = false;
-        throw error;
-      })
-      .finally(() => {
-        FocusModeComponent.focusAnimationStyleLoadPromise = null;
-      });
-
-    return FocusModeComponent.focusAnimationStyleLoadPromise;
-  }
-
   ngOnDestroy(): void {
     this.logger.debug('FocusMode', '销毁');
+    this.isDestroyed = true;
+    this.gateCheckVersion += 1;
     if (this.legacyInitialLoadTimer) {
       clearTimeout(this.legacyInitialLoadTimer);
       this.legacyInitialLoadTimer = null;
+    }
+    if (this.legacyInitialLoadIdleCallback !== null) {
+      const cancelIdle = (window as Window & {
+        cancelIdleCallback?: (handle: number) => void;
+      }).cancelIdleCallback;
+      if (typeof cancelIdle === 'function') {
+        cancelIdle(this.legacyInitialLoadIdleCallback);
+      }
+      this.legacyInitialLoadIdleCallback = null;
     }
     if (this.remoteStartupPullTimer) {
       clearTimeout(this.remoteStartupPullTimer);
@@ -147,7 +127,10 @@ export class FocusModeComponent implements OnInit, OnDestroy {
   private scheduleLegacyInitialGateCheck(): void {
     if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
       const requestIdle = (window as Window & { requestIdleCallback: (cb: IdleRequestCallback, opts?: IdleRequestOptions) => number }).requestIdleCallback;
-      requestIdle(() => {
+      this.legacyInitialLoadIdleCallback = requestIdle(() => {
+        this.legacyInitialLoadIdleCallback = null;
+        if (this.isDestroyed) return;
+
         this.ngZone.run(() => {
           void this.initializeAndCheckGateLegacy('startup');
         });
@@ -185,9 +168,10 @@ export class FocusModeComponent implements OnInit, OnDestroy {
     // 延迟时间由 STARTUP_PERF_CONFIG.FOCUS_REMOTE_STARTUP_DELAY_MS 控制(默认 4s)
     this.remoteStartupPullTimer = setTimeout(() => {
       this.remoteStartupPullTimer = null;
+      if (this.isDestroyed || version !== this.gateCheckVersion) return;
       this.blackBoxSyncService.pullChanges({ reason: 'startup' }).then(() => {
         // 【修复 P3-07】只有版本号匹配才更新 gate
-        if (version === this.gateCheckVersion) {
+        if (!this.isDestroyed && version === this.gateCheckVersion) {
           this.ngZone.run(() => this.checkGateOnStartup());
         }
       }).catch(pullError => {
@@ -242,15 +226,20 @@ export class FocusModeComponent implements OnInit, OnDestroy {
    * 本地检查后立即后台拉远端
    */
   private async initializeAndCheckGateLegacy(reason: 'startup' | 'resume'): Promise<void> {
+    const version = ++this.gateCheckVersion;
     try {
       await this.blackBoxSyncService.loadFromLocal();
+      if (this.isDestroyed || version !== this.gateCheckVersion) return;
       this.checkGateOnStartup();
 
       // 【性能优化 2026-02-18】legacy 路径同样延迟远端拉取，避免首屏竞争
       this.remoteStartupPullTimer = setTimeout(() => {
         this.remoteStartupPullTimer = null;
+        if (this.isDestroyed || version !== this.gateCheckVersion) return;
         this.blackBoxSyncService.pullChanges({ reason }).then(() => {
-          this.checkGateOnStartup();
+          if (!this.isDestroyed && version === this.gateCheckVersion) {
+            this.checkGateOnStartup();
+          }
         }).catch(pullError => {
           this.logger.warn('FocusMode', '后台拉取失败（legacy）',
             pullError instanceof Error ? pullError.message : String(pullError));
@@ -258,7 +247,9 @@ export class FocusModeComponent implements OnInit, OnDestroy {
       }, STARTUP_PERF_CONFIG.FOCUS_REMOTE_STARTUP_DELAY_MS);
     } catch (error) {
       this.logger.error('FocusMode', '初始化失败', error instanceof Error ? error.message : String(error));
-      this.checkGateOnStartup();
+      if (!this.isDestroyed && version === this.gateCheckVersion) {
+        this.checkGateOnStartup();
+      }
     }
   }
 

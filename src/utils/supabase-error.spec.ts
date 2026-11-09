@@ -158,6 +158,17 @@ describe('supabase-error', () => {
       expect(result.errorType).toBe('TimeoutError');
       expect(result.isRetryable).toBe(true);
     });
+
+    it('应该把写入链路 timeout 标记为远端结果未知', () => {
+      const error = new Error('请求超时 (30000ms): push-project:abc');
+      error.name = 'TimeoutError';
+
+      const result = supabaseErrorToError(error);
+
+      expect(result.errorType).toBe('TimeoutError');
+      expect(result.isRetryable).toBe(true);
+      expect(result.remoteOutcome).toBe('unknown');
+    });
     
     it('应该识别 Error 实例中的 "Unknown Supabase error"（504 回退场景）', () => {
       // 【关键测试】Supabase 客户端在无法解析 504 Gateway Timeout 等非 JSON 响应时
@@ -176,6 +187,17 @@ describe('supabase-error', () => {
 
       expect(result.name).toBe('BrowserNetworkSuspendedError');
       expect(result.errorType).toBe('BrowserNetworkSuspendedError');
+      expect(result.isRetryable).toBe(true);
+    });
+
+    it('应该仅凭 Supabase AuthRetryableFetchError 名称识别为可重试错误', () => {
+      const error = new Error('Auth request unavailable');
+      error.name = 'AuthRetryableFetchError';
+
+      const result = supabaseErrorToError(error);
+
+      expect(result.name).toBe('AuthRetryableFetchError');
+      expect(result.errorType).toBe('AuthRetryableFetchError');
       expect(result.isRetryable).toBe(true);
     });
     
@@ -230,6 +252,57 @@ describe('supabase-error', () => {
       expect(result.code).toBe('42P01');
       expect(result.details).toBe('relation "tasks" does not exist');
       expect(result.hint).toBe('Run migrations');
+    });
+
+    it('应该解包 PostgREST 整包响应并按内部 42501 识别权限错误', () => {
+      const error = {
+        error: {
+          code: '42501',
+          message: 'permission denied for table tasks',
+          details: null,
+          hint: 'Grant the required privileges',
+        },
+        status: 401,
+        statusText: 'Unauthorized',
+      };
+      const result = supabaseErrorToError(error);
+
+      expect(result.errorType).toBe('PermissionError');
+      expect(result.name).toBe('PermissionError');
+      expect(result.code).toBe('42501');
+      expect(result.status).toBe(401);
+      expect(result.hint).toBe('Grant the required privileges');
+      expect(result.isRetryable).toBe(false);
+    });
+
+    it('应该解包仅有响应级 status 的 Supabase 整包限流错误', () => {
+      const error = {
+        error: {
+          message: 'Too many requests',
+        },
+        status: 429,
+        statusText: 'Too Many Requests',
+      };
+      const result = supabaseErrorToError(error);
+
+      expect(result.errorType).toBe('RateLimitError');
+      expect(result.code).toBe(429);
+      expect(result.status).toBe(429);
+      expect(result.isRetryable).toBe(true);
+    });
+
+    it('应该解包非 JSON 网关错误整包并保留响应级 status', () => {
+      const error = {
+        error: null,
+        status: 504,
+        statusText: 'Gateway Timeout',
+      };
+      const result = supabaseErrorToError(error);
+
+      expect(result.errorType).toBe('NetworkTimeoutError');
+      expect(result.code).toBe(504);
+      expect(result.status).toBe(504);
+      expect(result.isRetryable).toBe(true);
     });
     
     it('应该支持字符串形式的状态码', () => {

@@ -1,0 +1,286 @@
+{
+  "schemaVersion": 1,
+  "hotspots": [
+    {
+      "name": "collectAndroid()",
+      "sourcePath": "scripts/generate-codegraph-nanoflow-overlay.mjs",
+      "status": "temporary-allowed",
+      "delegatedUpstreamOwner": "native CodeGraph",
+      "allowedPurpose": "attach NanoFlow metadata.relation to native-shaped Android Manifest, Kotlin, widget, and resource endpoints while aggregating project-specific Android semantics",
+      "forbiddenScope": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "removalTrigger": "upstream extension point or native projection hook can carry NanoFlow Android metadata.relation without a parallel Android collector",
+      "capabilityCategory": "Android/Kotlin duplicate hotspot",
+      "language": "kotlin/xml",
+      "nativeOwnedCapability": "native CodeGraph owns generic Kotlin symbol, import, call, type-reference, decorator, override, callers/callees, impact, auto-sync, indexing, and generic search ranking behavior",
+      "nanoFlowOwnedCapability": "NanoFlow owns Android Manifest, widget provider, resource, host-app project semantics, metadata.relation attachment, and source evidence policy",
+      "allowedRelations": [
+        "android-kotlin-class",
+        "android-kotlin-resource-reference",
+        "android-kotlin-source",
+        "android-manifest-component",
+        "android-manifest-component-permission",
+        "android-manifest-intent-filter-action",
+        "android-manifest-intent-filter-category",
+        "android-manifest-intent-filter-data",
+        "android-manifest-intent-filter-value",
+        "android-manifest-permission",
+        "android-manifest-query",
+        "android-manifest-uses-permission",
+        "android-resource-file",
+        "android-resource-reference",
+        "android-widget-provider"
+      ],
+      "forbiddenGenericBehavior": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "upstreamHookNeeded": "upstream CodeGraph hook for attaching NanoFlow Android metadata.relation and Android resource/widget evidence to native Kotlin/XML graph endpoints",
+      "removalCandidateWhen": "upstream CodeGraph exposes Kotlin/XML projection hooks that can carry NanoFlow Android relation metadata without rebuilding generic Kotlin symbol/call/type graph shape",
+      "lastVerifiedGate": "npm run codegraph:overlay:docs:validate",
+      "sourceSymbols": [
+        "collectAndroid"
+      ],
+      "coveredChildSymbols": [
+        "readAndroidKotlinClasses",
+        "readAndroidKotlinFunctions"
+      ],
+      "verificationGate": [
+        "npm run codegraph:overlay:docs:validate",
+        "npm run codegraph:adapter:gate"
+      ]
+    },
+    {
+      "name": "readAndroidKotlinFileSymbols()",
+      "sourcePath": "scripts/generate-codegraph-nanoflow-overlay.mjs",
+      "status": "temporary-allowed",
+      "delegatedUpstreamOwner": "native CodeGraph",
+      "allowedPurpose": "attach NanoFlow metadata.relation to native-shaped Kotlin class, object, enum, constructor, property, method, top-level function, import, annotation, and type endpoints",
+      "forbiddenScope": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "removalTrigger": "upstream extension point or native projection hook for Kotlin can carry NanoFlow Android metadata.relation without local Kotlin symbol extraction",
+      "capabilityCategory": "Android/Kotlin duplicate hotspot",
+      "language": "kotlin/xml",
+      "nativeOwnedCapability": "native CodeGraph owns generic Kotlin symbol, import, call, type-reference, decorator, override, callers/callees, impact, auto-sync, indexing, and generic search ranking behavior",
+      "nanoFlowOwnedCapability": "NanoFlow owns Android Manifest, widget provider, resource, host-app project semantics, metadata.relation attachment, and source evidence policy",
+      "allowedRelations": [
+        "android-kotlin-class",
+        "android-kotlin-function",
+        "android-kotlin-import",
+        "android-kotlin-annotation",
+        "android-kotlin-type-reference"
+      ],
+      "forbiddenGenericBehavior": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "upstreamHookNeeded": "upstream CodeGraph hook for attaching NanoFlow Android metadata.relation and Android resource/widget evidence to native Kotlin/XML graph endpoints",
+      "removalCandidateWhen": "upstream CodeGraph exposes Kotlin/XML projection hooks that can carry NanoFlow Android relation metadata without rebuilding generic Kotlin symbol/call/type graph shape",
+      "lastVerifiedGate": "npm run codegraph:overlay:docs:validate",
+      "sourceSymbols": [
+        "readAndroidKotlinFileSymbols"
+      ],
+      "coveredChildSymbols": [
+        "readAndroidKotlinImportFromLine",
+        "readAndroidKotlinImports",
+        "readAndroidKotlinImportsFromNativeEndpoints",
+        "readAndroidKotlinImportsFromSource",
+        "readAndroidKotlinHeritage",
+        "readAndroidKotlinHeritageTypes",
+        "readAndroidKotlinDeclarationEndLine",
+        "readAndroidKotlinHeritageTypeName",
+        "readAndroidKotlinHeritageType",
+        "readAndroidKotlinCompanionObjectsFromSource",
+        "readAndroidKotlinEnumMembersFromSource",
+        "readAndroidKotlinEnumMemberSegment",
+        "readAndroidKotlinConstructorsFromSource",
+        "readAndroidKotlinPropertiesFromSource",
+        "readAndroidKotlinPrimaryConstructorRanges",
+        "readAndroidKotlinCompanionObjectRanges",
+        "readAndroidKotlinPropertyDeclaration",
+        "readAndroidKotlinLeadingAnnotations",
+        "readAndroidKotlinInlineAnnotations",
+        "readAndroidKotlinAnnotationLine",
+        "readAndroidKotlinTypeReferencesFromTypeText",
+        "readAndroidKotlinCallableOwnerClasses",
+        "readAndroidKotlinClassTypeParametersEnd",
+        "readAndroidKotlinMethodsFromSource",
+        "readAndroidKotlinFunctionsFromSource",
+        "readAndroidKotlinFunctionsFromNativeEndpoints",
+        "readAndroidKotlinCallableTypeReferences",
+        "readAndroidKotlinParameterTypeReferences",
+        "readAndroidKotlinVisibility",
+        "readAndroidKotlinSignatureBounds",
+        "readAndroidKotlinCallableBodyBoundary"
+      ],
+      "verificationGate": [
+        "npm run codegraph:overlay:docs:validate",
+        "npm run codegraph:adapter:gate"
+      ]
+    },
+    {
+      "name": "readAndroidKotlinMethodCalls()",
+      "sourcePath": "scripts/generate-codegraph-nanoflow-overlay.mjs",
+      "status": "temporary-allowed",
+      "delegatedUpstreamOwner": "native CodeGraph",
+      "allowedPurpose": "attach NanoFlow metadata.relation to native-shaped Kotlin call endpoints for Android widget/project semantics",
+      "forbiddenScope": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "removalTrigger": "upstream extension point or native projection hook for Kotlin call can carry NanoFlow Android relation metadata without local Kotlin call parsing",
+      "capabilityCategory": "Android/Kotlin duplicate hotspot",
+      "language": "kotlin/xml",
+      "nativeOwnedCapability": "native CodeGraph owns generic Kotlin symbol, import, call, type-reference, decorator, override, callers/callees, impact, auto-sync, indexing, and generic search ranking behavior",
+      "nanoFlowOwnedCapability": "NanoFlow owns Android Manifest, widget provider, resource, host-app project semantics, metadata.relation attachment, and source evidence policy",
+      "allowedRelations": [
+        "android-kotlin-call"
+      ],
+      "forbiddenGenericBehavior": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "upstreamHookNeeded": "upstream CodeGraph hook for attaching NanoFlow Android metadata.relation and Android resource/widget evidence to native Kotlin/XML graph endpoints",
+      "removalCandidateWhen": "upstream CodeGraph exposes Kotlin/XML projection hooks that can carry NanoFlow Android relation metadata without rebuilding generic Kotlin symbol/call/type graph shape",
+      "lastVerifiedGate": "npm run codegraph:overlay:docs:validate",
+      "sourceSymbols": [
+        "readAndroidKotlinMethodCalls"
+      ],
+      "coveredChildSymbols": [],
+      "verificationGate": [
+        "npm run codegraph:overlay:docs:validate",
+        "npm run codegraph:adapter:gate"
+      ]
+    },
+    {
+      "name": "resolveAndroidKotlinCallTarget()",
+      "sourcePath": "scripts/generate-codegraph-nanoflow-overlay.mjs",
+      "status": "temporary-allowed",
+      "delegatedUpstreamOwner": "native CodeGraph",
+      "allowedPurpose": "attach NanoFlow metadata.relation to resolved native-shaped Kotlin call targets without falling back to unsafe cross-file same-name calls",
+      "forbiddenScope": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "removalTrigger": "upstream extension point or native projection hook for Kotlin call target can expose Kotlin call endpoints that NanoFlow annotates with Android relation metadata",
+      "capabilityCategory": "Android/Kotlin duplicate hotspot",
+      "language": "kotlin/xml",
+      "nativeOwnedCapability": "native CodeGraph owns generic Kotlin symbol, import, call, type-reference, decorator, override, callers/callees, impact, auto-sync, indexing, and generic search ranking behavior",
+      "nanoFlowOwnedCapability": "NanoFlow owns Android Manifest, widget provider, resource, host-app project semantics, metadata.relation attachment, and source evidence policy",
+      "allowedRelations": [
+        "android-kotlin-call"
+      ],
+      "forbiddenGenericBehavior": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "upstreamHookNeeded": "upstream CodeGraph hook for attaching NanoFlow Android metadata.relation and Android resource/widget evidence to native Kotlin/XML graph endpoints",
+      "removalCandidateWhen": "upstream CodeGraph exposes Kotlin/XML projection hooks that can carry NanoFlow Android relation metadata without rebuilding generic Kotlin symbol/call/type graph shape",
+      "lastVerifiedGate": "npm run codegraph:overlay:docs:validate",
+      "sourceSymbols": [
+        "resolveAndroidKotlinCallTarget"
+      ],
+      "coveredChildSymbols": [],
+      "verificationGate": [
+        "npm run codegraph:overlay:docs:validate",
+        "npm run codegraph:adapter:gate"
+      ]
+    },
+    {
+      "name": "resolveAndroidKotlinTypeTarget()",
+      "sourcePath": "scripts/generate-codegraph-nanoflow-overlay.mjs",
+      "status": "temporary-allowed",
+      "delegatedUpstreamOwner": "native CodeGraph",
+      "allowedPurpose": "attach NanoFlow metadata.relation to resolved native-shaped Kotlin type and heritage endpoints while filtering Kotlin standard-library noise",
+      "forbiddenScope": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "removalTrigger": "upstream extension point or native projection hook for Kotlin type-reference can carry NanoFlow Android relation metadata without local Kotlin type resolution",
+      "capabilityCategory": "Android/Kotlin duplicate hotspot",
+      "language": "kotlin/xml",
+      "nativeOwnedCapability": "native CodeGraph owns generic Kotlin symbol, import, call, type-reference, decorator, override, callers/callees, impact, auto-sync, indexing, and generic search ranking behavior",
+      "nanoFlowOwnedCapability": "NanoFlow owns Android Manifest, widget provider, resource, host-app project semantics, metadata.relation attachment, and source evidence policy",
+      "allowedRelations": [
+        "android-kotlin-type-reference",
+        "android-kotlin-override"
+      ],
+      "forbiddenGenericBehavior": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "upstreamHookNeeded": "upstream CodeGraph hook for attaching NanoFlow Android metadata.relation and Android resource/widget evidence to native Kotlin/XML graph endpoints",
+      "removalCandidateWhen": "upstream CodeGraph exposes Kotlin/XML projection hooks that can carry NanoFlow Android relation metadata without rebuilding generic Kotlin symbol/call/type graph shape",
+      "lastVerifiedGate": "npm run codegraph:overlay:docs:validate",
+      "sourceSymbols": [
+        "resolveAndroidKotlinTypeTarget"
+      ],
+      "coveredChildSymbols": [
+        "resolveAndroidKotlinHeritageDeclaration",
+        "resolveAndroidKotlinExternalHeritageTarget"
+      ],
+      "verificationGate": [
+        "npm run codegraph:overlay:docs:validate",
+        "npm run codegraph:adapter:gate"
+      ]
+    },
+    {
+      "name": "addAndroidKotlinTypeReferenceEdges()",
+      "sourcePath": "scripts/generate-codegraph-nanoflow-overlay.mjs",
+      "status": "temporary-allowed",
+      "delegatedUpstreamOwner": "native CodeGraph",
+      "allowedPurpose": "attach NanoFlow metadata.relation to native type_of edges for Kotlin property, parameter, return, and function type evidence",
+      "forbiddenScope": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "removalTrigger": "upstream extension point or native projection hook for Kotlin type_of can carry NanoFlow Android relation metadata on Kotlin type-reference endpoints",
+      "capabilityCategory": "Android/Kotlin duplicate hotspot",
+      "language": "kotlin/xml",
+      "nativeOwnedCapability": "native CodeGraph owns generic Kotlin symbol, import, call, type-reference, decorator, override, callers/callees, impact, auto-sync, indexing, and generic search ranking behavior",
+      "nanoFlowOwnedCapability": "NanoFlow owns Android Manifest, widget provider, resource, host-app project semantics, metadata.relation attachment, and source evidence policy",
+      "allowedRelations": [
+        "android-kotlin-type-reference"
+      ],
+      "forbiddenGenericBehavior": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "upstreamHookNeeded": "upstream CodeGraph hook for attaching NanoFlow Android metadata.relation and Android resource/widget evidence to native Kotlin/XML graph endpoints",
+      "removalCandidateWhen": "upstream CodeGraph exposes Kotlin/XML projection hooks that can carry NanoFlow Android relation metadata without rebuilding generic Kotlin symbol/call/type graph shape",
+      "lastVerifiedGate": "npm run codegraph:overlay:docs:validate",
+      "sourceSymbols": [
+        "addAndroidKotlinTypeReferenceEdges"
+      ],
+      "coveredChildSymbols": [],
+      "verificationGate": [
+        "npm run codegraph:overlay:docs:validate",
+        "npm run codegraph:adapter:gate"
+      ]
+    },
+    {
+      "name": "addAndroidKotlinOverrideEdges()",
+      "sourcePath": "scripts/generate-codegraph-nanoflow-overlay.mjs",
+      "status": "temporary-allowed",
+      "delegatedUpstreamOwner": "native CodeGraph",
+      "allowedPurpose": "attach NanoFlow metadata.relation to native overrides edges for Kotlin override methods and properties",
+      "forbiddenScope": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "removalTrigger": "upstream extension point or native projection hook for Kotlin overrides can carry NanoFlow Android relation metadata on Kotlin override endpoints",
+      "capabilityCategory": "Android/Kotlin duplicate hotspot",
+      "language": "kotlin/xml",
+      "nativeOwnedCapability": "native CodeGraph owns generic Kotlin symbol, import, call, type-reference, decorator, override, callers/callees, impact, auto-sync, indexing, and generic search ranking behavior",
+      "nanoFlowOwnedCapability": "NanoFlow owns Android Manifest, widget provider, resource, host-app project semantics, metadata.relation attachment, and source evidence policy",
+      "allowedRelations": [
+        "android-kotlin-override"
+      ],
+      "forbiddenGenericBehavior": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "upstreamHookNeeded": "upstream CodeGraph hook for attaching NanoFlow Android metadata.relation and Android resource/widget evidence to native Kotlin/XML graph endpoints",
+      "removalCandidateWhen": "upstream CodeGraph exposes Kotlin/XML projection hooks that can carry NanoFlow Android relation metadata without rebuilding generic Kotlin symbol/call/type graph shape",
+      "lastVerifiedGate": "npm run codegraph:overlay:docs:validate",
+      "sourceSymbols": [
+        "addAndroidKotlinOverrideEdges"
+      ],
+      "coveredChildSymbols": [],
+      "verificationGate": [
+        "npm run codegraph:overlay:docs:validate",
+        "npm run codegraph:adapter:gate"
+      ]
+    },
+    {
+      "name": "addAndroidKotlinAnnotationEdges()",
+      "sourcePath": "scripts/generate-codegraph-nanoflow-overlay.mjs",
+      "status": "temporary-allowed",
+      "delegatedUpstreamOwner": "native CodeGraph",
+      "allowedPurpose": "attach NanoFlow metadata.relation to native decorates edges for Kotlin annotations while preserving strict native projection behavior",
+      "forbiddenScope": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "removalTrigger": "upstream extension point or native projection hook for Kotlin decorators can carry NanoFlow Android relation metadata on Kotlin annotation endpoints",
+      "capabilityCategory": "Android/Kotlin duplicate hotspot",
+      "language": "kotlin/xml",
+      "nativeOwnedCapability": "native CodeGraph owns generic Kotlin symbol, import, call, type-reference, decorator, override, callers/callees, impact, auto-sync, indexing, and generic search ranking behavior",
+      "nanoFlowOwnedCapability": "NanoFlow owns Android Manifest, widget provider, resource, host-app project semantics, metadata.relation attachment, and source evidence policy",
+      "allowedRelations": [
+        "android-kotlin-annotation"
+      ],
+      "forbiddenGenericBehavior": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
+      "upstreamHookNeeded": "upstream CodeGraph hook for attaching NanoFlow Android metadata.relation and Android resource/widget evidence to native Kotlin/XML graph endpoints",
+      "removalCandidateWhen": "upstream CodeGraph exposes Kotlin/XML projection hooks that can carry NanoFlow Android relation metadata without rebuilding generic Kotlin symbol/call/type graph shape",
+      "lastVerifiedGate": "npm run codegraph:overlay:docs:validate",
+      "sourceSymbols": [
+        "addAndroidKotlinAnnotationEdges"
+      ],
+      "coveredChildSymbols": [],
+      "verificationGate": [
+        "npm run codegraph:overlay:docs:validate",
+        "npm run codegraph:adapter:gate"
+      ]
+    }
+  ]
+}

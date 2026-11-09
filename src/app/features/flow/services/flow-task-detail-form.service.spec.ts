@@ -642,6 +642,8 @@ describe('FlowTaskDetailFormService', () => {
 
       // 清理
       service.cleanup();
+      expect(mockChangeTracker.unlockTaskField).toHaveBeenCalledTimes(2);
+      mockChangeTracker.unlockTaskField.mockClear();
 
       // 快进 10 秒，定时器已被清除，不应调用 unlockTaskField
       vi.advanceTimersByTime(10000);
@@ -649,6 +651,29 @@ describe('FlowTaskDetailFormService', () => {
       expect(mockChangeTracker.unlockTaskField).not.toHaveBeenCalled();
 
       vi.useRealTimers();
+    });
+
+    it('清理时应立即释放仍处于聚焦状态的当前任务字段锁', () => {
+      const task = createMockTask();
+
+      service.onInputFocus('title', task);
+      service.onInputFocus('content', task);
+      vi.clearAllMocks();
+
+      service.cleanup();
+
+      expect(mockChangeTracker.unlockTaskField).toHaveBeenCalledWith(
+        'task-1',
+        'project-1',
+        'title',
+      );
+      expect(mockChangeTracker.unlockTaskField).toHaveBeenCalledWith(
+        'task-1',
+        'project-1',
+        'content',
+      );
+      expect(service.isTitleFocused).toBe(false);
+      expect(service.isContentFocused).toBe(false);
     });
 
     it('无定时器时调用 cleanup 不应抛错', () => {

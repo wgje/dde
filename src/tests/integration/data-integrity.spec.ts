@@ -23,7 +23,12 @@ import { ToastService } from '../../services/toast.service';
 import { PreferenceService } from '../../services/preference.service';
 import { LayoutService } from '../../services/layout.service';
 import { ExternalSourceLinkService } from '../../app/core/external-sources/external-source-link.service';
-import { Project, Task, Connection, Attachment, TaskStatus, AttachmentType } from '../../models';
+import { Project } from '../../models';
+import {
+  createCompleteConnection,
+  createCompleteProject,
+  createCompleteTask,
+} from './data-integrity.fixtures';
 
 describe('数据完整性验证', () => {
   let exportService: ExportService;
@@ -81,110 +86,6 @@ describe('数据完整性验证', () => {
     exportService = TestBed.inject(ExportService);
     importService = TestBed.inject(ImportService);
   });
-  
-  // ============================================
-  // 辅助函数：创建完整测试数据
-  // ============================================
-  
-  /**
-   * 创建包含所有字段的完整附件
-   */
-  function createCompleteAttachment(id: string): Attachment {
-    return {
-      id,
-      type: 'image' as AttachmentType,
-      name: `attachment-${id}.png`,
-      url: `https://storage.example.com/${id}`,
-      thumbnailUrl: `https://storage.example.com/${id}/thumb`,
-      mimeType: 'image/png',
-      size: 1024 * 100, // 100KB
-      createdAt: '2024-01-15T10:30:00.000Z',
-      signedAt: '2024-01-15T10:30:00.000Z', // 不应导出
-    };
-  }
-  
-  /**
-   * 创建包含所有字段的完整任务
-   */
-  function createCompleteTask(id: string, overrides: Partial<Task> = {}): Task {
-    return {
-      id,
-      title: `Task ${id}`,
-      content: `# Markdown Content for ${id}\n\nThis is **bold** and *italic*.`,
-      stage: 1,
-      parentId: null,
-      order: 0,
-      rank: 10000,
-      status: 'active' as TaskStatus,
-      x: 150.5,
-      y: 250.75,
-      createdDate: '2024-01-10T08:00:00.000Z',
-      updatedAt: '2024-01-15T14:30:00.000Z',
-      displayId: '1',
-      shortId: 'NF-A1B2',
-      hasIncompleteTask: true,
-      deletedAt: null,
-      tags: ['important', 'urgent'],
-      priority: 'high',
-      dueDate: '2024-02-01T00:00:00.000Z',
-      attachments: [createCompleteAttachment(`att-${id}-1`)],
-      // 客户端临时字段（不应导出）
-      deletedConnections: [],
-      deletedMeta: undefined,
-      ...overrides,
-    };
-  }
-  
-  /**
-   * 创建包含所有字段的完整连接
-   */
-  function createCompleteConnection(id: string, source: string, target: string): Connection {
-    return {
-      id,
-      source,
-      target,
-      title: `Connection ${id} Title`,
-      description: `Detailed description for connection ${id}`,
-      deletedAt: null,
-    };
-  }
-  
-  /**
-   * 创建包含所有字段的完整项目
-   */
-  function createCompleteProject(): Project {
-    const task1 = createCompleteTask('task-1');
-    const task2 = createCompleteTask('task-2', {
-      parentId: 'task-1',
-      displayId: '1,a',
-      stage: 2,
-    });
-    const task3 = createCompleteTask('task-3', {
-      deletedAt: '2024-01-14T00:00:00.000Z', // 回收站任务
-    });
-    
-    const conn1 = createCompleteConnection('conn-1', 'task-1', 'task-2');
-    const conn2 = createCompleteConnection('conn-2', 'task-2', 'task-3');
-    conn2.deletedAt = '2024-01-14T00:00:00.000Z'; // 回收站连接
-    
-    return {
-      id: 'project-complete',
-      name: 'Complete Test Project',
-      description: 'A project with all fields populated for integrity testing',
-      createdDate: '2024-01-01T00:00:00.000Z',
-      updatedAt: '2024-01-15T18:00:00.000Z',
-      version: 5,
-      tasks: [task1, task2, task3],
-      connections: [conn1, conn2],
-      viewState: {
-        scale: 1.5,
-        positionX: 100,
-        positionY: 200,
-      },
-      flowchartUrl: 'https://storage.example.com/flowchart.png',
-      flowchartThumbnailUrl: 'https://storage.example.com/flowchart-thumb.png',
-    };
-  }
   
   // ============================================
   // Task 字段完整性测试

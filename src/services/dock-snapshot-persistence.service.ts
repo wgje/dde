@@ -8,31 +8,29 @@ import { PARKING_CONFIG } from '../config/parking.config';
 import { ErrorCodes } from '../utils/result';
 
 import {
-  CognitiveLoad,
   CURRENT_DOCK_SNAPSHOT_VERSION,
   DailySlotEntry,
-  DockLane,
   DockEntry,
   DockPendingDecision,
   DockRuleDecision,
   DockRuleDecisionType,
   DockSessionState,
   DockSnapshot,
-  DockSourceSection,
-  DockTaskStatus,
-  DockZoneSource,
   FocusSessionState,
   HighLoadCounter,
   RecommendationGroupType,
   fromLegacySessionState,
   type LegacyFocusSessionState,
 } from '../models/parking-dock';
-import { sanitizePlannerFields } from '../utils/planner-fields';
 import { LoggerService } from './logger.service';
 import { del, get, set } from 'idb-keyval';
 import { TimerHandle } from '../utils/timer-handle';
+import { normalizeDockSnapshotEntry } from './dock-snapshot-entry-normalization.helpers';
+import {
+  beginLocalBackupUiRestoreWriter,
+  type LocalBackupUiRestoreWriterHandle,
+} from './local-backup-ui-restore-writer-quiescence-tracker';
 
-export const DOCK_SNAPSHOT_IDB_DB_NAME = 'keyval-store';
 const LOCAL_IDB_KEY_PREFIX = 'nanoflow.focus-session.v5';
 // 持久化防抖 500ms（原 120ms 太激进，动画期间信号频繁变化导致
 // JSON.stringify 阻塞动画帧；500ms 覆盖大多数连续动画周期）
@@ -63,6 +61,7 @@ export class DockSnapshotPersistenceService {
     snapshotFn: () => DockSnapshot;
     userId: string | null;
   } | null = null;
+  private pendingWriter: { ownerUserId: string; handle: LocalBackupUiRestoreWriterHandle } | null = null;
 
   // ─── Local IDB Persistence ───────────────────
 
@@ -71,29 +70,72 @@ export class DockSnapshotPersistenceService {
     userId: string | null,
     getNonCriticalHoldDelay: () => number,
   ): void {
+    this.beginPendingWriter(userId);
     this.pendingLocalPersist = { snapshotFn, userId };
     // M-3 fix: 持久化最大延迟上限，防止动画持续 hold 导致无限延迟
     const deadline = Date.now() + 10_000;
     const runPersist = () => {
-      const holdDelay = getNonCriticalHoldDelay();
+      let holdDelay: number;
+      try {
+        holdDelay = getNonCriticalHoldDelay();
+      } catch (error) {
+        this.pendingLocalPersist = null;
+        this.releasePendingWriter();
+        this.logger.error('Scheduled dock snapshot hold check failed', error);
+        return;
+      }
       if (holdDelay > 0 && Date.now() < deadline) {
         this.localPersistTimer.schedule(runPersist, holdDelay);
         return;
       }
-      const resolved = snapshotFn();
       this.pendingLocalPersist = null;
-      // structuredClone 深拷贝快照，避免后续异步 IDB 写入时引用被外部修改
-      const cloned = structuredClone(resolved);
-      // 串行化写入：前一次未完成时，本次写入排队等待
-      // 链上附加 .catch 防止单次 IDB 写入失败导致整条链断裂（后续所有持久化静默丢失）
-      const key = this.localCacheKey(userId);
-      this.persistChain = this.persistChain.then(
-        () => this.persistToIdb(key, cloned),
-      ).catch(err => {
-        this.logger.error('persistChain: IDB write failed, chain recovered', err);
-      });
+      const pendingWriter = this.takePendingWriter();
+      let queued = false;
+      try {
+        // structuredClone prevents callers from mutating a snapshot queued for IDB.
+        const cloned = structuredClone(snapshotFn());
+        const key = this.localCacheKey(userId);
+        const write = this.persistChain.then(async () => {
+          await this.persistToIdb(key, cloned);
+        }).catch(err => {
+          this.logger.error('persistChain: IDB write failed, chain recovered', err);
+        });
+        this.persistChain = write.finally(() => pendingWriter?.release());
+        queued = true;
+      } catch (error) {
+        this.logger.error('Scheduled dock snapshot persist failed before enqueue', error);
+      } finally {
+        if (!queued) pendingWriter?.release();
+      }
     };
     this.localPersistTimer.schedule(runPersist, LOCAL_PERSIST_DEBOUNCE_MS);
+  }
+
+  persistImmediateSnapshot(
+    snapshotFn: () => DockSnapshot,
+    userId: string | null,
+  ): Promise<boolean> {
+    const writer = this.beginStandaloneWriter(userId);
+    try {
+      this.pendingLocalPersist = null;
+      this.localPersistTimer.cancel();
+      this.releasePendingWriter();
+
+      const cloned = structuredClone(snapshotFn());
+      this.persistShadowToLocalStorage(cloned, userId);
+      const key = this.localCacheKey(userId);
+      const write = this.persistChain
+        .then(() => this.persistToIdb(key, cloned))
+        .catch(err => {
+          this.logger.error('Immediate dock snapshot persist failed, chain recovered', err);
+          return false;
+        });
+      this.persistChain = write.then(() => undefined).finally(() => writer?.release());
+      return write;
+    } catch (error) {
+      writer?.release();
+      throw error;
+    }
   }
 
   async restoreLocalSnapshot(
@@ -105,29 +147,13 @@ export class DockSnapshotPersistenceService {
     const currentLegacyKey = this.legacyLocalStorageKey(userId);
     const anonymousLegacyKey = userId === null ? null : this.legacyLocalStorageKey(null);
 
-    const [currentIdbSnapshot, anonymousIdbSnapshot] = await Promise.all([
-      this.readNormalizedIdbSnapshot(currentIdbKey, ctx),
-      anonymousIdbKey ? this.readNormalizedIdbSnapshot(anonymousIdbKey, ctx) : Promise.resolve(null),
-    ]);
-
-    const currentLegacySnapshot = this.readNormalizedLegacySnapshot(currentLegacyKey, ctx);
-    const anonymousLegacySnapshot = anonymousLegacyKey
-      ? this.readNormalizedLegacySnapshot(anonymousLegacyKey, ctx)
-      : null;
-
-    const candidates: PersistedSnapshotCandidate[] = [];
-    if (currentIdbSnapshot) {
-      candidates.push({ snapshot: currentIdbSnapshot, source: 'idb-current' });
-    }
-    if (anonymousIdbSnapshot) {
-      candidates.push({ snapshot: anonymousIdbSnapshot, source: 'idb-anonymous' });
-    }
-    if (currentLegacySnapshot) {
-      candidates.push({ snapshot: currentLegacySnapshot, source: 'legacy-current' });
-    }
-    if (anonymousLegacySnapshot) {
-      candidates.push({ snapshot: anonymousLegacySnapshot, source: 'legacy-anonymous' });
-    }
+    const { candidates, currentLegacySnapshot } = await this.collectRestoreCandidates({
+      currentIdbKey,
+      anonymousIdbKey,
+      currentLegacyKey,
+      anonymousLegacyKey,
+      ctx,
+    });
 
     const winner = candidates.reduce<PersistedSnapshotCandidate | null>(
       (best, candidate) => this.pickNewerPersistedSnapshot(best, candidate),
@@ -136,55 +162,137 @@ export class DockSnapshotPersistenceService {
 
     if (!winner) return null;
 
-    if (winner.source !== 'idb-current') {
-      try {
-        await set(currentIdbKey, winner.snapshot);
-      } catch (err) {
-        this.logger.warn('IDB restore failed', {
-          code: ErrorCodes.DOCK_IDB_RESTORE_FAILED,
-          error: err,
-        });
-      }
+    const writer = this.beginStandaloneWriter(userId);
+    try {
+      const promoted = await this.promoteRestoreWinner(currentIdbKey, winner);
+      if (!promoted) return winner.snapshot;
+      this.reconcileLegacyRestoreShadow(
+        winner,
+        userId,
+        currentLegacyKey,
+        anonymousLegacyKey,
+        currentLegacySnapshot,
+      );
+      await this.cleanupAnonymousIdbFallback(anonymousIdbKey);
+
+      return winner.snapshot;
+    } finally {
+      writer?.release();
+    }
+  }
+
+  private async collectRestoreCandidates(params: {
+    currentIdbKey: string;
+    anonymousIdbKey: string | null;
+    currentLegacyKey: string;
+    anonymousLegacyKey: string | null;
+    ctx: SnapshotNormalizeContext;
+  }): Promise<{
+    candidates: PersistedSnapshotCandidate[];
+    currentLegacySnapshot: DockSnapshot | null;
+  }> {
+    const [currentIdbSnapshot, anonymousIdbSnapshot] = await Promise.all([
+      this.readNormalizedIdbSnapshot(params.currentIdbKey, params.ctx),
+      params.anonymousIdbKey
+        ? this.readNormalizedIdbSnapshot(params.anonymousIdbKey, params.ctx)
+        : Promise.resolve(null),
+    ]);
+    const currentLegacySnapshot = this.readNormalizedLegacySnapshot(params.currentLegacyKey, params.ctx);
+    const anonymousLegacySnapshot = params.anonymousLegacyKey
+      ? this.readNormalizedLegacySnapshot(params.anonymousLegacyKey, params.ctx)
+      : null;
+
+    return {
+      candidates: this.toRestoreCandidates(
+        currentIdbSnapshot,
+        anonymousIdbSnapshot,
+        currentLegacySnapshot,
+        anonymousLegacySnapshot,
+      ),
+      currentLegacySnapshot,
+    };
+  }
+
+  private toRestoreCandidates(
+    currentIdbSnapshot: DockSnapshot | null,
+    anonymousIdbSnapshot: DockSnapshot | null,
+    currentLegacySnapshot: DockSnapshot | null,
+    anonymousLegacySnapshot: DockSnapshot | null,
+  ): PersistedSnapshotCandidate[] {
+    return [
+      currentIdbSnapshot ? { snapshot: currentIdbSnapshot, source: 'idb-current' as const } : null,
+      anonymousIdbSnapshot ? { snapshot: anonymousIdbSnapshot, source: 'idb-anonymous' as const } : null,
+      currentLegacySnapshot ? { snapshot: currentLegacySnapshot, source: 'legacy-current' as const } : null,
+      anonymousLegacySnapshot ? { snapshot: anonymousLegacySnapshot, source: 'legacy-anonymous' as const } : null,
+    ].filter((candidate): candidate is PersistedSnapshotCandidate => !!candidate);
+  }
+
+  private async promoteRestoreWinner(
+    currentIdbKey: string,
+    winner: PersistedSnapshotCandidate,
+  ): Promise<boolean> {
+    if (winner.source === 'idb-current') return true;
+    try {
+      await set(currentIdbKey, winner.snapshot);
+      return true;
+    } catch (err) {
+      this.logger.warn('IDB restore failed', {
+        code: ErrorCodes.DOCK_IDB_RESTORE_FAILED,
+        error: err,
+      });
+      return false;
+    }
+  }
+
+  private reconcileLegacyRestoreShadow(
+    winner: PersistedSnapshotCandidate,
+    userId: string | null,
+    currentLegacyKey: string,
+    anonymousLegacyKey: string | null,
+    currentLegacySnapshot: DockSnapshot | null,
+  ): void {
+    if (typeof localStorage === 'undefined') return;
+    if (winner.source === 'idb-anonymous' || winner.source === 'legacy-anonymous') {
+      this.persistShadowToLocalStorage(winner.snapshot, userId);
+    } else if (currentLegacySnapshot) {
+      localStorage.removeItem(currentLegacyKey);
     }
 
-    if (typeof localStorage !== 'undefined') {
-      if (winner.source === 'idb-anonymous' || winner.source === 'legacy-anonymous') {
-        this.persistShadowToLocalStorage(winner.snapshot, userId);
-      } else if (currentLegacySnapshot) {
-        localStorage.removeItem(currentLegacyKey);
-      }
-
-      if (anonymousLegacyKey) {
-        localStorage.removeItem(anonymousLegacyKey);
-      }
+    if (anonymousLegacyKey) {
+      localStorage.removeItem(anonymousLegacyKey);
     }
+  }
 
-    if (anonymousIdbKey) {
-      try {
-        await del(anonymousIdbKey);
-      } catch (err) {
-        this.logger.warn('IDB fallback cleanup failed', {
-          code: ErrorCodes.DOCK_IDB_RESTORE_FAILED,
-          error: err,
-        });
-      }
+  private async cleanupAnonymousIdbFallback(anonymousIdbKey: string | null): Promise<void> {
+    if (!anonymousIdbKey) return;
+    try {
+      await del(anonymousIdbKey);
+    } catch (err) {
+      this.logger.warn('IDB fallback cleanup failed', {
+        code: ErrorCodes.DOCK_IDB_RESTORE_FAILED,
+        error: err,
+      });
     }
-
-    return winner.snapshot;
   }
 
   cancelPendingPersist(): void {
-    if (this.pendingLocalPersist) {
-      const { snapshotFn, userId } = this.pendingLocalPersist;
-      this.pendingLocalPersist = null;
-      this.persistShadowToLocalStorage(snapshotFn(), userId);
+    const writer = this.takePendingWriter();
+    try {
+      if (this.pendingLocalPersist) {
+        const { snapshotFn, userId } = this.pendingLocalPersist;
+        this.pendingLocalPersist = null;
+        this.persistShadowToLocalStorage(snapshotFn(), userId);
+      }
+    } finally {
+      this.localPersistTimer.cancel();
+      writer?.release();
     }
-    this.localPersistTimer.cancel();
   }
 
   async discardPendingPersist(): Promise<void> {
     this.pendingLocalPersist = null;
     this.localPersistTimer.cancel();
+    this.releasePendingWriter();
 
     try {
       await this.persistChain;
@@ -195,20 +303,52 @@ export class DockSnapshotPersistenceService {
     this.persistChain = Promise.resolve();
   }
 
-  private persistShadowToLocalStorage(snapshot: DockSnapshot, userId: string | null): void {
-    if (typeof localStorage === 'undefined') return;
+  private beginPendingWriter(userId: string | null): void {
+    if (!userId) {
+      this.releasePendingWriter();
+      return;
+    }
+    if (this.pendingWriter?.ownerUserId === userId) {
+      this.pendingWriter.handle.renew();
+      return;
+    }
+    this.releasePendingWriter();
+    this.pendingWriter = {
+      ownerUserId: userId,
+      handle: beginLocalBackupUiRestoreWriter(userId, 'dock-snapshot'),
+    };
+  }
+
+  private beginStandaloneWriter(userId: string | null): LocalBackupUiRestoreWriterHandle | null {
+    return userId ? beginLocalBackupUiRestoreWriter(userId, 'dock-snapshot') : null;
+  }
+
+  private takePendingWriter(): LocalBackupUiRestoreWriterHandle | null {
+    const handle = this.pendingWriter?.handle ?? null;
+    this.pendingWriter = null;
+    return handle;
+  }
+
+  private releasePendingWriter(): void {
+    this.takePendingWriter()?.release();
+  }
+
+  private persistShadowToLocalStorage(snapshot: DockSnapshot, userId: string | null): boolean {
+    if (typeof localStorage === 'undefined') return false;
     try {
       localStorage.setItem(this.legacyLocalStorageKey(userId), JSON.stringify(snapshot));
+      return true;
     } catch (err) {
       this.logger.warn('Legacy localStorage shadow persist failed', {
         code: ErrorCodes.DOCK_IDB_PERSIST_FAILED,
         error: err,
       });
+      return false;
     }
   }
 
   /** IDB 写入（含 1 次重试），失败不阻塞业务流 */
-  private async persistToIdb(key: string, value: DockSnapshot): Promise<void> {
+  private async persistToIdb(key: string, value: DockSnapshot): Promise<boolean> {
     // 配额预检：移动端 Safari 等环境 IDB 配额有限，静默降级避免数据丢失
     if (typeof navigator !== 'undefined' && navigator.storage?.estimate) {
       try {
@@ -220,7 +360,7 @@ export class DockSnapshotPersistenceService {
             quota,
             key,
           });
-          return;
+          return false;
         }
       } catch {
         // estimate() 不可用时静默跳过检查，继续尝试写入
@@ -230,7 +370,7 @@ export class DockSnapshotPersistenceService {
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
         await set(key, value);
-        return;
+        return true;
       } catch (err) {
         if (attempt < maxRetries) continue;
         this.logger.warn('IDB persist failed after retry', {
@@ -240,6 +380,7 @@ export class DockSnapshotPersistenceService {
         });
       }
     }
+    return false;
   }
 
   localCacheKey(userId: string | null): string {
@@ -436,94 +577,15 @@ export class DockSnapshotPersistenceService {
   }
 
   normalizeEntry(raw: unknown, ctx: SnapshotNormalizeContext): DockEntry | null {
-    if (!raw || typeof raw !== 'object') return null;
-    const source = raw as Partial<DockEntry>;
-    // H-3 fix: 验证 taskId 为非空字符串。对不符合 UUID 格式的 taskId 记录警告
-    // 但不拒绝（测试环境使用短 ID），仅拒绝空值和非字符串类型。
-    if (!source.taskId || typeof source.taskId !== 'string' || !source.taskId.trim()) return null;
-    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(source.taskId)) {
-      this.logger.warn('normalizeEntry: taskId is not a valid UUID', { taskId: source.taskId });
-    }
-
-    const enumFields = this.normalizeEntryEnumFields(source);
-    const plannerFields = sanitizePlannerFields({
-      expectedMinutes: source.expectedMinutes,
-      waitMinutes: source.waitMinutes,
-      cognitiveLoad: enumFields.load,
+    const normalized = normalizeDockSnapshotEntry({
+      raw,
+      muteWaitTone: ctx.muteWaitTone,
     });
-
-    return {
-      taskId: source.taskId,
-      title: typeof source.title === 'string' ? source.title.slice(0, PARKING_CONFIG.MAX_ENTRY_TITLE_LENGTH) : 'Untitled task',
-      sourceProjectId: typeof source.sourceProjectId === 'string' ? source.sourceProjectId : null,
-      status: enumFields.status,
-      load: plannerFields.cognitiveLoad ?? enumFields.load,
-      expectedMinutes: plannerFields.expectedMinutes,
-      waitMinutes: plannerFields.waitMinutes,
-      waitStartedAt: typeof source.waitStartedAt === 'string' && !isNaN(Date.parse(source.waitStartedAt))
-        ? source.waitStartedAt
-        : null,
-      lane: enumFields.lane,
-      zoneSource: enumFields.zoneSource,
-      isMain: Boolean(source.isMain),
-      dockedOrder: Number.isFinite(source.dockedOrder) ? Number(source.dockedOrder) : 0,
-      manualOrder: normalizeNullableNumber(source.manualOrder) ?? undefined,
-      detail: typeof source.detail === 'string' ? source.detail.slice(0, PARKING_CONFIG.MAX_ENTRY_DETAIL_LENGTH) : '',
-      sourceKind: enumFields.sourceKind,
-      sourceBlackBoxEntryId:
-        typeof source.sourceBlackBoxEntryId === 'string' && source.sourceBlackBoxEntryId
-          ? source.sourceBlackBoxEntryId
-          : null,
-      inlineArchiveStatus: enumFields.inlineArchiveStatus,
-      inlineArchivedTaskId:
-        typeof source.inlineArchivedTaskId === 'string' && source.inlineArchivedTaskId
-          ? source.inlineArchivedTaskId
-          : null,
-      systemSelected: Boolean(source.systemSelected),
-      recommendedScore: normalizeNullableNumber(source.recommendedScore),
-      sourceSection: normalizeSourceSection(source.sourceSection),
-      manualMainSelected: Boolean(source.manualMainSelected),
-      recommendationLocked: Boolean(source.recommendationLocked),
-      snoozeRingMuted: source.snoozeRingMuted === undefined ? ctx.muteWaitTone : Boolean(source.snoozeRingMuted),
-      relationScore: normalizeNullableNumber(source.relationScore),
-      relationReason:
-        typeof source.relationReason === 'string' && source.relationReason
-          ? source.relationReason
-          : null,
-    };
-  }
-
-  /** 枚举类字段归一化：status、lane、load、sourceKind、inlineArchiveStatus */
-  private normalizeEntryEnumFields(source: Partial<DockEntry>): {
-    status: DockEntry['status'];
-    lane: DockLane;
-    zoneSource: DockZoneSource;
-    load: CognitiveLoad;
-    sourceKind: DockEntry['sourceKind'];
-    inlineArchiveStatus: DockEntry['inlineArchiveStatus'];
-  } {
-    const status = normalizeStatus(source.status);
-    const rawLane = (source as { lane?: unknown; zone?: unknown }).lane ?? (source as { zone?: unknown }).zone;
-    const lane: DockLane =
-      rawLane === 'combo-select' || rawLane === 'strong'
-        ? 'combo-select'
-        : 'backup';
-    const zoneSource: DockZoneSource = source.zoneSource === 'manual' ? 'manual' : 'auto';
-    const load: CognitiveLoad = source.load === 'high' ? 'high' : 'low';
-    const sourceKind: DockEntry['sourceKind'] =
-      source.sourceKind === 'dock-created'
-        ? 'dock-created'
-        : 'project-task';
-    const inlineArchiveStatus: DockEntry['inlineArchiveStatus'] =
-      source.inlineArchiveStatus === 'archiving' ||
-      source.inlineArchiveStatus === 'archived' ||
-      source.inlineArchiveStatus === 'failed' ||
-      source.inlineArchiveStatus === 'pending'
-        ? source.inlineArchiveStatus
-        : sourceKind === 'dock-created'
-          ? 'pending'
-          : undefined;
-    return { status, lane, zoneSource, load, sourceKind, inlineArchiveStatus };
+    if (!normalized) return null;
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(normalized.taskId)) {
+      this.logger.warn('normalizeEntry: taskId is not a valid UUID', { taskId: normalized.taskId });
+    }
+    return normalized;
   }
 
   normalizeDailySlot(raw: unknown): DailySlotEntry | null {
@@ -735,21 +797,6 @@ function normalizeSessionFields(
   };
 }
 
-// ─── Standalone normalize helpers (re-exported for DockEngine backward compat) ───
-
-export function normalizeStatus(status: DockEntry['status'] | undefined): DockTaskStatus {
-  if (
-    status === 'focusing' ||
-    status === 'suspended_waiting' ||
-    status === 'wait_finished' ||
-    status === 'stalled' ||
-    status === 'completed'
-  ) {
-    return status;
-  }
-  return 'pending_start';
-}
-
 export function normalizeNullableNumber(value: unknown): number | null {
   if (value === null || value === undefined || value === '') return null;
   const numeric = Number(value);
@@ -765,11 +812,4 @@ export function normalizeHighLoadCounter(value: unknown): HighLoadCounter {
   const count = Number.isFinite(source.count) ? Math.max(0, Math.floor(Number(source.count))) : 0;
   const windowStartAt = Number.isFinite(source.windowStartAt) ? Number(source.windowStartAt) : 0;
   return { count, windowStartAt };
-}
-
-export function normalizeSourceSection(value: unknown): DockSourceSection | undefined {
-  if (value === 'text' || value === 'flow' || value === 'dock-create') {
-    return value;
-  }
-  return undefined;
 }

@@ -1,0 +1,97 @@
+{
+  "schemaVersion": 1,
+  "protocol": "codegraph-overlay-generation-v1",
+  "sourcePolicyDigest": "ca78ea5e17d32399faac676bcab26fc1d7f48186a89792774d37a6b8549d0ca3",
+  "overlaySchemaDigest": "5132af08c96287a8808840b6667fe2df8e0a4d6a57e471c9aada686d0f2e3250",
+  "patterns": {
+    "generationId": "^g-[a-f0-9]{64}$",
+    "sequence": "^[1-9][0-9]{0,19}$",
+    "sha256": "^[a-f0-9]{64}$"
+  },
+  "limits": {
+    "controlFileBytes": 1048576,
+    "shardBytes": 8388608,
+    "recordBytes": 262144,
+    "arrayCount": 1024,
+    "shardCount": 4096,
+    "generationBytes": 536870912,
+    "pathCharacters": 240
+  },
+  "paths": {
+    "generationRoot": ".codegraph/nanoflow-generations",
+    "current": "CURRENT.json",
+    "receipt": "receipt.json",
+    "manifest": "manifest.json",
+    "transactions": ".transactions",
+    "quarantine": ".quarantine",
+    "compatibility": "compatibility/nanoflow-overlay.json",
+    "skeleton": "payload/skeleton.json",
+    "arrays": "payload/arrays"
+  },
+  "currentKeys": [
+    "compatibilityDigest",
+    "contractDigest",
+    "generationId",
+    "manifestDigest",
+    "overlaySchemaDigest",
+    "protocol",
+    "publishedAt",
+    "receiptDigest",
+    "schemaVersion",
+    "sequence",
+    "sourcePolicyDigest"
+  ],
+  "receiptKeys": [
+    "barrier",
+    "compatibilityDigest",
+    "configDigest",
+    "contractDigest",
+    "generationId",
+    "manifestDigest",
+    "overlaySchemaDigest",
+    "protocol",
+    "publishedAt",
+    "receiptDigest",
+    "schemaVersion",
+    "sequence",
+    "setupDigest",
+    "sourceManifestDigest",
+    "sourcePolicyDigest",
+    "toolchainDigest"
+  ],
+  "manifestKeys": [
+    "arrays",
+    "compatibility",
+    "contractDigest",
+    "generationId",
+    "overlaySchemaDigest",
+    "protocol",
+    "schemaVersion",
+    "sequence",
+    "skeleton",
+    "sourceManifestDigest",
+    "sourcePolicyDigest",
+    "totalBytes"
+  ],
+  "fileDescriptorKeys": [
+    "bytes",
+    "path",
+    "sha256"
+  ],
+  "arrayDescriptorKeys": [
+    "count",
+    "jsonPath",
+    "shards"
+  ],
+  "shardDescriptorKeys": [
+    "bytes",
+    "count",
+    "path",
+    "sha256"
+  ],
+  "barrierKeys": [
+    "fence",
+    "heldEpoch",
+    "owner"
+  ]
+}

@@ -176,6 +176,7 @@
       }
     })();
   </script>
+  <script src="/assets/auth-canonical-storage-bootstrap-v1.js"></script>
   
   <!-- ========== 安全：Content Security Policy ========== -->
   <!-- 
@@ -612,126 +613,24 @@
     window.__DEBUG_LOG__.push({t: Date.now(), m: '预热脚本开始'});
   </script>
 
-  <!-- Supabase 会话预热：在骨架屏渲染后立即发起 token 刷新 -->
-  <!-- ⚠️ 当 AUTH_RUNTIME_GATE_V1=true 时，此脚本仅初始化 __NANOFLOW_SESSION_PREWARM__ 后立即退出，
-       不发起网络请求。Auth 初始化被延后到 Angular handoff 阶段由 AuthService.ensureRuntimeAuthReady() 显式触发。 -->
+  <!-- Supabase 会话预热：在骨架屏渲染后立即发起 token 刷新。 -->
+  <!-- Supabase 配置仅保留在 index handoff，由 set-env 注入生成文件。 -->
+  <!-- launch 别名只继承 shared-head authority，不继承此 handoff。 -->
   <script>
     (function() {
-      window.__NANOFLOW_SESSION_PREWARM__ = { status: 'idle' };
-      if (window.__NANOFLOW_PUSH_STARTUP_TRACE__) {
-        window.__NANOFLOW_PUSH_STARTUP_TRACE__('auth.prewarm_initialized', { status: 'idle' });
-      }
-      var runtimeFlags = window.__NANOFLOW_BOOT_FLAGS__ || {};
-      // AUTH_RUNTIME_GATE_V1=true → 跳过预热，auth 生命周期由 Angular 侧显式控制
-      if (runtimeFlags.AUTH_RUNTIME_GATE_V1 !== false) {
-        if (window.__NANOFLOW_PUSH_STARTUP_TRACE__) {
-          window.__NANOFLOW_PUSH_STARTUP_TRACE__('auth.prewarm_skipped', { reason: 'auth_runtime_gate' });
-        }
-        return;
-      }
-
       var SUPABASE_URL = 'https://your-project.supabase.co';
       var SUPABASE_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY';
-
-      // 【根因修复 2026-05-15】占位 host 与 supabase.co 预连接提示对齐，guard 改用占位 host 短路
-      if (!SUPABASE_URL || SUPABASE_URL === 'https://your-project.supabase.co') return;
-      if (!SUPABASE_ANON_KEY || SUPABASE_ANON_KEY === 'YOUR_SUPABASE_ANON_KEY') return;
-
-      // 动态推导 auth storage key，与 Supabase JS SDK getStorageKey() 保持一致
-      // 格式：sb-<project-ref>-auth-token，其中 project-ref 从 URL 的第一段取
-      var AUTH_KEY = (function() {
-        try {
-          var hostname = new URL(SUPABASE_URL).hostname;
-          var ref = hostname.split('.')[0];
-          return 'sb-' + ref + '-auth-token';
-        } catch (_e) {
-          return '';
-        }
-      })();
-      if (!AUTH_KEY) return;
-
-      try {
-        var raw = localStorage.getItem(AUTH_KEY);
-        if (!raw) return;
-        var authData = JSON.parse(raw);
-        function clearPersistedAuthSession() {
-          try { localStorage.removeItem(AUTH_KEY); } catch (_e) {}
-          try { localStorage.removeItem('nanoflow.auth-cache'); } catch (_e2) {}
-        }
-        var refreshToken = null;
-        if (authData && authData.refresh_token) {
-          refreshToken = authData.refresh_token;
-        } else if (authData && authData.currentSession && authData.currentSession.refresh_token) {
-          refreshToken = authData.currentSession.refresh_token;
-        }
-        if (!refreshToken || typeof refreshToken !== 'string') return;
-
-        var expiresAt = null;
-        if (authData.expires_at) expiresAt = authData.expires_at;
-        else if (authData.currentSession && authData.currentSession.expires_at) expiresAt = authData.currentSession.expires_at;
-
-        if (typeof expiresAt === 'number') {
-          if (expiresAt < 1e12) expiresAt = expiresAt * 1000;
-          if (expiresAt > Date.now() + 600000) return;
-        }
-
-        window.__NANOFLOW_SESSION_PREWARM__.status = 'pending';
-        if (window.__NANOFLOW_PUSH_STARTUP_TRACE__) {
-          window.__NANOFLOW_PUSH_STARTUP_TRACE__('auth.prewarm_pending');
-        }
-
-        fetch(SUPABASE_URL + '/auth/v1/token?grant_type=refresh_token', {
-          method: 'POST',
-          headers: { 'apikey': SUPABASE_ANON_KEY, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ refresh_token: refreshToken })
-        }).then(function(resp) {
-          if (resp.ok) {
-            return resp.json();
-          }
-
-          return resp.json().catch(function() {
-            return null;
-          }).then(function(errorData) {
-            window.__NANOFLOW_SESSION_PREWARM__.status = 'failed';
-            if (resp.status === 400 || resp.status === 401) {
-              clearPersistedAuthSession();
-              if (window.__NANOFLOW_PUSH_STARTUP_TRACE__) {
-                window.__NANOFLOW_PUSH_STARTUP_TRACE__('auth.prewarm_invalidated', {
-                  status: resp.status,
-                  error: errorData && (errorData.message || errorData.error || errorData.error_description)
-                });
-              }
-              return null;
-            }
-
-            if (window.__NANOFLOW_PUSH_STARTUP_TRACE__) {
-              window.__NANOFLOW_PUSH_STARTUP_TRACE__('auth.prewarm_failed', { status: resp.status });
-            }
-            return null;
-          });
-        }).then(function(data) {
-          if (!data || !data.access_token) return;
-          var newSession = {
-            access_token: data.access_token,
-            refresh_token: data.refresh_token || refreshToken,
-            expires_in: data.expires_in,
-            expires_at: Math.floor(Date.now() / 1000) + (data.expires_in || 3600),
-            token_type: data.token_type || 'bearer',
-            user: data.user || (authData && authData.user) || null
-          };
-          try { localStorage.setItem(AUTH_KEY, JSON.stringify(newSession)); } catch (e) {}
-          window.__NANOFLOW_SESSION_PREWARM__.status = 'refreshed';
-          window.__NANOFLOW_SESSION_PREWARM__.session = newSession;
-          if (window.__NANOFLOW_PUSH_STARTUP_TRACE__) {
-            window.__NANOFLOW_PUSH_STARTUP_TRACE__('auth.prewarm_refreshed');
-          }
-        }).catch(function() {
-          window.__NANOFLOW_SESSION_PREWARM__.status = 'failed';
-          if (window.__NANOFLOW_PUSH_STARTUP_TRACE__) {
-            window.__NANOFLOW_PUSH_STARTUP_TRACE__('auth.prewarm_failed', { reason: 'network' });
-          }
-        });
-      } catch (e) {}
+      var authority = window.__NANOFLOW_AUTH_CANONICAL_STORAGE__;
+      if (!authority) {
+        window.__NANOFLOW_SESSION_PREWARM__ = { status: 'failed' };
+        if (window.__NANOFLOW_PUSH_STARTUP_TRACE__) window.__NANOFLOW_PUSH_STARTUP_TRACE__('auth.prewarm_failed', { reason: 'authority_unavailable' });
+        return;
+      }
+      void authority.startSessionPrewarm({
+        supabaseUrl: SUPABASE_URL === 'https://your-project.supabase.co' ? '' : SUPABASE_URL,
+        supabaseAnonKey: SUPABASE_ANON_KEY === 'YOUR_SUPABASE_ANON_KEY' ? '' : SUPABASE_ANON_KEY,
+        bootFlags: window.__NANOFLOW_BOOT_FLAGS__ || {}
+      });
     })();
   </script>
 

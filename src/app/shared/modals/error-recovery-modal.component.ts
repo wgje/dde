@@ -180,6 +180,7 @@ export class ErrorRecoveryModalComponent implements OnInit, OnDestroy {
   
   /** 自动选择定时器 */
   private autoSelectTimer: ReturnType<typeof setInterval> | null = null;
+  private settled = false;
   
   get iconBgClass(): string {
     switch (this.type) {
@@ -200,6 +201,7 @@ export class ErrorRecoveryModalComponent implements OnInit, OnDestroy {
   }
   
   ngOnDestroy() {
+    this.settled = true;
     this.stopAutoSelectTimer();
   }
   
@@ -215,6 +217,8 @@ export class ErrorRecoveryModalComponent implements OnInit, OnDestroy {
   }
   
   selectOption(option: ErrorRecoveryOption): void {
+    if (this.settled) return;
+    this.settled = true;
     this.stopAutoSelectTimer();
     this.select.emit({
       optionId: option.id,
@@ -223,13 +227,18 @@ export class ErrorRecoveryModalComponent implements OnInit, OnDestroy {
   }
   
   onBackdropClick(event: MouseEvent): void {
-    if (event.target === event.currentTarget) {
-      this.close.emit();
-    }
+    if (event.target !== event.currentTarget || this.settled) return;
+    this.settled = true;
+    this.stopAutoSelectTimer();
+    this.close.emit();
   }
   
   private startAutoSelectTimer(): void {
     this.autoSelectTimer = setInterval(() => {
+      if (this.settled) {
+        this.stopAutoSelectTimer();
+        return;
+      }
       if (this.autoSelectIn !== null) {
         this.autoSelectIn--;
         if (this.autoSelectIn <= 0) {
@@ -243,7 +252,7 @@ export class ErrorRecoveryModalComponent implements OnInit, OnDestroy {
   }
   
   private stopAutoSelectTimer(): void {
-    if (this.autoSelectTimer) {
+    if (this.autoSelectTimer !== null) {
       clearInterval(this.autoSelectTimer);
       this.autoSelectTimer = null;
     }

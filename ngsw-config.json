@@ -1,7 +1,7 @@
 {
   "$schema": "./node_modules/@angular/service-worker/config/schema.json",
   "index": "/index.html",
-  "navigationPreload": true,
+  "navigationPreload": false,
   "navigationUrls": [
     "/**"
   ],
@@ -16,6 +16,7 @@
           "/index.html",
           "/launch.html",
           "/manifest.webmanifest",
+          "/assets/auth-canonical-storage-bootstrap-v1.js",
           "/*.css",
           "/main*.js",
           "/polyfills*.js"

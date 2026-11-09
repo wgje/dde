@@ -5,6 +5,23 @@ import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { Task, Project, Connection } from '../models';
 import { mergeByLwwWithTombstone } from '../utils/lww-merge';
 
+type TaskMergeResult = {
+  mergedTask: Task;
+  hasConflict: boolean;
+  contentConflictCopy?: Task;
+};
+
+interface TaskMergeContext {
+  local: Task;
+  remote: Task;
+  mergedTask: Task;
+  localTime: number;
+  remoteTime: number;
+  lockedFields: string[];
+  hasConflict: boolean;
+  contentConflictCopy?: Task;
+}
+
 /**
  * 冲突检测服务
  *
@@ -36,6 +53,27 @@ export class ConflictDetectionService {
     const safeUpdatedAt = Number.isFinite(updatedAt) ? updatedAt : 0;
     const safeDeletedAt = Number.isFinite(deletedAt) ? deletedAt : 0;
     return Math.max(safeUpdatedAt, safeDeletedAt);
+  }
+
+  private fieldEqual(a: unknown, b: unknown): boolean {
+    if (Object.is(a, b)) return true;
+    if (a == null && b == null) return true;
+    if (Array.isArray(a) && Array.isArray(b)) {
+      return a.length === b.length && a.every((value, index) => this.fieldEqual(value, b[index]));
+    }
+
+    if (this.isRecord(a) && this.isRecord(b)) {
+      const aKeys = Object.keys(a);
+      const bKeys = Object.keys(b);
+      return aKeys.length === bKeys.length
+        && aKeys.every(key => Object.prototype.hasOwnProperty.call(b, key) && this.fieldEqual(a[key], b[key]));
+    }
+
+    return false;
+  }
+
+  private isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
   }
 
   private mergeEqualFreshnessConnections(local: Connection, remote: Connection): Connection {
@@ -112,166 +150,196 @@ export class ConflictDetectionService {
   } {
     const localTime = local.updatedAt ? new Date(local.updatedAt).getTime() : 0;
     const remoteTime = remote.updatedAt ? new Date(remote.updatedAt).getTime() : 0;
-
-    // 确定基础版本（使用更新时间较新的）
     const baseTask = remoteTime > localTime ? remote : local;
+    const context: TaskMergeContext = {
+      local,
+      remote,
+      mergedTask: { ...baseTask },
+      localTime,
+      remoteTime,
+      lockedFields: this.changeTracker.getLockedFields(local.id, projectId),
+      hasConflict: false,
+    };
 
-    let hasConflict = false;
-    let contentConflictCopy: Task | undefined = undefined;
+    this.mergeTitleField(context);
+    this.mergeContentField(context);
+    this.mergeStatusField(context);
+    this.mergePlanningFields(context);
+    this.mergeTagsField(context);
+    this.mergeAttentionMetaField(context);
+    this.mergeAttachmentsField(context);
+    this.mergePositionAndStructureFields(context);
+    this.mergeDeleteMarker(context);
+    context.mergedTask.updatedAt = new Date().toISOString();
 
-    // 字段级合并：检查每个可编辑字段
-    const mergedTask: Task = { ...baseTask };
+    return this.toTaskMergeResult(context);
+  }
 
-    // 【关键】检查字段锁：获取当前被锁定的字段
-    const lockedFields = this.changeTracker.getLockedFields(local.id, projectId);
-    const isFieldLocked = (field: string) => lockedFields.includes(field);
+  private mergeTitleField(context: TaskMergeContext): void {
+    const { local, remote, mergedTask } = context;
+    if (local.title === remote.title) return;
 
-    // 标题：如果不同，检测是否是有意义的编辑
-    if (local.title !== remote.title) {
-      hasConflict = true;
-      // 【字段锁检查】如果 title 被锁定，始终使用本地版本
-      if (isFieldLocked('title')) {
-        mergedTask.title = local.title;
-        this.logger.debug('mergeTaskFields: title 被锁定，使用本地版本', { taskId: local.id });
-      } else {
-        mergedTask.title = remoteTime > localTime ? remote.title : local.title;
-      }
+    context.hasConflict = true;
+    if (this.isTaskFieldLocked(context, 'title')) {
+      mergedTask.title = local.title;
+      this.logger.debug('mergeTaskFields: title 被锁定，使用本地版本', { taskId: local.id });
+      return;
     }
 
-    // 内容：如果不同，检测是否需要创建冲突副本
-    if (local.content !== remote.content) {
-      hasConflict = true;
-      // 【字段锁检查】如果 content 被锁定，始终使用本地版本
-      if (isFieldLocked('content')) {
-        mergedTask.content = local.content;
-        this.logger.debug('mergeTaskFields: content 被锁定，使用本地版本', { taskId: local.id });
-      } else {
-        // 【LWW 缺陷修复】检测是否是真正的冲突
-        // 真正冲突的定义：双方内容都有实质性修改，且不是简单的扩展关系
-        const isRealConflict = this.isRealContentConflict(local.content, remote.content);
+    mergedTask.title = this.pickNewerValue(local.title, remote.title, context);
+  }
 
-        if (isRealConflict) {
-          // 真正冲突：使用远程版本，创建本地版本的副本
-          mergedTask.content = remote.content;
+  private mergeContentField(context: TaskMergeContext): void {
+    const { local, remote, mergedTask } = context;
+    if (local.content === remote.content) return;
 
-          // 创建冲突副本 - 包含本地的 content
-          contentConflictCopy = {
-            ...local,
-            id: crypto.randomUUID(),
-            title: `${local.title || '未命名任务'} (冲突副本)`,
-            displayId: '', // 将由布局服务重新计算
-            shortId: this.generateShortId(),
-            content: local.content, // 保留本地内容
-            updatedAt: new Date().toISOString(),
-            // 将副本放在原任务附近
-            x: local.x + 50,
-            y: local.y + 50,
-          };
-
-          this.logger.warn('mergeTaskFields: content 真正冲突，创建副本', {
-            taskId: local.id,
-            localContentLength: local.content?.length,
-            remoteContentLength: remote.content?.length
-          });
-
-          // 发送 Sentry 事件
-          this.sentryLazyLoader.captureMessage('Content conflict detected, created copy', {
-            level: 'info',
-            tags: { operation: 'mergeTaskFields', taskId: local.id },
-            extra: {
-              localContentLength: local.content?.length,
-              remoteContentLength: remote.content?.length,
-              copyId: contentConflictCopy.id
-            }
-          });
-        } else {
-          // 非真正冲突：尝试智能合并（如果两边都有添加）
-          const mergedContent = this.mergeTextContent(local.content, remote.content, localTime, remoteTime);
-          mergedTask.content = mergedContent;
-        }
-      }
+    context.hasConflict = true;
+    if (this.isTaskFieldLocked(context, 'content')) {
+      mergedTask.content = local.content;
+      this.logger.debug('mergeTaskFields: content 被锁定，使用本地版本', { taskId: local.id });
+      return;
     }
 
-    // 状态：如果不同，使用更新时间较新的
-    if (local.status !== remote.status) {
-      hasConflict = true;
-      // 【字段锁检查】如果 status 被锁定，始终使用本地版本
-      // 这是防止状态回滚的关键修复
-      if (isFieldLocked('status')) {
-        mergedTask.status = local.status;
-        this.logger.debug('mergeTaskFields: status 被锁定，使用本地版本', {
-          taskId: local.id,
-          localStatus: local.status,
-          remoteStatus: remote.status
-        });
-      } else {
-        mergedTask.status = remoteTime > localTime ? remote.status : local.status;
-      }
+    if (this.isRealContentConflict(local.content, remote.content)) {
+      mergedTask.content = remote.content;
+      context.contentConflictCopy = this.createContentConflictCopy(local, remote);
+      return;
     }
 
-    // 优先级：如果不同，使用更新时间较新的
-    if (local.priority !== remote.priority) {
-      hasConflict = true;
-      // 【字段锁检查】
-      if (isFieldLocked('priority')) {
-        mergedTask.priority = local.priority;
-      } else {
-        mergedTask.priority = remoteTime > localTime ? remote.priority : local.priority;
+    mergedTask.content = this.mergeTextContent(local.content, remote.content, context.localTime, context.remoteTime);
+  }
+
+  private createContentConflictCopy(local: Task, remote: Task): Task {
+    const contentConflictCopy = {
+      ...local,
+      id: crypto.randomUUID(),
+      title: `${local.title || '未命名任务'} (冲突副本)`,
+      displayId: '',
+      shortId: this.generateShortId(),
+      content: local.content,
+      updatedAt: new Date().toISOString(),
+      x: local.x + 50,
+      y: local.y + 50,
+    };
+
+    this.logger.warn('mergeTaskFields: content 真正冲突，创建副本', {
+      taskId: local.id,
+      localContentLength: local.content?.length,
+      remoteContentLength: remote.content?.length
+    });
+
+    this.sentryLazyLoader.captureMessage('Content conflict detected, created copy', {
+      level: 'info',
+      tags: { operation: 'mergeTaskFields', taskId: local.id },
+      extra: {
+        localContentLength: local.content?.length,
+        remoteContentLength: remote.content?.length,
+        copyId: contentConflictCopy.id
       }
+    });
+
+    return contentConflictCopy;
+  }
+
+  private mergeStatusField(context: TaskMergeContext): void {
+    const { local, remote, mergedTask } = context;
+    if (local.status === remote.status) return;
+
+    context.hasConflict = true;
+    if (this.isTaskFieldLocked(context, 'status')) {
+      mergedTask.status = local.status;
+      this.logger.debug('mergeTaskFields: status 被锁定，使用本地版本', {
+        taskId: local.id,
+        localStatus: local.status,
+        remoteStatus: remote.status
+      });
+      return;
     }
 
-    // 截止日期：如果不同，使用更新时间较新的
-    if (local.dueDate !== remote.dueDate) {
-      hasConflict = true;
-      // 【字段锁检查】
-      if (isFieldLocked('dueDate')) {
-        mergedTask.dueDate = local.dueDate;
-      } else {
-        mergedTask.dueDate = remoteTime > localTime ? remote.dueDate : local.dueDate;
-      }
-    }
+    mergedTask.status = this.pickNewerValue(local.status, remote.status, context);
+  }
 
-    // 标签：智能合并两边的标签
+  private mergePlanningFields(context: TaskMergeContext): void {
+    const { local, remote, mergedTask } = context;
+    this.mergePriorityAndDueDate(context);
+
     if (local.expected_minutes !== remote.expected_minutes) {
-      hasConflict = true;
-      if (isFieldLocked('expected_minutes')) {
+      context.hasConflict = true;
+      if (this.isTaskFieldLocked(context, 'expected_minutes')) {
         mergedTask.expected_minutes = local.expected_minutes;
       } else {
-        mergedTask.expected_minutes =
-          remoteTime > localTime ? remote.expected_minutes : local.expected_minutes;
+        mergedTask.expected_minutes = this.pickNewerValue(local.expected_minutes, remote.expected_minutes, context);
       }
     }
 
     if (local.cognitive_load !== remote.cognitive_load) {
-      hasConflict = true;
-      if (isFieldLocked('cognitive_load')) {
+      context.hasConflict = true;
+      if (this.isTaskFieldLocked(context, 'cognitive_load')) {
         mergedTask.cognitive_load = local.cognitive_load;
       } else {
-        mergedTask.cognitive_load =
-          remoteTime > localTime ? remote.cognitive_load : local.cognitive_load;
+        mergedTask.cognitive_load = this.pickNewerValue(local.cognitive_load, remote.cognitive_load, context);
       }
     }
 
     if (local.wait_minutes !== remote.wait_minutes) {
-      hasConflict = true;
-      if (isFieldLocked('wait_minutes')) {
+      context.hasConflict = true;
+      if (this.isTaskFieldLocked(context, 'wait_minutes')) {
         mergedTask.wait_minutes = local.wait_minutes;
       } else {
-        mergedTask.wait_minutes = remoteTime > localTime ? remote.wait_minutes : local.wait_minutes;
+        mergedTask.wait_minutes = this.pickNewerValue(local.wait_minutes, remote.wait_minutes, context);
       }
     }
+  }
+
+  private mergePriorityAndDueDate(context: TaskMergeContext): void {
+    const { local, remote, mergedTask } = context;
+
+    if (local.priority !== remote.priority) {
+      context.hasConflict = true;
+      mergedTask.priority = this.isTaskFieldLocked(context, 'priority')
+        ? local.priority
+        : this.pickNewerValue(local.priority, remote.priority, context);
+    }
+
+    if (local.dueDate !== remote.dueDate) {
+      context.hasConflict = true;
+      mergedTask.dueDate = this.isTaskFieldLocked(context, 'dueDate')
+        ? local.dueDate
+        : this.pickNewerValue(local.dueDate, remote.dueDate, context);
+    }
+  }
+
+  private mergeTagsField(context: TaskMergeContext): void {
+    const { local, remote, mergedTask } = context;
 
     if (local.tags || remote.tags) {
       const localTags = local.tags || [];
       const remoteTags = remote.tags || [];
-      const mergedTags = this.mergeTagsWithIntent(localTags, remoteTags, localTime, remoteTime);
+      const mergedTags = this.mergeTagsWithIntent(localTags, remoteTags, context.localTime, context.remoteTime);
       mergedTask.tags = mergedTags.length > 0 ? mergedTags : undefined;
       // 标签变化也算冲突
       if (local.tags?.length !== remote.tags?.length ||
           !localTags.every(t => remoteTags.includes(t))) {
-        hasConflict = true;
+        context.hasConflict = true;
       }
     }
+  }
+
+  private mergeAttentionMetaField(context: TaskMergeContext): void {
+    const { local, remote, mergedTask } = context;
+
+    if (!this.fieldEqual(local.attentionMeta, remote.attentionMeta)) {
+      context.hasConflict = true;
+      if (this.isTaskFieldLocked(context, 'attentionMeta')) {
+        mergedTask.attentionMeta = local.attentionMeta;
+      } else {
+        mergedTask.attentionMeta = this.pickNewerValue(local.attentionMeta, remote.attentionMeta, context);
+      }
+    }
+  }
+
+  private mergeAttachmentsField(context: TaskMergeContext): void {
+    const { local, remote, mergedTask, remoteTime, localTime } = context;
 
     // 附件：合并两边的附件（按 ID 去重）
     if (local.attachments || remote.attachments) {
@@ -290,6 +358,10 @@ export class ConflictDetectionService {
 
       mergedTask.attachments = Array.from(attachmentMap.values());
     }
+  }
+
+  private mergePositionAndStructureFields(context: TaskMergeContext): void {
+    const { local, remote, mergedTask, remoteTime, localTime } = context;
 
     // 位置信息：保留本地位置（避免拖拽位置被覆盖）
     mergedTask.x = local.x;
@@ -304,11 +376,15 @@ export class ConflictDetectionService {
         mergedTask.rank = remote.rank;
       }
     }
+  }
+
+  private mergeDeleteMarker(context: TaskMergeContext): void {
+    const { local, remote, mergedTask } = context;
 
     // 删除标记：任一方删除则删除（删除优先）
     // 这样确保在任何一个标签页删除的任务，在合并时都会保持删除状态
     if (local.deletedAt || remote.deletedAt) {
-      hasConflict = true;
+      context.hasConflict = true;
       // 使用最早的删除时间，或者如果只有一方删除，使用那个删除时间
       if (local.deletedAt && remote.deletedAt) {
         const localDeleteTime = new Date(local.deletedAt).getTime();
@@ -318,11 +394,22 @@ export class ConflictDetectionService {
         mergedTask.deletedAt = local.deletedAt || remote.deletedAt;
       }
     }
+  }
 
-    // 更新合并时间戳
-    mergedTask.updatedAt = new Date().toISOString();
+  private isTaskFieldLocked(context: TaskMergeContext, field: string): boolean {
+    return context.lockedFields.includes(field);
+  }
 
-    return { mergedTask, hasConflict, contentConflictCopy };
+  private pickNewerValue<T>(localValue: T, remoteValue: T, context: TaskMergeContext): T {
+    return context.remoteTime > context.localTime ? remoteValue : localValue;
+  }
+
+  private toTaskMergeResult(context: TaskMergeContext): TaskMergeResult {
+    return {
+      mergedTask: context.mergedTask,
+      hasConflict: context.hasConflict,
+      contentConflictCopy: context.contentConflictCopy
+    };
   }
 
   // ========== 内容冲突检测 ==========

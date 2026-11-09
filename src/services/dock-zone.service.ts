@@ -6,6 +6,7 @@ import { Task } from '../models';
 import { TaskStore } from '../core-bridge';
 import { ProjectStateService } from './project-state.service';
 import { entryOrder } from './dock-engine.utils';
+import { inferDockAutoLane } from './dock-zone-lane-inference';
 
 /**
  * 区域/调度推断服务：从 DockEngineService 拆分，负责 auto-lane 推断、
@@ -66,54 +67,12 @@ export class DockZoneService {
       };
     }
 
-    let score = 0;
-    const reasons: string[] = [];
-
-    if (task.parentId === referenceTask.id || referenceTask.parentId === task.id) {
-      score += PARKING_CONFIG.ZONE_SCORE_PARENT_CHILD;
-      reasons.push('parent-child');
-    }
-
-    if (task.parentId && referenceTask.parentId && task.parentId === referenceTask.parentId) {
-      score += PARKING_CONFIG.ZONE_SCORE_SHARED_PARENT;
-      reasons.push('shared-parent');
-    }
-
-    if (this.hasDirectConnection(sourceProjectId, task.id, referenceTask.id)) {
-      score += PARKING_CONFIG.ZONE_SCORE_DIRECT_CONNECTION;
-      reasons.push('direct-connection');
-    }
-
-    // 树距离评分：同一棵树上的距离越近，优先级越高
-    const treeDistance = this.computeTreeDistance(sourceProjectId, task.id, referenceTask.id);
-    if (treeDistance !== null && treeDistance >= 2) {
-      // 距离 2 → 40分，距离 3 → 30分，距离 4 → 20分，距离 5+ → 10分
-      const distanceScore = Math.max(
-        PARKING_CONFIG.ZONE_SCORE_TREE_DISTANCE_FLOOR,
-        PARKING_CONFIG.ZONE_SCORE_TREE_DISTANCE_BASE - treeDistance * PARKING_CONFIG.ZONE_SCORE_TREE_DISTANCE_STEP,
-      );
-      score += distanceScore;
-      reasons.push(`tree-distance:${treeDistance}`);
-    }
-
-    if (task.stage !== null && referenceTask.stage !== null && task.stage === referenceTask.stage) {
-      score += PARKING_CONFIG.ZONE_SCORE_SAME_STAGE;
-      reasons.push('same-stage');
-      if (Math.abs((task.order ?? 0) - (referenceTask.order ?? 0)) <= 1) {
-        score += PARKING_CONFIG.ZONE_SCORE_ADJACENT_ORDER;
-        reasons.push('adjacent-order');
-      }
-    }
-
-    const normalizedScore = Math.max(0, Math.min(100, score));
-    const lane: DockLane = normalizedScore >= PARKING_CONFIG.ZONE_COMBO_THRESHOLD ? 'combo-select' : 'backup';
-    return {
-      lane,
-      relationScore: normalizedScore,
-      relationReason: reasons.length > 0
-        ? `auto:${reasons.join('|')}`
-        : 'auto:same-project-low-relation',
-    };
+    return inferDockAutoLane({
+      task,
+      referenceTask,
+      hasDirectConnection: this.hasDirectConnection(sourceProjectId, task.id, referenceTask.id),
+      treeDistance: this.computeTreeDistance(sourceProjectId, task.id, referenceTask.id),
+    });
   }
 
   pickAutoLaneForNextEntry(entriesSnapshot: DockEntry[] = []): DockLane {

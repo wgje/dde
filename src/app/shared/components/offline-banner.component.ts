@@ -1,13 +1,15 @@
 import { Component, inject, effect, signal, computed, ChangeDetectionStrategy, DestroyRef } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { SimpleSyncService } from '../../core/services/simple-sync.service';
+import { SyncStateService } from '../../core/services/sync/sync-state.service';
 import { ToastService } from '../../../services/toast.service';
 import { ActionQueueService } from '../../../services/action-queue.service';
 import { UiStateService } from '../../../services/ui-state.service';
 import { AuthService } from '../../../services/auth.service';
 import { NetworkAwarenessService } from '../../../services/network-awareness.service';
-import { AUTH_CONFIG, FEATURE_FLAGS } from '../../../config';
-import { isLocalModeEnabled } from '../../../services/guards/auth.guard';
+import {
+  readDemoBannerDismissed,
+  resolveRuntimeDemoBannerVisible,
+} from './demo-banner.helpers';
 
 /**
  * 离线状态通知 + 持久化状态指示器组件
@@ -57,8 +59,7 @@ import { isLocalModeEnabled } from '../../../services/guards/auth.guard';
   `,
 })
 export class OfflineBannerComponent {
-  private static readonly DEMO_BANNER_DISMISS_STORAGE_KEY = 'nanoflow.demo-banner-dismissed';
-  private syncService = inject(SimpleSyncService);
+  private syncStateService = inject(SyncStateService);
   private actionQueue = inject(ActionQueueService);
   private toast = inject(ToastService);
   private uiState = inject(UiStateService);
@@ -81,15 +82,15 @@ export class OfflineBannerComponent {
   /** 离线状态 */
   readonly isOffline = computed(() => 
     !this.networkAwareness.isOnline()
-    || !this.syncService.syncState().isOnline
-    || this.syncService.syncState().offlineMode
+    || !this.syncStateService.syncState().isOnline
+    || this.syncStateService.syncState().offlineMode
   );
 
   /** 存储冻结状态 */
   readonly isStorageFrozen = this.actionQueue.queueFrozen;
 
   /** 待同步编辑数（给用户可见的安心感） */
-  readonly pendingEditCount = computed(() => this.syncService.syncState().pendingCount);
+  readonly pendingEditCount = computed(() => this.syncStateService.syncState().pendingCount);
 
   /** 在线恢复后淡出定时器 */
   private fadeOutTimer: ReturnType<typeof setTimeout> | null = null;
@@ -106,8 +107,8 @@ export class OfflineBannerComponent {
 
     // 使用 effect 监听网络状态变化
     effect(() => {
-      const isOnline = this.networkAwareness.isOnline() && this.syncService.syncState().isOnline;
-      const offlineMode = this.syncService.syncState().offlineMode;
+      const isOnline = this.networkAwareness.isOnline() && this.syncStateService.syncState().isOnline;
+      const offlineMode = this.syncStateService.syncState().offlineMode;
       const queueFrozen = this.actionQueue.queueFrozen();
       
       // 检测网络连接状态变化
@@ -135,7 +136,8 @@ export class OfflineBannerComponent {
       }
 
       // 根据状态决定是否显示指示器
-      const shouldShow = !isOnline || offlineMode || queueFrozen;
+      const recovering = this.fadeOutTimer !== null;
+      const shouldShow = !isOnline || offlineMode || queueFrozen || recovering;
       this.showIndicator.set(shouldShow);
       
       // 更新状态
@@ -154,7 +156,7 @@ export class OfflineBannerComponent {
   }
 
   private cancelFadeOut(): void {
-    if (this.fadeOutTimer) {
+    if (this.fadeOutTimer !== null) {
       clearTimeout(this.fadeOutTimer);
       this.fadeOutTimer = null;
     }
@@ -168,17 +170,11 @@ export class OfflineBannerComponent {
   }
 
   private showMobileDemoBanner(): boolean {
-    if (!this.isMobile()) {
-      return false;
-    }
-
-    if (this.isDemoBannerDismissed()) {
-      return false;
-    }
-
-    return isLocalModeEnabled()
-      || this.auth.currentUserId() === AUTH_CONFIG.LOCAL_MODE_USER_ID
-      || (FEATURE_FLAGS.DEMO_MODE_ENABLED ?? false);
+    return resolveRuntimeDemoBannerVisible({
+      isMobile: this.isMobile(),
+      dismissed: this.isDemoBannerDismissed(),
+      currentUserId: this.auth.currentUserId(),
+    });
   }
 
   private isDemoBannerDismissed(): boolean {
@@ -186,27 +182,6 @@ export class OfflineBannerComponent {
       return false;
     }
 
-    try {
-      const stored = localStorage.getItem(OfflineBannerComponent.DEMO_BANNER_DISMISS_STORAGE_KEY);
-      if (!stored) {
-        return false;
-      }
-
-      const data = JSON.parse(stored) as { timestamp?: unknown } | null;
-      if (!data || typeof data.timestamp !== 'number') {
-        localStorage.removeItem(OfflineBannerComponent.DEMO_BANNER_DISMISS_STORAGE_KEY);
-        return false;
-      }
-
-      const dismissExpiryMs = 7 * 24 * 60 * 60 * 1000;
-      if (Date.now() - data.timestamp < dismissExpiryMs) {
-        return true;
-      }
-
-      localStorage.removeItem(OfflineBannerComponent.DEMO_BANNER_DISMISS_STORAGE_KEY);
-      return false;
-    } catch {
-      return false;
-    }
+    return readDemoBannerDismissed(localStorage);
   }
 }

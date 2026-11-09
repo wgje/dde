@@ -208,29 +208,37 @@ export class ParkingNoticeComponent implements OnDestroy {
 
   readonly isExiting = signal(false);
   readonly dismissingNotice = signal<ParkingNotice | null>(null);
-  readonly renderNotice = computed<ParkingNotice | null>(() => this.currentNotice() ?? this.dismissingNotice());
+  private readonly pendingActionRetainedNotice = signal<ParkingNotice | null>(null);
+  readonly renderNotice = computed<ParkingNotice | null>(() => (
+    this.dismissingNotice()
+    ?? this.currentNotice()
+    ?? this.pendingActionRetainedNotice()
+  ));
   readonly showSnoozeGuidance = computed(() => {
     const notice = this.currentNotice();
     if (!notice || notice.type !== 'reminder') return false;
     return notice.actions.some(a => a.key === 'ignore' && a.label.includes('已延后'));
   });
 
+  /** 动作进行中守卫：通知按钮连点时忽略后续调用，防止重复 startWork/snooze/undoEviction */
+  private readonly actionsInFlight = new Set<ParkingNotice>();
+
   private phase: DismissPhase = 'idle';
   private immuneTimer: ReturnType<typeof setTimeout> | null = null;
   private fallbackTimer: ReturnType<typeof setTimeout> | null = null;
   private dismissTimer: ReturnType<typeof setTimeout> | null = null;
   private noticeStartTime = 0;
-  private lastNoticeId: string | null = null;
+  private lastNotice: ParkingNotice | null = null;
 
   private clickHandler: ((e: MouseEvent) => void) | null = null;
   private scrollStartY: number | null = null;
 
   private readonly noticeStateEffect = effect(() => {
     const notice = this.currentNotice();
-    const noticeId = notice?.id ?? null;
-    if (noticeId === this.lastNoticeId) return;
+    if (this.dismissingNotice()) return;
+    if (notice === this.lastNotice) return;
 
-    this.lastNoticeId = noticeId;
+    this.lastNotice = notice;
     this.resetStateForNoticeChange(notice);
   });
 
@@ -259,57 +267,93 @@ export class ParkingNoticeComponent implements OnDestroy {
     return notice.actions.length > this.visibleActions(notice).length;
   }
 
-  handleAction(notice: ParkingNotice, key: ParkingNoticeActionKey): void {
+  async handleAction(notice: ParkingNotice, key: ParkingNoticeActionKey): Promise<void> {
+    if (this.actionsInFlight.has(notice)) return;
+    this.actionsInFlight.add(notice);
+    if (this.shouldRetainNoticeWhileActionSettles(notice, key) && this.currentNotice() === notice) {
+      this.pendingActionRetainedNotice.set(notice);
+    }
+    try {
+      const shouldDismiss = await this.runNoticeAction(notice, key);
+      if (shouldDismiss) {
+        this.dismissNotice('action', notice);
+      } else {
+        this.releasePendingActionRetainedNotice(notice);
+      }
+    } finally {
+      this.actionsInFlight.delete(notice);
+      if (!this.isExiting()) {
+        this.releasePendingActionRetainedNotice(notice);
+      }
+    }
+  }
+
+  private shouldRetainNoticeWhileActionSettles(
+    notice: ParkingNotice,
+    key: ParkingNoticeActionKey,
+  ): boolean {
+    return notice.type === 'reminder'
+      && (key === 'snooze-5m'
+        || key === 'snooze-30m'
+        || key === 'snooze-2h-later'
+        || key === 'ignore');
+  }
+
+  private releasePendingActionRetainedNotice(notice: ParkingNotice): void {
+    if (this.pendingActionRetainedNotice() === notice) {
+      this.pendingActionRetainedNotice.set(null);
+    }
+  }
+
+  private async runNoticeAction(notice: ParkingNotice, key: ParkingNoticeActionKey): Promise<boolean> {
+    const projectId = notice.type === 'reminder' ? notice.projectId : null;
     switch (key) {
       case 'start-work':
-        this.parkingService.startWork(notice.taskId);
-        break;
+        return projectId ? this.parkingService.startWork(projectId, notice.taskId) : false;
       case 'snooze-5m':
-        this.reminderService.snooze5m(notice.taskId);
-        break;
+        return projectId ? this.reminderService.snooze5m(projectId, notice.taskId) : false;
       case 'snooze-30m':
-        this.reminderService.snooze30m(notice.taskId);
-        break;
+        return projectId ? this.reminderService.snooze30m(projectId, notice.taskId) : false;
       case 'snooze-2h-later':
-        this.reminderService.snooze2h(notice.taskId);
-        break;
+        return projectId ? this.reminderService.snooze2h(projectId, notice.taskId) : false;
       case 'ignore':
-        this.reminderService.cancelReminder(notice.taskId);
-        break;
+        return projectId ? this.reminderService.cancelReminder(projectId, notice.taskId) : false;
       case 'undo-eviction':
         if (notice.evictionTokenId) {
-          this.parkingService.undoEviction(notice.evictionTokenId);
+          return this.parkingService.undoEviction(notice.evictionTokenId);
         }
-        break;
+        return false;
       case 'keep-parked':
         if (notice.evictionItems && notice.evictionItems.length > 0) {
+          const results: boolean[] = [];
           for (const item of notice.evictionItems) {
-            this.parkingService.keepParked(item.taskId);
+            results.push(await this.parkingService.keepParked(item.taskId));
           }
-        } else {
-          this.parkingService.keepParked(notice.taskId);
+          return results.every(Boolean);
         }
-        break;
+        return this.parkingService.keepParked(notice.taskId);
+      default:
+        return true;
     }
-
-    this.dismissNotice('action');
   }
 
   toggleEvictionExpanded(): void {
     this.evictionExpanded.update(v => !v);
   }
 
-  undoEvictionItem(notice: ParkingNotice, item: ParkingNoticeEvictionItem, event: Event): void {
+  async undoEvictionItem(notice: ParkingNotice, item: ParkingNoticeEvictionItem, event: Event): Promise<void> {
     event.stopPropagation();
     if (!this.isEvictionTokenActive(item.evictionTokenId)) return;
 
-    this.parkingService.undoEviction(item.evictionTokenId);
+    const restored = await this.parkingService.undoEviction(item.evictionTokenId);
+    if (!restored) return;
+
     this.dismissedEvictionTokenIds.update((set) => {
       return new Set([...set, item.evictionTokenId]);
     });
 
     if (this.visibleEvictionItems(notice).length === 0) {
-      this.dismissNotice('action');
+      this.dismissNotice('action', notice);
     }
   }
 
@@ -326,6 +370,9 @@ export class ParkingNoticeComponent implements OnDestroy {
   }
 
   private resetStateForNoticeChange(notice: ParkingNotice | null): void {
+    if (notice && this.pendingActionRetainedNotice() !== notice) {
+      this.pendingActionRetainedNotice.set(null);
+    }
     this.clearAllTimers();
     this.removeExternalListeners();
     this.isExiting.set(false);
@@ -350,15 +397,19 @@ export class ParkingNoticeComponent implements OnDestroy {
       if (notice.type === 'reminder') {
         const remainingFallback = Math.max(0, notice.fallbackTimeoutMs - notice.minVisibleMs);
         this.fallbackTimer = setTimeout(() => {
-          this.dismissNotice('fallback');
+          this.dismissNotice('fallback', notice);
         }, remainingFallback);
       }
     }, notice.minVisibleMs);
   }
 
-  private dismissNotice(reason: DismissReason): void {
-    if (this.phase === 'idle' || this.isExiting()) return;
-    const notice = this.currentNotice();
+  private dismissNotice(reason: DismissReason, expectedNotice?: ParkingNotice): void {
+    if (this.isExiting()) return;
+    const currentNotice = this.currentNotice();
+    if (expectedNotice && currentNotice && currentNotice !== expectedNotice) return;
+    if (expectedNotice && !currentNotice && this.pendingActionRetainedNotice() !== expectedNotice) return;
+    if (this.phase === 'idle' && !expectedNotice) return;
+    const notice = expectedNotice ?? currentNotice;
     if (!notice) return;
     this.dismissingNotice.set(notice);
 
@@ -370,6 +421,7 @@ export class ParkingNoticeComponent implements OnDestroy {
       const dismissingNotice = this.dismissingNotice();
       if (dismissingNotice) {
         this.consumeNoticeByType(dismissingNotice, reason);
+        this.releasePendingActionRetainedNotice(dismissingNotice);
       }
       this.dismissingNotice.set(null);
       this.phase = 'idle';
@@ -382,9 +434,9 @@ export class ParkingNoticeComponent implements OnDestroy {
   private consumeNoticeByType(notice: ParkingNotice, reason: DismissReason): void {
     if (notice.type === 'reminder') {
       if (reason === 'fallback') {
-        this.reminderService.handleNoticeFadeout(notice.taskId);
+        this.reminderService.handleNoticeFadeout(notice.projectId, notice.id, notice.taskId);
       } else {
-        this.reminderService.clearActiveNotice();
+        this.reminderService.clearActiveNotice(notice.projectId, notice.id, notice.taskId);
       }
       return;
     }
@@ -398,7 +450,7 @@ export class ParkingNoticeComponent implements OnDestroy {
     this.clickHandler = (e: MouseEvent) => {
       if (this.phase !== 'interactive') return;
       if (!this.elRef.nativeElement.contains(e.target as Node)) {
-        this.dismissNotice('interactive');
+        this.dismissNotice('interactive', notice);
       }
     };
     document.addEventListener('click', this.clickHandler, { capture: true });
@@ -439,15 +491,17 @@ export class ParkingNoticeComponent implements OnDestroy {
   }
 
   private clearAllTimers(): void {
-    if (this.immuneTimer) {
+    // 显式 null 判断：timer handle 为 0 时也必须清理，否则旧通知的 immune/fallback
+    // 回调会在下一条通知的免疫窗口内重放，提前解锁交互甚至误 dismiss 新通知
+    if (this.immuneTimer !== null) {
       clearTimeout(this.immuneTimer);
       this.immuneTimer = null;
     }
-    if (this.fallbackTimer) {
+    if (this.fallbackTimer !== null) {
       clearTimeout(this.fallbackTimer);
       this.fallbackTimer = null;
     }
-    if (this.dismissTimer) {
+    if (this.dismissTimer !== null) {
       clearTimeout(this.dismissTimer);
       this.dismissTimer = null;
     }

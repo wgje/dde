@@ -1,7 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { DestroyRef, Injector, runInInjectionContext, signal } from '@angular/core';
 import { ActionQueueService } from '../../services/action-queue.service';
+import { ActionQueueEnqueueMutationService } from '../../services/action-queue-enqueue-mutation.service';
+import { ActionQueueOwnerStorageService } from '../../services/action-queue-owner-storage.service';
+import { ActionQueueSchedulerService } from '../../services/action-queue-scheduler.service';
 import { ActionQueueStorageService, LOCAL_QUEUE_CONFIG } from '../../services/action-queue-storage.service';
+import { ActionQueueSyncWriterLeaseService } from '../../services/action-queue-sync-writer-lease.service';
+import { ActionQueueViewStateService } from '../../services/action-queue-view-state.service';
 import { ChangeTrackerService } from '../../services/change-tracker.service';
 import { LoggerService } from '../../services/logger.service';
 import { ToastService } from '../../services/toast.service';
@@ -11,48 +16,27 @@ import { NetworkAwarenessService } from '../../services/network-awareness.servic
 import { AuthService } from '../../services/auth.service';
 import { QueueBackupService } from '../../services/queue-backup.service';
 import { RetryQueueService } from '../../app/core/services/sync/retry-queue.service';
+import { LocalBackupUiRestorePreActionQueueFenceService } from '../../services/local-backup-ui-restore-pre-actionqueue-fence.service';
+import { SyncWriterLeaseService } from '../../services/sync-writer-lease.service';
+import { UserSessionService } from '../../services/user-session.service';
+import { WriteGuardService } from '../../services/write-guard.service';
+import {
+  mockLocalBackupUiRestorePreActionQueueFence,
+  mockLoggerCategory,
+  mockLoggerService,
+  mockNetworkAwarenessService,
+  mockQueueBackupService,
+  mockRetryQueueService,
+  mockSentryAlertService,
+  mockSyncWriterLeaseService,
+  mockToastService,
+  mockWriteGuardService,
+  resetActionQueueServiceMocks,
+} from '../../services/action-queue-service-test-harness.spec-helpers';
 import { createMockDestroyRef, mockSentryLazyLoaderService } from '../../test-setup.mocks';
 import { SYNC_CONFIG, SYNC_DURABILITY_CONFIG } from '../../config';
 import type { Task, Connection } from '../../models';
 import { resetBrowserNetworkSuspensionTrackingForTests } from '../../utils/browser-network-suspension';
-
-const mockLoggerCategory = {
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
-  debug: vi.fn(),
-};
-
-const mockLoggerService = {
-  category: vi.fn(() => mockLoggerCategory),
-};
-
-const mockToastService = {
-  success: vi.fn(),
-  error: vi.fn(),
-  warning: vi.fn(),
-  info: vi.fn(),
-};
-
-const mockSentryAlertService = {
-  captureException: vi.fn(),
-  captureMessage: vi.fn(),
-  setContext: vi.fn(),
-  updateSyncContext: vi.fn(),
-};
-
-const mockNetworkAwarenessService = {
-  setStoragePressure: vi.fn(),
-};
-
-const mockQueueBackupService = {
-  backupQueue: vi.fn().mockResolvedValue(true),
-  restoreQueue: vi.fn().mockResolvedValue(null),
-};
-
-const mockRetryQueueService = {
-  removeByEntity: vi.fn(() => false),
-};
 
 const createTask = (id: string, overrides?: Partial<Task>): Task => ({
   id,
@@ -84,10 +68,11 @@ describe('Sync Integrity Invariants (2026-02-07)', () => {
   let changeTracker: ChangeTrackerService;
   let destroyRefCleanup: (() => void) | undefined;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     resetBrowserNetworkSuspensionTrackingForTests();
     localStorage.clear();
     vi.clearAllMocks();
+    resetActionQueueServiceMocks();
     Object.defineProperty(document, 'visibilityState', {
       value: 'visible',
       writable: true,
@@ -100,6 +85,11 @@ describe('Sync Integrity Invariants (2026-02-07)', () => {
     const injector = Injector.create({
       providers: [
         ActionQueueService,
+        ActionQueueEnqueueMutationService,
+        ActionQueueOwnerStorageService,
+        ActionQueueSchedulerService,
+        ActionQueueSyncWriterLeaseService,
+        ActionQueueViewStateService,
         ActionQueueStorageService,
         ChangeTrackerService,
         { provide: LoggerService, useValue: mockLoggerService },
@@ -109,7 +99,28 @@ describe('Sync Integrity Invariants (2026-02-07)', () => {
         { provide: NetworkAwarenessService, useValue: mockNetworkAwarenessService },
         { provide: QueueBackupService, useValue: mockQueueBackupService },
         { provide: RetryQueueService, useValue: mockRetryQueueService },
-        { provide: AuthService, useValue: { currentUserId: signal<string | null>('test-user') } },
+        { provide: WriteGuardService, useValue: mockWriteGuardService },
+        { provide: SyncWriterLeaseService, useValue: mockSyncWriterLeaseService },
+        {
+          provide: LocalBackupUiRestorePreActionQueueFenceService,
+          useValue: mockLocalBackupUiRestorePreActionQueueFence,
+        },
+        {
+          provide: AuthService,
+          useValue: {
+            currentUserId: signal<string | null>('test-user'),
+            captureAuthIdentityFence: () => 'auth:test-user',
+          },
+        },
+        {
+          provide: UserSessionService,
+          useValue: {
+            getCurrentSessionGeneration: () => 0,
+            isSessionContextCurrent: (generation: number, ownerUserId: string) => (
+              generation === 0 && ownerUserId === 'test-user'
+            ),
+          },
+        },
         { provide: DestroyRef, useValue: destroyRef },
       ],
     });
@@ -119,10 +130,12 @@ describe('Sync Integrity Invariants (2026-02-07)', () => {
       actionQueueStorage = injector.get(ActionQueueStorageService);
       changeTracker = injector.get(ChangeTrackerService);
     });
+    await actionQueue.reloadFromStorageForCurrentOwner();
+    vi.clearAllMocks();
   });
 
   afterEach(() => {
-    actionQueue.reset();
+    actionQueue?.reset();
     destroyRefCleanup?.();
     resetBrowserNetworkSuspensionTrackingForTests();
     vi.useRealTimers();
@@ -156,7 +169,7 @@ describe('Sync Integrity Invariants (2026-02-07)', () => {
     expect(actionQueue.pendingActions().some(a => a.id === firstActionId)).toBe(true);
   });
 
-  it('QUEUE-DURABILITY-002: 冻结状态下应走内存兜底接收新写', () => {
+  it('QUEUE-DURABILITY-002: 冻结状态下应拒绝新写并保持队列不变', () => {
     actionQueueStorage.isOnline = false;
 
     actionQueue.enqueue({
@@ -177,8 +190,8 @@ describe('Sync Integrity Invariants (2026-02-07)', () => {
       payload: { task: createTask('task-2'), projectId: 'p-1' },
     });
 
-    expect(actionId).not.toBe('');
-    expect(actionQueue.queueSize()).toBe(sizeBeforeFreeze + 1);
+    expect(actionId).toBe('');
+    expect(actionQueue.queueSize()).toBe(sizeBeforeFreeze);
     expect(mockToastService.warning).toHaveBeenCalled();
   });
 
@@ -401,7 +414,7 @@ describe('Sync Integrity Invariants (2026-02-07)', () => {
     });
 
     // 添加 create 和 update 到同一实体
-    actionQueueStorage.isOnline = true;
+    actionQueueStorage.isOnline = false;
 
     actionQueue.enqueue({
       type: 'create',
@@ -418,6 +431,9 @@ describe('Sync Integrity Invariants (2026-02-07)', () => {
     });
 
     // processQueue 应先处理 create，失败后跳过 update
+    expect(actionQueue.getCurrentOwnerStorageLoadState()).toBe('loaded');
+    expect(actionQueue.queueSize()).toBe(1);
+    actionQueueStorage.isOnline = true;
     await actionQueue.processQueue();
 
     expect(createCallCount).toBe(1);
@@ -500,7 +516,7 @@ describe('Sync Integrity Invariants (2026-02-07)', () => {
 
   // ==================== SYNC-CROSS-012: Queue Semantics Convergence ====================
 
-  it('SYNC-CROSS-012: ActionQueue 冻结状态应走内存兜底继续入队', () => {
+  it('SYNC-CROSS-012: ActionQueue 冻结状态应拒绝新入队', () => {
     actionQueueStorage.isOnline = false;
 
     // 设置冻结状态
@@ -514,8 +530,8 @@ describe('Sync Integrity Invariants (2026-02-07)', () => {
       payload: { task: createTask('task-frozen'), projectId: 'p-1' },
     });
 
-    expect(id).not.toBe('');
-    expect(actionQueue.queueSize()).toBe(1);
+    expect(id).toBe('');
+    expect(actionQueue.queueSize()).toBe(0);
   });
 
   it('SYNC-CROSS-012: delete 已删除实体的 update 应被忽略', () => {

@@ -4,8 +4,120 @@
  * 所有函数均为无状态、无 `this`、不依赖 Angular 服务的纯函数，
  * 便于独立测试与跨模块复用。
  */
-import { DockEntry, DockPendingDecision, DockTaskStatus } from '../models/parking-dock';
+import {
+  DockEntry,
+  DockPendingDecision,
+  DockTaskStatus,
+  RecommendationGroupType,
+} from '../models/parking-dock';
 import { entryOrder, hasActiveWaitTimer, isWaitingLike } from './dock-engine.utils';
+
+export interface ApplyRecommendationEntriesInput {
+  suspendedTaskId: string;
+  recommendationIds: string[];
+  scoreByTaskId: ReadonlyMap<string, number>;
+}
+
+export interface ApplyPendingDecisionEntryFlagsInput {
+  candidateIds: string[];
+  scoreByTaskId: ReadonlyMap<string, number>;
+}
+
+export interface BuildDockPendingDecisionInput {
+  rootTaskId: string;
+  rootRemainingMinutes: number;
+  candidateGroups: Array<{ type: RecommendationGroupType; taskIds: string[] }>;
+  reason: string;
+  now: Date;
+  minAutoPromoteMs: number;
+  autoPromoteAfterMs?: number;
+}
+
+export interface BuildDockPendingDecisionResult {
+  candidateIds: string[];
+  pendingDecision: DockPendingDecision;
+}
+
+export function applyRecommendationEntries(
+  entries: DockEntry[],
+  input: ApplyRecommendationEntriesInput,
+): DockEntry[] {
+  return entries.map(entry => {
+    if (entry.taskId === input.suspendedTaskId) {
+      return {
+        ...entry,
+        status: 'suspended_waiting',
+        systemSelected: false,
+        recommendationLocked: false,
+        recommendedScore: null,
+      };
+    }
+    if (input.recommendationIds.includes(entry.taskId)) {
+      return {
+        ...entry,
+        status: 'pending_start',
+        systemSelected: true,
+        recommendationLocked: true,
+        recommendedScore: input.scoreByTaskId.get(entry.taskId) ?? null,
+      };
+    }
+    return {
+      ...entry,
+      systemSelected: false,
+      recommendationLocked: false,
+      recommendedScore: input.scoreByTaskId.get(entry.taskId) ?? null,
+    };
+  });
+}
+
+export function applyPendingDecisionEntryFlags(
+  entries: DockEntry[],
+  input: ApplyPendingDecisionEntryFlagsInput,
+): DockEntry[] {
+  return entries.map(entry => {
+    if (input.candidateIds.includes(entry.taskId)) {
+      return {
+        ...entry,
+        systemSelected: true,
+        recommendationLocked: true,
+        recommendedScore: input.scoreByTaskId.get(entry.taskId) ?? null,
+      };
+    }
+    return {
+      ...entry,
+      systemSelected: false,
+      recommendationLocked: false,
+    };
+  });
+}
+
+// ---------------------------------------------------------------------------
+//  buildDockPendingDecision
+// ---------------------------------------------------------------------------
+
+export function buildDockPendingDecision(input: BuildDockPendingDecisionInput): BuildDockPendingDecisionResult {
+  const createdAt = input.now.toISOString();
+  const autoPromoteAfterMs =
+    typeof input.autoPromoteAfterMs === 'number'
+      ? Math.max(input.minAutoPromoteMs, input.autoPromoteAfterMs)
+      : null;
+  const candidateIds = input.candidateGroups.flatMap(group => group.taskIds);
+
+  return {
+    candidateIds,
+    pendingDecision: {
+      rootTaskId: input.rootTaskId,
+      rootRemainingMinutes: input.rootRemainingMinutes,
+      candidateGroups: input.candidateGroups,
+      reason: input.reason,
+      expiresAt: autoPromoteAfterMs === null
+        ? undefined
+        : new Date(input.now.getTime() + autoPromoteAfterMs).toISOString(),
+      autoPromoteAfterMs: autoPromoteAfterMs ?? undefined,
+      createdAt,
+    },
+  };
+}
 
 // ---------------------------------------------------------------------------
 //  deriveBackgroundStatus
@@ -132,6 +244,59 @@ export function pendingCandidateIds(pending: DockPendingDecision): string[] {
   return pending.candidateGroups.flatMap(group => group.taskIds);
 }
 
+function compareFocusStatus(a: DockEntry, b: DockEntry): number {
+  if (a.status === 'focusing') return -1;
+  if (b.status === 'focusing') return 1;
+  return 0;
+}
+
+function compareOrderHint(
+  a: DockEntry,
+  b: DockEntry,
+  hintIndex: ReadonlyMap<string, number>,
+): number {
+  const aHintIndex = hintIndex.get(a.taskId);
+  const bHintIndex = hintIndex.get(b.taskId);
+  if (aHintIndex === undefined && bHintIndex === undefined) return 0;
+  if (aHintIndex !== undefined && bHintIndex !== undefined && aHintIndex !== bHintIndex) {
+    return aHintIndex - bHintIndex;
+  }
+  if (aHintIndex !== undefined && bHintIndex === undefined) return -1;
+  if (bHintIndex !== undefined && aHintIndex === undefined) return 1;
+  return 0;
+}
+
+function compareDemotedEntry(
+  a: DockEntry,
+  b: DockEntry,
+  demotedTaskId: string | null,
+): number {
+  if (!demotedTaskId) return 0;
+  const aDemoted = a.taskId === demotedTaskId && a.status === 'stalled';
+  const bDemoted = b.taskId === demotedTaskId && b.status === 'stalled';
+  if (aDemoted && !bDemoted) return -1;
+  if (bDemoted && !aDemoted) return 1;
+  return 0;
+}
+
+function compareConsoleStatus(a: DockEntry, b: DockEntry): number {
+  const aStalled = a.status === 'stalled';
+  const bStalled = b.status === 'stalled';
+  if (aStalled && !bStalled) return -1;
+  if (bStalled && !aStalled) return 1;
+
+  const aSuspended = isWaitingLike(a.status);
+  const bSuspended = isWaitingLike(b.status);
+  if (aSuspended && !bSuspended) return 1;
+  if (bSuspended && !aSuspended) return -1;
+  return 0;
+}
+
+function compareStableEntryOrder(a: DockEntry, b: DockEntry): number {
+  if (a.dockedOrder !== b.dockedOrder) return a.dockedOrder - b.dockedOrder;
+  return a.taskId.localeCompare(b.taskId);
+}
+
 // ---------------------------------------------------------------------------
 //  sortConsoleEntriesForDisplay
 // ---------------------------------------------------------------------------
@@ -146,35 +311,10 @@ export function sortConsoleEntriesForDisplay(
   const hintIndex = new Map(orderHint.map((taskId, index) => [taskId, index] as const));
 
   return [...entries].sort((a, b) => {
-    if (a.status === 'focusing') return -1;
-    if (b.status === 'focusing') return 1;
-
-    const aHintIndex = hintIndex.get(a.taskId);
-    const bHintIndex = hintIndex.get(b.taskId);
-    if (aHintIndex !== undefined || bHintIndex !== undefined) {
-      if (aHintIndex !== undefined && bHintIndex !== undefined && aHintIndex !== bHintIndex) return aHintIndex - bHintIndex;
-      if (aHintIndex !== undefined && bHintIndex === undefined) return -1;
-      if (bHintIndex !== undefined && aHintIndex === undefined) return 1;
-    }
-
-    if (demotedTaskId) {
-      const aDemoted = a.taskId === demotedTaskId && a.status === 'stalled';
-      const bDemoted = b.taskId === demotedTaskId && b.status === 'stalled';
-      if (aDemoted && !bDemoted) return -1;
-      if (bDemoted && !aDemoted) return 1;
-    }
-
-    const aStalled = a.status === 'stalled';
-    const bStalled = b.status === 'stalled';
-    if (aStalled && !bStalled) return -1;
-    if (bStalled && !aStalled) return 1;
-
-    const aSuspended = isWaitingLike(a.status);
-    const bSuspended = isWaitingLike(b.status);
-    if (aSuspended && !bSuspended) return 1;
-    if (bSuspended && !aSuspended) return -1;
-
-    if (a.dockedOrder !== b.dockedOrder) return a.dockedOrder - b.dockedOrder;
-    return a.taskId.localeCompare(b.taskId);
+    return compareFocusStatus(a, b)
+      || compareOrderHint(a, b, hintIndex)
+      || compareDemotedEntry(a, b, demotedTaskId)
+      || compareConsoleStatus(a, b)
+      || compareStableEntryOrder(a, b);
   });
 }

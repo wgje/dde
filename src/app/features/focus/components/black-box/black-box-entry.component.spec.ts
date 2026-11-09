@@ -1,6 +1,6 @@
 import { TestBed } from '@angular/core/testing';
 import { Injector, runInInjectionContext, signal } from '@angular/core';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { BlackBoxEntryComponent } from './black-box-entry.component';
 import type { BlackBoxEntry } from '../../../../../models';
 import { AUTH_CONFIG } from '../../../../../config/auth.config';
@@ -109,5 +109,43 @@ describe('BlackBoxEntryComponent', () => {
       updatedAt: '2026-05-08T10:01:23.456Z',
     })) as typeof component.entry;
     expect(component.syncDebugAttribute()).toBe('synced|2026-05-08T10:01:23.456Z');
+  });
+
+  it('已读条目按 r 不应再次发出 markRead', () => {
+    const component = runInInjectionContext(injector, () => new BlackBoxEntryComponent());
+    component.entry = (() => createEntry({ isRead: true })) as typeof component.entry;
+    const markReadSpy = vi.spyOn(component.markRead, 'emit');
+    const event = {
+      key: 'r',
+      ctrlKey: false,
+      metaKey: false,
+      altKey: false,
+      preventDefault: vi.fn(),
+      stopPropagation: vi.fn(),
+    } as unknown as KeyboardEvent;
+
+    component.handleKeydown(event);
+
+    expect(markReadSpy).not.toHaveBeenCalled();
+    expect(event.preventDefault).not.toHaveBeenCalled();
+  });
+
+  it('已完成条目按 c 不应再次发出 markCompleted', () => {
+    const component = runInInjectionContext(injector, () => new BlackBoxEntryComponent());
+    component.entry = (() => createEntry({ isCompleted: true })) as typeof component.entry;
+    const markCompletedSpy = vi.spyOn(component.markCompleted, 'emit');
+    const event = {
+      key: 'c',
+      ctrlKey: false,
+      metaKey: false,
+      altKey: false,
+      preventDefault: vi.fn(),
+      stopPropagation: vi.fn(),
+    } as unknown as KeyboardEvent;
+
+    component.handleKeydown(event);
+
+    expect(markCompletedSpy).not.toHaveBeenCalled();
+    expect(event.preventDefault).not.toHaveBeenCalled();
   });
 });

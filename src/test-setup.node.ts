@@ -6,6 +6,7 @@
 
 import '@angular/compiler';
 import './test-setup.mocks';
+import { afterEach, vi } from 'vitest';
 
 const g = globalThis as typeof globalThis & {
   window?: Window & typeof globalThis;
@@ -95,5 +96,9 @@ if (typeof cancelAnimationFrame === 'undefined') {
   (globalThis as typeof globalThis & { cancelAnimationFrame: (id: number) => void }).cancelAnimationFrame =
     (id: number) => clearTimeout(id);
 }
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 export { resetMocks } from './test-setup.mocks';

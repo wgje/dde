@@ -1,8 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { Injector, runInInjectionContext } from '@angular/core';
+import { Injector, runInInjectionContext, signal } from '@angular/core';
 import { TabSyncService, TabEditLock, ConcurrentEditEvent } from './tab-sync.service';
 import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
+import { AuthService } from './auth.service';
+import { SessionRuntimeResetRegistry } from './session-runtime-reset.service';
 
 /**
  * Mock BroadcastChannel for testing
@@ -22,7 +24,7 @@ class MockBroadcastChannel {
     for (const instance of MockBroadcastChannel.instances) {
       if (instance !== this && instance.name === this.name && instance.onmessage) {
         // Simulate async delivery
-        setTimeout(() => instance.onmessage?.({ data }), 0);
+        queueMicrotask(() => instance.onmessage?.({ data }));
       }
     }
   }
@@ -71,14 +73,17 @@ describe('TabSyncService', () => {
     };
   };
 
-  const createServiceInstance = () => {
+  const createServiceInstance = (ownerUserId = 'user-1') => {
     const toast = createToastMock();
     const logger = createLoggerMock();
+    const currentUserId = signal<string | null>(ownerUserId);
 
     const injector = Injector.create({
       providers: [
         { provide: ToastService, useValue: toast },
         { provide: LoggerService, useValue: logger.provider },
+        { provide: AuthService, useValue: { currentUserId } },
+        SessionRuntimeResetRegistry,
       ],
     });
 
@@ -90,11 +95,16 @@ describe('TabSyncService', () => {
       toast,
       logger: logger.provider,
       loggerMethods: logger.methods,
+      currentUserId,
+      sessionRuntimeReset: runInInjectionContext(
+        injector,
+        () => injector.get(SessionRuntimeResetRegistry),
+      ),
     };
   };
 
   const flushBroadcast = async (): Promise<void> => {
-    await new Promise(resolve => setTimeout(resolve, 0));
+    await Promise.resolve();
   };
   
   beforeEach(() => {
@@ -124,6 +134,8 @@ describe('TabSyncService', () => {
     }
     managedServices = [];
     MockBroadcastChannel.reset();
+    vi.restoreAllMocks();
+    vi.useRealTimers();
   });
   
   describe('编辑锁基本功能', () => {
@@ -208,6 +220,22 @@ describe('TabSyncService', () => {
       await flushBroadcast();
       expect(secondTab.service.isBeingEditedByOtherTab('task-1', 'content')).toBe(false);
     });
+
+    it('销毁后不应处理已经排队的跨标签编辑锁消息', async () => {
+      const firstTab = createServiceInstance();
+      const secondTab = createServiceInstance();
+      const onConcurrentEdit = vi.fn();
+
+      secondTab.service.setOnConcurrentEditCallback(onConcurrentEdit);
+      firstTab.service.acquireEditLock('task-1', 'content');
+      secondTab.service.ngOnDestroy();
+      managedServices = managedServices.filter(item => item !== secondTab.service);
+
+      await flushBroadcast();
+
+      expect(secondTab.service.isBeingEditedByOtherTab('task-1', 'content')).toBe(false);
+      expect(onConcurrentEdit).not.toHaveBeenCalled();
+    });
   });
   
   describe('项目打开/关闭', () => {
@@ -223,6 +251,239 @@ describe('TabSyncService', () => {
     it('应该能通知项目关闭', () => {
       service.notifyProjectOpen('proj-1', 'Test Project');
       expect(() => service.notifyProjectClose()).not.toThrow();
+    });
+
+    it('销毁时应向其他标签页广播项目关闭', async () => {
+      const firstTab = createServiceInstance();
+      const secondTab = createServiceInstance();
+
+      firstTab.service.notifyProjectOpen('proj-1', 'Test Project');
+      secondTab.service.notifyProjectOpen('proj-1', 'Test Project');
+      await flushBroadcast();
+
+      expect(firstTab.service.getOtherTabsCount('proj-1')).toBe(1);
+
+      secondTab.service.ngOnDestroy();
+      managedServices = managedServices.filter(item => item !== secondTab.service);
+      await flushBroadcast();
+
+      expect(firstTab.service.getOtherTabsCount('proj-1')).toBe(0);
+    });
+  });
+
+  describe('会话运行时重置', () => {
+    it('reset 时广播项目关闭与编辑解锁并清空本地会话状态', async () => {
+      const firstTab = createServiceInstance('shared-owner');
+      const secondTab = createServiceInstance('shared-owner');
+      firstTab.service.notifyProjectOpen('proj-reset', 'Reset Project');
+      secondTab.service.notifyProjectOpen('proj-reset', 'Reset Project');
+      firstTab.service.acquireEditLock('task-reset', 'content');
+      await flushBroadcast();
+
+      expect(secondTab.service.getOtherTabsCount('proj-reset')).toBe(1);
+      expect(secondTab.service.isBeingEditedByOtherTab('task-reset', 'content')).toBe(true);
+
+      firstTab.sessionRuntimeReset.resetAll('owner-change');
+      await flushBroadcast();
+
+      expect(secondTab.service.getOtherTabsCount('proj-reset')).toBe(0);
+      expect(secondTab.service.isBeingEditedByOtherTab('task-reset', 'content')).toBe(false);
+      expect((firstTab.service as unknown as { currentProjectId: string | null }).currentProjectId).toBeNull();
+      expect((firstTab.service as unknown as { localEditLocks: Map<string, unknown> }).localEditLocks.size).toBe(0);
+      expect(firstTab.service.concurrentEditCount()).toBe(0);
+    });
+
+    it('不同 owner 的标签页消息互不计数且不触发冲突提醒', async () => {
+      const firstTab = createServiceInstance('owner-a');
+      const secondTab = createServiceInstance('owner-b');
+
+      firstTab.service.notifyProjectOpen('shared-project-id', 'Owner A Project');
+      secondTab.service.notifyProjectOpen('shared-project-id', 'Owner B Project');
+      await flushBroadcast();
+
+      expect(firstTab.service.getOtherTabsCount('shared-project-id')).toBe(0);
+      expect(secondTab.service.getOtherTabsCount('shared-project-id')).toBe(0);
+      expect(firstTab.toast.warning).not.toHaveBeenCalled();
+      expect(secondTab.toast.warning).not.toHaveBeenCalled();
+    });
+
+    it('旧 owner 已排队的 data-synced 在切号后不得刷新新会话', async () => {
+      const sender = createServiceInstance('old-owner');
+      const receiver = createServiceInstance('old-owner');
+      const onDataSynced = vi.fn();
+      receiver.service.notifyProjectOpen('same-project-id', 'Old Project');
+      receiver.service.setOnDataSyncedCallback(onDataSynced);
+
+      sender.service.notifyDataSynced('same-project-id', '2026-07-14T00:00:00.000Z');
+      receiver.sessionRuntimeReset.resetAll('owner-change');
+      receiver.currentUserId.set('new-owner');
+      receiver.service.notifyProjectOpen('same-project-id', 'New Project');
+      await flushBroadcast();
+
+      expect(onDataSynced).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('BroadcastChannel 初始化边界', () => {
+    it('BroadcastChannel 创建失败时不应启动心跳定时器', () => {
+      vi.useFakeTimers();
+      for (const managedService of managedServices) {
+        managedService.ngOnDestroy();
+      }
+      managedServices = [];
+      const logger = createLoggerMock();
+      class ThrowingBroadcastChannel {
+        constructor(_name: string) {
+          throw new Error('channel unavailable');
+        }
+      }
+      (globalThis as unknown as { BroadcastChannel?: typeof ThrowingBroadcastChannel }).BroadcastChannel = ThrowingBroadcastChannel;
+      const injector = Injector.create({
+        providers: [
+          { provide: ToastService, useValue: createToastMock() },
+          { provide: LoggerService, useValue: logger.provider },
+          { provide: AuthService, useValue: { currentUserId: signal<string | null>('user-1') } },
+          SessionRuntimeResetRegistry,
+        ],
+      });
+      const instance = runInInjectionContext(injector, () => new TabSyncService());
+      managedServices.push(instance);
+      const sendHeartbeatSpy = vi.spyOn(
+        instance as unknown as { sendHeartbeat: () => void },
+        'sendHeartbeat',
+      );
+
+      vi.advanceTimersByTime(120_000);
+
+      expect(sendHeartbeatSpy).not.toHaveBeenCalled();
+      expect(logger.methods.error).toHaveBeenCalledWith(
+        'BroadcastChannel 建立失败',
+        expect.any(Error),
+      );
+      vi.useRealTimers();
+    });
+  });
+
+  describe('定时器清理边界', () => {
+    it('销毁时应清理浏览器返回 0 的心跳 interval handle', () => {
+      for (const managedService of managedServices) {
+        managedService.ngOnDestroy();
+      }
+      managedServices = [];
+      const setIntervalSpy = vi
+        .spyOn(globalThis, 'setInterval')
+        .mockImplementation((() => 0) as unknown as typeof setInterval);
+      const clearIntervalSpy = vi
+        .spyOn(globalThis, 'clearInterval')
+        .mockImplementation((() => undefined) as unknown as typeof clearInterval);
+      const instance = createServiceInstance().service;
+
+      expect(setIntervalSpy).toHaveBeenCalled();
+      instance.ngOnDestroy();
+      managedServices = managedServices.filter(item => item !== instance);
+
+      expect(clearIntervalSpy).toHaveBeenCalledWith(0);
+    });
+
+    it('销毁时 heartbeat interval 清理失败仍应关闭 channel 并清空状态', () => {
+      const clearIntervalSpy = vi
+        .spyOn(globalThis, 'clearInterval')
+        .mockImplementationOnce((() => {
+          throw new Error('heartbeat interval cleanup failed');
+        }) as unknown as typeof clearInterval)
+        .mockImplementation((() => undefined) as unknown as typeof clearInterval);
+
+      service.notifyProjectOpen('proj-1', 'Test Project');
+
+      expect(() => service.ngOnDestroy()).not.toThrow();
+      managedServices = managedServices.filter(item => item !== service);
+
+      expect(clearIntervalSpy).toHaveBeenCalled();
+      expect(MockBroadcastChannel.instances).toHaveLength(0);
+      expect((service as unknown as { heartbeatTimer: unknown }).heartbeatTimer).toBeNull();
+      expect((service as unknown as { currentProjectId: unknown }).currentProjectId).toBeNull();
+    });
+
+    it('释放编辑锁时应清理浏览器返回 0 的锁刷新 interval handle', () => {
+      for (const managedService of managedServices) {
+        managedService.ngOnDestroy();
+      }
+      managedServices = [];
+      let intervalIndex = 0;
+      vi.spyOn(globalThis, 'setInterval')
+        .mockImplementation((() => {
+          const handle = intervalIndex === 0 ? 1 : 0;
+          intervalIndex += 1;
+          return handle;
+        }) as unknown as typeof setInterval);
+      const clearIntervalSpy = vi
+        .spyOn(globalThis, 'clearInterval')
+        .mockImplementation((() => undefined) as unknown as typeof clearInterval);
+      const instance = createServiceInstance().service;
+
+      instance.acquireEditLock('task-1', 'content');
+      instance.releaseEditLock('task-1', 'content');
+
+      expect(clearIntervalSpy).toHaveBeenCalledWith(0);
+
+      managedServices = managedServices.filter(item => item !== instance);
+      instance.ngOnDestroy();
+    });
+
+    it('释放编辑锁时锁刷新 interval 清理失败仍应释放本地锁并广播解锁', async () => {
+      const firstTab = createServiceInstance();
+      const secondTab = createServiceInstance();
+      firstTab.service.acquireEditLock('task-1', 'content');
+      await flushBroadcast();
+      expect(secondTab.service.isBeingEditedByOtherTab('task-1', 'content')).toBe(true);
+      const clearIntervalSpy = vi
+        .spyOn(globalThis, 'clearInterval')
+        .mockImplementationOnce((() => {
+          throw new Error('lock refresh interval cleanup failed');
+        }) as unknown as typeof clearInterval)
+        .mockImplementation((() => undefined) as unknown as typeof clearInterval);
+
+      expect(() => firstTab.service.releaseEditLock('task-1', 'content')).not.toThrow();
+      await flushBroadcast();
+
+      expect(clearIntervalSpy).toHaveBeenCalled();
+      expect(secondTab.service.isBeingEditedByOtherTab('task-1', 'content')).toBe(false);
+      expect((firstTab.service as unknown as { localEditLocks: Map<string, unknown> }).localEditLocks.size).toBe(0);
+      expect((firstTab.service as unknown as { lockRefreshTimers: Map<string, unknown> }).lockRefreshTimers.size).toBe(0);
+    });
+
+    it('忽略被新锁刷新 timer 替换后的旧 interval tick', () => {
+      for (const managedService of managedServices) {
+        managedService.ngOnDestroy();
+      }
+      managedServices = [];
+      const intervalCallbacks: Array<() => void> = [];
+      vi.spyOn(globalThis, 'setInterval')
+        .mockImplementation(((callback: TimerHandler) => {
+          intervalCallbacks.push(
+            typeof callback === 'function'
+              ? () => callback()
+              : () => undefined,
+          );
+          return intervalCallbacks.length;
+        }) as unknown as typeof setInterval);
+      vi.spyOn(globalThis, 'clearInterval')
+        .mockImplementation((() => undefined) as unknown as typeof clearInterval);
+      const created = createServiceInstance();
+      const instance = created.service;
+
+      instance.acquireEditLock('task-1', 'content');
+      const staleLockRefreshTick = intervalCallbacks[1];
+      instance.acquireEditLock('task-1', 'content');
+
+      staleLockRefreshTick();
+      managedServices = managedServices.filter(item => item !== instance);
+      instance.ngOnDestroy();
+
+      expect(created.loggerMethods.debug).not.toHaveBeenCalledWith(
+        '刷新编辑锁',
+        { taskId: 'task-1', field: 'content' },
+      );
     });
   });
   

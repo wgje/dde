@@ -1,0 +1,367 @@
+{
+  "version": 1,
+  "description": "将用户可感知的实现区域绑定到对应的中文 handbook 页面；命中触发路径的变更必须在同一变更中更新至少一篇绑定页面。",
+  "routes": [
+    {
+      "id": "workspace-startup-and-session",
+      "description": "启动、登录、会话恢复、侧栏壳层和状态提示会改变用户进入应用与判断当前状态的方式。",
+      "triggers": [
+        "src/workspace-shell.component.ts",
+        "src/app/core/shell/**",
+        "src/app/core/services/app-auth-coordinator.service.ts",
+        "src/services/auth-*.ts",
+        "src/services/user-session-*.ts",
+        "src/services/session-runtime-reset.*",
+        "src/app/shared/modals/login-modal.component.ts",
+        "src/app/shared/components/reset-password.component.ts",
+        "src/services/app-lifecycle-*.ts"
+      ],
+      "handbook": [
+        "docs/handbook/01-get-started/05-startup-login-and-status.md"
+      ]
+    },
+    {
+      "id": "local-only-workspace",
+      "description": "本地模式访问、当前浏览器数据隔离和 Demo 模式提示会改变用户判断数据保存范围、登录切换和恢复准备的方式。",
+      "triggers": [
+        "src/services/guards/auth.guard.ts",
+        "src/services/auth-storage-bridge.controller.ts",
+        "src/app/shared/components/demo-banner.component.ts"
+      ],
+      "handbook": [
+        "docs/handbook/01-get-started/02-local-only-mode.md"
+      ]
+    },
+    {
+      "id": "local-development-startup",
+      "description": "本地开发服务器的启动、端口选择和环境生成会改变使用者打开应用和判断运行实例的方式。",
+      "triggers": [
+        "scripts/run-ng.cjs",
+        "scripts/dev-server-port.cjs",
+        "scripts/set-env.cjs"
+      ],
+      "handbook": [
+        "docs/handbook/01-get-started/01-quickstart.md"
+      ]
+    },
+    {
+      "id": "text-task-workflow",
+      "description": "任务创建、编辑、移动、撤销和文本视图交互会改变日常任务管理流程。",
+      "triggers": [
+        "src/app/features/text/**",
+        "src/services/task-*.ts",
+        "src/services/project-operation*.ts",
+        "src/services/undo.service.ts"
+      ],
+      "handbook": [
+        "docs/handbook/02-use-nanoflow/01-text-view.md",
+        "docs/handbook/01-get-started/03-first-project.md",
+        "docs/handbook/02-use-nanoflow/08-task-sidecar-and-planning.md",
+        "docs/handbook/02-use-nanoflow/10-attachments-and-file-safety.md"
+      ]
+    },
+    {
+      "id": "flow-workflow",
+      "description": "流程图视图、Constellation 小地图、临时图例筛选、连线、布局、导出和触控交互会改变用户理解任务关系的方式。",
+      "triggers": [
+        "src/app/features/flow/**"
+      ],
+      "handbook": [
+        "docs/handbook/02-use-nanoflow/02-flow-view.md",
+        "docs/handbook/02-use-nanoflow/08-task-sidecar-and-planning.md",
+        "docs/handbook/02-use-nanoflow/06-siyuan-knowledge-anchors.md"
+      ]
+    },
+    {
+      "id": "task-sidecar-and-planning",
+      "description": "任务僚机摘要、计划字段、注意事项保存和跨项目任务预览会改变用户安排、扫读和恢复任务的方式。",
+      "triggers": [
+        "src/utils/task-sidecar.ts",
+        "src/utils/planner-fields.ts",
+        "src/app/features/text/components/text-task-editor-sidecar-draft.controller.ts",
+        "src/app/features/flow/components/flow-task-detail-attention-draft.helpers.ts",
+        "src/app/features/flow/components/flow-task-detail-planner-save.controller.ts",
+        "src/app/features/flow/components/flow-task-detail-sidecar-preview.controller.ts",
+        "src/app/features/flow/components/flow-task-detail-summary.helpers.ts",
+        "src/app/core/shell/workspace-shell-project-search-task.controller.ts"
+      ],
+      "handbook": [
+        "docs/handbook/02-use-nanoflow/08-task-sidecar-and-planning.md"
+      ]
+    },
+    {
+      "id": "workspace-settings-and-recovery",
+      "description": "项目创建、系统设置、导入导出、本地增强备份和回收站恢复会改变用户组织工作区与保护数据的方式。",
+      "triggers": [
+        "src/app/shared/modals/new-project-modal.component.ts",
+        "src/app/shared/modals/settings-modal.component.ts",
+        "src/app/shared/modals/settings-modal.component.html",
+        "src/app/shared/modals/settings-modal-appearance.component.ts",
+        "src/app/shared/modals/settings-modal-appearance.component.html",
+        "src/app/shared/modals/settings-modal/local-backup-ui.service.ts",
+        "src/app/shared/modals/settings-modal-attachment-import.helpers.ts",
+        "src/app/shared/modals/trash-modal.component.ts",
+        "src/app/shared/modals/delete-confirm-modal.component.ts",
+        "src/services/task-trash-helpers.ts"
+      ],
+      "handbook": [
+        "docs/handbook/02-use-nanoflow/09-project-settings-and-recovery.md"
+      ]
+    },
+    {
+      "id": "appearance-and-preference-sync",
+      "description": "主题、颜色模式及其离线暂存、确认基线和跨设备偏好同步会改变用户理解设置何时生效、何时需要等待同步以及如何避免多端覆盖的方式。",
+      "triggers": [
+        "src/services/theme.service.ts",
+        "src/services/pending-preference-outbox.service.ts",
+        "src/services/user-preferences-baseline.store.ts",
+        "src/app/core/services/sync/user-preferences-sync.service.ts"
+      ],
+      "handbook": [
+        "docs/handbook/02-use-nanoflow/09-project-settings-and-recovery.md"
+      ]
+    },
+    {
+      "id": "guest-data-migration",
+      "description": "登录后发现的本地访客数据、迁移策略、完整性检查、快照与失败恢复会改变用户选择可信数据来源和保护本地工作的方式。",
+      "triggers": [
+        "src/app/shared/modals/migration-modal.component.ts",
+        "src/services/migration.service.ts",
+        "src/services/migration-integrity.service.ts",
+        "src/app/core/services/app-auth-post-login.controller.ts"
+      ],
+      "handbook": [
+        "docs/handbook/02-use-nanoflow/09-project-settings-and-recovery.md"
+      ]
+    },
+    {
+      "id": "cloud-configuration-help",
+      "description": "离线配置帮助、Supabase 客户端配置校验和密钥边界会改变使用者判断本地模式与操作者修复私有实例的方式。",
+      "triggers": [
+        "src/app/shared/modals/config-help-modal.component.ts",
+        "src/services/supabase-client-configuration.ts",
+        "src/services/supabase-client.service.ts"
+      ],
+      "handbook": [
+        "docs/handbook/01-get-started/04-cloud-sync-setup.md",
+        "docs/handbook/04-deploy-operate/01-private-deployment.md"
+      ]
+    },
+    {
+      "id": "siyuan-knowledge-anchor-workflow",
+      "description": "思源知识锚点的添加、预览、编辑、移除、离线缓存与跨设备链接同步会改变用户引用资料和恢复上下文的方式。",
+      "triggers": [
+        "src/app/shared/components/knowledge-anchor/**",
+        "src/app/core/external-sources/**",
+        "src/app/features/flow/services/flow-diagram-config.service.ts",
+        "src/services/external-source-link-*.ts",
+        "extensions/siyuan-relay/**"
+      ],
+      "handbook": [
+        "docs/handbook/02-use-nanoflow/06-siyuan-knowledge-anchors.md"
+      ]
+    },
+    {
+      "id": "pwa-offline-and-error-recovery",
+      "description": "PWA 安装提示、离线与存储受限指示、可恢复错误选项和本地数据完整性修复会改变用户保护当前工作的方法。",
+      "triggers": [
+        "src/app/shared/components/pwa-install-prompt-banner.component.ts",
+        "src/services/pwa-install-prompt.service.ts",
+        "src/app/shared/components/offline-banner.component.ts",
+        "src/app/shared/modals/error-recovery-modal.component.ts",
+        "src/app/shared/components/error-boundary.component.ts",
+        "src/app/shared/components/migration-recovery.component.ts",
+        "src/services/offline-integrity.service.ts"
+      ],
+      "handbook": [
+        "docs/handbook/01-get-started/06-pwa-offline-and-error-recovery.md"
+      ]
+    },
+    {
+      "id": "route-and-fatal-error-recovery",
+      "description": "应用路由、404 页面和致命错误页会改变用户判断链接是否失效、选择简单刷新还是清理应用缓存，以及保留错误证据的方式。",
+      "triggers": [
+        "src/app.routes.ts",
+        "src/app/shared/components/error-page.component.ts",
+        "src/app/shared/components/not-found.component.ts"
+      ],
+      "handbook": [
+        "docs/handbook/01-get-started/06-pwa-offline-and-error-recovery.md"
+      ]
+    },
+    {
+      "id": "sync-diagnostics-and-conflict-center",
+      "description": "同步状态面板、待处理与死信队列、逃生导出和本地/云端冲突选择会改变用户恢复数据和判断可信来源的方式。",
+      "triggers": [
+        "src/app/shared/modals/dashboard-modal.component.ts",
+        "src/app/shared/modals/dashboard-modal.component.html",
+        "src/app/shared/components/sync-status.component.ts",
+        "src/app/shared/components/sync-status.component.html",
+        "src/app/shared/modals/conflict-modal.component.ts",
+        "src/app/shared/components/conflict-task-diff.component.ts",
+        "src/app/shared/modals/storage-escape-modal.component.ts",
+        "src/services/conflict-auto-resolver.service.ts",
+        "src/services/action-queue-dead-letter-notifier.ts",
+        "src/services/action-queue-escape-export.helpers.ts"
+      ],
+      "handbook": [
+        "docs/handbook/03-data-sync-safety/05-sync-diagnostics-and-conflict-center.md"
+      ]
+    },
+    {
+      "id": "conflict-resolution-policy",
+      "description": "自动 LWW 冲突解决开关、逐任务建议和手动冲突中心会改变用户何时需要人工选择可信来源，以及该选择是否只作用于当前浏览器。",
+      "triggers": [
+        "src/services/preference.service.ts",
+        "src/services/conflict-auto-resolver.service.ts",
+        "src/app/shared/modals/settings-modal.component.ts",
+        "src/app/shared/modals/settings-modal.component.html",
+        "src/app/shared/modals/conflict-modal.component.ts",
+        "src/app/shared/modals/dashboard-modal.component.ts"
+      ],
+      "handbook": [
+        "docs/handbook/03-data-sync-safety/02-sync-and-conflicts.md",
+        "docs/handbook/03-data-sync-safety/05-sync-diagnostics-and-conflict-center.md",
+        "docs/handbook/02-use-nanoflow/09-project-settings-and-recovery.md"
+      ]
+    },
+    {
+      "id": "attachments-and-file-safety",
+      "description": "附件上传、进度、失败恢复、下载、删除与安全扫描会改变用户处理任务文件和判断可用性的方式。",
+      "triggers": [
+        "src/app/features/text/components/text-task-editor-attachment.controller.ts",
+        "src/services/attachment.service.ts",
+        "src/services/attachment-upload-state.controller.ts",
+        "src/services/attachment-upload-outbox.service.ts",
+        "src/services/attachment-download-safety.helpers.ts",
+        "src/services/attachment-soft-delete.helpers.ts",
+        "src/services/virus-scan.service.ts"
+      ],
+      "handbook": [
+        "docs/handbook/02-use-nanoflow/10-attachments-and-file-safety.md"
+      ]
+    },
+    {
+      "id": "parking-workflow",
+      "description": "Parking Dock、提醒、停泊状态和恢复路径会改变任务暂存与回访体验。",
+      "triggers": [
+        "src/app/features/parking/**",
+        "src/services/parking-*.ts",
+        "src/services/dock-*.ts",
+        "src/services/simple-reminder*.ts"
+      ],
+      "handbook": [
+        "docs/handbook/02-use-nanoflow/03-parking-dock.md"
+      ]
+    },
+    {
+      "id": "daily-routines-and-focus-preferences",
+      "description": "日常任务槽、逻辑日切、专注入口开关和休息提醒会改变用户在停泊空档中安排小任务、理解当日完成次数和收窄注意力的方式。",
+      "triggers": [
+        "src/services/dock-daily-slot.service.ts",
+        "src/app/features/parking/components/dock-daily-slot.component.ts",
+        "src/services/focus-preference.service.ts",
+        "src/app/shared/modals/settings-modal.component.ts",
+        "src/app/shared/modals/settings-modal.component.html"
+      ],
+      "handbook": [
+        "docs/handbook/02-use-nanoflow/03-parking-dock.md",
+        "docs/handbook/02-use-nanoflow/04-focus-mode.md",
+        "docs/handbook/02-use-nanoflow/09-project-settings-and-recovery.md"
+      ]
+    },
+    {
+      "id": "focus-and-capture-workflow",
+      "description": "Focus、Gate、Black Box、语音录制和转写恢复会改变用户的收集与专注流程。",
+      "triggers": [
+        "src/app/features/focus/**",
+        "src/services/black-box*.ts",
+        "src/services/gate*.ts",
+        "src/services/focus-preference*.ts",
+        "src/services/focus-startup-probe.service.ts",
+        "src/services/speech-to-text-*.ts",
+        "supabase/functions/transcribe/**"
+      ],
+      "handbook": [
+        "docs/handbook/02-use-nanoflow/04-focus-mode.md",
+        "docs/handbook/02-use-nanoflow/05-black-box.md"
+      ]
+    },
+    {
+      "id": "offline-sync-and-recovery",
+      "description": "同步、离线队列、持久化、冲突和恢复逻辑会改变用户对保存状态、跨设备和数据安全的预期。",
+      "triggers": [
+        "src/app/core/services/sync/**",
+        "src/app/core/services/simple-sync.service.ts",
+        "src/app/core/state/persistence/**",
+        "src/services/action-queue-*.ts",
+        "src/services/change-tracker.service.ts",
+        "src/services/conflict-*.ts",
+        "src/services/delta-sync-*.ts",
+        "src/services/event-driven-sync-*.ts",
+        "src/services/session-runtime-reset.*",
+        "src/services/sync-*.ts",
+        "src/services/task-record-*.ts",
+        "src/services/user-session-*.ts",
+        "src/services/local-backup-*.ts",
+        "src/services/data-safety-*.ts"
+      ],
+      "handbook": [
+        "docs/handbook/03-data-sync-safety/01-offline-first-model.md",
+        "docs/handbook/03-data-sync-safety/02-sync-and-conflicts.md",
+        "docs/handbook/03-data-sync-safety/03-backup-and-restore.md",
+        "docs/handbook/03-data-sync-safety/05-sync-diagnostics-and-conflict-center.md"
+      ]
+    },
+    {
+      "id": "cloud-security-and-edge-functions",
+      "description": "数据库迁移、RLS、附件、扫描、Edge Functions 和云端接口会改变部署者的安全与可用性操作。",
+      "triggers": [
+        "supabase/migrations/**",
+        "supabase/functions/**",
+        "src/services/file-type-validator*.ts",
+        "src/services/attachment-*.ts",
+        "src/services/virus-scan*.ts",
+        "src/utils/supabase-error.ts"
+      ],
+      "handbook": [
+        "docs/handbook/01-get-started/04-cloud-sync-setup.md",
+        "docs/handbook/03-data-sync-safety/04-security-and-privacy.md",
+        "docs/handbook/04-deploy-operate/02-supabase-operations.md",
+        "docs/handbook/04-deploy-operate/03-edge-functions.md",
+        "docs/handbook/02-use-nanoflow/10-attachments-and-file-safety.md"
+      ]
+    },
+    {
+      "id": "android-widget-workflow",
+      "description": "Android 宿主、小组件启动和小组件云端函数会改变移动端摘要与跳转体验。",
+      "triggers": [
+        "android/**",
+        "src/app/core/shell/*android-widget*",
+        "supabase/functions/widget-*/**"
+      ],
+      "handbook": [
+        "docs/handbook/02-use-nanoflow/07-android-widget.md"
+      ]
+    },
+    {
+      "id": "deployment-and-runtime-configuration",
+      "description": "部署配置、运行时环境和质量命令会改变私有实例的上线与验收方式。",
+      "triggers": [
+        "angular.json",
+        "package.json",
+        "netlify.toml",
+        "railway.json",
+        "vercel.json",
+        "src/config/**",
+        "scripts/set-env.cjs",
+        "scripts/validate-env.cjs",
+        "scripts/supabase-cli.cjs"
+      ],
+      "handbook": [
+        "docs/handbook/04-deploy-operate/01-private-deployment.md",
+        "docs/handbook/04-deploy-operate/04-production-troubleshooting.md"
+      ]
+    }
+  ]
+}

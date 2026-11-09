@@ -1,15 +1,41 @@
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { defineConfig, devices } from '@playwright/test';
+import * as dotenv from 'dotenv';
+
+dotenv.config({ path: path.resolve(process.cwd(), '.env.local'), override: false, quiet: true });
 
 interface ResolvedDevServerInfo {
   port: number;
   url: string;
 }
 
+function readCachedPlaywrightDevServer(): ResolvedDevServerInfo | null {
+  const cachedPort = Number.parseInt(process.env['PLAYWRIGHT_RESOLVED_DEV_SERVER_PORT'] || '', 10);
+  const cachedUrl = process.env['PLAYWRIGHT_RESOLVED_DEV_SERVER_URL'];
+  if (!Number.isInteger(cachedPort) || cachedPort < 1 || cachedPort > 65535 || !cachedUrl) {
+    return null;
+  }
+
+  return {
+    port: cachedPort,
+    url: cachedUrl,
+  };
+}
+
 function resolvePlaywrightDevServer(): ResolvedDevServerInfo {
+  const cached = readCachedPlaywrightDevServer();
+  if (cached) {
+    return cached;
+  }
+
   const resolverPath = path.join(process.cwd(), 'scripts', 'dev-server-port.cjs');
-  const raw = execFileSync(process.execPath, [resolverPath, '--json', '--allow-existing'], {
+  const resolverArgs = ['--json'];
+  if (process.env['PLAYWRIGHT_REUSE_EXISTING_SERVER'] === '1') {
+    resolverArgs.push('--allow-existing');
+  }
+
+  const raw = execFileSync(process.execPath, [resolverPath, ...resolverArgs], {
     cwd: process.cwd(),
     encoding: 'utf8',
     env: process.env,
@@ -20,10 +46,14 @@ function resolvePlaywrightDevServer(): ResolvedDevServerInfo {
     throw new Error('无法解析 Playwright 开发服务器端口');
   }
 
-  return {
+  const resolved = {
     port: parsed.port,
     url: parsed.url,
   };
+  process.env['PLAYWRIGHT_RESOLVED_DEV_SERVER_PORT'] = String(resolved.port);
+  process.env['PLAYWRIGHT_RESOLVED_DEV_SERVER_URL'] = resolved.url;
+
+  return resolved;
 }
 
 function normalizeProxyServer(server: string | undefined): string | undefined {
@@ -55,6 +85,7 @@ function resolvePlaywrightProxy(): { server: string; bypass?: string } | undefin
 
 const hasCustomBaseURL = typeof process.env['PLAYWRIGHT_BASE_URL'] === 'string' && process.env['PLAYWRIGHT_BASE_URL'].length > 0;
 const hasCustomWebServerCommand = typeof process.env['PLAYWRIGHT_WEB_SERVER_COMMAND'] === 'string' && process.env['PLAYWRIGHT_WEB_SERVER_COMMAND'].length > 0;
+const isPwaPreview = process.env['PLAYWRIGHT_PWA_PREVIEW'] === '1';
 if (hasCustomWebServerCommand && !hasCustomBaseURL) {
   throw new Error('PLAYWRIGHT_WEB_SERVER_COMMAND 需要同时设置 PLAYWRIGHT_BASE_URL，避免等待错误的端口。');
 }
@@ -73,17 +104,22 @@ const baseURL = process.env['PLAYWRIGHT_BASE_URL'] || resolvedDevServer?.url || 
 // E2E 默认使用专用起服脚本，避免嵌套 npm run 在 Playwright webServer 管理下提前退出。
 const webServerCommand = process.env['PLAYWRIGHT_WEB_SERVER_COMMAND']
   || (shouldManageWebServer && resolvedDevServer
-    ? `npm run start:e2e -- --port=${resolvedDevServer.port}`
+    ? isPwaPreview
+      ? `npm run build && npm run start:pwa-preview -- --port=${resolvedDevServer.port}`
+      : `npm run start:e2e -- --port=${resolvedDevServer.port}`
     : undefined);
 // Angular dev server 首次编译耗时较长，默认给 8 分钟防止超时
 const webServerTimeout = Number(process.env['PLAYWRIGHT_WEB_SERVER_TIMEOUT'] || 480_000);
 const configuredWorkers = Number.parseInt(process.env['PLAYWRIGHT_WORKERS'] || '', 10);
 const resolvedWorkers = Number.isFinite(configuredWorkers) && configuredWorkers > 0
   ? configuredWorkers
-  : process.env['CI']
-    ? 1
-    : undefined;
+  : 1;
 const includePerfSuites = process.env['PLAYWRIGHT_INCLUDE_PERF'] === '1' || process.env['PERF_BUDGET_TEST'] === '1';
+const shouldReuseExistingServer =
+  !process.env['CI']
+  && !isPwaPreview
+  && !hasCustomWebServerCommand
+  && process.env['PLAYWRIGHT_REUSE_EXISTING_SERVER'] === '1';
 const proxy = resolvePlaywrightProxy();
 
 export default defineConfig({
@@ -101,7 +137,7 @@ export default defineConfig({
   forbidOnly: !!process.env['CI'],
   /* 重试机制：本地 1 次，CI 2 次，降低环境抖动导致的误报 */
   retries: process.env['CI'] ? 2 : 1,
-  /* CI 默认保守单 worker，避免重型页面并发导致 Chromium 崩溃；需要提速时用 PLAYWRIGHT_WORKERS 显式覆盖 */
+  /* 默认单 worker，避免重型页面并发压垮 Angular dev server；需要提速时用 PLAYWRIGHT_WORKERS 显式覆盖 */
   workers: resolvedWorkers,
   /* 测试报告 */
   reporter: [
@@ -144,7 +180,7 @@ export default defineConfig({
   webServer: webServerCommand ? {
     command: webServerCommand,
     url: baseURL,
-    reuseExistingServer: !process.env['CI'] && !process.env['PLAYWRIGHT_WEB_SERVER_COMMAND'],
+    reuseExistingServer: shouldReuseExistingServer,
     timeout: webServerTimeout,
   } : undefined,
 });

@@ -1,9 +1,9 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { computed, signal } from '@angular/core';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SyncStatusComponent } from './sync-status.component';
 import { ActionQueueService } from '../../../services/action-queue.service';
-import { SimpleSyncService } from '../../core/services/simple-sync.service';
+import { SyncStateService } from '../../core/services/sync/sync-state.service';
 import { SyncCoordinatorService } from '../../../services/sync-coordinator.service';
 import { ProjectStateService } from '../../../services/project-state.service';
 import { AuthService } from '../../../services/auth.service';
@@ -19,6 +19,7 @@ function createQueuedAction(entityType: QueuedAction['entityType']): QueuedActio
 
   return {
     id: `${entityType}-action`,
+    operationId: `${entityType}-operation`,
     type: 'update',
     entityType,
     entityId: `${entityType}-1`,
@@ -29,11 +30,18 @@ function createQueuedAction(entityType: QueuedAction['entityType']): QueuedActio
   };
 }
 
+type MutableSyncStatusComponent = {
+  pendingClearTimer: ReturnType<typeof setTimeout> | null;
+  schedulePendingClearTimer: (next: number) => void;
+  clearPendingTimers: () => void;
+};
+
 describe('SyncStatusComponent', () => {
   let fixture: ComponentFixture<SyncStatusComponent>;
   const pendingActions = signal<QueuedAction[]>([]);
   const deadLetters = signal<DeadLetterItem[]>([]);
   const queueFrozen = signal(false);
+  const queueFreezeReason = signal<string | null>(null);
   const syncState = signal({
     isSyncing: false,
     isOnline: true,
@@ -43,10 +51,11 @@ describe('SyncStatusComponent', () => {
     pendingCount: 0,
     syncError: null as string | null,
     backgroundSyncNotice: null as string | null,
+    cloudSyncPausedReason: null as 'no-session' | 'refresh-failed' | null,
     hasConflict: false,
     conflictData: null,
   });
-  const currentUserId = signal('user-1');
+  const currentUserId = signal<string | null>('user-1');
   const conflictCount = signal(0);
   const hasUnresolvedConflicts = signal(false);
   const isLoadingRemote = signal(false);
@@ -59,6 +68,7 @@ describe('SyncStatusComponent', () => {
     deadLetterQueue: deadLetters,
     deadLetterSize: computed(() => deadLetters().length),
     queueFrozen,
+    queueFreezeReason,
     isProcessing: signal(false),
     processQueue: vi.fn().mockResolvedValue({ processed: 0, failed: 0, movedToDeadLetter: 0 }),
     retryDeadLetter: vi.fn(),
@@ -67,11 +77,17 @@ describe('SyncStatusComponent', () => {
     downloadEscapeExport: vi.fn(),
   };
 
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
   beforeEach(async () => {
     vi.clearAllMocks();
     pendingActions.set([]);
     deadLetters.set([]);
     queueFrozen.set(false);
+    queueFreezeReason.set(null);
     syncState.set({
       isSyncing: false,
       isOnline: true,
@@ -81,6 +97,7 @@ describe('SyncStatusComponent', () => {
       pendingCount: 0,
       syncError: null,
       backgroundSyncNotice: null,
+      cloudSyncPausedReason: null,
       hasConflict: false,
       conflictData: null,
     });
@@ -95,7 +112,7 @@ describe('SyncStatusComponent', () => {
       imports: [SyncStatusComponent],
       providers: [
         { provide: ActionQueueService, useValue: actionQueueMock },
-        { provide: SimpleSyncService, useValue: { syncState } },
+        { provide: SyncStateService, useValue: { syncState } },
         {
           provide: SyncCoordinatorService,
           useValue: {
@@ -163,7 +180,8 @@ describe('SyncStatusComponent', () => {
 
     expect(fixture.componentInstance.pendingCount()).toBe(0);
     expect(fixture.componentInstance.isBackgroundRetrying()).toBe(true);
-    expect(fixture.componentInstance.detailedStatus()).toBe('后台同步中...');
+    // 弱网长重试期间展示积压数（后台通道），但绝不能进入用户可见的 "N 个操作待同步" 琥珀色通道
+    expect(fixture.componentInstance.detailedStatus()).toBe('后台同步中（1 项待重试）...');
   });
 
   it('可自愈的 retry handoff 应通过 backgroundSyncNotice 通道显示为后台同步态而非红色', () => {
@@ -200,6 +218,29 @@ describe('SyncStatusComponent', () => {
     expect(fixture.componentInstance.detailedStatus()).toBe('后台同步中...');
   });
 
+  it('网络已恢复但云端会话不可用时应显示本地可用而非连接中断', () => {
+    const embeddedFixture = TestBed.createComponent(SyncStatusComponent);
+    (embeddedFixture.componentInstance as unknown as { embedded: ReturnType<typeof signal<boolean>> }).embedded = signal(true);
+    currentUserId.set(null);
+    syncState.set({
+      ...syncState(),
+      isOnline: true,
+      offlineMode: true,
+      pendingCount: 0,
+      cloudSyncPausedReason: 'no-session',
+    });
+    embeddedFixture.detectChanges();
+
+    const indicator = embeddedFixture.nativeElement.querySelector('[data-testid="sync-status-indicator"]') as HTMLDivElement | null;
+    const text = embeddedFixture.nativeElement.textContent as string;
+
+    expect(embeddedFixture.componentInstance.detailedStatus()).toBe('本地数据可用 - 登录后继续云同步');
+    expect(indicator?.classList.contains('bg-amber-500')).toBe(true);
+    expect(indicator?.classList.contains('bg-red-500')).toBe(false);
+    expect(text).toContain('本地数据可用');
+    expect(text).not.toContain('连接中断');
+  });
+
   it('在用户可见待同步 0↔1 高频震荡时应在重置阈值后强制收口，避免 "1 待同步" 永不归零', () => {
     vi.useFakeTimers();
     try {
@@ -234,12 +275,40 @@ describe('SyncStatusComponent', () => {
     }
   });
 
+  it('pending clear timer id 为 0 时应被 clearPendingTimers 清理', () => {
+    const component = fixture.componentInstance as unknown as MutableSyncStatusComponent;
+    vi.spyOn(globalThis, 'setTimeout')
+      .mockImplementation(() => 0 as unknown as ReturnType<typeof setTimeout>);
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout')
+      .mockImplementation(() => undefined);
+
+    component.schedulePendingClearTimer(0);
+    expect(component.pendingClearTimer).toBe(0);
+    component.clearPendingTimers();
+
+    expect(clearTimeoutSpy).toHaveBeenCalledWith(0);
+    expect(component.pendingClearTimer).toBeNull();
+  });
+
   it('应显示待人工确认的 legacy retry 数据', () => {
     legacyReviewCount.set(2);
     fixture.detectChanges();
 
     expect(fixture.componentInstance.detailedStatus()).toBe('2 个旧版离线同步项待确认');
     expect(fixture.componentInstance.hasIssues()).toBe(true);
+  });
+
+  it('队列冻结时应显示具体存储失败原因，避免本地持久化风险被静默隐藏', () => {
+    const embeddedFixture = TestBed.createComponent(SyncStatusComponent);
+    (embeddedFixture.componentInstance as unknown as { embedded: ReturnType<typeof signal<boolean>> }).embedded = signal(true);
+    queueFrozen.set(true);
+    queueFreezeReason.set('quota exceeded while saving local outbox');
+    pendingActions.set([createQueuedAction('project')]);
+    embeddedFixture.detectChanges();
+
+    expect(embeddedFixture.componentInstance.detailedStatus()).toContain('quota exceeded while saving local outbox');
+    expect(embeddedFixture.nativeElement.textContent).toContain('quota exceeded while saving local outbox');
+    expect(embeddedFixture.nativeElement.textContent).toContain('导出待同步数据');
   });
 
   it('retryAll 应先重放 RetryQueue，再处理 ActionQueue', async () => {

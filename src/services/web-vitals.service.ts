@@ -70,6 +70,10 @@ interface NetworkInfo {
   saveData?: boolean;     // 用户是否启用省流模式
 }
 
+interface NormalizedNetworkInfo extends NetworkInfo {
+  rttAvailable: boolean;
+}
+
 @Injectable({
   providedIn: 'root'
 })
@@ -97,56 +101,71 @@ export class WebVitalsService {
   private detectNetworkQuality(): NetworkQuality {
     if (this.cachedNetworkQuality) return this.cachedNetworkQuality;
     
-    // 尝试使用 Network Information API
-    const nav = navigator as Navigator & { connection?: NetworkInfo; mozConnection?: NetworkInfo; webkitConnection?: NetworkInfo };
-    const connection = nav.connection || nav.mozConnection || nav.webkitConnection;
-    
+    const connection = this.getBrowserConnection();
     if (!connection) {
       this.cachedNetworkQuality = 'unknown';
       return 'unknown';
     }
-    
+
+    const networkInfo = this.normalizeNetworkInfo(connection);
+    this.cachedNetworkQuality = this.classifyNetworkQuality(networkInfo);
+    this.logger.info(`网络质量检测: ${this.cachedNetworkQuality}`, networkInfo);
+    return this.cachedNetworkQuality;
+  }
+
+  private getBrowserConnection(): NetworkInfo | null {
+    const nav = navigator as Navigator & { connection?: NetworkInfo; mozConnection?: NetworkInfo; webkitConnection?: NetworkInfo };
+    return nav.connection || nav.mozConnection || nav.webkitConnection || null;
+  }
+
+  private normalizeNetworkInfo(connection: NetworkInfo): NormalizedNetworkInfo {
     const effectiveType = connection.effectiveType || '';
     const downlink = connection.downlink || 0;
     const rtt = connection.rtt || 0;
-    const saveData = !!connection.saveData;
-    
+
     // rtt === 0 通常表示浏览器不提供 RTT 数据（HeadlessChrome、部分移动浏览器），
     // 而不是表示网络延迟为零。将其标记为"不可用"以避免误判。
-    const rttAvailable = rtt > 0;
+    return {
+      effectiveType,
+      downlink,
+      rtt,
+      saveData: !!connection.saveData,
+      rttAvailable: rtt > 0,
+    };
+  }
 
+  private classifyNetworkQuality(networkInfo: NormalizedNetworkInfo): NetworkQuality {
     // 先用真实链路指标判定弱网，避免 "4g + 低带宽" 误判为 moderate
     const constrainedByTelemetry =
-      saveData ||
-      (downlink > 0 && downlink < 1.5) ||
-      (rttAvailable && rtt >= 180);
+      !!networkInfo.saveData ||
+      (networkInfo.downlink > 0 && networkInfo.downlink < 1.5) ||
+      (networkInfo.rttAvailable && networkInfo.rtt >= 180);
 
     // 分类网络质量
     // 参考: Chrome DevTools Network Throttling Presets
-    if (effectiveType === 'slow-2g' || saveData) {
-      this.cachedNetworkQuality = 'offline'; // 极慢网络/省流模式
-    } else if (effectiveType === '2g' || constrainedByTelemetry) {
-      this.cachedNetworkQuality = 'slow'; // 2G 或链路受限
-    } else if (effectiveType === '3g' && downlink <= 2) {
-      this.cachedNetworkQuality = 'slow'; // 典型 3G
-    } else if (effectiveType === '4g' && downlink >= 8 && (!rttAvailable || rtt < 80)) {
-      this.cachedNetworkQuality = 'fast'; // 4G 快速网络（rtt 不可用时不惩罚）
-    } else if (effectiveType === '4g' || effectiveType === '3g') {
-      this.cachedNetworkQuality = 'moderate'; // 常规移动网络
-    } else {
-      this.cachedNetworkQuality = 'unknown';
+    if (networkInfo.effectiveType === 'slow-2g' || networkInfo.saveData) {
+      return 'offline'; // 极慢网络/省流模式
     }
-    
-    this.logger.info(`网络质量检测: ${this.cachedNetworkQuality}`, { effectiveType, downlink, rtt, saveData });
-    return this.cachedNetworkQuality;
+    if (networkInfo.effectiveType === '2g' || constrainedByTelemetry) {
+      return 'slow'; // 2G 或链路受限
+    }
+    if (networkInfo.effectiveType === '3g' && networkInfo.downlink <= 2) {
+      return 'slow'; // 典型 3G
+    }
+    if (networkInfo.effectiveType === '4g' && networkInfo.downlink >= 8 && (!networkInfo.rttAvailable || networkInfo.rtt < 80)) {
+      return 'fast'; // 4G 快速网络（rtt 不可用时不惩罚）
+    }
+    if (networkInfo.effectiveType === '4g' || networkInfo.effectiveType === '3g') {
+      return 'moderate'; // 常规移动网络
+    }
+    return 'unknown';
   }
   
   /**
    * 获取网络信息（用于 Sentry 上下文）
    */
   private getNetworkInfo(): NetworkInfo | null {
-    const nav = navigator as Navigator & { connection?: NetworkInfo; mozConnection?: NetworkInfo; webkitConnection?: NetworkInfo };
-    const connection = nav.connection || nav.mozConnection || nav.webkitConnection;
+    const connection = this.getBrowserConnection();
     return connection ? {
       effectiveType: connection.effectiveType || 'unknown',
       downlink: connection.downlink || 0,

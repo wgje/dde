@@ -30,6 +30,25 @@ describe('focus-stores', () => {
     vi.useRealTimers();
   });
 
+  describe('运行时 interval 生命周期', () => {
+    it('cleanupTodayDateInterval 应同时停止日期与 Gate 时钟 interval', () => {
+      expect(vi.getTimerCount()).toBe(2);
+
+      resetFocusState({ cleanupTodayDateInterval: true });
+
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('停止后再次普通 reset 应只恢复一组 interval', () => {
+      resetFocusState({ cleanupTodayDateInterval: true });
+
+      resetFocusState();
+      resetFocusState();
+
+      expect(vi.getTimerCount()).toBe(2);
+    });
+  });
+
   describe('pendingBlackBoxEntries', () => {
     /**
      * 创建测试用的 BlackBoxEntry

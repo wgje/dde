@@ -2,6 +2,11 @@ import { Component, inject, ChangeDetectionStrategy, computed, signal, DestroyRe
 import { AuthService } from '../../../services/auth.service';
 import { isLocalModeEnabled, LOCAL_MODE_CHANGED_EVENT } from '../../../services/guards/auth.guard';
 import { AUTH_CONFIG, FEATURE_FLAGS } from '../../../config';
+import {
+  DEMO_BANNER_DISMISS_STORAGE_KEY,
+  readDemoBannerDismissed,
+  resolveDemoBannerVisible,
+} from './demo-banner.helpers';
 
 /**
  * Demo 模式横幅组件
@@ -196,7 +201,6 @@ import { AUTH_CONFIG, FEATURE_FLAGS } from '../../../config';
   `]
 })
 export class DemoBannerComponent {
-  private static readonly DISMISS_STORAGE_KEY = 'nanoflow.demo-banner-dismissed';
   private readonly auth = inject(AuthService);
   private readonly destroyRef = inject(DestroyRef);
   /** 触发本地模式相关计算刷新 */
@@ -223,54 +227,26 @@ export class DemoBannerComponent {
   }
 
   private readonly onStorageChanged = (event: StorageEvent): void => {
-    if (event.key === AUTH_CONFIG.LOCAL_MODE_CACHE_KEY || event.key === DemoBannerComponent.DISMISS_STORAGE_KEY) {
+    if (event.key === AUTH_CONFIG.LOCAL_MODE_CACHE_KEY || event.key === DEMO_BANNER_DISMISS_STORAGE_KEY) {
       this.onLocalModeChanged();
     }
   };
   
   /** 从 localStorage 读取关闭状态 */
   private loadDismissedState(): boolean {
-    try {
-      const stored = localStorage.getItem(DemoBannerComponent.DISMISS_STORAGE_KEY);
-      if (!stored) return false;
-      const data = JSON.parse(stored);
-      // 关闭状态有效期：7 天
-      const DISMISS_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000;
-      if (Date.now() - data.timestamp < DISMISS_EXPIRY_MS) {
-        return true;
-      }
-      // 已过期，清除
-      localStorage.removeItem(DemoBannerComponent.DISMISS_STORAGE_KEY);
-      return false;
-    } catch {
-      return false;
-    }
+    return readDemoBannerDismissed(localStorage);
   }
   
   /** 是否显示 Banner */
   showBanner = computed(() => {
     this.localModeRevision();
 
-    // 如果用户已关闭，不再显示
-    if (this.dismissed()) {
-      return false;
-    }
-    
-    // 检查是否处于本地模式（Demo 模式）
-    const isLocalMode = isLocalModeEnabled();
-    
-    // 检查当前用户是否是本地模式用户
-    const currentUserId = this.auth.currentUserId();
-    const isLocalModeUser = currentUserId === AUTH_CONFIG.LOCAL_MODE_USER_ID;
-    
-    // 检查 feature flag（可通过环境变量控制）
-    const demoModeFlag = FEATURE_FLAGS.DEMO_MODE_ENABLED ?? false;
-    
-    // 满足以下任一条件时显示：
-    // 1. 处于本地模式
-    // 2. 当前用户是本地模式用户
-    // 3. 启用了 DEMO_MODE feature flag
-    return isLocalMode || isLocalModeUser || demoModeFlag;
+    return resolveDemoBannerVisible({
+      dismissed: this.dismissed(),
+      currentUserId: this.auth.currentUserId(),
+      localModeEnabled: isLocalModeEnabled(),
+      demoModeEnabled: FEATURE_FLAGS.DEMO_MODE_ENABLED ?? false,
+    });
   });
   
   /**
@@ -297,7 +273,7 @@ export class DemoBannerComponent {
     this.dismissed.set(true);
     try {
       localStorage.setItem(
-        DemoBannerComponent.DISMISS_STORAGE_KEY, 
+        DEMO_BANNER_DISMISS_STORAGE_KEY,
         JSON.stringify({ timestamp: Date.now() })
       );
     } catch {

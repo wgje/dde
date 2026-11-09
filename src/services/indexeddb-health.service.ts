@@ -20,6 +20,7 @@ import { ToastService } from './toast.service';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { INDEXEDDB_HEALTH_CONFIG } from '../config/sync.config';
 import { IndexedDBService, DB_CONFIG } from '../core-bridge';
+import { checkIndexedDBStoreRecords } from './indexeddb-health-record-check.helpers';
 
 /**
  * 损坏类型
@@ -95,20 +96,40 @@ export class IndexedDBHealthService implements OnDestroy {
 
   /** 定期检查定时器 */
   private periodicTimer: ReturnType<typeof setInterval> | null = null;
+  private healthCheckPromise: Promise<HealthCheckResult> | null = null;
 
   /** 是否已初始化 */
   private initialized = false;
+  private initializePromise: Promise<HealthCheckResult> | null = null;
+  private destroyed = false;
 
   /**
    * 初始化健康检查
    * 应在应用启动时调用（在 IndexedDB 初始化之后）
    */
   async initialize(): Promise<HealthCheckResult> {
+    if (this.destroyed) {
+      return this._lastResult() ?? this.createEmptyResult();
+    }
+
+    if (this.initializePromise) {
+      return this.initializePromise;
+    }
+
     if (this.initialized) {
       return this._lastResult() ?? this.createEmptyResult();
     }
     this.initialized = true;
 
+    this.initializePromise = this.performInitialize()
+      .finally(() => {
+        this.initializePromise = null;
+      });
+
+    return this.initializePromise;
+  }
+
+  private async performInitialize(): Promise<HealthCheckResult> {
     this.logger.info('IndexedDB 健康检查服务初始化');
 
     // 启动时检查
@@ -117,6 +138,9 @@ export class IndexedDBHealthService implements OnDestroy {
       result = await this.performHealthCheck();
     } else {
       result = this.createEmptyResult();
+    }
+    if (this.destroyed) {
+      return result;
     }
 
     // 启动定期检查
@@ -128,7 +152,10 @@ export class IndexedDBHealthService implements OnDestroy {
   }
 
   ngOnDestroy(): void {
-    if (this.periodicTimer) {
+    if (this.destroyed) return;
+    this.destroyed = true;
+
+    if (this.periodicTimer !== null) {
       clearInterval(this.periodicTimer);
       this.periodicTimer = null;
     }
@@ -138,6 +165,27 @@ export class IndexedDBHealthService implements OnDestroy {
    * 执行完整的健康检查
    */
   async performHealthCheck(): Promise<HealthCheckResult> {
+    if (this.destroyed) {
+      return this._lastResult() ?? this.createEmptyResult();
+    }
+
+    if (this.healthCheckPromise) {
+      return this.healthCheckPromise;
+    }
+
+    this.healthCheckPromise = this.runHealthCheck()
+      .finally(() => {
+        this.healthCheckPromise = null;
+      });
+
+    return this.healthCheckPromise;
+  }
+
+  private async runHealthCheck(): Promise<HealthCheckResult> {
+    if (this.destroyed) {
+      return this._lastResult() ?? this.createEmptyResult();
+    }
+
     const issues: HealthIssue[] = [];
     let samplesChecked = 0;
     let samplesFailed = 0;
@@ -145,6 +193,9 @@ export class IndexedDBHealthService implements OnDestroy {
     try {
       // 1. 检查数据库是否可以打开
       const db = await this.checkDatabaseOpen();
+      if (this.destroyed) {
+        return this._lastResult() ?? this.createEmptyResult();
+      }
       if (!db) {
         issues.push({
           type: 'open-error',
@@ -162,6 +213,9 @@ export class IndexedDBHealthService implements OnDestroy {
       // 3. 抽样校验数据完整性
       if (INDEXEDDB_HEALTH_CONFIG.STARTUP_INTEGRITY_CHECK.ENABLED) {
         const sampleResult = await this.sampleIntegrityCheck(db);
+        if (this.destroyed) {
+          return this._lastResult() ?? this.createEmptyResult();
+        }
         samplesChecked = sampleResult.checked;
         samplesFailed = sampleResult.failed;
         issues.push(...sampleResult.issues);
@@ -306,44 +360,16 @@ export class IndexedDBHealthService implements OnDestroy {
 
     try {
       const records = await this.getRandomSample(db, storeName, sampleSize);
-
-      for (const record of records) {
-        checked++;
-
-        // JSON 解析校验（记录已经被 IndexedDB 反序列化，检查是否为有效对象）
-        if (INDEXEDDB_HEALTH_CONFIG.STARTUP_INTEGRITY_CHECK.CHECK_JSON_PARSE) {
-          if (!record || typeof record !== 'object') {
-            failed++;
-            issues.push({
-              type: 'json-parse-error',
-              severity: 'error',
-              message: `[${storeName}] 记录不是有效的对象`,
-              store: storeName,
-              recovery: 'prompt-recovery',
-            });
-            continue;
-          }
-        }
-
-        // 必填字段校验
-        if (INDEXEDDB_HEALTH_CONFIG.STARTUP_INTEGRITY_CHECK.CHECK_REQUIRED_FIELDS) {
-          const obj = record as Record<string, unknown>;
-          for (const field of requiredFields) {
-            if (obj[field] === undefined || obj[field] === null) {
-              failed++;
-              issues.push({
-                type: 'schema-mismatch',
-                severity: 'warning',
-                message: `[${storeName}] 记录缺少必填字段 "${field}"`,
-                store: storeName,
-                recordId: typeof obj['id'] === 'string' ? obj['id'] : undefined,
-                recovery: 'prompt-recovery',
-              });
-              break; // 一条记录只报告一次
-            }
-          }
-        }
-      }
+      const result = checkIndexedDBStoreRecords({
+        records,
+        storeName,
+        requiredFields,
+        checkJsonParse: INDEXEDDB_HEALTH_CONFIG.STARTUP_INTEGRITY_CHECK.CHECK_JSON_PARSE,
+        checkRequiredFields: INDEXEDDB_HEALTH_CONFIG.STARTUP_INTEGRITY_CHECK.CHECK_REQUIRED_FIELDS,
+      });
+      checked = result.checked;
+      failed = result.failed;
+      issues.push(...result.issues);
     } catch (error) {
       this.logger.warn(`校验 ${storeName} 失败`, error);
 
@@ -432,6 +458,10 @@ export class IndexedDBHealthService implements OnDestroy {
     samplesChecked: number,
     samplesFailed: number
   ): HealthCheckResult {
+    if (this.destroyed) {
+      return this._lastResult() ?? this.createEmptyResult();
+    }
+
     const result: HealthCheckResult = {
       healthy,
       issues,
@@ -454,6 +484,10 @@ export class IndexedDBHealthService implements OnDestroy {
    * 处理发现的健康问题
    */
   private handleHealthIssues(result: HealthCheckResult): void {
+    if (this.destroyed) {
+      return;
+    }
+
     const criticalIssues = result.issues.filter(i => i.severity === 'critical');
     const errorIssues = result.issues.filter(i => i.severity === 'error');
 

@@ -34,6 +34,7 @@ export interface AndroidWidgetBootstrapRequest {
   sizeBucket: string;
   bootstrapNonce: string;
   pendingPushToken: string | null;
+  originOwnerUserId?: string;
 }
 
 function buildAndroidWidgetBootstrapRequest(input: {
@@ -47,6 +48,7 @@ function buildAndroidWidgetBootstrapRequest(input: {
   sizeBucket: string | null;
   bootstrapNonce: string | null;
   pendingPushToken: string | null;
+  originOwnerUserId: string | null;
 }): AndroidWidgetBootstrapRequest | null {
   if (!isAndroidBootstrapCallbackUri(input.callbackUri)) {
     return null;
@@ -60,7 +62,7 @@ function buildAndroidWidgetBootstrapRequest(input: {
     return null;
   }
 
-  return {
+  const request: AndroidWidgetBootstrapRequest = {
     callbackUri: input.callbackUri,
     installationId: input.installationId,
     deviceId: input.deviceId,
@@ -72,6 +74,12 @@ function buildAndroidWidgetBootstrapRequest(input: {
     bootstrapNonce: input.bootstrapNonce,
     pendingPushToken: isNonEmptyText(input.pendingPushToken, 4096) ? input.pendingPushToken.trim() : null,
   };
+
+  if (isNonEmptyText(input.originOwnerUserId, 128)) {
+    request.originOwnerUserId = input.originOwnerUserId.trim();
+  }
+
+  return request;
 }
 
 function readStartupEntryParams(routeUrl: string | null): URLSearchParams | null {
@@ -98,6 +106,10 @@ function isStartupEntryIntentKind(value: string | null): value is StartupEntryIn
     || value === 'open-blackbox-recorder'
     || value === 'mark-gate-read'
     || value === 'mark-gate-complete';
+}
+
+function isWidgetGateMutationIntent(value: StartupEntryIntentKind | null): value is 'mark-gate-read' | 'mark-gate-complete' {
+  return value === 'mark-gate-read' || value === 'mark-gate-complete';
 }
 
 function isUuidLike(value: string | null): value is string {
@@ -141,11 +153,14 @@ export function resolveStartupEntryIntent(routeUrl: string | null): StartupEntry
 
   const rawIntent = params.get('intent');
   const rawGateEntryId = params.get('widgetGateEntryId');
+  const parsedIntent = isStartupEntryIntentKind(rawIntent) ? rawIntent : null;
   const intent: StartupEntryIntent = {
     entry: rawEntry,
-    intent: isStartupEntryIntentKind(rawIntent) ? rawIntent : null,
+    intent: parsedIntent,
     rawIntent,
-    widgetGateEntryId: isUuidLike(rawGateEntryId) ? rawGateEntryId : null,
+    widgetGateEntryId: isWidgetGateMutationIntent(parsedIntent) && isUuidLike(rawGateEntryId)
+      ? rawGateEntryId
+      : null,
   };
 
   if (rawEntry === 'twa' && params.get('widgetBootstrap') === '1') {
@@ -181,10 +196,10 @@ export function normalizeStartupEntryIntent(value: unknown): StartupEntryIntent 
     entry: rawEntry,
     intent,
     rawIntent,
-    widgetGateEntryId: isUuidLike(rawGateEntryId) ? rawGateEntryId : null,
+    widgetGateEntryId: isWidgetGateMutationIntent(intent) && isUuidLike(rawGateEntryId) ? rawGateEntryId : null,
   };
 
-  if (record.androidWidgetBootstrap === true) {
+  if (rawEntry === 'twa' && record.androidWidgetBootstrap === true) {
     intentValue.androidWidgetBootstrap = true;
   }
 
@@ -224,6 +239,7 @@ export function resolveAndroidWidgetBootstrapRequest(routeUrl: string | null): A
     sizeBucket,
     bootstrapNonce,
     pendingPushToken,
+    originOwnerUserId: null,
   });
 }
 
@@ -244,6 +260,9 @@ export function normalizeAndroidWidgetBootstrapRequest(value: unknown): AndroidW
     sizeBucket: typeof record.sizeBucket === 'string' ? record.sizeBucket : null,
     bootstrapNonce: typeof record.bootstrapNonce === 'string' ? record.bootstrapNonce : null,
     pendingPushToken: typeof record.pendingPushToken === 'string' ? record.pendingPushToken : null,
+    originOwnerUserId: typeof record.originOwnerUserId === 'string'
+      ? record.originOwnerUserId
+      : null,
   });
 }
 

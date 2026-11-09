@@ -36,12 +36,12 @@ object NanoflowWidgetTelemetry {
         put(key, normalizeValue(value))
       }
       if (error != null) {
-        put("error", error.message ?: error.javaClass.simpleName)
+        put("error", error.javaClass.simpleName.ifBlank { "UNKNOWN_ERROR_TYPE" })
       }
     }
 
     when (priority) {
-      Log.ERROR -> Log.e(TAG, payload.toString(), error)
+      Log.ERROR -> Log.e(TAG, payload.toString())
       Log.WARN -> Log.w(TAG, payload.toString())
       else -> Log.i(TAG, payload.toString())
     }

@@ -17,218 +17,58 @@ import { Injectable, inject, signal, computed, DestroyRef } from '@angular/core'
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
 import { PreferenceService } from './preference.service';
-import { Project, Task, Connection } from '../models';
+import type { Project } from '../models';
 import { LOCAL_BACKUP_CONFIG } from '../config/local-backup.config';
 import { ExternalSourceLinkService } from '../app/core/external-sources/external-source-link.service';
-import type { ExternalSourceLink, ExternalSourceRole, ExternalSourceType } from '../app/core/external-sources/external-source.model';
+import {
+  buildExportData,
+  collectExportStats,
+  createExportBlobResult,
+  EXPORT_CONFIG,
+  type ExportData,
+  type ExportMetadata,
+  type ExportProgress,
+  type ExportProject,
+  type ExportResult,
+  generateExportFilename,
+  sanitizeProjectForExport,
+} from './export-build.utils';
 
-// ============================================
-// 导出配置
-// ============================================
+interface FileSystemWritableFileStreamLike {
+  write(data: Blob): Promise<void>;
+  close(): Promise<void>;
+}
 
-export const EXPORT_CONFIG = {
-  /** 导出格式版本 */
-  FORMAT_VERSION: '2.1',
-  
-  /** 默认文件名前缀 */
-  FILENAME_PREFIX: 'nanoflow-backup',
-  
-  /** 导出文件 MIME 类型 */
-  MIME_TYPE: 'application/json',
-  
-  /** 是否格式化 JSON（便于人类阅读） */
-  PRETTY_PRINT: true,
-  
-  /** 缩进空格数 */
-  INDENT_SPACES: 2,
-  
-  /** 是否包含附件元数据 */
-  INCLUDE_ATTACHMENT_METADATA: true,
-  
-  /** 是否包含已删除项目（回收站中的任务和连接） */
-  INCLUDE_DELETED_ITEMS: true,
-  
-  /** 是否移除敏感字段 */
-  SANITIZE_SENSITIVE_FIELDS: true,
-  
-  /** 敏感字段列表 */
-  SENSITIVE_FIELDS: ['ownerId', 'userId'] as readonly string[],
-  
-  /** 导出提醒间隔（毫秒）- 7 天 */
-  REMINDER_INTERVAL: 7 * 24 * 60 * 60 * 1000,
-} as const;
+interface FileSystemFileHandleLike {
+  name: string;
+  createWritable(): Promise<FileSystemWritableFileStreamLike>;
+}
+
+interface SaveFilePickerWindow {
+  showSaveFilePicker(options: {
+    suggestedName: string;
+    types: Array<{
+      description: string;
+      accept: Record<string, string[]>;
+    }>;
+  }): Promise<FileSystemFileHandleLike>;
+}
+
+export { EXPORT_CONFIG };
+export type {
+  ExportAttachment,
+  ExportConnection,
+  ExportData,
+  ExportExternalSourceLink,
+  ExportMetadata,
+  ExportProgress,
+  ExportProject,
+  ExportResult,
+  ExportStats,
+  ExportTask,
+} from './export-build.utils';
 
 const LAST_EXPORT_AT_STORAGE_KEY = 'nanoflow.lastExportAt';
-
-// ============================================
-// 类型定义
-// ============================================
-
-/**
- * 导出元数据
- */
-export interface ExportMetadata {
-  /** 导出时间 */
-  exportedAt: string;
-  /** 格式版本 */
-  version: string;
-  /** 应用版本 */
-  appVersion: string;
-  /** 项目数量 */
-  projectCount: number;
-  /** 任务数量 */
-  taskCount: number;
-  /** 连接数量 */
-  connectionCount: number;
-  /** 附件数量 */
-  attachmentCount: number;
-  /** 校验和 */
-  checksum: string;
-  /** 导出类型 */
-  exportType: 'full' | 'single-project' | 'selected';
-}
-
-/**
- * 导出数据结构
- */
-export interface ExportData {
-  /** 元数据 */
-  metadata: ExportMetadata;
-  /** 项目列表 */
-  projects: ExportProject[];
-}
-
-export interface ExportExternalSourceLink {
-  id: string;
-  sourceType: ExternalSourceType;
-  targetId: string;
-  uri: string;
-  label?: string;
-  hpath?: string;
-  role?: ExternalSourceRole;
-  sortOrder: number;
-  deletedAt?: string | null;
-  createdAt: string;
-  updatedAt: string;
-}
-
-/**
- * 导出项目结构（清理后的项目）
- */
-export interface ExportProject {
-  id: string;
-  name: string;
-  description: string;
-  tasks: ExportTask[];
-  connections: ExportConnection[];
-  createdAt?: string;
-  updatedAt?: string;
-  viewState?: {
-    scale: number;
-    positionX: number;
-    positionY: number;
-  };
-  /** 流程图图片 URL */
-  flowchartUrl?: string;
-  /** 流程图缩略图 URL */
-  flowchartThumbnailUrl?: string;
-  /** 数据版本号 */
-  version?: number;
-}
-
-/**
- * 导出任务结构
- */
-export interface ExportTask {
-  id: string;
-  title: string;
-  content: string;
-  stage: number | null;
-  parentId: string | null;
-  order: number;
-  rank: number;
-  status: string;
-  x: number;
-  y: number;
-  displayId: string;
-  shortId?: string;
-  createdAt?: string;
-  updatedAt?: string;
-  completedAt?: string | null;
-  attachments?: ExportAttachment[];
-  /** 标签列表 */
-  tags?: string[];
-  /** 优先级 */
-  priority?: 'low' | 'medium' | 'high' | 'urgent';
-  /** 截止日期 */
-  dueDate?: string | null;
-  expected_minutes?: number | null;
-  cognitive_load?: 'high' | 'low' | null;
-  wait_minutes?: number | null;
-  /** 是否包含未完成待办项 */
-  hasIncompleteTask?: boolean;
-  /** 软删除时间戳（回收站中的任务） */
-  deletedAt?: string | null;
-  /** 停泊元数据（A3.11：导出时清除 contextSnapshot） */
-  parkingMeta?: import('../models/parking').TaskParkingMeta | null;
-  /** 外部知识锚点指针（不包含 token / 正文缓存） */
-  externalSourceLinks?: ExportExternalSourceLink[];
-}
-
-/**
- * 导出连接结构
- */
-export interface ExportConnection {
-  id: string;
-  source: string;
-  target: string;
-  title?: string;
-  description?: string;
-  /** 软删除时间戳（回收站中的连接） */
-  deletedAt?: string | null;
-}
-
-/**
- * 导出附件元数据
- */
-export interface ExportAttachment {
-  id: string;
-  name: string;
-  size: number;
-  mimeType: string;
-  /** 附件 URL（注意：Signed URL 可能过期） */
-  url?: string;
-  createdAt?: string;
-  /** 附件类型 */
-  type?: 'image' | 'document' | 'link' | 'file';
-  /** 缩略图 URL（图片类型） */
-  thumbnailUrl?: string;
-}
-
-/**
- * 导出结果
- */
-export interface ExportResult {
-  success: boolean;
-  error?: string;
-  blob?: Blob;
-  filename?: string;
-  metadata?: ExportMetadata;
-  /** 导出耗时（毫秒） */
-  durationMs?: number;
-}
-
-/**
- * 导出进度
- */
-export interface ExportProgress {
-  /** 当前阶段 */
-  stage: 'preparing' | 'processing' | 'generating' | 'complete';
-  /** 进度百分比 (0-100) */
-  percentage: number;
-  /** 当前处理项 */
-  currentItem?: string;
-}
 
 // ============================================
 // 服务实现
@@ -337,50 +177,13 @@ export class ExportService {
       this.updateProgress('preparing', 10);
       
       await this.externalSourceLinks.ensureLoaded();
-
-      // 统计任务和附件
-      let taskCount = 0;
-      let connectionCount = 0;
-      let attachmentCount = 0;
-      
-      for (const project of projects) {
-        taskCount += project.tasks?.length ?? 0;
-        connectionCount += project.connections?.length ?? 0;
-        for (const task of project.tasks ?? []) {
-          attachmentCount += task.attachments?.length ?? 0;
-        }
-      }
+      const stats = collectExportStats(projects);
       
       this.updateProgress('processing', 30);
-      
-      // 阶段 2：清理和转换项目数据
-      const exportProjects: ExportProject[] = [];
-      for (let i = 0; i < projects.length; i++) {
-        const project = projects[i];
-        const exportProject = this.sanitizeProject(project);
-        exportProjects.push(exportProject);
-        
-        const progress = 30 + (i / projects.length) * 40;
-        this.updateProgress('processing', progress, project.name);
-      }
+      const exportProjects = this.prepareExportProjects(projects);
       
       this.updateProgress('generating', 75);
-      
-      // 阶段 3：构建导出数据
-      const exportData: ExportData = {
-        metadata: {
-          exportedAt: new Date().toISOString(),
-          version: EXPORT_CONFIG.FORMAT_VERSION,
-          appVersion: '1.0.0', // 应用版本
-          projectCount: projects.length,
-          taskCount,
-          connectionCount,
-          attachmentCount,
-          checksum: '', // 后面计算
-          exportType,
-        },
-        projects: exportProjects,
-      };
+      const exportData = buildExportData(projects.length, exportProjects, stats, exportType);
       
       // 阶段 4：计算校验和
       this.updateProgress('generating', 85);
@@ -388,35 +191,24 @@ export class ExportService {
       
       // 阶段 5：生成文件
       this.updateProgress('generating', 95);
-      const jsonContent = EXPORT_CONFIG.PRETTY_PRINT
-        ? JSON.stringify(exportData, null, EXPORT_CONFIG.INDENT_SPACES)
-        : JSON.stringify(exportData);
-      
-      const blob = new Blob([jsonContent], { type: EXPORT_CONFIG.MIME_TYPE });
-      const filename = this.generateFilename(exportType);
+      const filename = generateExportFilename(exportType);
+      const result = createExportBlobResult(exportData, filename, startTime);
       
       // 完成
       this.updateProgress('complete', 100);
-      const durationMs = Date.now() - startTime;
       
       // 记录导出时间
       await this.saveLastExportTime();
       
       this.logger.info('导出完成', {
         projectCount: projects.length,
-        taskCount,
-        attachmentCount,
-        durationMs,
-        fileSize: blob.size,
+        taskCount: stats.taskCount,
+        attachmentCount: stats.attachmentCount,
+        durationMs: result.durationMs,
+        fileSize: result.blob?.size,
       });
       
-      return {
-        success: true,
-        blob,
-        filename,
-        metadata: exportData.metadata,
-        durationMs,
-      };
+      return result;
     } catch (error) {
       this.logger.error('导出失败', error);
       return {
@@ -426,6 +218,17 @@ export class ExportService {
     } finally {
       this._isExporting.set(false);
     }
+  }
+
+  private prepareExportProjects(projects: Project[]): ExportProject[] {
+    return projects.map((project, index) => {
+      const progress = 30 + (index / projects.length) * 40;
+      this.updateProgress('processing', progress, project.name);
+      return sanitizeProjectForExport(
+        project,
+        taskId => this.externalSourceLinks.activeLinksForTask(taskId),
+      );
+    });
   }
   
   /**
@@ -473,10 +276,9 @@ export class ExportService {
     }
     
     try {
-      const suggestedName = result.filename ?? this.generateFilename('full');
+      const suggestedName = result.filename ?? generateExportFilename('full');
       
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const showSaveFilePicker = (window as any).showSaveFilePicker;
+      const showSaveFilePicker = (window as unknown as SaveFilePickerWindow).showSaveFilePicker;
       const handle = await showSaveFilePicker({
         suggestedName,
         types: [{
@@ -523,133 +325,6 @@ export class ExportService {
   }
   
   // ==================== 私有方法 ====================
-  
-  /**
-   * 清理项目数据（移除敏感字段，规范化结构）
-   */
-  private sanitizeProject(project: Project): ExportProject {
-    // 根据配置决定是否包含已删除项目
-    const taskFilter = EXPORT_CONFIG.INCLUDE_DELETED_ITEMS
-      ? () => true // 包含所有任务（含回收站）
-      : (t: Task) => !t.deletedAt; // 仅包含未删除任务
-    
-    const connectionFilter = EXPORT_CONFIG.INCLUDE_DELETED_ITEMS
-      ? () => true // 包含所有连接（含回收站）
-      : (c: Connection) => !c.deletedAt; // 仅包含未删除连接
-    
-    const tasks = (project.tasks ?? [])
-      .filter(taskFilter)
-      .map(t => this.sanitizeTask(t));
-    
-    const connections = (project.connections ?? [])
-      .filter(connectionFilter)
-      .map(c => this.sanitizeConnection(c));
-    
-    return {
-      id: project.id,
-      name: project.name,
-      description: project.description ?? '',
-      tasks,
-      connections,
-      createdAt: project.createdDate,
-      updatedAt: project.updatedAt,
-      viewState: project.viewState,
-      flowchartUrl: project.flowchartUrl,
-      flowchartThumbnailUrl: project.flowchartThumbnailUrl,
-      version: project.version,
-    };
-  }
-  
-  /**
-   * 清理任务数据
-   */
-  private sanitizeTask(task: Task): ExportTask {
-    const exportTask: ExportTask = {
-      id: task.id,
-      title: task.title,
-      content: task.content ?? '',
-      stage: task.stage,
-      parentId: task.parentId,
-      order: task.order ?? 0,
-      rank: task.rank ?? 10000,
-      status: task.status ?? 'active',
-      x: task.x ?? 0,
-      y: task.y ?? 0,
-      displayId: task.displayId ?? '',
-      shortId: task.shortId,
-      createdAt: task.createdDate,
-      updatedAt: task.updatedAt,
-      completedAt: task.completedAt ?? null,
-      tags: task.tags,
-      priority: task.priority,
-      dueDate: task.dueDate,
-      expected_minutes: task.expected_minutes ?? null,
-      cognitive_load: task.cognitive_load ?? null,
-      wait_minutes: task.wait_minutes ?? null,
-      hasIncompleteTask: task.hasIncompleteTask,
-      deletedAt: task.deletedAt,
-      // 导出保留停泊元数据但清除 contextSnapshot（A3.11）
-      parkingMeta: task.parkingMeta ? {
-        ...task.parkingMeta,
-        contextSnapshot: null,
-      } : null,
-      externalSourceLinks: this.exportExternalSourceLinks(task.id),
-    };
-    
-    // 包含附件元数据
-    if (EXPORT_CONFIG.INCLUDE_ATTACHMENT_METADATA && task.attachments?.length) {
-      exportTask.attachments = task.attachments
-        .filter(att => !att.deletedAt) // 过滤已删除附件
-        .map(att => ({
-          id: att.id,
-          name: att.name,
-          size: att.size ?? 0,
-          mimeType: att.mimeType ?? 'application/octet-stream',
-          url: att.url, // 注意：Signed URL 可能过期
-          createdAt: att.createdAt,
-          type: att.type,
-          thumbnailUrl: att.thumbnailUrl,
-        }));
-    }
-    
-    return exportTask;
-  }
-  
-  private exportExternalSourceLinks(taskId: string): ExportExternalSourceLink[] | undefined {
-    const links = this.externalSourceLinks.activeLinksForTask(taskId);
-    if (links.length === 0) return undefined;
-    return links.map(link => this.toExportExternalSourceLink(link));
-  }
-
-  private toExportExternalSourceLink(link: ExternalSourceLink): ExportExternalSourceLink {
-    return {
-      id: link.id,
-      sourceType: link.sourceType,
-      targetId: link.targetId,
-      uri: link.uri,
-      label: link.label,
-      hpath: link.hpath,
-      role: link.role,
-      sortOrder: link.sortOrder,
-      deletedAt: link.deletedAt,
-      createdAt: link.createdAt,
-      updatedAt: link.updatedAt,
-    };
-  }
-
-  /**
-   * 清理连接数据
-   */
-  private sanitizeConnection(connection: Connection): ExportConnection {
-    return {
-      id: connection.id,
-      source: connection.source,
-      target: connection.target,
-      title: connection.title,
-      description: connection.description,
-      deletedAt: connection.deletedAt,
-    };
-  }
   
   /**
    * 计算校验和（简化版 SHA-256）

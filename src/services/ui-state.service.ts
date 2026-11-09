@@ -132,10 +132,10 @@ export class UiStateService {
     this.loadLocalPreferences();
     
     this.destroyRef.onDestroy(() => {
-      if (this.searchDebounceTimer) {
+      if (this.searchDebounceTimer !== null) {
         clearTimeout(this.searchDebounceTimer);
       }
-      if (this.editingTimer) {
+      if (this.editingTimer !== null) {
         clearTimeout(this.editingTimer);
       }
     });
@@ -203,7 +203,7 @@ export class UiStateService {
   setSearchQueryDebounced(query: string, delay: number = 300): void {
     this.searchQuery.set(query);
     
-    if (this.searchDebounceTimer) {
+    if (this.searchDebounceTimer !== null) {
       clearTimeout(this.searchDebounceTimer);
     }
     
@@ -220,7 +220,7 @@ export class UiStateService {
     this.searchQuery.set('');
     this.projectSearchQuery.set('');
     this.debouncedSearchQuery.set('');
-    if (this.searchDebounceTimer) {
+    if (this.searchDebounceTimer !== null) {
       clearTimeout(this.searchDebounceTimer);
       this.searchDebounceTimer = null;
     }
@@ -376,7 +376,7 @@ export class UiStateService {
     // 递增版本号，标记这是一个新的编辑会话
     const currentVersion = ++this._editingVersion;
     
-    if (this.editingTimer) {
+    if (this.editingTimer !== null) {
       clearTimeout(this.editingTimer);
     }
     
@@ -402,7 +402,7 @@ export class UiStateService {
    */
   clearEditingState(): void {
     this._isEditing = false;
-    if (this.editingTimer) {
+    if (this.editingTimer !== null) {
       clearTimeout(this.editingTimer);
       this.editingTimer = null;
     }

@@ -1,116 +1,198 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { Injector, runInInjectionContext } from '@angular/core';
-import { TombstoneService } from './tombstone.service';
+import { Injector } from '@angular/core';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LoggerService } from '../../../../services/logger.service';
 import { RequestThrottleService } from '../../../../services/request-throttle.service';
-import {
-  isBrowserNetworkSuspendedError,
-  resetBrowserNetworkSuspensionTrackingForTests,
-} from '../../../../utils/browser-network-suspension';
+import { AttachmentCleanupOutboxService } from '../../../../services/attachment-cleanup-outbox.service';
+import { SessionRuntimeResetRegistry } from '../../../../services/session-runtime-reset.service';
+import { resetBrowserNetworkSuspensionTrackingForTests } from '../../../../utils/browser-network-suspension';
+import { TombstoneService } from './tombstone.service';
 
-function setVisibilityState(state: DocumentVisibilityState): void {
-  Object.defineProperty(document, 'visibilityState', {
-    configurable: true,
-    value: state,
-  });
+function createPagedTombstoneQuery(
+  rows: Array<{ task_id: string; deleted_at: string | null }>,
+  limits: number[],
+) {
+  let offset = 0;
+  const query = {
+    select: vi.fn(),
+    eq: vi.fn(),
+    or: vi.fn(),
+    order: vi.fn(),
+    limit: vi.fn(async (count: number) => {
+      limits.push(count);
+      const from = offset;
+      offset += count;
+      return { data: rows.slice(from, from + count), error: null };
+    }),
+  };
+
+  query.select.mockReturnValue(query);
+  query.eq.mockReturnValue(query);
+  query.or.mockReturnValue(query);
+  query.order.mockReturnValue(query);
+
+  return query;
 }
 
-const mockLoggerCategory = {
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
-  debug: vi.fn(),
-};
-
-const mockLoggerService = {
-  category: vi.fn(() => mockLoggerCategory),
-};
-
-const mockThrottleService = {
-  execute: vi.fn(),
-};
-
 describe('TombstoneService', () => {
-  let service: TombstoneService;
-
   beforeEach(() => {
-    vi.clearAllMocks();
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date('2026-04-23T00:00:00.000Z'));
     resetBrowserNetworkSuspensionTrackingForTests();
-    setVisibilityState('visible');
-    localStorage.removeItem('nanoflow.local-tombstones');
-
-    const injector = Injector.create({
-      providers: [
-        TombstoneService,
-        { provide: LoggerService, useValue: mockLoggerService },
-        { provide: RequestThrottleService, useValue: mockThrottleService },
-      ],
+    localStorage.clear();
+    Object.defineProperty(document, 'visibilityState', {
+      value: 'visible',
+      writable: true,
+      configurable: true,
     });
-
-    service = runInInjectionContext(injector, () => injector.get(TombstoneService));
   });
 
   afterEach(() => {
-    vi.useRealTimers();
     resetBrowserNetworkSuspensionTrackingForTests();
-    localStorage.removeItem('nanoflow.local-tombstones');
   });
 
-  it('should reject older candidates that are not newer than the local tombstone timestamp', () => {
-    service.addLocalTombstones('project-1', ['task-1']);
+  it('getTombstonesWithCache 应分页加载超过 1000 条 task tombstones', async () => {
+    const rows = Array.from({ length: 1001 }, (_, index) => ({
+      task_id: `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
+      deleted_at: new Date(Date.UTC(2026, 5, 9, 0, 0, index)).toISOString(),
+    }));
+    const limits: number[] = [];
+    const query = createPagedTombstoneQuery(rows, limits);
+    const client = {
+      from: vi.fn((table: string) => {
+        if (table === 'task_tombstones') return query;
+        throw new Error(`unexpected table ${table}`);
+      }),
+    };
 
-    expect(service.shouldRejectTaskUpsert('project-1', 'task-1', '2026-04-22T23:59:59.000Z')).toBe(true);
-  });
-
-  it('should allow newer candidates to clear the local tombstone guard', () => {
-    service.addLocalTombstones('project-1', ['task-1']);
-
-    expect(service.shouldRejectTaskUpsert('project-1', 'task-1', '2026-04-23T00:00:01.000Z')).toBe(false);
-    expect(service.getLocalTombstones('project-1').has('task-1')).toBe(false);
-  });
-
-  it('should compare restores against the actual delete timestamp instead of the later cache write time', () => {
-    vi.setSystemTime(new Date('2026-04-23T02:00:00.000Z'));
-
-    service.addLocalTombstones('project-1', ['task-1'], {
-      'task-1': '2026-04-23T00:00:00.000Z',
+    const injector = Injector.create({
+      providers: [
+        { provide: TombstoneService, useClass: TombstoneService },
+        {
+          provide: LoggerService,
+          useValue: {
+            category: () => ({
+              debug: vi.fn(),
+              info: vi.fn(),
+              warn: vi.fn(),
+              error: vi.fn(),
+            }),
+          },
+        },
+        {
+          provide: RequestThrottleService,
+          useValue: {
+            execute: vi.fn(async (_key: string, operation: () => Promise<unknown>) => operation()),
+          },
+        },
+        {
+          provide: AttachmentCleanupOutboxService,
+          useValue: {
+            enqueuePaths: vi.fn().mockResolvedValue([]),
+            removePendingCleanups: vi.fn().mockResolvedValue(undefined),
+          },
+        },
+        SessionRuntimeResetRegistry,
+      ],
     });
 
-    expect(service.shouldRejectTaskUpsert('project-1', 'task-1', '2026-04-23T01:00:00.000Z')).toBe(false);
+    const service = injector.get(TombstoneService);
+    const result = await service.getTombstonesWithCache('project-1', client as never);
+
+    expect(result.error).toBeNull();
+    expect(result.data).toHaveLength(1001);
+    expect(result.data?.[1000]?.task_id).toBe('00000000-0000-4000-8000-000000001000');
+    expect(limits).toEqual([1000, 1000]);
+    expect(query.order).toHaveBeenCalledWith('deleted_at', { ascending: true });
+    expect(query.order).toHaveBeenCalledWith('task_id', { ascending: true });
   });
 
-  it('should compare remote restores against the cached tombstone deletedAt watermark instead of cache fetch time', () => {
-    vi.setSystemTime(new Date('2026-04-23T02:00:00.000Z'));
+  it('deleteAttachmentFilesFromStorage client 缺失时仍先持久化附件清理 outbox', async () => {
+    const enqueuePaths = vi.fn().mockResolvedValue([]);
+    const removePendingCleanups = vi.fn().mockResolvedValue(undefined);
+    const injector = Injector.create({
+      providers: [
+        { provide: TombstoneService, useClass: TombstoneService },
+        {
+          provide: LoggerService,
+          useValue: {
+            category: () => ({
+              debug: vi.fn(),
+              info: vi.fn(),
+              warn: vi.fn(),
+              error: vi.fn(),
+            }),
+          },
+        },
+        {
+          provide: RequestThrottleService,
+          useValue: {
+            execute: vi.fn(async (_key: string, operation: () => Promise<unknown>) => operation()),
+          },
+        },
+        { provide: AttachmentCleanupOutboxService, useValue: { enqueuePaths, removePendingCleanups } },
+        SessionRuntimeResetRegistry,
+      ],
+    });
+    const service = injector.get(TombstoneService);
 
-    service.updateTombstoneCache(
-      'project-1',
-      new Set(['task-1']),
-      new Map([['task-1', new Date('2026-04-23T00:00:00.000Z').getTime()]])
+    await service.deleteAttachmentFilesFromStorage(null, [
+      'user1/proj1/task1/attachment-a.png',
+    ]);
+
+    expect(enqueuePaths).toHaveBeenCalledWith(
+      ['user1/proj1/task1/attachment-a.png'],
+      { ownerUserId: 'user1' },
     );
-
-    expect(service.shouldRejectTaskUpsert('project-1', 'task-1', '2026-04-23T01:00:00.000Z')).toBe(false);
+    expect(removePendingCleanups).not.toHaveBeenCalled();
   });
 
-  it('should allow restore candidates when batch-preloaded remote tombstones lack deletedAt watermarks', () => {
-    vi.setSystemTime(new Date('2026-04-23T02:00:00.000Z'));
+  it('deleteAttachmentFilesFromStorage 远端失败时保留 cleanup outbox 待恢复', async () => {
+    const enqueuePaths = vi.fn().mockResolvedValue([]);
+    const removePendingCleanups = vi.fn().mockResolvedValue(undefined);
+    const remove = vi.fn().mockResolvedValue({
+      data: null,
+      error: { message: 'storage timeout' },
+    });
+    const client = {
+      storage: {
+        from: vi.fn(() => ({ remove })),
+      },
+    };
+    const injector = Injector.create({
+      providers: [
+        { provide: TombstoneService, useClass: TombstoneService },
+        {
+          provide: LoggerService,
+          useValue: {
+            category: () => ({
+              debug: vi.fn(),
+              info: vi.fn(),
+              warn: vi.fn(),
+              error: vi.fn(),
+            }),
+          },
+        },
+        {
+          provide: RequestThrottleService,
+          useValue: {
+            execute: vi.fn(async (_key: string, operation: () => Promise<unknown>) => operation()),
+          },
+        },
+        { provide: AttachmentCleanupOutboxService, useValue: { enqueuePaths, removePendingCleanups } },
+        SessionRuntimeResetRegistry,
+      ],
+    });
+    const service = injector.get(TombstoneService);
 
-    service.updateTombstoneCache('project-1', new Set(['task-1']));
+    await service.deleteAttachmentFilesFromStorage(client as never, [
+      'user1/proj1/task1/attachment-a.png',
+    ]);
 
-    expect(service.shouldRejectTaskUpsert('project-1', 'task-1', '2026-04-23T01:00:00.000Z')).toBe(false);
-  });
-
-  it('getTombstonesWithCache should return a suspension error without querying remote while hidden', async () => {
-    setVisibilityState('hidden');
-
-    const result = await service.getTombstonesWithCache(
-      'project-1',
-      {} as Parameters<TombstoneService['getTombstonesWithCache']>[1]
+    expect(enqueuePaths).toHaveBeenCalledWith(
+      ['user1/proj1/task1/attachment-a.png'],
+      { ownerUserId: 'user1' },
     );
-
-    expect(result.data).toBeNull();
-    expect(isBrowserNetworkSuspendedError(result.error)).toBe(true);
-    expect(mockThrottleService.execute).not.toHaveBeenCalled();
+    expect(remove).toHaveBeenCalledWith([
+      'user1/proj1/task1/attachment-a.png',
+    ]);
+    expect(removePendingCleanups).not.toHaveBeenCalled();
   });
 });

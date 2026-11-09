@@ -1,28 +1,8 @@
 /**
- * LocalBackupService - 本地目录备份服务
- * 
- * 【P3 桌面坚果云备份 - C 层可选增强】
- * 
- * 职责：
- * - 使用 File System Access API 备份到本地目录
- * - 支持坚果云/Dropbox/OneDrive 同步目录
- * - 自动定时备份
- * - 备份文件版本管理
- * - IndexedDB 持久化 DirectoryHandle，跨会话保留
- * 
- * 限制：
- * - 仅桌面 Chrome 浏览器支持
- * - 需要用户手动授权
- * - 浏览器重启后需要重新验证权限（用户点击确认）
- * 
- * 设计理念：
- * - C 层是"第三层"增强，不是主依赖
- * - 提供用户可见的离线副本（心理安全感）
- * - 在极端情况下提供额外恢复途径
- * - 持久化状态确保用户设置不丢失
+ * 本地目录备份服务：File System Access API + 自动备份 + DirectoryHandle 持久化。
+ * 这是 C 层增强能力，不是主同步链路；仅桌面 Chrome 可用，需要用户授权。
  */
 import { Injectable, inject, signal, computed, OnDestroy } from '@angular/core';
-import { get, set, del } from 'idb-keyval';
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
 import { UiStateService } from './ui-state.service';
@@ -40,19 +20,35 @@ import {
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import {
   getRemainingBrowserNetworkResumeDelayMs,
-  isBrowserNetworkSuspendedError,
-  isBrowserNetworkSuspendedWindow,
 } from '../utils/browser-network-suspension';
-// ============================================
-// IndexedDB 存储键
-// ============================================
-const IDB_KEYS = {
-  DIRECTORY_HANDLE: 'nanoflow.local-backup.directory-handle',
-} as const;
+import { del, get, set } from 'idb-keyval';
+import {
+  buildLocalBackupFilename,
+  createLocalBackupTimestamp,
+} from './local-backup-file.helpers';
+import {
+  buildDeferredRetryResult,
+  classifyLocalBackupFailure,
+  getAutoBackupDeferredRetryWindowState,
+} from './local-backup-deferred-retry-state.helpers';
+import { LocalBackupDeferredRetryScheduler } from './local-backup-deferred-retry.scheduler';
+import {
+  LocalBackupPersistenceController,
+  type LocalBackupOwnerContext,
+} from './local-backup-persistence.controller';
+import { LocalBackupDirectoryFilesController } from './local-backup-directory-files.controller';
+import { isStaleDirectoryHandleError } from './local-backup-directory-handle.helpers';
+import { resolveLocalBackupCompatibility } from './local-backup-compatibility.helpers';
+import { AuthService } from './auth.service';
+import { SessionRuntimeResetRegistry } from './session-runtime-reset.service';
+import {
+  buildStaleLocalBackupSessionResult,
+  LocalBackupSessionRuntimeController,
+  type LocalBackupRunContext,
+} from './local-backup-session-runtime.controller';
+export { buildLocalBackupFilename } from './local-backup-file.helpers';
 
 const STALE_DIRECTORY_HANDLE_MESSAGE = '备份目录状态已变化，请重新选择本地备份目录';
-const AUTO_BACKUP_RETRY_BUFFER_MS = 50;
-const AUTO_BACKUP_RETRY_MIN_DELAY_MS = 100;
 
 type LocalBackupProjectSnapshot = { id: string; name: string; tasks: unknown[]; connections: unknown[] };
 
@@ -68,10 +64,6 @@ interface AutoBackupStartOptions {
   silent?: boolean;
 }
 
-// ============================================
-// 服务实现
-// ============================================
-
 @Injectable({
   providedIn: 'root'
 })
@@ -83,17 +75,34 @@ export class LocalBackupService implements OnDestroy {
   private readonly exportService = inject(ExportService);
   private readonly uiState = inject(UiStateService);
   private readonly preferenceService = inject(PreferenceService);
-  
-  // 内部状态
+  private readonly auth = inject(AuthService);
+  private readonly sessionRuntimeReset = inject(SessionRuntimeResetRegistry);
+  private readonly persistence = new LocalBackupPersistenceController({
+    logger: this.logger,
+    idbGet: get,
+    idbSet: set,
+    idbDel: del,
+  });
   private directoryHandle: FileSystemDirectoryHandle | null = null;
   private restoreHandlePromise: Promise<boolean> | null = null;
   private autoBackupTimer: ReturnType<typeof setInterval> | null = null;
-  private autoBackupDeferredRetryTimer: ReturnType<typeof setTimeout> | null = null;
-  private autoBackupVisibilityRetryHandler: (() => void) | null = null;
+  private destroyed = false;
+  private unregisterSessionRuntimeReset: (() => void) | null = null;
   /** 用于自动备份的项目获取函数（持久化后恢复使用） */
   private getProjectsFn: (() => LocalBackupProjectSnapshot[]) | null = null;
+  private readonly deferredRetryScheduler = new LocalBackupDeferredRetryScheduler({
+    isEnabled: () => this._autoBackupEnabled(),
+    hasProjectsProvider: () => !!this.getProjectsFn,
+    runRetry: () => void this.runAutoBackupCycle(),
+    getRemainingResumeDelayMs: () => getRemainingBrowserNetworkResumeDelayMs(),
+  });
+  private readonly sessionRuntime = new LocalBackupSessionRuntimeController({
+    currentUserId: () => this.auth.currentUserId(),
+    restartAutoBackup: () => this.restartAutoBackupForCurrentSession(),
+    setBackingUp: value => this._isBackingUp.set(value),
+    stopAutoBackup: () => this.stopAutoBackup(false),
+  });
   
-  // 响应式状态信号
   private readonly _isAuthorized = signal(false);
   private readonly _directoryName = signal<string | null>(null);
   private readonly _lastBackupTime = signal<string | null>(null);
@@ -105,7 +114,6 @@ export class LocalBackupService implements OnDestroy {
   /** 权限状态：granted=已授权, prompt=需要用户确认, denied=已拒绝 */
   private readonly _permissionState = signal<PermissionState | null>(null);
   
-  // 公开的计算属性
   readonly isAuthorized = computed(() => this._isAuthorized());
   readonly directoryName = computed(() => this._directoryName());
   readonly lastBackupTime = computed(() => this._lastBackupTime());
@@ -121,43 +129,15 @@ export class LocalBackupService implements OnDestroy {
     this._hasSavedHandle() && !this._isAuthorized() && this._permissionState() === 'prompt'
   );
   
-  /**
-   * 平台兼容性检查
-   */
-  readonly compatibility = computed<LocalBackupCompatibility>(() => {
-    const isDesktop = !this.uiState.isMobile();
-    const isSupported = 'showDirectoryPicker' in window;
-    
-    if (!isDesktop) {
-      return {
-        isSupported: false,
-        isDesktop: false,
-        unsupportedReason: '移动设备不支持本地备份功能',
-      };
-    }
-    
-    if (!isSupported) {
-      return {
-        isSupported: false,
-        isDesktop: true,
-        unsupportedReason: '当前浏览器不支持 File System Access API，请使用 Chrome 浏览器',
-      };
-    }
-    
-    return {
-      isSupported: true,
-      isDesktop: true,
-    };
-  });
+  readonly compatibility = computed<LocalBackupCompatibility>(() =>
+    resolveLocalBackupCompatibility({
+      isDesktop: !this.uiState.isMobile(),
+      hasDirectoryPicker: 'showDirectoryPicker' in window,
+    })
+  );
   
-  /**
-   * 是否可用（平台支持且功能可用）
-   */
   readonly isAvailable = computed(() => this.compatibility().isSupported);
   
-  /**
-   * 完整状态
-   */
   readonly status = computed<LocalBackupStatus>(() => ({
     isAuthorized: this._isAuthorized(),
     directoryName: this._directoryName() ?? undefined,
@@ -167,19 +147,25 @@ export class LocalBackupService implements OnDestroy {
   }));
   
   constructor() {
-    // 先从 localStorage 加载基础状态
-    this.loadPersistedState();
-    // 然后从 IndexedDB 恢复 DirectoryHandle（异步）
-    this.restoreHandlePromise = this.restoreFromIndexedDB();
+    this.unregisterSessionRuntimeReset = this.sessionRuntimeReset.register(
+      'LocalBackupService',
+      () => this.resetForOwnerChange(),
+    );
+    this.bindCurrentOwner();
   }
   
   ngOnDestroy(): void {
+    if (this.destroyed) {
+      return;
+    }
+
+    this.destroyed = true;
+    this.persistence.detachOwnerScope();
+    this.sessionRuntime.destroy();
+    this.unregisterSessionRuntimeReset?.();
+    this.unregisterSessionRuntimeReset = null;
     this.stopAutoBackup();
   }
-  
-  // ============================================
-  // 目录授权
-  // ============================================
   
   /**
    * 请求目录访问授权
@@ -190,43 +176,39 @@ export class LocalBackupService implements OnDestroy {
       const reason = this.compatibility().unsupportedReason || '功能不可用';
       return { success: false, error: reason };
     }
-    
+    const ownerContext = this.persistence.captureOwnerContext();
+    if (!ownerContext) return { success: false, error: '会话已切换' };
     try {
       this.logger.info('请求目录访问授权...');
-      
-      // 调用 File System Access API
-      this.directoryHandle = await window.showDirectoryPicker!(LOCAL_BACKUP_CONFIG.DIRECTORY_PICKER_OPTIONS);
-      
-      const directoryName = this.directoryHandle.name;
-      
-      // 更新状态
+      const handle = await window.showDirectoryPicker!(LOCAL_BACKUP_CONFIG.DIRECTORY_PICKER_OPTIONS);
+      if (!this.persistence.isOwnerContextCurrent(ownerContext)) {
+        return { success: false, error: '会话已切换' };
+      }
+      this.directoryHandle = handle;
+      const directoryName = handle.name;
       this._isAuthorized.set(true);
       this._directoryName.set(directoryName);
       this._hasSavedHandle.set(true);
       this._permissionState.set('granted');
-      
-      // 持久化到 IndexedDB 和 localStorage
-      await this.saveDirectoryHandleToIDB();
-      this.savePersistedState();
-
+      // 保存当前 owner DirectoryHandle 到 IndexedDB
+      await this.persistence.saveDirectoryHandle(ownerContext, handle);
+      if (!this.persistence.isOwnerContextCurrent(ownerContext)) {
+        return { success: false, error: '会话已切换' };
+      }
+      this.savePersistedState(ownerContext);
       if (this._autoBackupEnabled() && this.getProjectsFn) {
         this.startAutoBackup(this.getProjectsFn, undefined, { silent: true });
       }
-      
       this.logger.info('目录授权成功', { directoryName });
       this.toast.success(`已选择备份目录：${directoryName}`);
-      
       return { success: true, directoryName };
-      
     } catch (error) {
       const e = error as Error;
-      
       // 用户取消不算错误
       if (e.name === 'AbortError') {
         this.logger.info('用户取消目录选择');
         return { success: false, error: '已取消' };
       }
-      
       this.logger.error('目录授权失败', error);
       this.sentryLazyLoader.captureException(error, { tags: { operation: 'localBackup.requestDirectory' } });
       
@@ -239,48 +221,33 @@ export class LocalBackupService implements OnDestroy {
    * 浏览器重启后需要重新获取权限
    */
   async checkAndRestorePermission(options: PermissionCheckOptions = {}): Promise<boolean> {
-    await this.ensureDirectoryHandleLoaded();
+    const ownerContext = this.persistence.captureOwnerContext();
+    return ownerContext ? this.checkPermissionForOwner(ownerContext, options) : false;
+  }
 
-    if (!this.directoryHandle) {
+  private async checkPermissionForOwner(
+    ownerContext: LocalBackupOwnerContext,
+    options: PermissionCheckOptions,
+  ): Promise<boolean> {
+    await this.ensureDirectoryHandleLoaded(ownerContext);
+    const handle = this.currentHandle(ownerContext);
+    if (!handle) return false;
+    // 查询当前权限状态；仅用户手势路径继续请求权限
+    const mode = options.request === false ? 'query' : 'query-and-request';
+    const result = await this.persistence.resolveDirectoryPermission(ownerContext, handle, mode);
+    if (result.kind === 'stale') return false;
+    if (result.kind === 'error') {
+      if (isStaleDirectoryHandleError(result.error)) {
+        await this.invalidateDirectoryHandleAfterStateError(ownerContext, options.request !== false);
+      } else {
+        this.logger.warn('权限检查失败', result.error);
+        this._permissionState.set('denied');
+      }
       return false;
     }
-    
-    try {
-      // 查询当前权限状态
-      const permission = await this.directoryHandle.queryPermission({ mode: 'readwrite' });
-      this._permissionState.set(permission);
-      
-      if (permission === 'granted') {
-        this._isAuthorized.set(true);
-        return true;
-      }
-      
-      if (options.request === false) {
-        this._isAuthorized.set(false);
-        return false;
-      }
-
-      // 尝试请求权限（必须由用户手势触发）
-      const request = await this.directoryHandle.requestPermission({ mode: 'readwrite' });
-      this._permissionState.set(request);
-      
-      if (request === 'granted') {
-        this._isAuthorized.set(true);
-        return true;
-      }
-      
-      return false;
-      
-    } catch (error) {
-      if (this.isStaleDirectoryHandleError(error)) {
-        await this.invalidateDirectoryHandleAfterStateError(options.request !== false);
-        return false;
-      }
-
-      this.logger.warn('权限检查失败', error);
-      this._permissionState.set('denied');
-      return false;
-    }
+    this._permissionState.set(result.permission);
+    this._isAuthorized.set(result.permission === 'granted');
+    return result.permission === 'granted';
   }
   
   /**
@@ -288,314 +255,233 @@ export class LocalBackupService implements OnDestroy {
    * 用于浏览器重启后重新获取权限
    */
   async resumePermission(): Promise<boolean> {
-    if (!this.directoryHandle) {
+    const ownerContext = this.persistence.captureOwnerContext();
+    if (!ownerContext) return false;
+    if (!this.currentHandle(ownerContext)) {
       // 尝试从 IndexedDB 恢复 handle
-      const restored = await this.ensureDirectoryHandleLoaded();
-      if (!restored || !this.directoryHandle) {
+      const restored = await this.ensureDirectoryHandleLoaded(ownerContext);
+      if (!restored || !this.currentHandle(ownerContext)) {
         this.toast.error('未找到保存的备份目录，请重新选择');
         return false;
       }
     }
-    
-    try {
-      const permission = await this.directoryHandle.requestPermission({ mode: 'readwrite' });
-      this._permissionState.set(permission);
-      
-      if (permission === 'granted') {
-        this._isAuthorized.set(true);
-        this._directoryName.set(this.directoryHandle.name);
-        this.toast.success(`已恢复备份目录：${this.directoryHandle.name}`);
-        
-        // 如果之前启用了自动备份，自动恢复
-        if (this._autoBackupEnabled() && this.getProjectsFn) {
-          this.startAutoBackup(this.getProjectsFn);
-          this.logger.info('自动备份已自动恢复');
-        }
-        
-        return true;
-      }
-      
-      this.toast.info('权限请求被拒绝');
-      return false;
-      
-    } catch (error) {
-      if (this.isStaleDirectoryHandleError(error)) {
-        await this.invalidateDirectoryHandleAfterStateError(true);
-        return false;
-      }
 
-      this.logger.error('恢复权限失败', error);
-      this.toast.error('恢复权限失败');
+    const handle = this.currentHandle(ownerContext);
+    if (!handle) return false;
+    const result = await this.persistence.resolveDirectoryPermission(ownerContext, handle, 'request');
+    if (result.kind === 'stale') return false;
+    if (result.kind === 'error') {
+      if (isStaleDirectoryHandleError(result.error)) {
+        await this.invalidateDirectoryHandleAfterStateError(ownerContext, true);
+      } else {
+        this.logger.error('恢复权限失败', result.error);
+        this.toast.error('恢复权限失败');
+      }
       return false;
     }
+    this._permissionState.set(result.permission);
+    if (result.permission !== 'granted') {
+      this.toast.info('权限请求被拒绝');
+      return false;
+    }
+    this._isAuthorized.set(true);
+    this._directoryName.set(handle.name);
+    this.toast.success(`已恢复备份目录：${handle.name}`);
+    // 如果之前启用了自动备份，自动恢复
+    if (this._autoBackupEnabled() && this.getProjectsFn) {
+      this.startAutoBackup(this.getProjectsFn);
+      this.logger.info('自动备份已自动恢复');
+    }
+    return true;
   }
   
   /**
    * 撤销目录授权
    */
   async revokeDirectoryAccess(): Promise<void> {
+    const ownerContext = this.persistence.captureOwnerContext();
     this.directoryHandle = null;
+    this.restoreHandlePromise = null;
     this._isAuthorized.set(false);
     this._directoryName.set(null);
     this._hasSavedHandle.set(false);
     this._permissionState.set(null);
     this.stopAutoBackup();
-    
-    // 清除 IndexedDB 中的 handle
-    await this.clearDirectoryHandleFromIDB();
-    this.clearPersistedState();
+
+    if (ownerContext) {
+      this.persistence.clearState(ownerContext);
+      await this.persistence.clearDirectoryHandle(ownerContext);
+    }
     
     this.logger.info('目录授权已撤销');
     this.toast.info('已取消本地备份目录');
   }
-  
-  // ============================================
-  // 备份操作
-  // ============================================
   
   /**
    * 执行本地备份
    * @param projects 要备份的项目列表
    */
   async performBackup(projects: LocalBackupProjectSnapshot[], options: BackupRunOptions = {}): Promise<LocalBackupResult> {
-    await this.ensureDirectoryHandleLoaded();
-
-    if (!this.directoryHandle) {
-      return { success: false, error: '未授权目录访问，请先选择备份目录' };
-    }
-    
     if (this._isBackingUp()) {
       return { success: false, error: '备份正在进行中' };
     }
-    
+
+    const ownerContext = this.persistence.captureOwnerContext();
+    if (!ownerContext) return buildStaleLocalBackupSessionResult();
+    const runContext = this.sessionRuntime.beginRun();
+    this._isBackingUp.set(true);
+    try {
+      const preparationError = await this.prepareBackupRun(ownerContext, options);
+      if (!this.isRunCurrent(runContext, ownerContext)) {
+        return buildStaleLocalBackupSessionResult();
+      }
+      if (preparationError) {
+        return preparationError;
+      }
+
+      return await this.writeBackupSnapshot(projects, runContext, ownerContext);
+    } catch (error) {
+      if (!this.isRunCurrent(runContext, ownerContext)) {
+        return buildStaleLocalBackupSessionResult();
+      }
+      return await this.handleBackupFailure(error, ownerContext, options);
+    } finally {
+      this.sessionRuntime.finishRun(runContext);
+    }
+  }
+  private async prepareBackupRun(
+    ownerContext: LocalBackupOwnerContext,
+    options: BackupRunOptions,
+  ): Promise<LocalBackupResult | null> {
+    await this.ensureDirectoryHandleLoaded(ownerContext);
+    if (!this.currentHandle(ownerContext)) {
+      return { success: false, error: '未授权目录访问，请先选择备份目录' };
+    }
     // 检查权限
-    const hasPermission = await this.checkAndRestorePermission({ request: options.requestPermission !== false });
+    if (!this.persistence.isOwnerContextCurrent(ownerContext)) return buildStaleLocalBackupSessionResult();
+    const hasPermission = await this.checkAndRestorePermission({
+      request: options.requestPermission !== false,
+    });
     if (!hasPermission) {
       this._isAuthorized.set(false);
       return { success: false, error: '目录访问权限已过期，请重新授权' };
     }
-    
-    this._isBackingUp.set(true);
-    
-    try {
-      this.logger.info('开始本地备份...', { projectCount: projects.length });
-      
-      const { blob, deferredCloudUserState } = await this.disasterBackupService.buildLocalBlob(projects as Project[], {
-        autoBackupEnabled: this._autoBackupEnabled(),
-        autoBackupIntervalMs: this._autoBackupIntervalMs(),
-      });
 
-      if (deferredCloudUserState) {
-        return {
-          success: false,
-          error: '浏览器恢复连接中，自动备份稍后重试',
-          deferred: true,
-        };
-      }
-      
-      // 生成文件名
-      const timestamp = this.formatTimestamp();
-      const filename = `${LOCAL_BACKUP_CONFIG.FILENAME_PREFIX}-${timestamp}${LOCAL_BACKUP_CONFIG.FILE_EXTENSION}`;
-      
-      // 写入文件
-      const fileHandle = await this.directoryHandle.getFileHandle(filename, { create: true });
-      const writable = await fileHandle.createWritable();
-      await writable.write(blob);
-      await writable.close();
-      
-      // 验证写入（可选）
-      if (LOCAL_BACKUP_CONFIG.VALIDATION.VERIFY_WRITE) {
-        const verified = await this.verifyBackupFile(fileHandle, blob.size);
-        if (!verified) {
-          this.logger.warn('备份文件验证失败，但文件已写入');
-        }
-      }
-      
-      // 清理旧备份
-      await this.cleanupOldBackups();
-      
-      // 更新状态
-      const backupTime = new Date().toISOString();
-      this._lastBackupTime.set(backupTime);
-      this.savePersistedState();
-      this.exportService.recordLocalBackupSuccess(backupTime);
-      
-      this.logger.info('本地备份完成', { filename, size: blob.size });
-      
-      return {
-        success: true,
-        filename,
-        size: blob.size,
-        timestamp: backupTime,
-        pathHint: `${this._directoryName()}/${filename}`,
-      };
-      
-    } catch (error) {
-      if (this.isStaleDirectoryHandleError(error)) {
-        await this.invalidateDirectoryHandleAfterStateError(options.requestPermission !== false);
-        return { success: false, error: STALE_DIRECTORY_HANDLE_MESSAGE };
-      }
-
-      if (isBrowserNetworkSuspendedError(error)) {
-        return {
-          success: false,
-          error: '浏览器恢复连接中，自动备份稍后重试',
-          deferred: true,
-        };
-      }
-
-      const e = error as Error;
-      this.logger.error('本地备份失败', error);
-      this.sentryLazyLoader.captureException(error, { tags: { operation: 'localBackup.perform' } });
-      
-      return { success: false, error: e.message };
-      
-    } finally {
-      this._isBackingUp.set(false);
-    }
+    return null;
   }
-  
-  /**
-   * 验证备份文件
-   */
-  private async verifyBackupFile(fileHandle: FileSystemFileHandle, expectedSize: number): Promise<boolean> {
-    try {
-      const file = await fileHandle.getFile();
-      return file.size === expectedSize;
-    } catch (e) {
-      this.logger.debug('验证备份文件失败', { error: e, expectedSize });
-      return false;
-    }
-  }
-  
-  /**
-   * 清理旧备份文件
-   */
-  private async cleanupOldBackups(): Promise<void> {
-    if (!this.directoryHandle) return;
-    
-    try {
-      const backupFiles: { name: string; timestamp: number }[] = [];
-      
-      // 遍历目录，收集备份文件
-      for await (const entry of this.directoryHandle.values()) {
-        if (entry.kind === 'file' && entry.name.startsWith(LOCAL_BACKUP_CONFIG.FILENAME_PREFIX)) {
-          // 从文件名解析时间戳
-          const timestamp = this.parseTimestampFromFilename(entry.name);
-          if (timestamp) {
-            backupFiles.push({ name: entry.name, timestamp });
-          }
-        }
-      }
-      
-      // 按时间排序，保留最新的
-      backupFiles.sort((a, b) => b.timestamp - a.timestamp);
-      
-      // 删除超出数量限制的旧文件
-      const toDelete = backupFiles.slice(LOCAL_BACKUP_CONFIG.MAX_BACKUP_FILES);
-      
-      for (const file of toDelete) {
-        try {
-          await this.directoryHandle.removeEntry(file.name);
-          this.logger.debug('已删除旧备份', { filename: file.name });
-        } catch (error) {
-          if (this.isStaleDirectoryHandleError(error)) {
-            throw error;
-          }
 
-          this.logger.warn('删除旧备份失败', { filename: file.name, error });
-        }
-      }
-      
-      if (toDelete.length > 0) {
-        this.logger.info(`清理了 ${toDelete.length} 个旧备份文件`);
-      }
-      
-    } catch (error) {
-      if (this.isStaleDirectoryHandleError(error)) {
-        throw error;
-      }
+  private async writeBackupSnapshot(
+    projects: LocalBackupProjectSnapshot[],
+    runContext: LocalBackupRunContext,
+    ownerContext: LocalBackupOwnerContext,
+  ): Promise<LocalBackupResult> {
+    this.logger.info('开始本地备份...', { projectCount: projects.length });
 
-      this.logger.warn('清理旧备份时出错', error);
+    const { blob, deferredCloudUserState } = await this.disasterBackupService.buildLocalBlob(projects as Project[], {
+      autoBackupEnabled: this._autoBackupEnabled(),
+      autoBackupIntervalMs: this._autoBackupIntervalMs(),
+    });
+
+    if (!this.isRunCurrent(runContext, ownerContext)) {
+      return buildStaleLocalBackupSessionResult();
     }
+
+    if (deferredCloudUserState) {
+      return buildDeferredRetryResult();
+    }
+
+    const filename = buildLocalBackupFilename(createLocalBackupTimestamp());
+    await this.writeBackupFile(ownerContext, filename, blob);
+
+    if (!this.isRunCurrent(runContext, ownerContext)) {
+      return buildStaleLocalBackupSessionResult();
+    }
+
+    return this.recordBackupSuccess(ownerContext, filename, blob.size);
   }
-  
-  // ============================================
-  // 备份浏览与恢复
-  // ============================================
-  
+
+  private async writeBackupFile(
+    ownerContext: LocalBackupOwnerContext,
+    filename: string,
+    blob: Blob,
+  ): Promise<void> {
+    const handle = this.currentHandle(ownerContext);
+    if (!handle) {
+      throw new Error('未授权目录访问，请先选择备份目录');
+    }
+
+    await this.directoryFilesFor(ownerContext).writeBackupFile(handle, filename, blob);
+  }
+
+  private recordBackupSuccess(
+    ownerContext: LocalBackupOwnerContext,
+    filename: string,
+    size: number,
+  ): LocalBackupResult {
+    const backupTime = new Date().toISOString();
+    this._lastBackupTime.set(backupTime);
+    this.savePersistedState(ownerContext);
+    this.exportService.recordLocalBackupSuccess(backupTime);
+
+    this.logger.info('本地备份完成', { filename, size });
+
+    return {
+      success: true,
+      filename,
+      size,
+      timestamp: backupTime,
+      pathHint: `${this._directoryName()}/${filename}`,
+    };
+  }
+
+  private async handleBackupFailure(
+    error: unknown,
+    ownerContext: LocalBackupOwnerContext,
+    options: BackupRunOptions,
+  ): Promise<LocalBackupResult> {
+    const failure = classifyLocalBackupFailure(error, STALE_DIRECTORY_HANDLE_MESSAGE);
+    if (failure.kind === 'stale-directory-handle') {
+      await this.invalidateDirectoryHandleAfterStateError(ownerContext, options.requestPermission !== false);
+      return failure.result;
+    }
+
+    if (failure.kind === 'deferred-retry') {
+      return failure.result;
+    }
+
+    this.logger.error('本地备份失败', error);
+    this.sentryLazyLoader.captureException(error, { tags: { operation: 'localBackup.perform' } });
+
+    return failure.result;
+  }
   /**
    * 列出备份目录中的所有备份文件
    * @returns 按时间倒序排列的备份文件列表
    */
   async listBackupFiles(): Promise<{ name: string; timestamp: number; size: number }[]> {
-    if (!this.directoryHandle) {
-      return [];
-    }
-    
-    const hasPermission = await this.checkAndRestorePermission();
-    if (!hasPermission) {
-      return [];
-    }
-    
-    try {
-      const files: { name: string; timestamp: number; size: number }[] = [];
-      
-      for await (const entry of this.directoryHandle.values()) {
-        if (entry.kind === 'file' && entry.name.startsWith(LOCAL_BACKUP_CONFIG.FILENAME_PREFIX)) {
-          const timestamp = this.parseTimestampFromFilename(entry.name);
-          if (timestamp) {
-            const fileHandle = await this.directoryHandle.getFileHandle(entry.name);
-            const file = await fileHandle.getFile();
-            files.push({ name: entry.name, timestamp, size: file.size });
-          }
-        }
-      }
-      
-      files.sort((a, b) => b.timestamp - a.timestamp);
-      return files;
-    } catch (error) {
-      if (this.isStaleDirectoryHandleError(error)) {
-        await this.invalidateDirectoryHandleAfterStateError(true);
-        return [];
-      }
-
-      this.logger.error('列出备份文件失败', error);
-      return [];
-    }
+    const ownerContext = this.persistence.captureOwnerContext();
+    if (!ownerContext || !await this.checkPermissionForOwner(ownerContext, {})) return [];
+    const handle = this.currentHandle(ownerContext);
+    if (!handle) return [];
+    const files = await this.directoryFilesFor(ownerContext).listBackupFiles(handle, async () => (
+      this.persistence.isOwnerContextCurrent(ownerContext)
+    ));
+    return this.persistence.isOwnerContextCurrent(ownerContext) ? files : [];
   }
-  
   /**
    * 从备份目录读取指定备份文件为 File 对象
    * 返回的 File 可以直接传入 ImportService.validateFile() 进行导入
    */
   async readBackupFile(filename: string): Promise<File | null> {
-    if (!this.directoryHandle) {
-      return null;
-    }
-    
-    const hasPermission = await this.checkAndRestorePermission();
-    if (!hasPermission) {
-      return null;
-    }
-    
-    try {
-      const fileHandle = await this.directoryHandle.getFileHandle(filename);
-      return await fileHandle.getFile();
-    } catch (error) {
-      if (this.isStaleDirectoryHandleError(error)) {
-        await this.invalidateDirectoryHandleAfterStateError(true);
-        return null;
-      }
-
-      this.logger.error('读取备份文件失败', { filename, error });
-        return null; // eslint-disable-line no-restricted-syntax -- 文件读取失败时"无法获取"语义正确，null 触发调用方错误提示
-    }
+    const ownerContext = this.persistence.captureOwnerContext();
+    if (!ownerContext || !await this.checkPermissionForOwner(ownerContext, {})) return null;
+    const handle = this.currentHandle(ownerContext);
+    if (!handle) return null;
+    const file = await this.directoryFilesFor(ownerContext).readBackupFile(handle, filename, async () => (
+      this.persistence.isOwnerContextCurrent(ownerContext)
+    ));
+    return this.persistence.isOwnerContextCurrent(ownerContext) ? file : null;
   }
-  
-  // ============================================
-  // 自动备份
-  // ============================================
   
   /**
    * 启动自动备份
@@ -607,6 +493,10 @@ export class LocalBackupService implements OnDestroy {
     intervalMs?: number,
     options: AutoBackupStartOptions = {},
   ): void {
+    if (this.destroyed) {
+      return;
+    }
+
     if (!this._isAuthorized()) {
       this.logger.warn('未授权目录，无法启动自动备份');
       return;
@@ -619,11 +509,20 @@ export class LocalBackupService implements OnDestroy {
     
     // 保存获取项目的函数，用于权限恢复后自动恢复备份
     this.getProjectsFn = getProjects;
-    this.clearDeferredAutoBackupRetry();
+    this.deferredRetryScheduler.clear();
     
-    this.autoBackupTimer = setInterval(() => {
-      void this.runAutoBackupCycle();
-    }, interval);
+    try {
+      this.autoBackupTimer = setInterval(() => {
+        void this.runAutoBackupCycle();
+      }, interval);
+    } catch (error) {
+      this.autoBackupTimer = null;
+      this._autoBackupEnabled.set(false);
+      this._autoBackupIntervalMs.set(interval);
+      this.savePersistedState();
+      this.warnSafely('自动备份定时器启动失败，已保持关闭状态', error);
+      return;
+    }
     
     this._autoBackupEnabled.set(true);
     this._autoBackupIntervalMs.set(interval);
@@ -640,11 +539,13 @@ export class LocalBackupService implements OnDestroy {
    * @param updateState 是否更新状态（默认 true）
    */
   stopAutoBackup(updateState = true): void {
-    if (this.autoBackupTimer) {
-      clearInterval(this.autoBackupTimer);
-      this.autoBackupTimer = null;
+    // 显式 null 判断：interval handle 为 0 时也要清理，否则重启路径会残留双备份周期
+    const autoBackupTimer = this.autoBackupTimer;
+    this.autoBackupTimer = null;
+    if (autoBackupTimer !== null) {
+      this.clearAutoBackupTimerSafely(autoBackupTimer);
     }
-    this.clearDeferredAutoBackupRetry();
+    this.deferredRetryScheduler.clear();
     
     if (updateState) {
       this._autoBackupEnabled.set(false);
@@ -652,10 +553,31 @@ export class LocalBackupService implements OnDestroy {
       this.logger.info('自动备份已停止');
     }
   }
+
+  private clearAutoBackupTimerSafely(timer: ReturnType<typeof setInterval>): void {
+    try {
+      clearInterval(timer);
+    } catch (error) {
+      this.warnSafely('自动备份定时器清理失败，继续停止自动备份', error);
+    }
+  }
+
+  private warnSafely(message: string, error: unknown): void {
+    try {
+      this.logger.warn(message, error);
+    } catch {
+      // Timer state is already synchronized; diagnostics must not reopen the failure path.
+    }
+  }
+
+  private restartAutoBackupForCurrentSession(): void {
+    if (this.destroyed) return;
+    if (!this.auth.currentUserId() || !this._autoBackupEnabled() || !this._isAuthorized() || !this.getProjectsFn) {
+      return;
+    }
+    this.startAutoBackup(this.getProjectsFn, undefined, { silent: true });
+  }
   
-  /**
-   * 设置自动备份间隔
-   */
   setAutoBackupInterval(intervalMs: number): void {
     this._autoBackupIntervalMs.set(intervalMs);
     this.savePersistedState();
@@ -664,107 +586,49 @@ export class LocalBackupService implements OnDestroy {
     }
   }
   
-  // ============================================
-  // 辅助方法
-  // ============================================
-  
-  /**
-   * 格式化时间戳用于文件名
-   */
-  private formatTimestamp(): string {
-    const now = new Date();
-    const year = now.getFullYear();
-    const month = String(now.getMonth() + 1).padStart(2, '0');
-    const day = String(now.getDate()).padStart(2, '0');
-    const hour = String(now.getHours()).padStart(2, '0');
-    const minute = String(now.getMinutes()).padStart(2, '0');
-    const second = String(now.getSeconds()).padStart(2, '0');
-    
-    return `${year}-${month}-${day}_${hour}-${minute}-${second}`;
-  }
-  
-  /**
-   * 从文件名解析时间戳
-   */
-  private parseTimestampFromFilename(filename: string): number | null {
-    // 匹配格式：nanoflow-backup-2026-01-02_12-30-45.json
-    const match = filename.match(/(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})/);
-    if (!match) return null;
-    
-    const [, year, month, day, hour, minute, second] = match;
-    const date = new Date(
-      parseInt(year),
-      parseInt(month) - 1,
-      parseInt(day),
-      parseInt(hour),
-      parseInt(minute),
-      parseInt(second)
+  private bindCurrentOwner(): void {
+    const userId = this.auth.currentUserId();
+    const ownerContext = this.persistence.activateOwnerScope(
+      userId ? { kind: 'authenticated', userId } : { kind: 'local' },
     );
-    
-    return date.getTime();
+    // 先从 localStorage 加载当前 owner 的基础状态
+    this.applyPersistedState(this.persistence.loadState(ownerContext));
+    // 然后从 IndexedDB 恢复当前 owner 的 DirectoryHandle（异步）
+    this.restoreHandlePromise = this.restoreFromIndexedDB(ownerContext);
+  }
+
+  private resetForOwnerChange(): void {
+    this.persistence.detachOwnerScope();
+    this.directoryHandle = null;
+    this.restoreHandlePromise = null;
+    this.applyPersistedState(null);
+    this._isAuthorized.set(false);
+    this._permissionState.set(null);
+    queueMicrotask(() => {
+      if (!this.destroyed) this.bindCurrentOwner();
+    });
+    this.sessionRuntime.reset();
+  }
+
+  private applyPersistedState(state: ReturnType<LocalBackupPersistenceController['loadState']> | null): void {
+    this._lastBackupTime.set(state?.lastBackupTime ?? null);
+    this._autoBackupEnabled.set(state?.autoBackupEnabled ?? false);
+    this._autoBackupIntervalMs.set(state?.autoBackupIntervalMs ?? LOCAL_BACKUP_CONFIG.DEFAULT_INTERVAL_MS);
+    this._directoryName.set(state?.directoryName ?? null);
+    this._hasSavedHandle.set(state?.hasSavedHandle ?? false);
   }
   
-  // ============================================
-  // 状态持久化
-  // ============================================
-  
-  /**
-   * 加载持久化状态（localStorage）
-   */
-  private loadPersistedState(): void {
+  private savePersistedState(
+    ownerContext: LocalBackupOwnerContext | null = this.persistence.captureOwnerContext(),
+  ): void {
+    if (!ownerContext || !this.persistence.isOwnerContextCurrent(ownerContext)) return;
     try {
-      const lastBackupTime = localStorage.getItem(LOCAL_BACKUP_CONFIG.STORAGE_KEYS.LAST_BACKUP_TIME);
-      if (lastBackupTime) {
-        this._lastBackupTime.set(lastBackupTime);
-      }
-      
-      const autoEnabled = localStorage.getItem(LOCAL_BACKUP_CONFIG.STORAGE_KEYS.AUTO_BACKUP_ENABLED);
-      if (autoEnabled === 'true') {
-        this._autoBackupEnabled.set(true);
-      }
-      
-      const interval = localStorage.getItem(LOCAL_BACKUP_CONFIG.STORAGE_KEYS.AUTO_BACKUP_INTERVAL);
-      if (interval) {
-        this._autoBackupIntervalMs.set(parseInt(interval, 10));
-      }
-      
-      // 加载保存的目录名称
-      const directoryName = localStorage.getItem(LOCAL_BACKUP_CONFIG.STORAGE_KEYS.DIRECTORY_HANDLE);
-      if (directoryName) {
-        this._directoryName.set(directoryName);
-        this._hasSavedHandle.set(true);
-      }
-      
-    } catch (error) {
-      this.logger.warn('加载持久化状态失败', error);
-    }
-  }
-  
-  /**
-   * 保存持久化状态（localStorage + 云端同步）
-   */
-  private savePersistedState(): void {
-    try {
-      const lastBackupTime = this._lastBackupTime();
-      if (lastBackupTime) {
-        localStorage.setItem(LOCAL_BACKUP_CONFIG.STORAGE_KEYS.LAST_BACKUP_TIME, lastBackupTime);
-      }
-      
-      localStorage.setItem(
-        LOCAL_BACKUP_CONFIG.STORAGE_KEYS.AUTO_BACKUP_ENABLED,
-        String(this._autoBackupEnabled())
-      );
-      
-      localStorage.setItem(
-        LOCAL_BACKUP_CONFIG.STORAGE_KEYS.AUTO_BACKUP_INTERVAL,
-        String(this._autoBackupIntervalMs())
-      );
-      
-      // 保存目录名称（用于 UI 显示）
-      const directoryName = this._directoryName();
-      if (directoryName) {
-        localStorage.setItem(LOCAL_BACKUP_CONFIG.STORAGE_KEYS.DIRECTORY_HANDLE, directoryName);
-      }
+      this.persistence.saveState(ownerContext, {
+        lastBackupTime: this._lastBackupTime(),
+        autoBackupEnabled: this._autoBackupEnabled(),
+        autoBackupIntervalMs: this._autoBackupIntervalMs(),
+        directoryName: this._directoryName(),
+      });
       
       // 同步到云端（仅同步开关和间隔，不同步目录路径）
       void this.preferenceService.syncLocalBackupSettings({
@@ -776,139 +640,55 @@ export class LocalBackupService implements OnDestroy {
       this.logger.warn('保存持久化状态失败', error);
     }
   }
-  
-  /**
-   * 清除持久化状态
-   */
-  private clearPersistedState(): void {
-    try {
-      Object.values(LOCAL_BACKUP_CONFIG.STORAGE_KEYS).forEach(key => {
-        localStorage.removeItem(key);
-      });
-    } catch (error) {
-      this.logger.warn('清除持久化状态失败', error);
-    }
-  }
-
-  private shouldDeferAutoBackupForBrowserNetwork(): boolean {
-    if (!isBrowserNetworkSuspendedWindow()) {
-      return false;
-    }
-
-    this.logger.debug('浏览器网络恢复窗口内跳过本轮自动备份', {
-      resumeDelayMs: getRemainingBrowserNetworkResumeDelayMs(),
-    });
-    return true;
-  }
 
   private async runAutoBackupCycle(): Promise<void> {
-    if (!this.getProjectsFn || !this._autoBackupEnabled()) {
-      return;
-    }
-
-    if (this.shouldDeferAutoBackupForBrowserNetwork()) {
-      this.scheduleDeferredAutoBackupRetry();
-      return;
-    }
-
-    const projects = this.getProjectsFn();
-    if (projects.length === 0) {
-      return;
-    }
-
-    const result = await this.performBackup(projects, { requestPermission: false });
-    if (result.success) {
-      this.logger.debug('自动备份成功', { filename: result.filename });
-      return;
-    }
-
-    if (result.deferred) {
-      this.logger.debug('自动备份已延后', { error: result.error });
-      this.scheduleDeferredAutoBackupRetry();
-      return;
-    }
-
-    this.logger.warn('自动备份失败', { error: result.error });
-  }
-
-  private scheduleDeferredAutoBackupRetry(): void {
-    if (!this._autoBackupEnabled() || !this.getProjectsFn) {
-      return;
-    }
-
-    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
-      if (this.autoBackupVisibilityRetryHandler) {
+    try {
+      if (this.destroyed) {
         return;
       }
 
-      const onVisibilityChange = () => {
-        if (document.visibilityState !== 'visible') {
-          return;
-        }
+      if (!this.getProjectsFn || !this._autoBackupEnabled()) {
+        return;
+      }
 
-        document.removeEventListener('visibilitychange', onVisibilityChange);
-        this.autoBackupVisibilityRetryHandler = null;
-        this.armDeferredAutoBackupRetry();
-      };
+      const deferredRetryWindowState = getAutoBackupDeferredRetryWindowState();
+      if (deferredRetryWindowState) {
+        this.logger.debug('浏览器网络恢复窗口内跳过本轮自动备份', deferredRetryWindowState);
+        this.deferredRetryScheduler.schedule();
+        return;
+      }
 
-      document.addEventListener('visibilitychange', onVisibilityChange);
-      this.autoBackupVisibilityRetryHandler = onVisibilityChange;
-      return;
-    }
+      const projects = this.getProjectsFn();
+      if (projects.length === 0) {
+        return;
+      }
 
-    this.armDeferredAutoBackupRetry();
-  }
+      const result = await this.performBackup(projects, { requestPermission: false });
+      if (result.success) {
+        this.logger.debug('自动备份成功', { filename: result.filename });
+        return;
+      }
 
-  private armDeferredAutoBackupRetry(): void {
-    if (this.autoBackupDeferredRetryTimer) {
-      return;
-    }
+      if (result.deferred) {
+        this.logger.debug('自动备份已延后', { error: result.error });
+        this.deferredRetryScheduler.schedule();
+        return;
+      }
 
-    const delayMs = Math.max(
-      AUTO_BACKUP_RETRY_MIN_DELAY_MS,
-      getRemainingBrowserNetworkResumeDelayMs() + AUTO_BACKUP_RETRY_BUFFER_MS,
-    );
-
-    this.autoBackupDeferredRetryTimer = setTimeout(() => {
-      this.autoBackupDeferredRetryTimer = null;
-      void this.runAutoBackupCycle();
-    }, delayMs);
-  }
-
-  private clearDeferredAutoBackupRetry(): void {
-    if (this.autoBackupDeferredRetryTimer) {
-      clearTimeout(this.autoBackupDeferredRetryTimer);
-      this.autoBackupDeferredRetryTimer = null;
-    }
-
-    if (this.autoBackupVisibilityRetryHandler && typeof document !== 'undefined') {
-      document.removeEventListener('visibilitychange', this.autoBackupVisibilityRetryHandler);
-      this.autoBackupVisibilityRetryHandler = null;
-    }
-  }
-
-  private clearPersistedDirectoryHandleName(): void {
-    try {
-      localStorage.removeItem(LOCAL_BACKUP_CONFIG.STORAGE_KEYS.DIRECTORY_HANDLE);
+      this.logger.warn('自动备份失败', { error: result.error });
     } catch (error) {
-      this.logger.warn('清除本地备份目录名称失败', error);
+      this.logger.error('自动备份周期异常', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      this.sentryLazyLoader.captureException(error, { tags: { operation: 'localBackup.autoBackupCycle' } });
     }
   }
 
-  private isStaleDirectoryHandleError(error: unknown): boolean {
-    if (typeof error !== 'object' || error === null) {
-      return false;
-    }
-
-    const candidate = error as { name?: unknown; message?: unknown };
-    const name = typeof candidate.name === 'string' ? candidate.name : '';
-    const message = typeof candidate.message === 'string' ? candidate.message : '';
-
-    return name === 'InvalidStateError'
-      && /state cached|changed since it was read from disk|read from disk/i.test(message);
-  }
-
-  private async invalidateDirectoryHandleAfterStateError(notifyUser: boolean): Promise<void> {
+  private async invalidateDirectoryHandleAfterStateError(
+    ownerContext: LocalBackupOwnerContext,
+    notifyUser: boolean,
+  ): Promise<void> {
+    if (!this.persistence.isOwnerContextCurrent(ownerContext)) return;
     const directoryName = this._directoryName();
     this.stopAutoBackup(false);
     this.directoryHandle = null;
@@ -917,113 +697,89 @@ export class LocalBackupService implements OnDestroy {
     this._hasSavedHandle.set(false);
     this._permissionState.set(null);
     this._directoryName.set(null);
-    this.clearPersistedDirectoryHandleName();
-    await this.clearDirectoryHandleFromIDB();
-    this.savePersistedState();
+    this.persistence.clearDirectoryHandleName(ownerContext);
+    // 清除 IndexedDB 中的当前 owner DirectoryHandle
+    await this.persistence.clearDirectoryHandle(ownerContext);
+    if (!this.persistence.isOwnerContextCurrent(ownerContext)) return;
+    this.savePersistedState(ownerContext);
 
     this.logger.warn('备份目录句柄失效，已暂停自动备份', { directoryName });
     if (notifyUser) {
       this.toast.error(STALE_DIRECTORY_HANDLE_MESSAGE);
     }
   }
-  
-  // ============================================
-  // IndexedDB 持久化（DirectoryHandle）
-  // ============================================
-  
-  /**
-   * 保存 DirectoryHandle 到 IndexedDB
-   */
-  private async saveDirectoryHandleToIDB(): Promise<void> {
-    if (!this.directoryHandle) return;
-    
-    try {
-      await set(IDB_KEYS.DIRECTORY_HANDLE, this.directoryHandle);
-      this.logger.debug('DirectoryHandle 已保存到 IndexedDB');
-    } catch (error) {
-      this.logger.warn('保存 DirectoryHandle 到 IndexedDB 失败', error);
-    }
-  }
-  
+
   /**
    * 从 IndexedDB 恢复 DirectoryHandle
    * @returns 是否成功恢复
    */
-  private async restoreFromIndexedDB(): Promise<boolean> {
-    if (!this.isAvailable()) return false;
-    
-    try {
-      const handle = await get<FileSystemDirectoryHandle>(IDB_KEYS.DIRECTORY_HANDLE);
-      
-      if (!handle) {
-        this.logger.debug('IndexedDB 中没有保存的 DirectoryHandle');
-        return false;
-      }
-      
-      this.directoryHandle = handle;
-      this._directoryName.set(handle.name);
-      this._hasSavedHandle.set(true);
-      
-      // 检查权限状态（不请求权限，只查询）
-      try {
-        const permission = await handle.queryPermission({ mode: 'readwrite' });
-        this._permissionState.set(permission);
-        
-        if (permission === 'granted') {
-          // 权限仍然有效，自动恢复
-          this._isAuthorized.set(true);
-          this.logger.info('DirectoryHandle 权限仍然有效，已自动恢复', { name: handle.name });
-          
-          if (this._autoBackupEnabled()) {
-            if (this.getProjectsFn) {
-              this.startAutoBackup(this.getProjectsFn, undefined, { silent: true });
-              this.logger.info('自动备份已随目录权限恢复');
-            } else {
-              this.logger.info('等待设置项目获取函数后恢复自动备份');
-            }
-          }
-          
-          return true;
-        } else if (permission === 'prompt') {
-          // 需要用户点击恢复权限
-          this.logger.info('DirectoryHandle 已恢复，等待用户授权', { name: handle.name });
-          return true;
-        } else {
-          // 权限被拒绝
-          this.logger.warn('DirectoryHandle 权限已被拒绝');
-          return false;
-        }
-      } catch (permError) {
-        this.logger.warn('查询权限失败', permError);
-        this._permissionState.set('prompt');
-        return true; // handle 存在，但需要用户确认
-      }
-      
-    } catch (error) {
-      this.logger.warn('从 IndexedDB 恢复 DirectoryHandle 失败', error);
-      return false;
+  private async restoreFromIndexedDB(ownerContext: LocalBackupOwnerContext): Promise<boolean> {
+    if (!this.isAvailable() || !this.persistence.isOwnerContextCurrent(ownerContext)) return false;
+    const handle = await this.persistence.restoreDirectoryHandle(ownerContext);
+    if (!handle || !this.persistence.isOwnerContextCurrent(ownerContext)) return false;
+    this.directoryHandle = handle;
+    this._directoryName.set(handle.name);
+    this._hasSavedHandle.set(true);
+    // 检查权限状态（不请求权限，只查询）
+    const result = await this.persistence.resolveDirectoryPermission(ownerContext, handle, 'query');
+    if (result.kind === 'stale') return false;
+    if (result.kind === 'error') {
+      this.logger.warn('查询权限失败', result.error);
+      this._permissionState.set('prompt');
+      return true; // handle 存在，但需要用户确认
     }
+    this._permissionState.set(result.permission);
+    if (result.permission === 'granted') {
+      // 权限仍然有效，自动恢复
+      this._isAuthorized.set(true);
+      this.logger.info('DirectoryHandle 权限仍然有效，已自动恢复', { name: handle.name });
+      if (this._autoBackupEnabled() && this.getProjectsFn) {
+        this.startAutoBackup(this.getProjectsFn, undefined, { silent: true });
+        this.logger.info('自动备份已随目录权限恢复');
+      } else if (this._autoBackupEnabled()) {
+        this.logger.info('等待设置项目获取函数后恢复自动备份');
+      }
+      return true;
+    }
+    if (result.permission === 'prompt') {
+      // 需要用户点击恢复权限
+      this.logger.info('DirectoryHandle 已恢复，等待用户授权', { name: handle.name });
+      return true;
+    }
+    // 权限被拒绝
+    this.logger.warn('DirectoryHandle 权限已被拒绝');
+    return false;
   }
 
-  private async ensureDirectoryHandleLoaded(): Promise<boolean> {
-    if (this.directoryHandle) return true;
+  private async ensureDirectoryHandleLoaded(ownerContext: LocalBackupOwnerContext): Promise<boolean> {
+    if (this.currentHandle(ownerContext)) return true;
     if (!this.restoreHandlePromise) {
-      this.restoreHandlePromise = this.restoreFromIndexedDB();
+      this.restoreHandlePromise = this.restoreFromIndexedDB(ownerContext);
     }
     await this.restoreHandlePromise;
-    return !!this.directoryHandle;
+    return !!this.currentHandle(ownerContext);
   }
-  
-  /**
-   * 清除 IndexedDB 中的 DirectoryHandle
-   */
-  private async clearDirectoryHandleFromIDB(): Promise<void> {
-    try {
-      await del(IDB_KEYS.DIRECTORY_HANDLE);
-      this.logger.debug('DirectoryHandle 已从 IndexedDB 清除');
-    } catch (error) {
-      this.logger.warn('清除 IndexedDB 中的 DirectoryHandle 失败', error);
-    }
+
+  private currentHandle(ownerContext: LocalBackupOwnerContext): FileSystemDirectoryHandle | null {
+    return this.persistence.isOwnerContextCurrent(ownerContext) ? this.directoryHandle : null;
+  }
+
+  private isRunCurrent(
+    runContext: LocalBackupRunContext,
+    ownerContext: LocalBackupOwnerContext,
+  ): boolean {
+    return this.sessionRuntime.isRunCurrent(runContext)
+      && this.persistence.isOwnerContextCurrent(ownerContext);
+  }
+
+  private directoryFilesFor(ownerContext: LocalBackupOwnerContext): LocalBackupDirectoryFilesController {
+    return new LocalBackupDirectoryFilesController({
+      logger: this.logger,
+      isStaleDirectoryHandleError,
+      invalidateDirectoryHandle: notifyUser => (
+        this.invalidateDirectoryHandleAfterStateError(ownerContext, notifyUser)
+      ),
+    });
   }
   
   /**

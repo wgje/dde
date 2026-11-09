@@ -228,13 +228,6 @@ export const pendingBlackBoxEntries = computed(() => {
 });
 
 /**
- * 未读条目数量
- */
-export const unreadBlackBoxCount = computed(() => 
-  blackBoxEntries().filter(e => !e.isRead && !e.isArchived && !e.isCompleted).length
-);
-
-/**
  * 待处理条目数量（用于大门显示）
  */
 // ============================================
@@ -432,39 +425,6 @@ export function setBlackBoxEntries(entries: BlackBoxEntry[]): void {
   
   blackBoxEntriesMap.set(entriesMap);
   blackBoxEntriesByDate.set(dateMap);
-}
-
-/**
- * 删除黑匣子条目（软删除）
- */
-export function deleteBlackBoxEntry(id: string): void {
-  blackBoxEntriesMap.update(map => {
-    const newMap = new Map(map);
-    const entry = newMap.get(id);
-    if (entry) {
-      newMap.set(id, { ...entry, deletedAt: new Date().toISOString() });
-    }
-    return newMap;
-  });
-  
-  // 【P2-05 修复】同步更新日期索引，从日期分组中移除已删除的条目
-  const entry = blackBoxEntriesMap().get(id);
-  if (entry?.date) {
-    blackBoxEntriesByDate.update(dateMap => {
-      const newDateMap = new Map(dateMap);
-      const existingSet = newDateMap.get(entry.date);
-      if (existingSet) {
-        const newSet = new Set(existingSet);
-        newSet.delete(id);
-        if (newSet.size === 0) {
-          newDateMap.delete(entry.date);
-        } else {
-          newDateMap.set(entry.date, newSet);
-        }
-      }
-      return newDateMap;
-    });
-  }
 }
 
 /**

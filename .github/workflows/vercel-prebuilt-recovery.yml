@@ -85,6 +85,9 @@ jobs:
           node scripts/generate-artifact-manifest.cjs
 
       - name: Run deployment quality guards
+        env:
+          ANDROID_TWA_PACKAGE_NAME: ${{ vars.ANDROID_TWA_PACKAGE_NAME || 'app.nanoflow.twa' }}
+          ANDROID_TWA_EXPECTED_SHA256_CERT_FINGERPRINTS: ${{ vars.ANDROID_TWA_EXPECTED_SHA256_CERT_FINGERPRINTS || vars.ANDROID_TWA_SHA256_FINGERPRINTS || '' }}
         run: |
           set -euo pipefail
           npm run perf:guard:nojit
@@ -125,6 +128,14 @@ jobs:
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
         run: npx --yes vercel build --prod --token "$VERCEL_TOKEN"
+
+      - name: Validate final Vercel prebuilt artifact
+        if: inputs.deploy == true && inputs.confirm == 'DEPLOY_VERCEL_PREBUILT'
+        env:
+          ANDROID_TWA_PACKAGE_NAME: ${{ vars.ANDROID_TWA_PACKAGE_NAME || 'app.nanoflow.twa' }}
+          ANDROID_TWA_EXPECTED_SHA256_CERT_FINGERPRINTS: ${{ vars.ANDROID_TWA_EXPECTED_SHA256_CERT_FINGERPRINTS || vars.ANDROID_TWA_SHA256_FINGERPRINTS || '' }}
+          ARTIFACT_DIST_DIR: .vercel/output/static
+        run: npm run quality:guard:deploy-artifacts
 
       - name: Deploy Vercel prebuilt output
         if: inputs.deploy == true && inputs.confirm == 'DEPLOY_VERCEL_PREBUILT'

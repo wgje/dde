@@ -22,7 +22,7 @@
  * 双约束让命中面极窄，几乎不可能误吞其他异常。
  */
 
-const NULL_WIDTH_PATTERN = /Cannot read properties of null \(reading [\u2018\u2019'"]width[\u2018\u2019'"]\)/i;
+const NULL_WIDTH_PATTERN = /Cannot read properties of null \(reading [\u2018\u2019\u201c\u201d'"]width[\u2018\u2019\u201c\u201d'"]\)/i;
 const ORIGIN_RECT_PATTERN = /_getOriginRect/;
 
 /**
@@ -73,31 +73,4 @@ export function extractErrorStack(error: unknown): string | undefined {
   }
 
   return undefined;
-}
-
-/**
- * 从任意 unknown 错误对象中尽力提取消息字符串。
- *
- * 与 `extractErrorStack` 互补，但 GlobalErrorHandler 已有同等 `extractErrorMessage`，
- * 这里仅供 main.ts 在 Angular bootstrap 前的窗口使用。
- */
-export function extractErrorMessageLoose(error: unknown): string {
-  if (typeof error === 'string') return error;
-  if (error instanceof Error) return error.message;
-  if (error && typeof error === 'object') {
-    const message = (error as { message?: unknown }).message;
-    if (typeof message === 'string') return message;
-    const nested = (error as { error?: { message?: unknown } }).error;
-    if (nested && typeof nested === 'object') {
-      const nestedMsg = nested.message;
-      if (typeof nestedMsg === 'string') return nestedMsg;
-    }
-    const reason = (error as { reason?: unknown }).reason;
-    if (typeof reason === 'string') return reason;
-    if (reason && typeof reason === 'object') {
-      const reasonMsg = (reason as { message?: unknown }).message;
-      if (typeof reasonMsg === 'string') return reasonMsg;
-    }
-  }
-  return String(error ?? '');
 }

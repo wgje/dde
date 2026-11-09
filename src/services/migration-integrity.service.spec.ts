@@ -15,7 +15,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Injector, runInInjectionContext } from '@angular/core';
 import { MigrationIntegrityService } from './migration-integrity.service';
-import { SimpleSyncService } from '../app/core/services/simple-sync.service';
+import { ProjectDataService } from '../app/core/services/sync/project-data.service';
 import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
@@ -131,7 +131,7 @@ describe('MigrationIntegrityService', () => {
     const injector = Injector.create({
       providers: [
         MigrationIntegrityService,
-        { provide: SimpleSyncService, useValue: mockSyncService },
+        { provide: ProjectDataService, useValue: mockSyncService },
         { provide: ToastService, useValue: mockToastService },
         { provide: LoggerService, useValue: mockLoggerService },
         { provide: SentryLazyLoaderService, useValue: mockSentryLazyLoaderService },

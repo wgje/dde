@@ -4,21 +4,25 @@ import { UNDO_CONFIG } from '../config';
 import { ToastService } from './toast.service';
 import { UiStateService } from './ui-state.service';
 import { LoggerService } from './logger.service';
+import {
+  collectTaskFieldChanges,
+  createProjectUndoSnapshot,
+  filterUndoActionsExcludingTask,
+  filterRestorableUndoActions,
+  hasRedoVersionConflict,
+  hasProjectTaskSnapshotChanges,
+  limitStackForMax,
+  type PersistedUndoData,
+  resolveUndoVersionConflict,
+  selectUndoActionsForPersistence,
+  serializeUndoAction,
+} from './undo-history.helpers';
 
 export interface UndoAppliedReplay {
   readonly sequence: number;
   readonly kind: 'undo' | 'redo';
   readonly projectId: string;
   readonly taskFieldChanges: Readonly<Record<string, readonly ('title' | 'content')[]>>;
-}
-
-/** 持久化数据结构 @internal */
-interface PersistedUndoData {
-  version: number;
-  timestamp: string;
-  projectId: string;
-  undoStack: UndoAction[];
-  undoLimitNotificationLocked?: boolean;
 }
 
 /** 撤销操作结果：UndoAction | null | 'version-mismatch' | version-mismatch-forceable */
@@ -90,30 +94,24 @@ export class UndoService {
       : UNDO_CONFIG.DESKTOP_HISTORY_SIZE;
   }
 
-  /** 与撤销栈同上限，未来如需可独立配置 */
-  private getMaxRedoHistorySize(): number {
-    return this.getMaxHistorySize();
-  }
-
   /** 按上限裁剪撤销栈并触发截断提示 */
   private limitUndoStack(stack: UndoAction[], notify: boolean = true): UndoAction[] {
     const maxSize = this.getMaxHistorySize();
-    if (stack.length <= maxSize) {
+    const result = limitStackForMax(stack, maxSize);
+    if (result.truncatedCount === 0) {
       this.rearmTruncationNotification(stack.length, maxSize);
       return stack;
     }
-    const truncatedCount = stack.length - maxSize;
     if (notify) {
-      this.notifyTruncation(truncatedCount);
+      this.notifyTruncation(result.truncatedCount);
     }
-    return stack.slice(-maxSize);
+    return result.stack;
   }
 
   /** 按上限裁剪重做栈 */
   private limitRedoStack(stack: UndoAction[]): UndoAction[] {
-    const maxSize = this.getMaxRedoHistorySize();
-    if (stack.length <= maxSize) return stack;
-    return stack.slice(-maxSize);
+    const maxSize = this.getMaxHistorySize();
+    return limitStackForMax(stack, maxSize).stack;
   }
   
   /** 批处理状态（将多个操作合并为单个撤销单元） */
@@ -147,36 +145,8 @@ export class UndoService {
     // 只有当快照存在且项目 ID 匹配时才记录
     if (this.batchBeforeSnapshot && this.batchProjectId === project.id) {
       const afterSnapshot = this.createProjectSnapshot(project);
-      
-      // 检查是否有实际变更（避免空撤销记录）
-      // 【P3-26 增强】扩展脏检查：除位置外还检查 title、content、stage、parentId、status
-      const beforeTasks = this.batchBeforeSnapshot.tasks as Array<{ id: string; x: number; y: number; title?: string; content?: string; stage?: number | null; parentId?: string | null; status?: string }> | undefined;
-      const afterTasks = afterSnapshot.tasks as Array<{ id: string; x: number; y: number; title?: string; content?: string; stage?: number | null; parentId?: string | null; status?: string }> | undefined;
-      
-      let hasChanges = false;
-      if (beforeTasks && afterTasks && beforeTasks.length === afterTasks.length) {
-        const afterTaskMap = new Map(afterTasks.map(t => [t.id, t] as const));
-        for (let i = 0; i < beforeTasks.length; i++) {
-          const before = beforeTasks[i];
-          const after = afterTaskMap.get(before.id);
-          if (after && (
-            Math.abs(before.x - after.x) > 1 || 
-            Math.abs(before.y - after.y) > 1 ||
-            before.title !== after.title ||
-            before.content !== after.content ||
-            before.stage !== after.stage ||
-            before.parentId !== after.parentId ||
-            before.status !== after.status
-          )) {
-            hasChanges = true;
-            break;
-          }
-        }
-      } else {
-        hasChanges = true; // 数量变化也算变更
-      }
-      
-      if (hasChanges) {
+
+      if (hasProjectTaskSnapshotChanges(this.batchBeforeSnapshot, afterSnapshot)) {
         this.recordAction({
           type: 'task-move',
           projectId: this.batchProjectId,
@@ -333,7 +303,7 @@ export class UndoService {
       sequence: this.replaySequence,
       kind,
       projectId,
-      taskFieldChanges: this.getTaskFieldChanges(appliedSnapshot, previousSnapshot),
+      taskFieldChanges: collectTaskFieldChanges(appliedSnapshot, previousSnapshot),
     });
   }
 
@@ -348,56 +318,40 @@ export class UndoService {
    * @returns 需要应用的撤销数据，或 null（如果没有可撤销的操作），或 'version-mismatch'（如果版本不匹配）
    */
   undo(currentProjectVersion?: number): UndoResult {
+    const action = this.prepareUndo(currentProjectVersion);
+    if (!this.isCommittableUndoAction(action)) return action;
+    this.commitPreparedUndo(action);
+    return action;
+  }
+
+  prepareUndo(currentProjectVersion?: number): UndoResult {
     // 先刷新待处理的防抖操作，确保最近的编辑不会丢失
     this.flushPendingAction();
-    
+
     const stack = this.undoStack();
     if (stack.length === 0) return null;
-    
+
     const action = stack[stack.length - 1];
-    
-    // 版本检查：如果远程版本已更新（超过本地记录的版本），拒绝撤销
-    // 只有当两个版本号都有定义时才进行检查
-    // 注意：允许本地版本比记录的版本高（本地多次操作后撤销是正常的）
-    // 只拒绝当检测到远程同步导致版本跳跃的情况
-    // 使用宽松判断：如果远程版本比记录版本高超过允许的偏差量才拒绝
-    if (currentProjectVersion !== undefined && 
-        currentProjectVersion !== null &&
-        action.projectVersion !== undefined &&
-        action.projectVersion !== null) {
-      
-      const versionDiff = currentProjectVersion - action.projectVersion;
-      
-      // 版本差距超过容差的 2 倍：完全拒绝撤销
-      if (versionDiff > UNDO_CONFIG.VERSION_TOLERANCE * 2) {
-        return 'version-mismatch';
-      }
-      
-      // 版本差距在容差范围内：返回可强制撤销结果
-      if (versionDiff > UNDO_CONFIG.VERSION_TOLERANCE) {
-        return {
-          type: 'version-mismatch-forceable',
-          action,
-          versionDiff
-        };
-      }
+    return resolveUndoVersionConflict(action, currentProjectVersion) ?? action;
+  }
+
+  commitPreparedUndo(action: UndoAction): void {
+    const stack = this.undoStack();
+    if (stack.at(-1) !== action) {
+      this.logger.warn('[UndoService] 待提交撤销动作已过期，忽略提交');
+      return;
     }
-    
+
     this.isUndoRedoing = true;
-    
+
     // 注意：撤销操作的安全检查由 StoreService.applyProjectSnapshot 完成
     // 这里不阻止撤销，只记录可能的警告供日志使用
-    
     this.undoStack.update(s => s.slice(0, -1));
     this.rearmTruncationNotification(this.undoStack().length, this.getMaxHistorySize());
     this.redoStack.update(s => this.limitRedoStack([...s, action]));
-    
+
     this.isUndoRedoing = false;
-    
-    // 【v5.8】触发持久化
     this.schedulePersist();
-    
-    return action;
   }
   
   /**
@@ -430,36 +384,43 @@ export class UndoService {
    * @returns 需要应用的重做数据，或 null（如果没有可重做的操作），或 'version-mismatch'（如果版本不匹配）
    */
   redo(currentProjectVersion?: number): UndoResult {
+    const action = this.prepareRedo(currentProjectVersion);
+    if (!this.isCommittableUndoAction(action)) return action;
+    this.commitPreparedRedo(action);
+    return action;
+  }
+
+  prepareRedo(currentProjectVersion?: number): UndoResult {
     // 先刷新待处理的防抖操作，确保一致性
     this.flushPendingAction();
-    
+
     const stack = this.redoStack();
     if (stack.length === 0) return null;
-    
+
     const action = stack[stack.length - 1];
-    
-    // 版本检查：如果远程版本已更新，拒绝重做
-    // 只有当两个版本号都有定义时才进行检查
-    // 使用与 undo 相同的宽松判断逻辑
-    if (currentProjectVersion !== undefined && 
-        currentProjectVersion !== null &&
-        action.projectVersion !== undefined &&
-        action.projectVersion !== null &&
-        currentProjectVersion > action.projectVersion + UNDO_CONFIG.VERSION_TOLERANCE) {
-      return 'version-mismatch';
+    return hasRedoVersionConflict(action, currentProjectVersion) ? 'version-mismatch' : action;
+  }
+
+  commitPreparedRedo(action: UndoAction): void {
+    const stack = this.redoStack();
+    if (stack.at(-1) !== action) {
+      this.logger.warn('[UndoService] 待提交重做动作已过期，忽略提交');
+      return;
     }
-    
+
     this.isUndoRedoing = true;
-    
+
     this.redoStack.update(s => s.slice(0, -1));
     this.undoStack.update(s => this.limitUndoStack([...s, action]));
-    
+
     this.isUndoRedoing = false;
-    
-    // 【v5.8】触发持久化
     this.schedulePersist();
-    
-    return action;
+  }
+
+  private isCommittableUndoAction(result: UndoResult): result is UndoAction {
+    return !!result
+      && typeof result === 'object'
+      && !('type' in result && result.type === 'version-mismatch-forceable');
   }
 
   /**
@@ -505,41 +466,11 @@ export class UndoService {
   clearTaskHistory(taskId: string, projectId: string): number {
     const beforeUndo = this.undoStack().length;
     const beforeRedo = this.redoStack().length;
-    
-    // 过滤掉引用被删除任务的撤销记录
-    this.undoStack.update(stack => 
-      stack.filter(action => {
-        if (action.projectId !== projectId) return true;
-        
-        // 检查 before/after 快照中是否包含被删除的任务
-        const beforeTasks = action.data.before?.tasks as Array<{ id: string }> | undefined;
-        const afterTasks = action.data.after?.tasks as Array<{ id: string }> | undefined;
-        
-        // 如果操作涉及被删除的任务，移除该记录
-        const involvesDeletedTask = 
-          beforeTasks?.some(t => t.id === taskId) ||
-          afterTasks?.some(t => t.id === taskId);
-        
-        return !involvesDeletedTask;
-      })
-    );
+
+    this.undoStack.update(stack => filterUndoActionsExcludingTask(stack, taskId, projectId));
     this.rearmTruncationNotification(this.undoStack().length, this.getMaxHistorySize());
-    
-    // 同时清理重做栈
-    this.redoStack.update(stack => 
-      stack.filter(action => {
-        if (action.projectId !== projectId) return true;
-        
-        const beforeTasks = action.data.before?.tasks as Array<{ id: string }> | undefined;
-        const afterTasks = action.data.after?.tasks as Array<{ id: string }> | undefined;
-        
-        const involvesDeletedTask = 
-          beforeTasks?.some(t => t.id === taskId) ||
-          afterTasks?.some(t => t.id === taskId);
-        
-        return !involvesDeletedTask;
-      })
-    );
+
+    this.redoStack.update(stack => filterUndoActionsExcludingTask(stack, taskId, projectId));
 
     this.schedulePersist();
     
@@ -586,16 +517,7 @@ export class UndoService {
    * 【P1-21 修复】深拷贝嵌套数组（attachments, deletedConnections, tags），防止快照被后续修改污染
    */
   createProjectSnapshot(project: Project): Partial<Project> {
-    return {
-      id: project.id,
-      tasks: project.tasks.map(t => ({
-        ...t,
-        attachments: t.attachments ? t.attachments.map(a => ({ ...a })) : undefined,
-        deletedConnections: t.deletedConnections ? t.deletedConnections.map(c => ({ ...c })) : undefined,
-        tags: t.tags ? [...t.tags] : undefined,
-      })),
-      connections: project.connections.map(c => ({ ...c }))
-    };
+    return createProjectUndoSnapshot(project);
   }
 
   /**
@@ -704,35 +626,6 @@ export class UndoService {
     }
   }
 
-  private getTaskFieldChanges(
-    appliedSnapshot: Partial<Project>,
-    previousSnapshot?: Partial<Project>,
-  ): Readonly<Record<string, readonly ('title' | 'content')[]>> {
-    const appliedTasks = new Map((appliedSnapshot.tasks ?? []).map(task => [task.id, task]));
-    const previousTasks = new Map((previousSnapshot?.tasks ?? []).map(task => [task.id, task]));
-    const taskIds = new Set([...appliedTasks.keys(), ...previousTasks.keys()]);
-    const changes: Record<string, ('title' | 'content')[]> = {};
-
-    for (const taskId of taskIds) {
-      const appliedTask = appliedTasks.get(taskId);
-      const previousTask = previousTasks.get(taskId);
-      const changedFields: ('title' | 'content')[] = [];
-
-      if ((appliedTask?.title ?? '') !== (previousTask?.title ?? '')) {
-        changedFields.push('title');
-      }
-      if ((appliedTask?.content ?? '') !== (previousTask?.content ?? '')) {
-        changedFields.push('content');
-      }
-
-      if (changedFields.length > 0) {
-        changes[taskId] = changedFields;
-      }
-    }
-
-    return changes;
-  }
-  
   // ==================== 持久化方法 (v5.8) ====================
   
   /**
@@ -780,15 +673,16 @@ export class UndoService {
     try {
       const undoItems = this.undoStack();
       // 只保存最近的 N 条（受设备上限约束）
-      const itemsToPersist = undoItems
-        .slice(-this.getMaxHistorySize())
-        .slice(-UNDO_CONFIG.PERSISTENCE.MAX_PERSISTED_ITEMS);
+      const itemsToPersist = selectUndoActionsForPersistence(undoItems, {
+        historyLimit: this.getMaxHistorySize(),
+        persistedLimit: UNDO_CONFIG.PERSISTENCE.MAX_PERSISTED_ITEMS,
+      });
       
       const data: PersistedUndoData = {
         version: 1,
         timestamp: new Date().toISOString(),
         projectId: this.currentProjectId,
-        undoStack: itemsToPersist.map(item => this.serializeUndoAction(item)),
+        undoStack: itemsToPersist.map(item => serializeUndoAction(item)),
         undoLimitNotificationLocked: this.hasNotifiedUndoLimit,
       };
       
@@ -835,9 +729,7 @@ export class UndoService {
       }
       
       // 恢复撤销栈
-      const restoredActions = data.undoStack
-        .map(item => this.deserializeUndoAction(item))
-        .filter((item): item is UndoAction => item !== null);
+      const restoredActions = filterRestorableUndoActions(data.undoStack);
       
       if (restoredActions.length > 0) {
         this.undoStack.set(this.limitUndoStack(restoredActions, false));
@@ -859,33 +751,5 @@ export class UndoService {
     } catch (e) {
       this.logger.debug('sessionStorage 访问失败，静默忽略', { error: e });
     }
-  }
-  
-  /**
-   * 序列化 UndoAction（移除不可序列化的属性）
-   */
-  private serializeUndoAction(action: UndoAction): UndoAction {
-    // 创建深拷贝，确保可序列化
-    return JSON.parse(JSON.stringify(action));
-  }
-  
-  /**
-   * 反序列化 UndoAction
-   */
-  private deserializeUndoAction(data: unknown): UndoAction | null {
-    if (!data || typeof data !== 'object') return null;
-    
-    const action = data as Record<string, unknown>;
-    
-    // 验证必要字段
-    if (
-      typeof action['type'] !== 'string' ||
-      typeof action['projectId'] !== 'string' ||
-      typeof action['timestamp'] !== 'number'
-    ) {
-      return null;
-    }
-    
-    return action as unknown as UndoAction;
   }
 }

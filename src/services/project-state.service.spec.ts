@@ -72,6 +72,7 @@ const mockTaskStore = {
 const mockProjectStore = {
   projects: () => mockProjectsSignal(),
   activeProjectId: mockActiveProjectIdSignal,
+  getProject: vi.fn((id: string) => mockProjectsSignal().find(project => project.id === id)),
   activeProject: () => {
     const id = mockActiveProjectIdSignal();
     return mockProjectsSignal().find(p => p.id === id) || null;
@@ -83,6 +84,10 @@ const mockProjectStore = {
 };
 
 const mockConnectionStore = {
+  getConnectionsByProject: vi.fn((projectId: string) => {
+    const project = mockProjectsSignal().find(item => item.id === projectId);
+    return project?.connections || [];
+  }),
   getConnection: vi.fn((id: string) => mockConnectionsMap.get(id)),
   setConnections: vi.fn(),
   clear: vi.fn(),
@@ -114,6 +119,56 @@ describe('ProjectStateService - taskConnectionsMap', () => {
     });
 
     service = runInInjectionContext(injector, () => new ProjectStateService());
+  });
+
+  it('publishes activeProjectId as read-only state', () => {
+    expect(service.activeProjectId()).toBeNull();
+    expect('set' in service.activeProjectId).toBe(false);
+  });
+
+  it('runs registered project-owner retirement synchronously before a real project change', () => {
+    mockActiveProjectIdSignal.set('project-a');
+    const observed: { nextId: string | null; previousId: string | null; visibleId: string | null }[] = [];
+    service.registerBeforeActiveProjectChange((previousId, nextId) => {
+      observed.push({ previousId, nextId, visibleId: service.activeProjectId() });
+    });
+
+    service.setActiveProjectId('project-b');
+
+    expect(observed).toEqual([{ previousId: 'project-a', nextId: 'project-b', visibleId: 'project-a' }]);
+    expect(service.activeProjectId()).toBe('project-b');
+  });
+
+  it('preserves duplicate owners and supports listener retirement', () => {
+    mockActiveProjectIdSignal.set('project-a');
+    const listener = vi.fn();
+    const unregister = service.registerBeforeActiveProjectChange(listener);
+
+    service.setActiveProjectId('project-a');
+    expect(listener).not.toHaveBeenCalled();
+
+    unregister();
+    service.setActiveProjectId('project-b');
+    expect(listener).not.toHaveBeenCalled();
+  });
+
+  it('invalidates captured owners before publishing a real project change', () => {
+    service.setActiveProjectId('project-a');
+    const ownerA = service.captureActiveProjectOwner();
+    service.setActiveProjectId('project-a');
+    expect(service.isActiveProjectOwnerCurrent(ownerA)).toBe(true);
+
+    let retiredBeforePublish = false;
+    service.registerBeforeActiveProjectChange(() => {
+      retiredBeforePublish ||= !service.isActiveProjectOwnerCurrent(ownerA)
+        && service.activeProjectId() === 'project-a';
+    });
+    service.setActiveProjectId('project-b');
+    service.setActiveProjectId('project-a');
+
+    expect(retiredBeforePublish).toBe(true);
+    expect(service.isActiveProjectOwnerCurrent(ownerA)).toBe(false);
+    expect(service.isActiveProjectOwnerCurrent(service.captureActiveProjectOwner())).toBe(true);
   });
 
   it('should return empty Map when no active project', () => {

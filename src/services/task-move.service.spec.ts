@@ -4,10 +4,15 @@
  * 使用 Injector 隔离模式，无需 TestBed。
  * 覆盖：moveTaskToStage 四分支、边界校验、子树操作、辅助查询方法
  */
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { Injector } from '@angular/core';
 
-import { TaskMoveService, MoveTaskParams } from './task-move.service';
+import {
+  TaskMoveService,
+  MoveTaskParams,
+} from './task-move.service';
 import { LayoutService } from './layout.service';
 import { SubtreeOperationsService } from './subtree-operations.service';
 import { ProjectStateService } from './project-state.service';
@@ -15,6 +20,8 @@ import { TaskRecordTrackingService } from './task-record-tracking.service';
 import { LoggerService } from './logger.service';
 import { Project, Task, Connection } from '../models';
 import { success, ErrorCodes } from '../utils/result';
+import { registerTaskMoveAssignmentSpecs } from './task-move-assignment.spec-helpers';
+import { registerTaskMoveTreeReparentSpecs } from './task-move-tree-reparent.spec-helpers';
 
 // ─── 辅助工厂 ────────────────────────────────────────────────
 
@@ -112,7 +119,11 @@ describe('TaskMoveService', () => {
   let mockLayoutService: ReturnType<typeof createMockLayoutService>;
   let mockSubtreeOps: ReturnType<typeof createMockSubtreeOps>;
   let mockProjectState: { activeProject: ReturnType<typeof vi.fn>; getTask: ReturnType<typeof vi.fn> };
-  let mockRecorder: { recordAndUpdate: ReturnType<typeof vi.fn>; recordAndUpdateDebounced: ReturnType<typeof vi.fn> };
+  let mockRecorder: {
+    recordAndUpdate: ReturnType<typeof vi.fn>;
+    recordAndUpdateDebounced: ReturnType<typeof vi.fn>;
+    recordAndUpdateDurably: ReturnType<typeof vi.fn>;
+  };
   let activeProject: Project | null;
   let recordedMutators: Array<(p: Project) => Project>;
   let consoleSpies: Array<ReturnType<typeof vi.spyOn>>;
@@ -143,6 +154,16 @@ describe('TaskMoveService', () => {
         }
       }),
       recordAndUpdateDebounced: vi.fn(),
+      recordAndUpdateDurably: vi.fn(async (
+        mutator: (p: Project) => Project,
+        _options?: { updateType?: 'content' | 'structure' | 'position' },
+      ) => {
+        recordedMutators.push(mutator);
+        if (activeProject) {
+          activeProject = mutator(activeProject);
+        }
+        return true;
+      }),
     };
 
     const injector = Injector.create({
@@ -168,23 +189,66 @@ describe('TaskMoveService', () => {
   // moveTaskToStage — 公共入口校验
   // ═══════════════════════════════════════════
 
+  it('只保留 durable 移动路径，不再维护未调用的同步私有 helper', () => {
+    const source = readFileSync(join(__dirname, 'task-move.service.ts'), 'utf8');
+
+    expect(source).toContain('moveTaskToStageDurably');
+    expect(source).not.toMatch(/\n\s+private reparentWithinUnassigned\(/);
+    expect(source).not.toMatch(/\n\s+private assignUnassignedSubtree\(/);
+    expect(source).not.toMatch(/\n\s+private detachSubtreeToUnassigned\(/);
+    expect(source).not.toMatch(/\n\s+private moveAssignedTaskToStage\(/);
+  });
+
   describe('moveTaskToStage - 公共校验', () => {
-    it('没有活动项目时返回 DATA_NOT_FOUND', () => {
+    it('没有活动项目时返回 DATA_NOT_FOUND', async () => {
       activeProject = null;
-      const result = service.moveTaskToStage({ taskId: 'x', newStage: 1 });
+      const result = await service.moveTaskToStage({ taskId: 'x', newStage: 1 });
       expect(result.ok).toBe(false);
       if (!result.ok) {
         expect(result.error.code).toBe(ErrorCodes.DATA_NOT_FOUND);
       }
     });
 
-    it('任务不存在时返回 DATA_NOT_FOUND', () => {
+    it('任务不存在时返回 DATA_NOT_FOUND', async () => {
       activeProject = createProject({ tasks: [] });
-      const result = service.moveTaskToStage({ taskId: 'missing', newStage: 1 });
+      const result = await service.moveTaskToStage({ taskId: 'missing', newStage: 1 });
       expect(result.ok).toBe(false);
       if (!result.ok) {
         expect(result.error.code).toBe(ErrorCodes.DATA_NOT_FOUND);
       }
+    });
+  });
+
+  describe('moveTaskToStageAtPositionDurably', () => {
+    it('已分配任务结构移动和落点坐标应在同一次 durable mutator 中提交', async () => {
+      const parent = createTask({ id: 'parent-1', stage: 1, parentId: null, rank: 1000 });
+      const moved = createTask({ id: 'task-1', stage: 2, parentId: null, rank: 1100, x: 10, y: 20 });
+      const before = createTask({ id: 'before-1', stage: 2, parentId: 'parent-1', rank: 2000 });
+      activeProject = createProject({ tasks: [parent, moved, before] });
+
+      const result = await service.moveTaskToStageAtPositionDurably({
+        taskId: 'task-1',
+        newStage: 2,
+        beforeTaskId: 'before-1',
+        newParentId: 'parent-1',
+        x: 80,
+        y: 160,
+      });
+
+      expect(result.ok).toBe(true);
+      expect(mockRecorder.recordAndUpdateDurably).toHaveBeenCalledTimes(1);
+      expect(mockRecorder.recordAndUpdateDurably).toHaveBeenCalledWith(
+        expect.any(Function),
+        { updateType: 'structure' },
+      );
+      const taskAfter = activeProject?.tasks.find(task => task.id === 'task-1');
+      expect(taskAfter).toMatchObject({
+        stage: 2,
+        parentId: 'parent-1',
+        rank: 1500,
+        x: 80,
+        y: 160,
+      });
     });
   });
 
@@ -193,31 +257,33 @@ describe('TaskMoveService', () => {
   // ═══════════════════════════════════════════
 
   describe('moveTaskToStage - 分支1: null→null (待分配区内部重组)', () => {
-    it('成功更新父子关系', () => {
+    it('成功更新父子关系', async () => {
       const parent = createTask({ id: 'parent', stage: null });
       const child = createTask({ id: 'child', stage: null, parentId: null });
       activeProject = createProject({ tasks: [parent, child] });
 
-      const result = service.moveTaskToStage({
+      const result = await service.moveTaskToStage({
         taskId: 'child',
         newStage: null,
         newParentId: 'parent',
       });
 
       expect(result.ok).toBe(true);
-      // 验证 mutator 被调用
-      expect(recordedMutators.length).toBe(1);
-      // 验证任务 parentId 被更新
+      expect(mockRecorder.recordAndUpdateDurably).toHaveBeenCalledWith(
+        expect.any(Function),
+        { updateType: 'structure' },
+      );
+      expect(mockRecorder.recordAndUpdate).not.toHaveBeenCalled();
       const updatedChild = activeProject!.tasks.find(t => t.id === 'child');
       expect(updatedChild?.parentId).toBe('parent');
     });
 
-    it('newParentId 为 null 时断开父子关系', () => {
+    it('newParentId 为 null 时断开父子关系', async () => {
       const parent = createTask({ id: 'parent', stage: null });
       const child = createTask({ id: 'child', stage: null, parentId: 'parent' });
       activeProject = createProject({ tasks: [parent, child] });
 
-      const result = service.moveTaskToStage({
+      const result = await service.moveTaskToStage({
         taskId: 'child',
         newStage: null,
         newParentId: null,
@@ -228,12 +294,12 @@ describe('TaskMoveService', () => {
       expect(updatedChild?.parentId).toBeNull();
     });
 
-    it('目标父任务在已分配区时返回 CROSS_BOUNDARY_VIOLATION', () => {
+    it('目标父任务在已分配区时返回 CROSS_BOUNDARY_VIOLATION', async () => {
       const parent = createTask({ id: 'parent', stage: 2 });
       const child = createTask({ id: 'child', stage: null });
       activeProject = createProject({ tasks: [parent, child] });
 
-      const result = service.moveTaskToStage({
+      const result = await service.moveTaskToStage({
         taskId: 'child',
         newStage: null,
         newParentId: 'parent',
@@ -245,13 +311,13 @@ describe('TaskMoveService', () => {
       }
     });
 
-    it('会导致循环依赖时返回 LAYOUT_CYCLE_DETECTED', () => {
+    it('会导致循环依赖时返回 LAYOUT_CYCLE_DETECTED', async () => {
       mockLayoutService.detectCycle.mockReturnValue(true);
       const parent = createTask({ id: 'parent', stage: null });
       const child = createTask({ id: 'child', stage: null });
       activeProject = createProject({ tasks: [parent, child] });
 
-      const result = service.moveTaskToStage({
+      const result = await service.moveTaskToStage({
         taskId: 'child',
         newStage: null,
         newParentId: 'parent',
@@ -263,11 +329,11 @@ describe('TaskMoveService', () => {
       }
     });
 
-    it('目标父任务不存在时返回 DATA_NOT_FOUND', () => {
+    it('目标父任务不存在时返回 DATA_NOT_FOUND', async () => {
       const child = createTask({ id: 'child', stage: null });
       activeProject = createProject({ tasks: [child] });
 
-      const result = service.moveTaskToStage({
+      const result = await service.moveTaskToStage({
         taskId: 'child',
         newStage: null,
         newParentId: 'nonexistent',
@@ -278,6 +344,46 @@ describe('TaskMoveService', () => {
         expect(result.error.code).toBe(ErrorCodes.DATA_NOT_FOUND);
       }
     });
+
+    it('moveTaskToStageDurably 先写入本地持久化队列再更新待分配父子关系', async () => {
+      const parent = createTask({ id: 'parent', stage: null });
+      const child = createTask({ id: 'child', stage: null, parentId: null });
+      activeProject = createProject({ tasks: [parent, child] });
+
+      const result = await service.moveTaskToStageDurably({
+        taskId: 'child',
+        newStage: null,
+        newParentId: 'parent',
+      });
+
+      expect(result.ok).toBe(true);
+      expect(mockRecorder.recordAndUpdateDurably).toHaveBeenCalledWith(
+        expect.any(Function),
+        { updateType: 'structure' },
+      );
+      expect(mockRecorder.recordAndUpdate).not.toHaveBeenCalled();
+      expect(activeProject!.tasks.find(t => t.id === 'child')?.parentId).toBe('parent');
+    });
+
+    it('moveTaskToStageDurably 在本地持久化失败时不提交 UI 变更', async () => {
+      const parent = createTask({ id: 'parent', stage: null });
+      const child = createTask({ id: 'child', stage: null, parentId: null });
+      activeProject = createProject({ tasks: [parent, child] });
+      mockRecorder.recordAndUpdateDurably.mockResolvedValueOnce(false);
+
+      const result = await service.moveTaskToStageDurably({
+        taskId: 'child',
+        newStage: null,
+        newParentId: 'parent',
+      });
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error.code).toBe(ErrorCodes.OPERATION_FAILED);
+      }
+      expect(mockRecorder.recordAndUpdate).not.toHaveBeenCalled();
+      expect(activeProject!.tasks.find(t => t.id === 'child')?.parentId).toBeNull();
+    });
   });
 
   // ═══════════════════════════════════════════
@@ -285,28 +391,33 @@ describe('TaskMoveService', () => {
   // ═══════════════════════════════════════════
 
   describe('moveTaskToStage - 分支2: null→stage (浮动树整体分配)', () => {
-    it('成功将待分配任务分配到阶段', () => {
+    it('成功将待分配任务分配到阶段', async () => {
       const task = createTask({ id: 't1', stage: null });
       activeProject = createProject({ tasks: [task] });
 
-      const result = service.moveTaskToStage({
+      const result = await service.moveTaskToStage({
         taskId: 't1',
         newStage: 1,
       });
 
       expect(result.ok).toBe(true);
+      expect(mockRecorder.recordAndUpdateDurably).toHaveBeenCalledWith(
+        expect.any(Function),
+        { updateType: 'structure' },
+      );
+      expect(mockRecorder.recordAndUpdate).not.toHaveBeenCalled();
       expect(mockSubtreeOps.validateStageCapacity).toHaveBeenCalledWith('t1', 1, expect.any(Array));
       expect(mockSubtreeOps.fixSubtreeRanks).toHaveBeenCalled();
     });
 
-    it('阶段溢出时返回容量校验失败', () => {
+    it('阶段溢出时返回容量校验失败', async () => {
       mockSubtreeOps.validateStageCapacity.mockReturnValue(
         { ok: false, error: { code: ErrorCodes.STAGE_OVERFLOW, message: '阶段已满' } }
       );
       const task = createTask({ id: 't1', stage: null });
       activeProject = createProject({ tasks: [task] });
 
-      const result = service.moveTaskToStage({ taskId: 't1', newStage: 5 });
+      const result = await service.moveTaskToStage({ taskId: 't1', newStage: 5 });
 
       expect(result.ok).toBe(false);
       if (!result.ok) {
@@ -314,12 +425,12 @@ describe('TaskMoveService', () => {
       }
     });
 
-    it('指定的新父任务在待分配区时返回 CROSS_BOUNDARY_VIOLATION', () => {
+    it('指定的新父任务在待分配区时返回 CROSS_BOUNDARY_VIOLATION', async () => {
       const parent = createTask({ id: 'parent', stage: null });
       const child = createTask({ id: 'child', stage: null });
       activeProject = createProject({ tasks: [parent, child] });
 
-      const result = service.moveTaskToStage({
+      const result = await service.moveTaskToStage({
         taskId: 'child',
         newStage: 2,
         newParentId: 'parent',
@@ -331,12 +442,12 @@ describe('TaskMoveService', () => {
       }
     });
 
-    it('新父任务阶段与目标阶段不匹配时返回 CROSS_BOUNDARY_VIOLATION', () => {
+    it('新父任务阶段与目标阶段不匹配时返回 CROSS_BOUNDARY_VIOLATION', async () => {
       const parent = createTask({ id: 'parent', stage: 3 }); // stage 3，但目标 stage=2，期望 parent.stage=1
       const child = createTask({ id: 'child', stage: null });
       activeProject = createProject({ tasks: [parent, child] });
 
-      const result = service.moveTaskToStage({
+      const result = await service.moveTaskToStage({
         taskId: 'child',
         newStage: 2,
         newParentId: 'parent',
@@ -346,6 +457,25 @@ describe('TaskMoveService', () => {
       if (!result.ok) {
         expect(result.error.code).toBe(ErrorCodes.CROSS_BOUNDARY_VIOLATION);
       }
+    });
+
+    it('moveTaskToStageDurably 先持久化再分配待分配子树', async () => {
+      const task = createTask({ id: 't1', stage: null });
+      activeProject = createProject({ tasks: [task] });
+
+      const result = await service.moveTaskToStageDurably({
+        taskId: 't1',
+        newStage: 1,
+      });
+
+      expect(result.ok).toBe(true);
+      expect(mockRecorder.recordAndUpdateDurably).toHaveBeenCalledWith(
+        expect.any(Function),
+        { updateType: 'structure' },
+      );
+      expect(mockRecorder.recordAndUpdate).not.toHaveBeenCalled();
+      expect(activeProject!.tasks.find(t => t.id === 't1')?.stage).toBe(1);
+      expect(mockSubtreeOps.fixSubtreeRanks).toHaveBeenCalled();
     });
   });
 
@@ -354,19 +484,44 @@ describe('TaskMoveService', () => {
   // ═══════════════════════════════════════════
 
   describe('moveTaskToStage - 分支3: stage→null (已分配树整体回收)', () => {
-    it('成功将子树移回待分配区', () => {
+    it('成功将子树移回待分配区', async () => {
       const task = createTask({ id: 't1', stage: 2, parentId: 'p0' });
       activeProject = createProject({ tasks: [task] });
       mockSubtreeOps.collectSubtreeIds.mockReturnValue(new Set(['t1']));
 
-      const result = service.moveTaskToStage({ taskId: 't1', newStage: null });
+      const result = await service.moveTaskToStage({ taskId: 't1', newStage: null });
 
       expect(result.ok).toBe(true);
+      expect(mockRecorder.recordAndUpdateDurably).toHaveBeenCalledWith(
+        expect.any(Function),
+        { updateType: 'structure' },
+      );
+      expect(mockRecorder.recordAndUpdate).not.toHaveBeenCalled();
       expect(mockSubtreeOps.collectSubtreeIds).toHaveBeenCalledWith('t1', expect.any(Array));
-      // 验证 root.parentId 被置空
       const updated = activeProject!.tasks.find(t => t.id === 't1');
       expect(updated?.stage).toBeNull();
       expect(updated?.parentId).toBeNull();
+    });
+
+    it('moveTaskToStageDurably 先持久化再将已分配子树移回待分配区', async () => {
+      const parent = createTask({ id: 'parent', stage: 1 });
+      const child = createTask({ id: 'child', stage: 2, parentId: 'parent' });
+      activeProject = createProject({ tasks: [parent, child] });
+      mockSubtreeOps.collectSubtreeIds.mockReturnValue(new Set(['parent', 'child']));
+
+      const result = await service.moveTaskToStageDurably({
+        taskId: 'parent',
+        newStage: null,
+      });
+
+      expect(result.ok).toBe(true);
+      expect(mockRecorder.recordAndUpdateDurably).toHaveBeenCalledWith(
+        expect.any(Function),
+        { updateType: 'structure' },
+      );
+      expect(mockRecorder.recordAndUpdate).not.toHaveBeenCalled();
+      expect(activeProject!.tasks.find(t => t.id === 'parent')?.stage).toBeNull();
+      expect(activeProject!.tasks.find(t => t.id === 'child')?.stage).toBeNull();
     });
   });
 
@@ -375,17 +530,37 @@ describe('TaskMoveService', () => {
   // ═══════════════════════════════════════════
 
   describe('moveTaskToStage - 分支4: stage→stage (阶段变更)', () => {
-    it('成功移动任务到新阶段', () => {
+    it('成功移动任务到新阶段', async () => {
       const task = createTask({ id: 't1', stage: 1, rank: 1000 });
       activeProject = createProject({ tasks: [task] });
 
-      const result = service.moveTaskToStage({ taskId: 't1', newStage: 2 });
+      const result = await service.moveTaskToStage({ taskId: 't1', newStage: 2 });
 
       expect(result.ok).toBe(true);
+      expect(mockRecorder.recordAndUpdateDurably).toHaveBeenCalledWith(
+        expect.any(Function),
+        { updateType: 'structure' },
+      );
+      expect(mockRecorder.recordAndUpdate).not.toHaveBeenCalled();
       expect(mockSubtreeOps.cascadeUpdateChildrenStage).toHaveBeenCalled();
     });
 
-    it('改父节点时会清理旧父与新父重合的 shadow connection', () => {
+    it('moveTaskToStageDurably 先持久化再移动已分配任务阶段', async () => {
+      const task = createTask({ id: 't1', stage: 1, rank: 1000 });
+      activeProject = createProject({ tasks: [task] });
+
+      const result = await service.moveTaskToStageDurably({ taskId: 't1', newStage: 2 });
+
+      expect(result.ok).toBe(true);
+      expect(mockRecorder.recordAndUpdateDurably).toHaveBeenCalledWith(
+        expect.any(Function),
+        { updateType: 'structure' },
+      );
+      expect(mockRecorder.recordAndUpdate).not.toHaveBeenCalled();
+      expect(activeProject!.tasks.find(t => t.id === 't1')?.stage).toBe(2);
+    });
+
+    it('改父节点时会清理旧父与新父重合的 shadow connection', async () => {
       const oldParent = createTask({ id: 'old-parent', stage: 1, rank: 1000 });
       const newParent = createTask({ id: 'new-parent', stage: 1, rank: 2000 });
       const child = createTask({ id: 'child', stage: 2, parentId: 'old-parent', rank: 1500 });
@@ -417,7 +592,7 @@ describe('TaskMoveService', () => {
         connections: originalConnections,
       });
 
-      const result = service.moveTaskToStage({
+      const result = await service.moveTaskToStage({
         taskId: 'child',
         newStage: 2,
         newParentId: 'new-parent',
@@ -446,14 +621,14 @@ describe('TaskMoveService', () => {
       expect(activeProject!.tasks.find(task => task.id === 'child')?.parentId).toBe('new-parent');
     });
 
-    it('阶段正在重新排序时返回 LAYOUT_RANK_CONFLICT', () => {
+    it('阶段正在重新排序时返回 LAYOUT_RANK_CONFLICT', async () => {
       const task = createTask({ id: 't1', stage: 1 });
       activeProject = createProject({ tasks: [task] });
 
       // 设置 isStageRebalancing 返回 true
       mockLayoutService.isStageRebalancing.mockReturnValue(true);
 
-      const result = service.moveTaskToStage({ taskId: 't1', newStage: 2 });
+      const result = await service.moveTaskToStage({ taskId: 't1', newStage: 2 });
 
       expect(result.ok).toBe(false);
       if (!result.ok) {
@@ -461,13 +636,13 @@ describe('TaskMoveService', () => {
       }
     });
 
-    it('移动时检测到循环依赖返回 LAYOUT_CYCLE_DETECTED', () => {
+    it('移动时检测到循环依赖返回 LAYOUT_CYCLE_DETECTED', async () => {
       mockLayoutService.detectCycle.mockReturnValue(true);
       const parent = createTask({ id: 'parent', stage: 1 });
       const child = createTask({ id: 'child', stage: 2, parentId: 'parent' });
       activeProject = createProject({ tasks: [parent, child] });
 
-      const result = service.moveTaskToStage({
+      const result = await service.moveTaskToStage({
         taskId: 'child',
         newStage: 2,
         newParentId: 'parent',
@@ -479,13 +654,13 @@ describe('TaskMoveService', () => {
       }
     });
 
-    it('放置策略拒绝时返回 LAYOUT_PARENT_CHILD_CONFLICT', () => {
+    it('放置策略拒绝时返回 LAYOUT_PARENT_CHILD_CONFLICT', async () => {
       const task = createTask({ id: 't1', stage: 1 });
       activeProject = createProject({ tasks: [task] });
 
       mockLayoutService.applyRefusalStrategy.mockReturnValue({ ok: false, rank: 0 });
 
-      const result = service.moveTaskToStage({ taskId: 't1', newStage: 2 });
+      const result = await service.moveTaskToStage({ taskId: 't1', newStage: 2 });
 
       expect(result.ok).toBe(false);
       if (!result.ok) {
@@ -493,13 +668,13 @@ describe('TaskMoveService', () => {
       }
     });
 
-    it('无效 parentId 会被自动清除', () => {
+    it('无效 parentId 会被自动清除', async () => {
       // 父任务在 stage 3，但任务移到 stage 2（需要父在 stage 1 才合法），parentId 应被清除
       const parent = createTask({ id: 'parent', stage: 3 });
       const child = createTask({ id: 'child', stage: 1, parentId: 'parent' });
       activeProject = createProject({ tasks: [parent, child] });
 
-      const result = service.moveTaskToStage({ taskId: 'child', newStage: 2 });
+      const result = await service.moveTaskToStage({ taskId: 'child', newStage: 2 });
 
       expect(result.ok).toBe(true);
       const updated = activeProject!.tasks.find(t => t.id === 'child');
@@ -508,319 +683,71 @@ describe('TaskMoveService', () => {
   });
 
   // ═══════════════════════════════════════════
-  // getDirectChildren
+  // tree reparent delegated specs
   // ═══════════════════════════════════════════
 
-  describe('getDirectChildren', () => {
-    it('返回直接子任务（排除已删除）', () => {
-      const parent = createTask({ id: 'p1', stage: 1 });
-      const child1 = createTask({ id: 'c1', parentId: 'p1', stage: 2 });
-      const child2 = createTask({ id: 'c2', parentId: 'p1', stage: 2, deletedAt: new Date().toISOString() });
-      const child3 = createTask({ id: 'c3', parentId: 'p1', stage: 2 });
-      activeProject = createProject({ tasks: [parent, child1, child2, child3] });
-
-      const children = service.getDirectChildren('p1');
-
-      expect(children).toHaveLength(2);
-      expect(children.map(c => c.id)).toContain('c1');
-      expect(children.map(c => c.id)).toContain('c3');
-    });
-
-    it('没有活动项目时返回空数组', () => {
-      activeProject = null;
-      expect(service.getDirectChildren('any')).toEqual([]);
-    });
+  registerTaskMoveTreeReparentSpecs({
+    service: () => service,
+    activeProject: () => activeProject,
+    setActiveProject: project => {
+      activeProject = project;
+    },
+    createTask,
+    createProject,
+    recordedMutators: () => recordedMutators,
+    mockLayoutService: () => mockLayoutService,
+    mockRecorder: () => mockRecorder,
+    mockSubtreeOps: () => mockSubtreeOps,
   });
 
   // ═══════════════════════════════════════════
-  // getUnassignedParent
+  // replaceChildSubtreeWithUnassigned / assignUnassignedToTask
   // ═══════════════════════════════════════════
 
-  describe('getUnassignedParent', () => {
-    it('返回待分配区的父任务 ID', () => {
-      const parent = createTask({ id: 'up', stage: null });
-      const child = createTask({ id: 'uc', stage: null, parentId: 'up' });
-      activeProject = createProject({ tasks: [parent, child] });
-
-      expect(service.getUnassignedParent('uc')).toBe('up');
-    });
-
-    it('父任务在已分配区时返回 null', () => {
-      const parent = createTask({ id: 'ap', stage: 1 });
-      const child = createTask({ id: 'uc', stage: null, parentId: 'ap' });
-      activeProject = createProject({ tasks: [parent, child] });
-
-      expect(service.getUnassignedParent('uc')).toBeNull();
-    });
-
-    it('任务自身在已分配区时返回 null', () => {
-      const task = createTask({ id: 't1', stage: 1, parentId: null });
-      activeProject = createProject({ tasks: [task] });
-
-      expect(service.getUnassignedParent('t1')).toBeNull();
-    });
-
-    it('没有活动项目时返回 null', () => {
-      activeProject = null;
-      expect(service.getUnassignedParent('any')).toBeNull();
-    });
-
-    it('任务无父节点时返回 null', () => {
-      const task = createTask({ id: 't1', stage: null, parentId: null });
-      activeProject = createProject({ tasks: [task] });
-
-      expect(service.getUnassignedParent('t1')).toBeNull();
-    });
+  registerTaskMoveAssignmentSpecs({
+    service: () => service,
+    setActiveProject: project => {
+      activeProject = project;
+    },
+    createTask,
+    createProject,
+    mockRecorder: () => mockRecorder,
+    mockSubtreeOps: () => mockSubtreeOps,
   });
 
-  // ═══════════════════════════════════════════
-  // detachTask
-  // ═══════════════════════════════════════════
-
-  describe('detachTask', () => {
-    it('将任务分离到待分配区且子节点提升', () => {
-      const grandParent = createTask({ id: 'gp', stage: 1, parentId: null });
-      const parent = createTask({ id: 'p', stage: 2, parentId: 'gp' });
-      const child = createTask({ id: 'c', stage: 3, parentId: 'p' });
-      activeProject = createProject({ tasks: [grandParent, parent, child] });
-
-      service.detachTask('p');
-
-      const updatedParent = activeProject!.tasks.find(t => t.id === 'p');
-      const updatedChild = activeProject!.tasks.find(t => t.id === 'c');
-
-      // 被分离的任务移到待分配区
-      expect(updatedParent?.stage).toBeNull();
-      expect(updatedParent?.parentId).toBeNull();
-      // 子节点提升到祖父节点下
-      expect(updatedChild?.parentId).toBe('gp');
-    });
-
-    it('任务不存在时不出错', () => {
-      activeProject = createProject({ tasks: [] });
-      service.detachTask('nonexistent');
-      // 不抛异常即可
-      expect(recordedMutators.length).toBe(1);
-    });
-  });
-
-  // ═══════════════════════════════════════════
-  // deleteTaskKeepChildren
-  // ═══════════════════════════════════════════
-
-  describe('deleteTaskKeepChildren', () => {
-    it('删除任务，子节点提升，相关连接移除', () => {
-      const parent = createTask({ id: 'p', stage: 1, parentId: null });
-      const target = createTask({ id: 't', stage: 2, parentId: 'p' });
-      const child = createTask({ id: 'c', stage: 3, parentId: 't' });
-      const conn: Connection = { id: 'conn1', source: 't', target: 'c' };
-      const otherConn: Connection = { id: 'conn2', source: 'p', target: 'c' };
-      activeProject = createProject({
-        tasks: [parent, target, child],
-        connections: [conn, otherConn],
-      });
-
-      service.deleteTaskKeepChildren('t');
-
-      // 目标任务被删除
-      expect(activeProject!.tasks.find(t => t.id === 't')).toBeUndefined();
-      // 子节点提升到父节点下
-      const updatedChild = activeProject!.tasks.find(t => t.id === 'c');
-      expect(updatedChild?.parentId).toBe('p');
-      // 与被删除任务相关的连接被移除
-      expect(activeProject!.connections.find(c => c.id === 'conn1')).toBeUndefined();
-      // 无关连接保留
-      expect(activeProject!.connections.find(c => c.id === 'conn2')).toBeDefined();
-    });
-
-    it('没有活动项目时静默返回', () => {
-      activeProject = null;
-      service.deleteTaskKeepChildren('any');
-      expect(recordedMutators.length).toBe(0);
-    });
-  });
-
-  // ═══════════════════════════════════════════
-  // moveSubtreeToNewParent
-  // ═══════════════════════════════════════════
-
-  describe('moveSubtreeToNewParent', () => {
-    it('成功迁移子树到新父节点', () => {
-      const oldParent = createTask({ id: 'op', stage: 1 });
-      const newParent = createTask({ id: 'np', stage: 1 });
-      const task = createTask({ id: 't1', stage: 2, parentId: 'op' });
-      activeProject = createProject({ tasks: [oldParent, newParent, task] });
-      mockSubtreeOps.collectSubtreeIds.mockReturnValue(new Set(['t1']));
-
-      const result = service.moveSubtreeToNewParent('t1', 'np');
-
-      expect(result.ok).toBe(true);
-      expect(mockSubtreeOps.updateSubtreeStages).toHaveBeenCalled();
-      expect(mockSubtreeOps.computeNewRankForMigratedTask).toHaveBeenCalled();
-      expect(mockSubtreeOps.updateParentChildConnections).toHaveBeenCalled();
-    });
-
-    it('新旧父节点相同时直接返回成功', () => {
-      const parent = createTask({ id: 'p', stage: 1 });
-      const task = createTask({ id: 't1', stage: 2, parentId: 'p' });
-      activeProject = createProject({ tasks: [parent, task] });
-
-      const result = service.moveSubtreeToNewParent('t1', 'p');
-
-      expect(result.ok).toBe(true);
-      expect(recordedMutators.length).toBe(0); // 无需执行 mutator
-    });
-
-    it('检测到循环依赖时返回 LAYOUT_CYCLE_DETECTED', () => {
-      mockLayoutService.detectCycle.mockReturnValue(true);
-      const parent = createTask({ id: 'p', stage: 1 });
-      const task = createTask({ id: 't1', stage: 2, parentId: null });
-      activeProject = createProject({ tasks: [parent, task] });
-
-      const result = service.moveSubtreeToNewParent('t1', 'p');
-
-      expect(result.ok).toBe(false);
-      if (!result.ok) {
-        expect(result.error.code).toBe(ErrorCodes.LAYOUT_CYCLE_DETECTED);
-      }
-    });
-
-    it('没有活动项目时返回 DATA_NOT_FOUND', () => {
-      activeProject = null;
-      const result = service.moveSubtreeToNewParent('t1', 'p');
-      expect(result.ok).toBe(false);
-      if (!result.ok) {
-        expect(result.error.code).toBe(ErrorCodes.DATA_NOT_FOUND);
-      }
-    });
-
-    it('目标任务不存在时返回 DATA_NOT_FOUND', () => {
-      activeProject = createProject({ tasks: [] });
-      const result = service.moveSubtreeToNewParent('missing', 'p');
-      expect(result.ok).toBe(false);
-      if (!result.ok) {
-        expect(result.error.code).toBe(ErrorCodes.DATA_NOT_FOUND);
-      }
-    });
-
-    it('迁移到 null 父节点（根级）成功', () => {
-      const parent = createTask({ id: 'p', stage: 1 });
-      const task = createTask({ id: 't1', stage: 2, parentId: 'p' });
-      activeProject = createProject({ tasks: [parent, task] });
-      mockSubtreeOps.collectSubtreeIds.mockReturnValue(new Set(['t1']));
-
-      const result = service.moveSubtreeToNewParent('t1', null);
-
-      expect(result.ok).toBe(true);
-      const updated = activeProject!.tasks.find(t => t.id === 't1');
-      expect(updated?.parentId).toBeNull();
-    });
-  });
-
-  // ═══════════════════════════════════════════
-  // replaceChildSubtreeWithUnassigned
-  // ═══════════════════════════════════════════
-
-  describe('replaceChildSubtreeWithUnassigned', () => {
-    it('成功执行替换操作', () => {
+  describe('assignment durable wrappers', () => {
+    it('replaceChildSubtreeWithUnassignedDurably 通过本地持久化路径替换子树', async () => {
       const source = createTask({ id: 'src', stage: 1 });
       const target = createTask({ id: 'tgt', stage: null });
       activeProject = createProject({ tasks: [source, target] });
       mockSubtreeOps.collectSubtreeIds.mockReturnValue(new Set(['tgt']));
 
-      const result = service.replaceChildSubtreeWithUnassigned('src', 'tgt');
+      const result = await service.replaceChildSubtreeWithUnassignedDurably('src', 'tgt');
 
       expect(result.ok).toBe(true);
-      if (result.ok) {
-        expect(result.value).toHaveProperty('detachedSubtreeRootId');
-      }
+      expect(mockRecorder.recordAndUpdateDurably).toHaveBeenCalledWith(
+        expect.any(Function),
+        { updateType: 'structure' },
+      );
+      expect(mockRecorder.recordAndUpdate).not.toHaveBeenCalled();
       expect(mockSubtreeOps.assignSubtreeToStage).toHaveBeenCalled();
     });
 
-    it('没有活动项目时返回 DATA_NOT_FOUND', () => {
-      activeProject = null;
-      const result = service.replaceChildSubtreeWithUnassigned('src', 'tgt');
-      expect(result.ok).toBe(false);
-      if (!result.ok) {
-        expect(result.error.code).toBe(ErrorCodes.DATA_NOT_FOUND);
-      }
-    });
-
-    it('源任务在待分配区时返回 VALIDATION_ERROR', () => {
-      const source = createTask({ id: 'src', stage: null });
-      const target = createTask({ id: 'tgt', stage: null });
-      activeProject = createProject({ tasks: [source, target] });
-
-      const result = service.replaceChildSubtreeWithUnassigned('src', 'tgt');
-
-      expect(result.ok).toBe(false);
-      if (!result.ok) {
-        expect(result.error.code).toBe(ErrorCodes.VALIDATION_ERROR);
-      }
-    });
-
-    it('目标任务在已分配区时返回 VALIDATION_ERROR', () => {
-      const source = createTask({ id: 'src', stage: 1 });
-      const target = createTask({ id: 'tgt', stage: 2 });
-      activeProject = createProject({ tasks: [source, target] });
-
-      const result = service.replaceChildSubtreeWithUnassigned('src', 'tgt');
-
-      expect(result.ok).toBe(false);
-      if (!result.ok) {
-        expect(result.error.code).toBe(ErrorCodes.VALIDATION_ERROR);
-      }
-    });
-  });
-
-  // ═══════════════════════════════════════════
-  // assignUnassignedToTask
-  // ═══════════════════════════════════════════
-
-  describe('assignUnassignedToTask', () => {
-    it('成功将待分配块分配给任务', () => {
+    it('assignUnassignedToTaskDurably 通过本地持久化路径分配待分配块', async () => {
       const source = createTask({ id: 'src', stage: 1 });
       const target = createTask({ id: 'tgt', stage: null });
       activeProject = createProject({ tasks: [source, target] });
       mockSubtreeOps.collectSubtreeIds.mockReturnValue(new Set(['tgt']));
 
-      const result = service.assignUnassignedToTask('src', 'tgt');
+      const result = await service.assignUnassignedToTaskDurably('src', 'tgt');
 
       expect(result.ok).toBe(true);
+      expect(mockRecorder.recordAndUpdateDurably).toHaveBeenCalledWith(
+        expect.any(Function),
+        { updateType: 'structure' },
+      );
+      expect(mockRecorder.recordAndUpdate).not.toHaveBeenCalled();
       expect(mockSubtreeOps.assignSubtreeToStage).toHaveBeenCalled();
-      expect(mockSubtreeOps.fixSubtreeRanks).toHaveBeenCalled();
-    });
-
-    it('没有活动项目时返回 DATA_NOT_FOUND', () => {
-      activeProject = null;
-      const result = service.assignUnassignedToTask('src', 'tgt');
-      expect(result.ok).toBe(false);
-    });
-
-    it('源任务在待分配区时返回 VALIDATION_ERROR', () => {
-      const source = createTask({ id: 'src', stage: null });
-      const target = createTask({ id: 'tgt', stage: null });
-      activeProject = createProject({ tasks: [source, target] });
-
-      const result = service.assignUnassignedToTask('src', 'tgt');
-
-      expect(result.ok).toBe(false);
-      if (!result.ok) {
-        expect(result.error.code).toBe(ErrorCodes.VALIDATION_ERROR);
-      }
-    });
-
-    it('目标任务在已分配区时返回 VALIDATION_ERROR', () => {
-      const source = createTask({ id: 'src', stage: 1 });
-      const target = createTask({ id: 'tgt', stage: 2 });
-      activeProject = createProject({ tasks: [source, target] });
-
-      const result = service.assignUnassignedToTask('src', 'tgt');
-
-      expect(result.ok).toBe(false);
-      if (!result.ok) {
-        expect(result.error.code).toBe(ErrorCodes.VALIDATION_ERROR);
-      }
     });
   });
 });

@@ -263,6 +263,44 @@ describe('ConflictDetectionService', () => {
       expect(result.mergedTask.x).toBe(100);
       expect(result.mergedTask.y).toBe(200);
     });
+
+    it('should merge attentionMeta by newer updatedAt unless the field is locked', () => {
+      const local = createTask({
+        updatedAt: '2024-01-01T00:00:00Z',
+        attentionMeta: {
+          items: [{
+            id: 'attention-local',
+            text: '本地僚机',
+            level: 'warning',
+            done: false,
+            createdAt: '2024-01-01T00:00:00Z',
+            updatedAt: '2024-01-01T00:00:00Z',
+          }],
+        },
+      });
+      const remote = createTask({
+        updatedAt: '2024-01-02T00:00:00Z',
+        attentionMeta: {
+          items: [{
+            id: 'attention-remote',
+            text: '云端僚机',
+            level: 'blocker',
+            done: false,
+            createdAt: '2024-01-02T00:00:00Z',
+            updatedAt: '2024-01-02T00:00:00Z',
+          }],
+        },
+      });
+
+      const result = service.mergeTaskFields(local, remote, 'proj-1');
+
+      expect(result.hasConflict).toBe(true);
+      expect(result.mergedTask.attentionMeta?.items[0].text).toBe('云端僚机');
+
+      mockChangeTracker.getLockedFields.mockReturnValue(['attentionMeta']);
+      const lockedResult = service.mergeTaskFields(local, remote, 'proj-1');
+      expect(lockedResult.mergedTask.attentionMeta?.items[0].text).toBe('本地僚机');
+    });
   });
 
   // ==================== 连接合并 ====================

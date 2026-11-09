@@ -7,13 +7,21 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.SystemClock
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.LifecycleRegistry
+import androidx.lifecycle.lifecycleScope
 import com.google.androidbrowserhelper.trusted.LauncherActivity
 import com.google.androidbrowserhelper.trusted.TwaProviderPicker
-import kotlinx.coroutines.runBlocking
 
-class NanoflowTwaLauncherActivity : LauncherActivity() {
+class NanoflowTwaLauncherActivity : LauncherActivity(), LifecycleOwner {
+  private val lifecycleRegistry = LifecycleRegistry(this)
+  override val lifecycle: Lifecycle
+    get() = lifecycleRegistry
+
   private var cachedLaunchRequest: LaunchRequest? = null
   private var cachedLaunchUri: Uri? = null
+  private var launchCoordinator: NanoflowTwaLaunchCoordinator<PreparedLaunch>? = null
   private var splashHoldStartElapsedMs = 0L
   private var isSplashHoldActive = false
 
@@ -51,23 +59,43 @@ class NanoflowTwaLauncherActivity : LauncherActivity() {
     // ABH 基类立刻 finish() → 用户观感 = 点图标白屏闪退、无法进入项目。
     // 传 null 绕过这条恢复路径；LauncherActivity 自己不关心任何恢复的 UI 状态，无副作用。
     super.onCreate(null)
+    lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
     // TWA Launcher 必须保持纯 trampoline：任何设置页引导都不能插在 launchTwa() 之前，
     // 否则普通桌面图标点击会先露出启动窗口再 finish，用户看到的就是白屏闪退。
     launchFromCurrentIntent()
   }
 
+  override fun onStart() {
+    super.onStart()
+    lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_START)
+  }
+
+  override fun onResume() {
+    super.onResume()
+    lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_RESUME)
+  }
+
+  override fun onPause() {
+    lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_PAUSE)
+    super.onPause()
+  }
+
   override fun onDestroy() {
+    launchCoordinator?.cancel()
     releaseSplashHold("activity-destroyed")
+    lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_DESTROY)
     super.onDestroy()
   }
 
   override fun onStop() {
     releaseSplashHold("activity-stopped")
+    lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_STOP)
     super.onStop()
   }
 
   override fun onNewIntent(intent: Intent) {
     super.onNewIntent(intent)
+    launchCoordinator?.retireGeneration()
     setIntent(intent)
     resetLaunchCache()
     launchFromCurrentIntent()
@@ -76,32 +104,9 @@ class NanoflowTwaLauncherActivity : LauncherActivity() {
   override fun shouldLaunchImmediately(): Boolean = false
 
   override fun getLaunchingUrl(): Uri {
-    return cachedLaunchUri ?: resolveLaunchingUrl().also { uri ->
-      cachedLaunchUri = uri
+    return checkNotNull(cachedLaunchUri) {
+      "TWA launch URL must be prepared before launchTwa()"
     }
-  }
-
-  private fun resolveLaunchingUrl(): Uri {
-    val request = resolveLaunchRequest()
-
-    if (request.appWidgetId != AppWidgetManager.INVALID_APPWIDGET_ID) {
-      return runBlocking {
-        NanoflowWidgetRepository(applicationContext).buildLaunchUri(
-          appWidgetId = request.appWidgetId,
-          preferredEntrySource = request.entrySource,
-          launchIntent = request.launchIntent,
-          requestedTaskIndex = request.taskIndex,
-          gateEntryId = request.gateEntryId,
-        )
-      }
-    }
-
-    return NanoflowBootstrapContract.buildLaunchUri(
-      request.entrySource,
-      request.launchIntent,
-      bridgeContext = null,
-      gateEntryId = request.gateEntryId,
-    )
   }
 
   private fun launchFromCurrentIntent() {
@@ -109,14 +114,57 @@ class NanoflowTwaLauncherActivity : LauncherActivity() {
       return
     }
 
-    resetReactiveRefreshGateIfNeeded()
-    scheduleWidgetRefreshBurstIfNeeded()
-    logLaunchStarted()
+    val request = resolveLaunchRequest()
+    resetReactiveRefreshGateIfNeeded(request)
+    scheduleWidgetRefreshBurstIfNeeded(request)
+    if (request.appWidgetId == AppWidgetManager.INVALID_APPWIDGET_ID) {
+      launchImmediately(request)
+      return
+    }
+
+    widgetLaunchCoordinator().start(
+      prepare = {
+        val launchUri = NanoflowWidgetRepository(applicationContext).buildLaunchUri(
+          appWidgetId = request.appWidgetId,
+          preferredEntrySource = request.entrySource,
+          launchIntent = request.launchIntent,
+          requestedTaskIndex = request.taskIndex,
+          gateEntryId = request.gateEntryId,
+        )
+        PreparedLaunch(request = request, uri = launchUri)
+      },
+      onCommit = ::commitPreparedLaunch,
+      onError = { error -> logLaunchPreparationFailed(request, error) },
+    )
+  }
+
+  private fun launchImmediately(request: LaunchRequest) {
+    val launchUri = NanoflowBootstrapContract.buildLaunchUri(
+      request.entrySource,
+      request.launchIntent,
+      bridgeContext = null,
+      gateEntryId = request.gateEntryId,
+    )
+    commitPreparedLaunch(PreparedLaunch(request = request, uri = launchUri))
+  }
+
+  private fun commitPreparedLaunch(preparedLaunch: PreparedLaunch) {
+    if (isFinishing) {
+      return
+    }
+
+    cachedLaunchRequest = preparedLaunch.request
+    cachedLaunchUri = preparedLaunch.uri
+    logLaunchStarted(preparedLaunch.uri, preparedLaunch.request)
     launchTwa()
   }
 
-  private fun resetReactiveRefreshGateIfNeeded() {
-    val request = resolveLaunchRequest()
+  private fun widgetLaunchCoordinator(): NanoflowTwaLaunchCoordinator<PreparedLaunch> {
+    return launchCoordinator ?: NanoflowTwaLaunchCoordinator<PreparedLaunch>(lifecycleScope)
+      .also { coordinator -> launchCoordinator = coordinator }
+  }
+
+  private fun resetReactiveRefreshGateIfNeeded(request: LaunchRequest) {
     if (request.entrySource != NanoFlowEntrySource.WIDGET) {
       return
     }
@@ -130,12 +178,11 @@ class NanoflowTwaLauncherActivity : LauncherActivity() {
     )
   }
 
-  private fun scheduleWidgetRefreshBurstIfNeeded() {
+  private fun scheduleWidgetRefreshBurstIfNeeded(request: LaunchRequest) {
     if (!NanoflowWidgetReceiver.hasInstalledWidgets(applicationContext)) {
       return
     }
 
-    val request = resolveLaunchRequest()
     val reason = when (request.entrySource) {
       NanoFlowEntrySource.WIDGET -> "twa-session-from-widget"
       NanoFlowEntrySource.TWA -> "twa-session-from-launcher"
@@ -170,8 +217,7 @@ class NanoflowTwaLauncherActivity : LauncherActivity() {
     )
   }
 
-  private fun logLaunchStarted() {
-    val launchUrl = getLaunchingUrl()
+  private fun logLaunchStarted(launchUrl: Uri, request: LaunchRequest) {
     val providerAction = TwaProviderPicker.pickProvider(packageManager)
     val providerLaunchMode = providerLaunchMode(providerAction.launchMode)
 
@@ -179,19 +225,31 @@ class NanoflowTwaLauncherActivity : LauncherActivity() {
       event = "widget_twa_launch_started",
       fields = buildLaunchTelemetryFields(
         launchUrl = launchUrl,
+        request = request,
         providerPackage = providerAction.provider,
         providerLaunchMode = providerLaunchMode,
       ),
     )
   }
 
+  private fun logLaunchPreparationFailed(request: LaunchRequest, error: Throwable) {
+    NanoflowWidgetTelemetry.warn(
+      event = "widget_twa_launch_prepare_failed",
+      fields = mapOf(
+        "appWidgetId" to request.appWidgetId,
+        "entrySource" to request.entrySource,
+        "launchIntent" to request.launchIntent,
+        "errorType" to error.javaClass.simpleName,
+      ),
+    )
+  }
+
   private fun buildLaunchTelemetryFields(
     launchUrl: Uri,
+    request: LaunchRequest,
     providerPackage: String?,
     providerLaunchMode: String,
   ): Map<String, Any?> {
-    val request = resolveLaunchRequest()
-
     return mapOf(
       "appWidgetId" to request.appWidgetId.takeUnless { it == AppWidgetManager.INVALID_APPWIDGET_ID },
       "entrySource" to request.entrySource,
@@ -235,6 +293,11 @@ class NanoflowTwaLauncherActivity : LauncherActivity() {
     val taskIndex: Int,
     val entrySource: NanoFlowEntrySource,
     val gateEntryId: String? = null,
+  )
+
+  private data class PreparedLaunch(
+    val request: LaunchRequest,
+    val uri: Uri,
   )
 
   companion object {

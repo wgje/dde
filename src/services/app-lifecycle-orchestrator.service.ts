@@ -1,222 +1,121 @@
 import { DestroyRef, Injectable, Injector, inject, signal } from '@angular/core';
-import { SwUpdate } from '@angular/service-worker';
 import { APP_LIFECYCLE_CONFIG } from '../config/app-lifecycle.config';
 import { FEATURE_FLAGS } from '../config/feature-flags.config';
 import { LoggerService } from './logger.service';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { ToastService } from './toast.service';
 import { NetworkAwarenessService } from './network-awareness.service';
-import { SimpleSyncService, SessionManagerService } from '../core-bridge';
+import { SyncResumeCoordinatorService, SessionManagerService, SyncStateService } from '../core-bridge';
 import { SyncCoordinatorService } from './sync-coordinator.service';
 import { FocusStartupProbeService } from './focus-startup-probe.service';
-import { FOCUS_CONFIG } from '../config/focus.config';
-import { reloadViaForceClearCache } from '../utils/force-clear-cache';
-import { getRemainingBrowserNetworkResumeDelayMs } from '../utils/browser-network-suspension';
-import { readRuntimePlatformSnapshot } from '../utils/runtime-platform';
+import {
+  createRecoveryTicketId,
+  markLifecyclePerformance,
+  measureLifecyclePerformance,
+  monotonicNow,
+  runIdleTask,
+  withLifecycleTimeout,
+} from './app-lifecycle-timing.helpers';
+import {
+  isHeavyRecoveryInCooldown,
+  isRecoveryCompensationInFlight,
+} from './app-lifecycle-recovery-state.helpers';
+import { AppLifecycleDeferredResumeController } from './app-lifecycle-deferred-resume.controller';
+import { AppLifecycleReloadCoordinator } from './app-lifecycle-reload.coordinator';
+import { AppLifecycleBrowserEventsCoordinator } from './app-lifecycle-browser-events.coordinator';
+import type {
+  AppResumeReason,
+  LifecycleRecoveryTicket,
+  RecoveryMetricsSnapshot,
+  ResumePipelineResult,
+} from './app-lifecycle-orchestrator.types';
+import {
+  buildRecoveryCompensationReport,
+  mergeRecoveryMetrics,
+  publishRecoveryMetrics,
+} from './app-lifecycle-recovery-metrics.helpers';
+import { shouldRunFocusGateResumeCheck } from './app-lifecycle-focus-gate.helpers';
+import {
+  AppLifecycleBreadcrumbsController,
+} from './app-lifecycle-breadcrumb.helpers';
+import { PendingPersistRecoveryController } from './app-lifecycle-pending-persist.helpers';
+import { SessionRuntimeResetRegistry } from './session-runtime-reset.service';
+import {
+  selectHigherPriorityResumeReason,
+  shouldQueueResumeAfterCurrent,
+} from './app-lifecycle-resume-queue.helpers';
 
-export type AppResumeReason =
-  | 'visibility-threshold'
-  | 'visibility-quick'
-  | 'pageshow'
-  | 'online'
-  | 'manual';
-
-export interface RecoveryMetricsSnapshot {
-  ticketId: string;
-  reason: string;
-  interactionReadyMs: number;
-  backgroundRefreshMs?: number;
-  fastPathHit?: boolean;
-}
+export type { AppResumeReason, RecoveryMetricsSnapshot } from './app-lifecycle-orchestrator.types';
 
 @Injectable({ providedIn: 'root' })
 export class AppLifecycleOrchestratorService {
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('LifecycleOrchestrator');
   private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
+  private readonly breadcrumbs =
+    new AppLifecycleBreadcrumbsController(this.sentryLazyLoader, this.logger);
   private readonly toast = inject(ToastService);
   private readonly networkAwareness = inject(NetworkAwarenessService);
-  private readonly simpleSync = inject(SimpleSyncService);
+  private readonly syncState = inject(SyncStateService);
+  private readonly syncResumeCoordinator = inject(SyncResumeCoordinatorService);
   private readonly sessionManager = inject(SessionManagerService);
   private readonly syncCoordinator = inject(SyncCoordinatorService);
+  private readonly reloadCoordinator = inject(AppLifecycleReloadCoordinator);
+  private readonly browserEvents = inject(AppLifecycleBrowserEventsCoordinator);
   private readonly injector = inject(Injector);
   private readonly destroyRef = inject(DestroyRef);
-  /**
-   * SwUpdate 在禁用 SW 的本地开发环境下不可用。
-   * 用 `{ optional: true }` 注入，调用前再检查 isEnabled。
-   */
-  private readonly swUpdate = inject(SwUpdate, { optional: true });
-
+  private readonly sessionRuntimeReset = inject(SessionRuntimeResetRegistry);
+  private readonly pendingPersistRecovery = new PendingPersistRecoveryController({
+    hasPendingLocalChanges: () => this.syncCoordinator.hasPendingLocalChanges(),
+    addBreadcrumb: breadcrumb => this.sentryLazyLoader.addBreadcrumb(breadcrumb),
+    flushPendingPersistToCloud: persistReason => this.syncCoordinator.flushPendingPersistToCloud(persistReason),
+    captureException: (error, context) => this.sentryLazyLoader.captureException(error, context),
+    logger: this.logger,
+  });
   private readonly isResumingSignal = signal(false);
   private readonly lastResumeAtSignal = signal<number | null>(null);
   private readonly lastHeavyRecoveryAtSignal = signal<number | null>(null);
   private readonly lastRecoveryMetricsSignal = signal<RecoveryMetricsSnapshot | null>(null);
   private readonly compensationTicketIdSignal = signal<string | null>(null);
-  private readonly currentRecoveryTicketSignal = signal<{
-    id: string;
-    startedAt: number;
-    mode: 'light' | 'heavy';
-  } | null>(null);
-
-  private initialized = false;
+  private readonly currentRecoveryTicketSignal = signal<LifecycleRecoveryTicket | null>(null);
   private resumePromise: Promise<void> | null = null;
-  private hiddenAt: number | null = null;
-  private lastBackgroundDurationMs = 0;
+  private activeResumeReason: AppResumeReason | null = null;
+  private queuedResumeReason: AppResumeReason | null = null;
+  private queuedResumePromise: Promise<void> | null = null;
   private consecutiveFailures = 0;
   // 仅用于诊断：会话失败计数永远不会触发 auto-reload（reload 无法修复 no-session 状态）。
   private consecutiveSessionFailures = 0;
-  private autoReloadScheduled = false;
-  private deferredResumeTimer: ReturnType<typeof setTimeout> | null = null;
-
+  private recoveryCompensationGeneration = 0;
+  private sessionGeneration = 0;
+  private destroyed = false;
   private hasPendingVersion = false;
   private hasShownResumeVersionPrompt = false;
 
-  private visibilityHandler: (() => void) | null = null;
-  private focusHandler: (() => void) | null = null;
-  private blurHandler: (() => void) | null = null;
-  private pageshowHandler: ((event: PageTransitionEvent) => void) | null = null;
-  private onlineHandler: (() => void) | null = null;
   private _focusStartupProbe?: FocusStartupProbeService;
-
-  private static readonly AUTO_RELOAD_COUNTER_KEY = 'nanoflow.lifecycle.auto-reload';
+  private readonly deferredResume = new AppLifecycleDeferredResumeController({
+    logger: this.logger,
+    triggerResume: (reason) => this.triggerResume(reason),
+  });
 
   private get focusStartupProbe(): FocusStartupProbeService {
     return (this._focusStartupProbe ??= this.injector.get(FocusStartupProbeService));
   }
 
   constructor() {
-    this.destroyRef.onDestroy(() => this.cleanup());
+    const unregisterSessionRuntimeReset = this.sessionRuntimeReset.register(
+      'AppLifecycleOrchestratorService', () => this.resetSessionRuntime(),
+    );
+    this.destroyRef.onDestroy(() => {
+      unregisterSessionRuntimeReset();
+      this.cleanup();
+    });
   }
 
-  /**
-   * Initialize the lifecycle orchestrator by registering browser event listeners
-   * for visibility changes, BFCache restoration, and network reconnection.
-   *
-   * This service manages the resume/recovery lifecycle and MUST be initialized
-   * first among all startup services. The full service initialization order,
-   * orchestrated by {@link WorkspaceShellComponent}, is:
-   *
-   * 1. **AppLifecycleOrchestratorService.initialize()** (constructor, synchronous)
-   *    - Registers visibilitychange, pageshow, and online listeners.
-   *    - Must be first so that resume/recovery orchestration is active before
-   *      any async work begins.
-   *
-   * 2. **StartupTierOrchestratorService.initialize()** (ngOnInit, synchronous)
-   *    - Sets up the P0/P1/P2 tiered startup state machine.
-   *    - P0 = critical render path, P1 = interaction readiness, P2 = background
-   *      sync hydration. Gated by {@link FEATURE_FLAGS.TIERED_STARTUP_HYDRATION_V1}.
-   *
-   * 3. **StartupFontSchedulerService.initialize()** (ngOnInit, synchronous)
-   *    - Schedules non-critical font loading via requestIdleCallback / setTimeout
-   *      to avoid blocking first paint.
-   *
-   * 4. **FocusStartupProbeService.initialize()** (signal effect, async-reactive)
-   *    - Runs a local-only gate check to determine whether Focus mode has
-   *      pending work. Fires after coreDataLoaded() becomes true and the user
-   *      is authenticated. Gated by {@link FEATURE_FLAGS.FOCUS_STARTUP_THROTTLED_CHECK_V1}.
-   *
-   * 5. **EventDrivenSyncPulseService.initialize()** (signal effect, async-reactive)
-   *    - Activates event-driven sync pulses (replaces fixed-interval polling).
-   *      Depends on authentication, coreDataLoaded, and P2 tier readiness.
-   *      Gated by {@link FEATURE_FLAGS.EVENT_DRIVEN_SYNC_PULSE_V1}.
-   *
-   * 6. **PwaInstallPromptService.initialize()** (deferred, lowest priority)
-   *    - Captures the beforeinstallprompt event and exposes install affordance.
-   *      Deferred to first user interaction or requestIdleCallback to avoid
-   *      competing with critical startup work.
-   *      Gated by {@link FEATURE_FLAGS.PWA_PROMPT_DEFER_V2}.
-   *
-   * Idempotent: subsequent calls after the first are no-ops.
-   * SSR-safe: returns immediately when `window` or `document` is unavailable.
-   */
+  /** 注册 resume/recovery 监听器；必须早于异步启动服务，且保持幂等与 SSR-safe。 */
   initialize(): void {
-    if (this.initialized || typeof window === 'undefined' || typeof document === 'undefined') {
-      return;
-    }
-
-    this.visibilityHandler = () => {
-      if (document.visibilityState === 'hidden') {
-        this.hiddenAt ??= Date.now();
-        void this.simpleSync.suspendRemoteTransport();
-        return;
-      }
-
-      if (document.visibilityState === 'visible' && this.hiddenAt) {
-        const duration = Date.now() - this.hiddenAt;
-        this.hiddenAt = null;
-        this.lastBackgroundDurationMs = duration;
-
-        const reason: AppResumeReason = duration >= APP_LIFECYCLE_CONFIG.RESUME_THRESHOLD_MS
-          ? 'visibility-threshold'
-          : 'visibility-quick';
-
-        void this.triggerResume(reason);
-      }
-    };
-
-    this.blurHandler = () => {
-      if (!this.shouldUseWindowFocusResumeFallback()) {
-        return;
-      }
-
-      if (this.hiddenAt !== null) {
-        return;
-      }
-
-      this.hiddenAt = Date.now();
-      void this.simpleSync.suspendRemoteTransport();
-    };
-
-    this.focusHandler = () => {
-      if (document.visibilityState === 'hidden' || !this.hiddenAt) {
-        return;
-      }
-
-      const duration = Date.now() - this.hiddenAt;
-      this.hiddenAt = null;
-      this.lastBackgroundDurationMs = duration;
-
-      const reason: AppResumeReason = duration >= APP_LIFECYCLE_CONFIG.RESUME_THRESHOLD_MS
-        ? 'visibility-threshold'
-        : 'visibility-quick';
-
+    this.browserEvents.initialize((reason) => {
       void this.triggerResume(reason);
-    };
-
-    this.pageshowHandler = (event: PageTransitionEvent) => {
-      // BFCache 恢复场景优先触发恢复编排
-      if (!event.persisted) {
-        return;
-      }
-
-      this.lastBackgroundDurationMs = Math.max(
-        this.lastBackgroundDurationMs,
-        APP_LIFECYCLE_CONFIG.RESUME_THRESHOLD_MS
-      );
-      void this.triggerResume('pageshow');
-    };
-
-    this.onlineHandler = () => {
-      if (document.visibilityState === 'hidden' || this.hiddenAt !== null) {
-        return;
-      }
-
-      void this.triggerResume('online');
-    };
-
-    document.addEventListener('visibilitychange', this.visibilityHandler);
-    window.addEventListener('blur', this.blurHandler);
-    window.addEventListener('focus', this.focusHandler);
-    window.addEventListener('pageshow', this.pageshowHandler as EventListener);
-    window.addEventListener('online', this.onlineHandler);
-
-    this.initialized = true;
-    this.logger.info('Lifecycle orchestrator initialized');
-  }
-
-  private shouldUseWindowFocusResumeFallback(): boolean {
-    const platform = readRuntimePlatformSnapshot();
-    return platform.isAndroid || platform.os === 'ios' || platform.isStandalone;
+    });
   }
 
   markVersionReady(): void {
@@ -245,39 +144,65 @@ export class AppLifecycleOrchestratorService {
   }
 
   isRecoveryCompensationInFlight(ticketId?: string): boolean {
-    const compensatingTicketId = this.compensationTicketIdSignal();
-    if (!compensatingTicketId) {
-      return false;
-    }
-    if (!ticketId) {
-      return true;
-    }
-    return compensatingTicketId === ticketId;
+    return isRecoveryCompensationInFlight(this.compensationTicketIdSignal(), ticketId);
   }
 
   isHeavyRecoveryInCooldown(windowMs = APP_LIFECYCLE_CONFIG.RESUME_HEAVY_COOLDOWN_MS): boolean {
-    const lastHeavy = this.lastHeavyRecoveryAtSignal();
-    if (!lastHeavy) {
-      return false;
-    }
-    return Date.now() - lastHeavy < windowMs;
+    return isHeavyRecoveryInCooldown(this.lastHeavyRecoveryAtSignal(), Date.now(), windowMs);
   }
 
   async triggerResume(reason: AppResumeReason): Promise<void> {
     if (!FEATURE_FLAGS.LIFECYCLE_RECOVERY_V1) {
       return;
     }
+    if (this.destroyed) {
+      return;
+    }
 
     if (this.resumePromise) {
+      if (shouldQueueResumeAfterCurrent(this.activeResumeReason, reason)) {
+        this.queuedResumeReason = selectHigherPriorityResumeReason(this.queuedResumeReason, reason);
+        if (!this.queuedResumePromise) {
+          const generation = this.sessionGeneration;
+          const queuedResumePromise = this.resumePromise
+            .then(() => this.runQueuedResume(generation))
+            .finally(() => {
+              if (this.queuedResumePromise === queuedResumePromise) this.queuedResumePromise = null;
+            });
+          this.queuedResumePromise = queuedResumePromise;
+        }
+        return this.queuedResumePromise;
+      }
       return this.resumePromise;
     }
 
+    return this.runResume(reason);
+  }
+
+  private async runResume(reason: AppResumeReason): Promise<void> {
+    if (this.destroyed) {
+      return;
+    }
+    this.deferredResume.clear();
+    this.activeResumeReason = reason;
     this.resumePromise = this.executeResume(reason);
+    const currentResumePromise = this.resumePromise;
 
     try {
-      await this.resumePromise;
+      await currentResumePromise;
     } finally {
-      this.resumePromise = null;
+      if (this.resumePromise === currentResumePromise) {
+        this.resumePromise = null;
+        if (this.activeResumeReason === reason) this.activeResumeReason = null;
+      }
+    }
+  }
+  private async runQueuedResume(generation: number): Promise<void> {
+    while (!this.destroyed && generation === this.sessionGeneration) {
+      const reason = this.queuedResumeReason;
+      this.queuedResumeReason = null;
+      if (!reason) return;
+      await this.triggerResume(reason);
     }
   }
 
@@ -296,90 +221,130 @@ export class AppLifecycleOrchestratorService {
   private async executeResume(reason: AppResumeReason): Promise<void> {
     const startAt = Date.now();
     const runHeavyRecovery = reason !== 'visibility-quick';
-    const recoveryTicket = {
-      id: this.createRecoveryTicketId(runHeavyRecovery ? 'heavy' : 'light'),
-      startedAt: startAt,
-      mode: runHeavyRecovery ? 'heavy' as const : 'light' as const,
-    };
-    this.currentRecoveryTicketSignal.set(recoveryTicket);
-    const perfPrefix = `nanoflow:resume:${recoveryTicket.id}`;
-    this.markPerformance(`${perfPrefix}:start`);
-
-    this.isResumingSignal.set(true);
-    this.addLifecycleBreadcrumb('lifecycle.resume.start', reason, {
-      runHeavyRecovery,
-      backgroundDurationMs: this.lastBackgroundDurationMs,
-      recoveryTicketId: recoveryTicket.id,
-    });
-    this.addLifecycleBreadcrumb('lifecycle.resume.reason', reason);
+    const recoveryTicket = this.startResumeExecution(reason, startAt, runHeavyRecovery);
 
     try {
-      const pipelineResult = await this.withTimeout(
+      const pipelineResult = await withLifecycleTimeout(
         this.executeRecoveryPipeline(reason, runHeavyRecovery, recoveryTicket),
         APP_LIFECYCLE_CONFIG.RESUME_TIMEOUT_MS
       );
+      if (!this.isResumeExecutionCurrent(recoveryTicket)) return;
 
-      if (pipelineResult.deferred) {
-        const deferredDelayMs = this.scheduleDeferredResumeRetry(reason);
-        this.addLifecycleBreadcrumb('lifecycle.resume.success', reason, {
-          elapsedMs: Date.now() - startAt,
-          deferred: true,
-          deferredReason: pipelineResult.reason ?? 'unknown',
-          deferredDelayMs,
-        });
-        return;
-      }
-
-      if (pipelineResult.reason === 'no-session' || pipelineResult.reason === 'refresh-failed') {
-        this.handleSessionFailure(reason, pipelineResult.reason, startAt);
-        return;
-      }
-
-      this.consecutiveFailures = 0;
-      this.consecutiveSessionFailures = 0;
-      this.lastResumeAtSignal.set(Date.now());
-      if (typeof pipelineResult.interactionReadyMs === 'number') {
-        this.reportRecoveryMetrics({
-          ticketId: recoveryTicket.id,
-          reason,
-          interactionReadyMs: pipelineResult.interactionReadyMs,
-          fastPathHit: pipelineResult.fastPathHit,
-        });
-      }
-
-      if (
-        this.hasPendingVersion &&
-        !this.hasShownResumeVersionPrompt &&
-        this.lastBackgroundDurationMs >= APP_LIFECYCLE_CONFIG.NEW_VERSION_PROMPT_THRESHOLD_MS
-      ) {
-        // 关键修复（2026-05-15）：
-        // - onClick 异步化，先 activateUpdate() 让 waiting SW 真正切到 active，再清缓存刷新；
-        // - 抑制 flag 在「点击实际开始」之前设置；若点击后两条路径都失败，复位 flag 让
-        //   下一次 resume 仍能弹出，避免用户只剩一个无效 toast。
-        this.hasShownResumeVersionPrompt = true;
-        this.toast.info(
-          '检测到新版本',
-          '页面后台停留较久，建议刷新以获得最新稳定版本',
-          {
-            duration: 0,
-            action: {
-              label: '立即刷新',
-              pendingLabel: '正在刷新…',
-              onClick: () => this.triggerVersionReload(),
-            },
-          }
-        );
-      }
-
-      this.addLifecycleBreadcrumb('lifecycle.resume.success', reason, {
-        elapsedMs: Date.now() - startAt,
-      });
+      if (this.handleDeferredPipelineResult(reason, pipelineResult, startAt)) return;
+      if (this.handleSessionPipelineFailure(reason, pipelineResult, startAt)) return;
+      this.handleSuccessfulResume(reason, recoveryTicket, pipelineResult, startAt);
     } catch (error) {
-      this.handlePipelineException(reason, error, startAt);
+      if (this.isResumeExecutionCurrent(recoveryTicket)) this.handlePipelineException(reason, error, startAt);
     } finally {
-      this.currentRecoveryTicketSignal.set(null);
-      this.isResumingSignal.set(false);
+      if (this.isResumeExecutionCurrent(recoveryTicket)) {
+        this.currentRecoveryTicketSignal.set(null);
+        this.isResumingSignal.set(false);
+      }
     }
+  }
+
+  private startResumeExecution(
+    reason: AppResumeReason,
+    startAt: number,
+    runHeavyRecovery: boolean,
+  ): LifecycleRecoveryTicket {
+    const recoveryTicket: LifecycleRecoveryTicket = {
+      id: createRecoveryTicketId(runHeavyRecovery ? 'heavy' : 'light'),
+      startedAt: startAt,
+      mode: runHeavyRecovery ? 'heavy' : 'light',
+    };
+    this.currentRecoveryTicketSignal.set(recoveryTicket);
+    markLifecyclePerformance(`nanoflow:resume:${recoveryTicket.id}:start`);
+    this.isResumingSignal.set(true);
+    this.breadcrumbs.add('lifecycle.resume.start', reason, {
+      runHeavyRecovery,
+      backgroundDurationMs: this.browserEvents.getLastBackgroundDurationMs(),
+      recoveryTicketId: recoveryTicket.id,
+    });
+    this.breadcrumbs.add('lifecycle.resume.reason', reason);
+    return recoveryTicket;
+  }
+
+  private handleDeferredPipelineResult(
+    reason: AppResumeReason,
+    pipelineResult: ResumePipelineResult,
+    startAt: number,
+  ): boolean {
+    if (!pipelineResult.deferred) return false;
+    const deferredDelayMs = this.deferredResume.schedule(reason);
+    this.breadcrumbs.add('lifecycle.resume.success', reason, {
+      elapsedMs: Date.now() - startAt,
+      deferred: true,
+      deferredReason: pipelineResult.reason ?? 'unknown',
+      deferredDelayMs,
+    });
+    return true;
+  }
+
+  private handleSessionPipelineFailure(
+    reason: AppResumeReason,
+    pipelineResult: ResumePipelineResult,
+    startAt: number,
+  ): boolean {
+    if (pipelineResult.reason !== 'no-session' && pipelineResult.reason !== 'refresh-failed') return false;
+    this.handleSessionFailure(reason, pipelineResult.reason, startAt);
+    return true;
+  }
+
+  private handleSuccessfulResume(
+    reason: AppResumeReason,
+    recoveryTicket: LifecycleRecoveryTicket,
+    pipelineResult: ResumePipelineResult,
+    startAt: number,
+  ): void {
+    this.consecutiveFailures = 0;
+    this.consecutiveSessionFailures = 0;
+    this.syncState.clearCloudSyncPausedReason();
+    this.lastResumeAtSignal.set(Date.now());
+    this.reportInteractionReadyMetricIfPresent(reason, recoveryTicket, pipelineResult);
+    this.showPendingVersionPromptIfNeeded();
+    this.breadcrumbs.add('lifecycle.resume.success', reason, {
+      elapsedMs: Date.now() - startAt,
+    });
+  }
+
+  private reportInteractionReadyMetricIfPresent(
+    reason: AppResumeReason,
+    recoveryTicket: LifecycleRecoveryTicket,
+    pipelineResult: ResumePipelineResult,
+  ): void {
+    if (typeof pipelineResult.interactionReadyMs !== 'number') return;
+    this.reportRecoveryMetrics({
+      ticketId: recoveryTicket.id,
+      reason,
+      interactionReadyMs: pipelineResult.interactionReadyMs,
+      fastPathHit: pipelineResult.fastPathHit,
+    });
+  }
+
+  private showPendingVersionPromptIfNeeded(): void {
+    if (
+      !this.hasPendingVersion ||
+      this.hasShownResumeVersionPrompt ||
+      this.browserEvents.getLastBackgroundDurationMs() < APP_LIFECYCLE_CONFIG.NEW_VERSION_PROMPT_THRESHOLD_MS
+    ) {
+      return;
+    }
+
+    this.hasShownResumeVersionPrompt = true;
+    this.toast.info('检测到新版本', '页面后台停留较久，建议刷新以获得最新稳定版本', {
+      duration: 0,
+      action: {
+        label: '立即刷新',
+        pendingLabel: '正在刷新…',
+        onClick: () => this.reloadCoordinator.triggerVersionReload(
+          (message, breadcrumbReason, extra) => this.breadcrumbs.add(message, breadcrumbReason, extra),
+          () => {
+            this.hasShownResumeVersionPrompt = false;
+          },
+        ),
+      },
+    });
   }
 
   /**
@@ -394,7 +359,8 @@ export class AppLifecycleOrchestratorService {
     startAt: number
   ): void {
     this.consecutiveSessionFailures += 1;
-    this.addLifecycleBreadcrumb('lifecycle.resume.fail', reason, {
+    this.syncState.setCloudSyncPausedReason(failureKind);
+    this.breadcrumbs.add('lifecycle.resume.fail', reason, {
       elapsedMs: Date.now() - startAt,
       failureKind,
       // 保留 sessionFailureReason 以兼容已存在的 Sentry 查询/告警；新代码应优先使用 failureKind。
@@ -414,7 +380,15 @@ export class AppLifecycleOrchestratorService {
   ): void {
     this.consecutiveFailures += 1;
 
-    this.addLifecycleBreadcrumb('lifecycle.resume.fail', reason, {
+    // 超时/异常意味着本轮恢复已宣告失败：取消协调器为本轮排下的后台探测与重试延续，
+    // 避免 stale 后台任务在 UI 已复位后继续运行；下一轮恢复会重新排空积压
+    try {
+      this.syncResumeCoordinator.cancelPendingBackgroundRecovery();
+    } catch (cancelError) {
+      this.logger.warn('取消恢复协调器后台任务失败（已隔离）', { reason, cancelError });
+    }
+
+    this.breadcrumbs.add('lifecycle.resume.fail', reason, {
       elapsedMs: Date.now() - startAt,
       failureKind: 'pipeline-exception',
       consecutiveFailures: this.consecutiveFailures,
@@ -432,31 +406,55 @@ export class AppLifecycleOrchestratorService {
       error,
     });
 
-    this.maybeScheduleAutoReload(reason, error);
+    this.reloadCoordinator.maybeScheduleAutoReload(reason, error, this.consecutiveFailures);
   }
 
   private async executeRecoveryPipeline(
     reason: AppResumeReason,
     heavy: boolean,
-    recoveryTicket: { id: string; startedAt: number; mode: 'light' | 'heavy' }
-  ): Promise<{
-    deferred: boolean;
-    reason?: 'client-unready' | 'no-session' | 'refresh-failed';
-    interactionReadyMs?: number;
-    fastPathHit?: boolean;
-  }> {
+    recoveryTicket: LifecycleRecoveryTicket
+  ): Promise<ResumePipelineResult> {
     const recoveryTicketId = recoveryTicket.id;
     const perfPrefix = recoveryTicketId ? `nanoflow:resume:${recoveryTicketId}` : null;
 
-    this.recordRecoveryStep('network-refresh', reason);
+    this.breadcrumbs.recordStep('network-refresh', reason);
     this.networkAwareness.refresh();
 
-    this.recordRecoveryStep('session-validate', reason);
+    const sessionGate = await this.validateResumeSession(reason);
+    if (!this.isResumeExecutionCurrent(recoveryTicket)) {
+      return { deferred: false };
+    }
+    if (sessionGate) return sessionGate;
+
+    this.kickPendingPersistRecovery(reason);
+    const interactionReadyMs = await this.runInteractionReadyRecovery(reason, recoveryTicket, perfPrefix);
+    if (!this.isResumeExecutionCurrent(recoveryTicket)) {
+      return { deferred: false, interactionReadyMs };
+    }
+
+    if (!heavy) return { deferred: false, interactionReadyMs };
+
+    if (await this.trySuppressHeavyRecovery(reason)) return { deferred: false, interactionReadyMs };
+
+    if (FEATURE_FLAGS.RESUME_INTERACTION_FIRST_V1) {
+      this.scheduleInteractionFirstHeavyRecovery(reason, recoveryTicketId, interactionReadyMs);
+      return { deferred: false, interactionReadyMs };
+    }
+
+    return this.runLegacyHeavyRecovery(reason, recoveryTicketId, interactionReadyMs);
+  }
+
+  private isResumeExecutionCurrent(recoveryTicket: LifecycleRecoveryTicket): boolean {
+    return !this.destroyed && this.currentRecoveryTicketSignal()?.id === recoveryTicket.id;
+  }
+
+  private async validateResumeSession(reason: AppResumeReason): Promise<ResumePipelineResult | null> {
+    this.breadcrumbs.recordStep('session-validate', reason);
     const sessionSnapshot = FEATURE_FLAGS.RESUME_SESSION_SNAPSHOT_V1
       ? this.sessionManager.getRecentValidationSnapshot(10_000)
       : null;
     const session = sessionSnapshot?.valid
-      ? { ok: true, refreshed: false, deferred: false, reason: undefined as ('client-unready' | 'no-session' | 'refresh-failed' | undefined) }
+      ? { ok: true, refreshed: false, deferred: false, reason: undefined }
       : await this.sessionManager.validateOrRefreshOnResume(`resume:${reason}`);
 
     if (session.deferred) {
@@ -469,12 +467,19 @@ export class AppLifecycleOrchestratorService {
       return { deferred: false, reason: session.reason };
     }
 
-    this.kickPendingPersistRecovery(reason);
+    return null;
+  }
 
-    const interactionStartAt = this.monotonicNow();
+  private async runInteractionReadyRecovery(
+    reason: AppResumeReason,
+    recoveryTicket: LifecycleRecoveryTicket,
+    perfPrefix: string | null,
+  ): Promise<number> {
+    const interactionStartAt = monotonicNow();
+    const recoveryTicketId = recoveryTicket.id;
     if (FEATURE_FLAGS.RESUME_INTERACTION_FIRST_V1) {
-      this.recordRecoveryStep('sync-recovery-light', reason);
-      await this.simpleSync.recoverAfterResume(reason, {
+      this.breadcrumbs.recordStep('sync-recovery-light', reason);
+      await this.syncResumeCoordinator.recoverAfterResume(reason, {
         mode: 'light',
         stage: 'full',
         allowRemoteProbe: false,
@@ -484,44 +489,59 @@ export class AppLifecycleOrchestratorService {
         recoveryTicketId: recoveryTicketId ?? undefined,
       });
     }
-    const interactionReadyMs = this.monotonicNow() - interactionStartAt;
-    if (perfPrefix) {
-      this.markPerformance(`${perfPrefix}:interaction-ready`);
-      this.measurePerformance('resume.interaction_ready_ms', `${perfPrefix}:start`, `${perfPrefix}:interaction-ready`);
+    if (!this.isResumeExecutionCurrent(recoveryTicket)) {
+      return 0;
     }
-
+    const interactionReadyMs = monotonicNow() - interactionStartAt;
+    this.markInteractionReadyPerformance(perfPrefix);
     await this.recheckFocusGateIfNeeded(reason, 'resume-local');
+    return interactionReadyMs;
+  }
 
-    if (!heavy) {
-      return { deferred: false, interactionReadyMs };
-    }
+  private markInteractionReadyPerformance(perfPrefix: string | null): void {
+    if (!perfPrefix) return;
+    markLifecyclePerformance(`${perfPrefix}:interaction-ready`);
+    measureLifecyclePerformance('resume.interaction_ready_ms', `${perfPrefix}:start`, `${perfPrefix}:interaction-ready`);
+  }
 
+  private async trySuppressHeavyRecovery(reason: AppResumeReason): Promise<boolean> {
     if (
-      FEATURE_FLAGS.RESUME_INTERACTION_FIRST_V1 &&
-      FEATURE_FLAGS.RESUME_PULSE_DEDUP_V1 &&
-      this.isHeavyRecoveryInCooldown()
+      !FEATURE_FLAGS.RESUME_INTERACTION_FIRST_V1 ||
+      !FEATURE_FLAGS.RESUME_PULSE_DEDUP_V1 ||
+      !this.isHeavyRecoveryInCooldown()
     ) {
-      this.recordRecoveryStep('sync-recovery-heavy-suppressed', reason);
-      if (this.shouldRecheckFocusGate(reason)) {
-        this.recordRecoveryStep('blackbox-recovery', reason);
-        await this.syncCoordinator.refreshBlackBoxWatermarkIfNeeded('resume');
-        await this.recheckFocusGateIfNeeded(reason, 'resume-remote');
-      }
-      return { deferred: false, interactionReadyMs };
+      return false;
     }
 
-    if (FEATURE_FLAGS.RESUME_INTERACTION_FIRST_V1) {
-      this.scheduleRecoveryCompensation(reason, {
-        id: recoveryTicketId ?? this.createRecoveryTicketId('heavy'),
-        startedAt: Date.now(),
-        mode: 'heavy',
-      }, interactionReadyMs);
-      this.lastHeavyRecoveryAtSignal.set(Date.now());
-      return { deferred: false, interactionReadyMs };
+    this.breadcrumbs.recordStep('sync-recovery-heavy-suppressed', reason);
+    if (this.shouldRecheckFocusGate(reason)) {
+      this.breadcrumbs.recordStep('blackbox-recovery', reason);
+      await this.syncCoordinator.refreshBlackBoxWatermarkIfNeeded('resume');
+      await this.recheckFocusGateIfNeeded(reason, 'resume-remote');
     }
+    return true;
+  }
 
-    this.recordRecoveryStep('sync-recovery', reason);
-    await this.simpleSync.recoverAfterResume(reason, {
+  private scheduleInteractionFirstHeavyRecovery(
+    reason: AppResumeReason,
+    recoveryTicketId: string,
+    interactionReadyMs: number,
+  ): void {
+    this.scheduleRecoveryCompensation(reason, {
+      id: recoveryTicketId ?? createRecoveryTicketId('heavy'),
+      startedAt: Date.now(),
+      mode: 'heavy',
+    }, interactionReadyMs);
+    this.lastHeavyRecoveryAtSignal.set(Date.now());
+  }
+
+  private async runLegacyHeavyRecovery(
+    reason: AppResumeReason,
+    recoveryTicketId: string,
+    interactionReadyMs: number,
+  ): Promise<ResumePipelineResult> {
+    this.breadcrumbs.recordStep('sync-recovery', reason);
+    await this.syncResumeCoordinator.recoverAfterResume(reason, {
       sessionValidated: true,
       retryProcessing: 'background',
       deferBlackBoxPull: true,
@@ -529,159 +549,204 @@ export class AppLifecycleOrchestratorService {
       backgroundProbeDelayMs: 180,
     });
 
-    this.recordRecoveryStep('blackbox-recovery', reason);
+    this.breadcrumbs.recordStep('blackbox-recovery', reason);
     const blackBoxResult = await this.syncCoordinator.refreshBlackBoxWatermarkIfNeeded('resume');
     await this.recheckFocusGateIfNeeded(reason, 'resume-remote');
-
-    this.recordRecoveryStep('ui-correction', reason);
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(new CustomEvent('nanoflow:lifecycle-resumed', {
-        detail: {
-          reason,
-          resumedAt: Date.now(),
-        },
-      }));
-    }
-
+    this.dispatchLifecycleResumed(reason);
     this.lastHeavyRecoveryAtSignal.set(Date.now());
-
     return { deferred: false, interactionReadyMs, fastPathHit: blackBoxResult.skipped };
   }
 
   private kickPendingPersistRecovery(reason: AppResumeReason): void {
-    if (!this.syncCoordinator.hasPendingLocalChanges()) {
-      return;
-    }
-
-    this.sentryLazyLoader.addBreadcrumb({
-      category: 'lifecycle',
-      message: 'recovery.step',
-      level: 'info',
-      data: {
-        step: 'resume-pending-persist-recovery',
-        reason,
-      }
-    });
-
-    const runRecovery = () => {
-      void this.syncCoordinator.flushPendingPersistToCloud(`resume:${reason}`).catch((error) => {
-        this.logger.warn('Resume pending persist recovery failed', { reason, error });
-        this.sentryLazyLoader.captureException(error, {
-          operation: 'lifecycle.resume.pending-persist',
-          reason,
-        });
-      });
-    };
-
-    if (typeof queueMicrotask === 'function') {
-      queueMicrotask(runRecovery);
-      return;
-    }
-
-    void Promise.resolve().then(runRecovery);
+    this.pendingPersistRecovery.schedule(reason);
   }
 
   private scheduleRecoveryCompensation(
     reason: AppResumeReason,
-    recoveryTicket: { id: string; startedAt: number; mode: 'light' | 'heavy' },
+    recoveryTicket: LifecycleRecoveryTicket,
     interactionReadyMs: number
   ): void {
-    if (this.isRecoveryCompensationInFlight(recoveryTicket.id)) {
+    if (this.destroyed) {
       return;
     }
+    if (this.isRecoveryCompensationInFlight()) {
+      return;
+    }
+    const generation = this.recoveryCompensationGeneration;
     this.compensationTicketIdSignal.set(recoveryTicket.id);
-
-    const runCompensation = async () => {
-      const backgroundStartAt = this.monotonicNow();
-      const perfPrefix = `nanoflow:resume:${recoveryTicket.id}`;
-      this.markPerformance(`${perfPrefix}:background-start`);
-      let fastPathHit: boolean | undefined;
-
-      try {
-        this.recordRecoveryStep('sync-recovery-heavy-compensation', reason);
-        await this.simpleSync.recoverAfterResume(reason, {
-          mode: 'heavy',
-          stage: 'compensation',
-          allowRemoteProbe: true,
-          sessionValidated: true,
-          retryProcessing: 'background',
-          deferBlackBoxPull: true,
-          recoveryTicketId: recoveryTicket.id,
-          backgroundProbeDelayMs: 180,
-          skipRetryQueue: true,
-          skipRealtimeResume: true,
-        });
-
-        this.recordRecoveryStep('blackbox-recovery', reason);
-        const blackboxRefresh = await this.syncCoordinator.refreshBlackBoxWatermarkIfNeeded('resume');
-        fastPathHit = blackboxRefresh.skipped;
-        await this.recheckFocusGateIfNeeded(reason, 'resume-remote');
-
-        this.recordRecoveryStep('ui-correction', reason);
-        if (typeof window !== 'undefined') {
-          window.dispatchEvent(new CustomEvent('nanoflow:lifecycle-resumed', {
-            detail: {
-              reason,
-              resumedAt: Date.now(),
-            },
-          }));
-        }
-
-        this.lastHeavyRecoveryAtSignal.set(Date.now());
-      } catch (error) {
-        this.logger.warn('Resume background compensation failed', { reason, recoveryTicketId: recoveryTicket.id, error });
-        this.sentryLazyLoader.captureException(error, {
-          operation: 'lifecycle.resume.compensation',
-          reason,
-          recoveryTicketId: recoveryTicket.id,
-        });
-      } finally {
-        const backgroundRefreshMs = this.monotonicNow() - backgroundStartAt;
-        this.markPerformance(`${perfPrefix}:background-end`);
-        this.measurePerformance(
-          'resume.background_refresh_ms',
-          `${perfPrefix}:background-start`,
-          `${perfPrefix}:background-end`
-        );
-        this.reportRecoveryMetrics({
-          ticketId: recoveryTicket.id,
-          reason,
-          interactionReadyMs,
-          backgroundRefreshMs,
-          fastPathHit,
-        });
+    const runCompensation = () => {
+      if (this.destroyed || generation !== this.recoveryCompensationGeneration) {
+        return;
+      }
+      void this.runRecoveryCompensation(reason, recoveryTicket, interactionReadyMs, generation);
+    };
+    const handleSchedulingError = (error: unknown) => {
+      if (!this.shouldContinueRecoveryCompensation(recoveryTicket, generation)) {
+        return;
+      }
+      if (this.compensationTicketIdSignal() === recoveryTicket.id) {
         this.compensationTicketIdSignal.set(null);
+      }
+      this.logger.warn('Resume background compensation scheduling failed', {
+        reason,
+        recoveryTicketId: recoveryTicket.id,
+        error,
+      });
+    };
+
+    this.scheduleCompensationTask(runCompensation, handleSchedulingError);
+  }
+
+  private scheduleCompensationTask(runCompensation: () => void, onScheduleError: (error: unknown) => void): void {
+    const scheduleIdle = () => {
+      try {
+        runIdleTask(runCompensation);
+      } catch (error) {
+        onScheduleError(error);
       }
     };
 
     if (typeof queueMicrotask === 'function') {
-      queueMicrotask(() => {
-        this.runIdleTask(() => {
-          void runCompensation();
+      try {
+        queueMicrotask(() => {
+          scheduleIdle();
         });
-      });
+      } catch (error) {
+        onScheduleError(error);
+      }
       return;
     }
 
-    this.runIdleTask(() => {
-      void runCompensation();
+    scheduleIdle();
+  }
+
+  private async runRecoveryCompensation(
+    reason: AppResumeReason,
+    recoveryTicket: LifecycleRecoveryTicket,
+    interactionReadyMs: number,
+    generation: number,
+  ): Promise<void> {
+    if (!this.shouldContinueRecoveryCompensation(recoveryTicket, generation)) {
+      return;
+    }
+    const backgroundStartAt = monotonicNow();
+    const perfPrefix = `nanoflow:resume:${recoveryTicket.id}`;
+    markLifecyclePerformance(`${perfPrefix}:background-start`);
+    let fastPathHit: boolean | undefined;
+
+    try {
+      fastPathHit = await this.executeRecoveryCompensationSteps(reason, recoveryTicket, generation);
+    } catch (error) {
+      if (this.shouldContinueRecoveryCompensation(recoveryTicket, generation)) {
+        this.handleRecoveryCompensationError(reason, recoveryTicket, error);
+      }
+    } finally {
+      if (this.shouldContinueRecoveryCompensation(recoveryTicket, generation)) {
+        this.finishRecoveryCompensation(reason, recoveryTicket, interactionReadyMs, backgroundStartAt, fastPathHit);
+      }
+    }
+  }
+
+  private async executeRecoveryCompensationSteps(
+    reason: AppResumeReason,
+    recoveryTicket: LifecycleRecoveryTicket,
+    generation: number,
+  ): Promise<boolean | undefined> {
+    this.breadcrumbs.recordStep('sync-recovery-heavy-compensation', reason);
+    await this.syncResumeCoordinator.recoverAfterResume(reason, {
+      mode: 'heavy',
+      stage: 'compensation',
+      allowRemoteProbe: true,
+      sessionValidated: true,
+      retryProcessing: 'background',
+      deferBlackBoxPull: true,
+      recoveryTicketId: recoveryTicket.id,
+      backgroundProbeDelayMs: 180,
+      skipRetryQueue: true,
+      skipRealtimeResume: true,
+    });
+    if (!this.shouldContinueRecoveryCompensation(recoveryTicket, generation)) {
+      return undefined;
+    }
+
+    this.breadcrumbs.recordStep('blackbox-recovery', reason);
+    const blackboxRefresh = await this.syncCoordinator.refreshBlackBoxWatermarkIfNeeded('resume');
+    if (!this.shouldContinueRecoveryCompensation(recoveryTicket, generation)) {
+      return undefined;
+    }
+    await this.recheckFocusGateIfNeeded(reason, 'resume-remote');
+    if (!this.shouldContinueRecoveryCompensation(recoveryTicket, generation)) {
+      return undefined;
+    }
+    this.dispatchLifecycleResumed(reason);
+    this.lastHeavyRecoveryAtSignal.set(Date.now());
+    return blackboxRefresh.skipped;
+  }
+
+  private shouldContinueRecoveryCompensation(
+    recoveryTicket: LifecycleRecoveryTicket,
+    generation: number,
+  ): boolean {
+    return !this.destroyed
+      && generation === this.recoveryCompensationGeneration
+      && this.compensationTicketIdSignal() === recoveryTicket.id;
+  }
+
+  private dispatchLifecycleResumed(reason: AppResumeReason): void {
+    this.breadcrumbs.recordStep('ui-correction', reason);
+    if (typeof window === 'undefined') return;
+    window.dispatchEvent(new CustomEvent('nanoflow:lifecycle-resumed', {
+      detail: {
+        reason,
+        resumedAt: Date.now(),
+      },
+    }));
+  }
+
+  private handleRecoveryCompensationError(
+    reason: AppResumeReason,
+    recoveryTicket: LifecycleRecoveryTicket,
+    error: unknown,
+  ): void {
+    this.logger.warn('Resume background compensation failed', { reason, recoveryTicketId: recoveryTicket.id, error });
+    this.sentryLazyLoader.captureException(error, {
+      operation: 'lifecycle.resume.compensation',
+      reason,
+      recoveryTicketId: recoveryTicket.id,
     });
   }
 
+  private finishRecoveryCompensation(
+    reason: AppResumeReason,
+    recoveryTicket: LifecycleRecoveryTicket,
+    interactionReadyMs: number,
+    backgroundStartAt: number,
+    fastPathHit: boolean | undefined,
+  ): void {
+    const perfPrefix = `nanoflow:resume:${recoveryTicket.id}`;
+    const backgroundRefreshMs = monotonicNow() - backgroundStartAt;
+    markLifecyclePerformance(`${perfPrefix}:background-end`);
+    measureLifecyclePerformance('resume.background_refresh_ms', `${perfPrefix}:background-start`, `${perfPrefix}:background-end`);
+    const metrics = buildRecoveryCompensationReport({
+      currentMetrics: this.lastRecoveryMetricsSignal(),
+      reason,
+      recoveryTicket,
+      interactionReadyMs,
+      backgroundRefreshMs,
+      fastPathHit,
+    });
+    if (metrics) {
+      this.reportRecoveryMetrics(metrics);
+    }
+    this.compensationTicketIdSignal.set(null);
+  }
+
   private shouldRecheckFocusGate(reason: AppResumeReason): boolean {
-    if (!FEATURE_FLAGS.FOCUS_STARTUP_THROTTLED_CHECK_V1) {
-      return false;
-    }
-
-    if (reason === 'manual' || reason === 'online') {
-      return false;
-    }
-
-    if (reason === 'pageshow') {
-      return true;
-    }
-
-    return this.lastBackgroundDurationMs >= FOCUS_CONFIG.GATE.IDLE_RECHECK_THRESHOLD;
+    return shouldRunFocusGateResumeCheck(
+      FEATURE_FLAGS.FOCUS_STARTUP_THROTTLED_CHECK_V1,
+      reason,
+      this.browserEvents.getLastBackgroundDurationMs(),
+    );
   }
 
   private async recheckFocusGateIfNeeded(
@@ -703,283 +768,32 @@ export class AppLifecycleOrchestratorService {
     });
   }
 
-  private runIdleTask(task: () => void): void {
-    const requestIdleCallback = typeof window !== 'undefined'
-      ? (
-          window as Window & {
-            requestIdleCallback?: (callback: IdleRequestCallback, options?: IdleRequestOptions) => number;
-          }
-        ).requestIdleCallback
-      : undefined;
-    if (typeof requestIdleCallback === 'function') {
-      requestIdleCallback(() => task(), { timeout: 1200 });
-      return;
-    }
-    setTimeout(task, 0);
-  }
-
   private reportRecoveryMetrics(metrics: RecoveryMetricsSnapshot): void {
-    const current = this.lastRecoveryMetricsSignal();
-    const next = current && current.ticketId === metrics.ticketId
-      ? { ...current, ...metrics }
-      : metrics;
+    const next = mergeRecoveryMetrics(this.lastRecoveryMetricsSignal(), metrics);
     this.lastRecoveryMetricsSignal.set(next);
-
-    if (FEATURE_FLAGS.RESUME_METRICS_GATE_V1) {
-      this.sentryLazyLoader.setMeasurement('resume.interaction_ready_ms', next.interactionReadyMs, 'millisecond');
-      if (typeof next.backgroundRefreshMs === 'number') {
-        this.sentryLazyLoader.setMeasurement('resume.background_refresh_ms', next.backgroundRefreshMs, 'millisecond');
-      }
-      if (typeof next.fastPathHit === 'boolean') {
-        this.sentryLazyLoader.setMeasurement('resume.fast_path_hit', next.fastPathHit ? 1 : 0, 'none');
-      }
-    }
-
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(new CustomEvent('nanoflow:resume-metrics', {
-        detail: next,
-      }));
-    }
+    publishRecoveryMetrics(next, this.sentryLazyLoader);
   }
 
-  private markPerformance(markName: string): void {
-    if (typeof performance === 'undefined' || typeof performance.mark !== 'function') {
-      return;
-    }
-    performance.mark(markName);
+  private resetSessionRuntime(): void {
+    this.sessionGeneration += 1;
+    this.queuedResumeReason = null;
+    this.queuedResumePromise = null;
+    this.resumePromise = null;
+    this.activeResumeReason = null;
+    this.deferredResume.clear();
+    this.pendingPersistRecovery.reset();
+    this.reloadCoordinator.resetSessionRuntime();
+    this.consecutiveFailures = this.consecutiveSessionFailures = 0;
+    this.lastHeavyRecoveryAtSignal.set(null);
+    this.recoveryCompensationGeneration += 1;
+    this.currentRecoveryTicketSignal.set(null);
+    this.isResumingSignal.set(false);
+    this.compensationTicketIdSignal.set(null);
   }
-
-  /**
-   * 使用高精度单调时钟计算阶段耗时，避免 Date.now() 同毫秒下出现 0ms 抖动误判。
-   */
-  private monotonicNow(): number {
-    if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
-      return performance.now();
-    }
-    return Date.now();
-  }
-
-  private measurePerformance(measureName: string, startMark: string, endMark: string): void {
-    if (typeof performance === 'undefined' || typeof performance.measure !== 'function') {
-      return;
-    }
-    try {
-      performance.measure(measureName, { start: startMark, end: endMark });
-    } catch {
-      try {
-        performance.measure(measureName, startMark, endMark);
-      } catch {
-        // ignored
-      }
-    }
-  }
-
-  private createRecoveryTicketId(mode: 'light' | 'heavy'): string {
-    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-      return `${mode}:${crypto.randomUUID()}`;
-    }
-    return `${mode}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
-  }
-
-  private async withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
-    let timeoutId: ReturnType<typeof setTimeout> | null = null;
-
-    try {
-      return await Promise.race([
-        promise,
-        new Promise<T>((_, reject) => {
-          timeoutId = setTimeout(() => {
-            reject(new Error(`Lifecycle resume timeout after ${timeoutMs}ms`));
-          }, timeoutMs);
-        }),
-      ]);
-    } finally {
-      if (timeoutId) {
-        clearTimeout(timeoutId);
-      }
-    }
-  }
-
-  private recordRecoveryStep(step: string, reason: AppResumeReason): void {
-    this.addLifecycleBreadcrumb('recovery.step', reason, { step });
-  }
-
-  private addLifecycleBreadcrumb(
-    message: 'lifecycle.resume.start' | 'lifecycle.resume.reason' | 'lifecycle.resume.success' | 'lifecycle.resume.fail' | 'recovery.step' | 'lifecycle.version-reload.activate-ok' | 'lifecycle.version-reload.activate-failed',
-    reason: AppResumeReason | 'manual',
-    extra?: Record<string, unknown>
-  ): void {
-    this.sentryLazyLoader.addBreadcrumb({
-      category: 'lifecycle',
-      message,
-      level: 'info',
-      data: {
-        reason,
-        ...extra,
-      },
-    });
-  }
-
-  private scheduleDeferredResumeRetry(reason: AppResumeReason): number {
-    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
-      this.logger.info('页面仍处于后台，跳过 deferred resume 定时器，等待下一次可见恢复事件', { reason });
-      return 0;
-    }
-
-    const delayMs = Math.max(100, getRemainingBrowserNetworkResumeDelayMs() + 50);
-
-    if (this.deferredResumeTimer) {
-      return delayMs;
-    }
-
-    this.logger.info('Resume recovery deferred, scheduling retry', { reason, delayMs });
-    this.deferredResumeTimer = setTimeout(() => {
-      this.deferredResumeTimer = null;
-      void this.triggerResume(reason);
-    }, delayMs);
-
-    return delayMs;
-  }
-
-  /**
-   * 「检测到新版本」toast 的「立即刷新」点击处理。
-   *
-   * 流程：
-   * 1. 若可用，先 `swUpdate.activateUpdate()` 让 waiting SW 真正进入 active；
-   * 2. 然后 `reloadViaForceClearCache()` 触发清缓存 + 导航。
-   * 3. 任一步抛错都不会传出（让 toast 容器的 finally 解锁 UI）；
-   *    若导航没有真正发生（catch 命中），flag 会复位，下一次 resume 仍能再次弹出
-   *    prompt（避免「点了没反应」+「不再提示」双重糟糕体验）。
-   *
-   * 注：成功路径下 `reloadViaForceClearCache()` 会触发 `location.replace` 导航，
-   * 当前文档被卸载，本函数后续代码与 `finally` 块都不会被执行；因此 flag 复位
-   * 只在异常路径才有意义。
-   */
-  private async triggerVersionReload(): Promise<void> {
-    try {
-      if (this.swUpdate?.isEnabled) {
-        try {
-          await this.swUpdate.activateUpdate();
-          this.addLifecycleBreadcrumb('lifecycle.version-reload.activate-ok', 'manual', {});
-        } catch (err) {
-          this.addLifecycleBreadcrumb('lifecycle.version-reload.activate-failed', 'manual', {
-            error: err instanceof Error ? err.message : String(err),
-          });
-        }
-      }
-
-      reloadViaForceClearCache();
-      // 正常路径下文档已被 location.replace 卸载，此后代码不会执行。
-    } catch (err) {
-      // 仅在 reloadViaForceClearCache 同步抛错（极端环境）时复位 flag。
-      this.logger.warn('triggerVersionReload failed', err);
-      this.hasShownResumeVersionPrompt = false;
-    }
-  }
-
-  private maybeScheduleAutoReload(reason: AppResumeReason, error: unknown): void {
-    if (this.autoReloadScheduled) {
-      return;
-    }
-
-    if (this.consecutiveFailures < APP_LIFECYCLE_CONFIG.AUTO_RELOAD_FAILURE_THRESHOLD) {
-      return;
-    }
-
-    if (!this.consumeAutoReloadQuota()) {
-      return;
-    }
-
-    this.autoReloadScheduled = true;
-
-    this.toast.warning(
-      '恢复失败',
-      '系统将自动刷新页面以恢复稳定状态',
-      { duration: 2500 }
-    );
-
-    this.sentryLazyLoader.captureMessage('Lifecycle auto reload scheduled', {
-      level: 'warning',
-      tags: {
-        operation: 'lifecycle.auto-reload',
-        reason,
-        failureKind: 'pipeline-exception',
-      },
-      extra: {
-        error: error instanceof Error ? error.message : String(error),
-        consecutiveFailures: this.consecutiveFailures,
-      },
-    });
-
-    setTimeout(() => {
-      reloadViaForceClearCache();
-    }, 1500);
-  }
-
-  private consumeAutoReloadQuota(): boolean {
-    if (typeof localStorage === 'undefined') {
-      return false;
-    }
-
-    const today = new Date().toISOString().slice(0, 10);
-
-    try {
-      const raw = localStorage.getItem(AppLifecycleOrchestratorService.AUTO_RELOAD_COUNTER_KEY);
-      const parsed = raw ? JSON.parse(raw) as { date?: string; count?: number } : {};
-
-      const date = parsed.date === today ? today : today;
-      const count = parsed.date === today ? (parsed.count ?? 0) : 0;
-
-      if (count >= APP_LIFECYCLE_CONFIG.MAX_AUTO_RELOAD_PER_DAY) {
-        return false;
-      }
-
-      localStorage.setItem(
-        AppLifecycleOrchestratorService.AUTO_RELOAD_COUNTER_KEY,
-        JSON.stringify({ date, count: count + 1 })
-      );
-
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
   private cleanup(): void {
-    if (this.deferredResumeTimer) {
-      clearTimeout(this.deferredResumeTimer);
-      this.deferredResumeTimer = null;
-    }
-
-    if (typeof window === 'undefined' || typeof document === 'undefined') {
-      return;
-    }
-
-    if (this.visibilityHandler) {
-      document.removeEventListener('visibilitychange', this.visibilityHandler);
-      this.visibilityHandler = null;
-    }
-
-    if (this.blurHandler) {
-      window.removeEventListener('blur', this.blurHandler);
-      this.blurHandler = null;
-    }
-
-    if (this.focusHandler) {
-      window.removeEventListener('focus', this.focusHandler);
-      this.focusHandler = null;
-    }
-
-    if (this.pageshowHandler) {
-      window.removeEventListener('pageshow', this.pageshowHandler as EventListener);
-      this.pageshowHandler = null;
-    }
-
-    if (this.onlineHandler) {
-      window.removeEventListener('online', this.onlineHandler);
-      this.onlineHandler = null;
-    }
-
-    this.initialized = false;
+    this.destroyed = true;
+    this.resetSessionRuntime();
+    this.pendingPersistRecovery.destroy();
+    this.browserEvents.cleanup();
   }
 }

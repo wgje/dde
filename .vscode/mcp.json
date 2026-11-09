@@ -1,0 +1,81 @@
+{
+	"inputs": [
+		{
+			"id": "project-ref",
+			"type": "promptString",
+			"description": "Supabase project reference ID (e.g., umerlqpzcbrzywrkfyhe)",
+			"password": false
+		},
+		{
+			"id": "SUPABASE_ACCESS_TOKEN",
+			"type": "promptString",
+			"description": "Supabase personal access token from Account > Access Tokens; do not use a service role key",
+			"password": true
+		},
+		{
+			"id": "context7_api_key",
+			"type": "promptString",
+			"description": "Context7 API key (leave blank to omit)",
+			"password": true
+		}
+	],
+	"servers": {
+		"ChromeDevTools/chrome-devtools-mcp": {
+			"type": "stdio",
+			"command": "npx",
+			"args": [
+				"-y",
+				"chrome-devtools-mcp@1.1.1",
+				"--headless=true",
+				"--disable-gpu",
+				"--disable-dev-shm-usage"
+			]
+		},
+		"context7": {
+			"type": "stdio",
+			"command": "npx",
+			"args": [
+				"-y",
+				"@upstash/context7-mcp@2.1.1"
+			],
+			"env": {
+				"CONTEXT7_API_KEY": "${input:context7_api_key}"
+			}
+		},
+		"codegraph": {
+			"type": "stdio",
+			"command": "node",
+			"args": [
+				"${workspaceFolder}/scripts/codegraph-nanoflow-mcp-stdio.cjs",
+				"@colbymchenry/codegraph@1.2.0",
+				"serve",
+				"--mcp",
+				"--path",
+				"${workspaceFolder}"
+			],
+			"env": {
+				"CODEGRAPH_NO_DAEMON": "1",
+				"CODEGRAPH_NO_WATCH": "0",
+				"CODEGRAPH_DAEMON_IDLE_TIMEOUT_MS": "60000",
+				"CODEGRAPH_DAEMON_MAX_IDLE_MS": "60000",
+				"NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS": "30000",
+				"NANOFLOW_CODEGRAPH_OVERLAY_QUERY_TIMEOUT_MS": "60000",
+				"NANOFLOW_CODEGRAPH_REFRESH_ON_STARTUP": "0",
+				"NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE": "1"
+			}
+		},
+		"Supabase": {
+			"type": "stdio",
+			"command": "npx",
+			"args": [
+				"-y",
+				"@supabase/mcp-server-supabase@0.5.9",
+				"--project-ref",
+				"${input:project-ref}"
+			],
+			"env": {
+				"SUPABASE_ACCESS_TOKEN": "${input:SUPABASE_ACCESS_TOKEN}"
+			}
+		}
+	}
+}

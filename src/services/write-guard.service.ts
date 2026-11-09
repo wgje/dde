@@ -170,7 +170,7 @@ export class WriteGuardService {
     }
   }
 
-  private shouldClearStaleRuntimeOverride(mode: WriteGuardMode): boolean {
+  private shouldClearStaleRuntimeOverride(_mode: WriteGuardMode): boolean {
     if (this.computeBaselineMode() !== 'writable') {
       return false;
     }
@@ -216,8 +216,9 @@ export class WriteGuardService {
       const parsedMs = Date.parse(parsed.ts);
       return Number.isFinite(parsedMs) ? parsedMs : null;
     } catch {
-      return null;
+      // sessionStorage 读取或 JSON 解析失败时视为无有效时间戳
     }
+    return null;
   }
 
   private clearRuntimeOverrideMarkers(): void {

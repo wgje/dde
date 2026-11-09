@@ -83,12 +83,40 @@ describe('SyncStateService', () => {
       expect(service.syncState().syncError).toBeNull();
     });
 
+    it('setSyncError 应隔离外部 listener 异常并保留状态写入', () => {
+      const listener = vi.fn(() => {
+        throw new Error('listener failed');
+      });
+      service.registerSyncErrorListener(listener);
+
+      expect(() => service.setSyncError('boom')).not.toThrow();
+
+      expect(service.syncState().syncError).toBe('boom');
+      expect(listener).toHaveBeenCalledWith('boom');
+    });
+
     it('scheduleRecoverableSyncError 应立即写入 backgroundSyncNotice 通道（非 syncError）', () => {
       service.scheduleRecoverableSyncError(RECOVERABLE_SYNC_ERROR_MESSAGES.PARTIAL_RETRY_HANDOFF, 3000);
       // 中文注释：新通道立即可见；不再走 syncError 红错路径。
       expect(service.syncState().syncError).toBeNull();
       expect(service.syncState().backgroundSyncNotice).toBe(RECOVERABLE_SYNC_ERROR_MESSAGES.PARTIAL_RETRY_HANDOFF);
       expect(service.backgroundSyncNotice()).toBe(RECOVERABLE_SYNC_ERROR_MESSAGES.PARTIAL_RETRY_HANDOFF);
+    });
+
+    it('clearPendingRecoverableSyncError 应清理浏览器 timer handle 为 0 的遗留定时器', () => {
+      const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout').mockImplementation(() => undefined);
+      const internals = service as unknown as {
+        recoverableSyncErrorTimer: ReturnType<typeof setTimeout> | null;
+        pendingRecoverableSyncError: string | null;
+      };
+      internals.recoverableSyncErrorTimer = 0 as unknown as ReturnType<typeof setTimeout>;
+      internals.pendingRecoverableSyncError = 'pending';
+
+      service.clearPendingRecoverableSyncError();
+
+      expect(clearTimeoutSpy).toHaveBeenCalledWith(0);
+      expect(internals.recoverableSyncErrorTimer).toBeNull();
+      expect(internals.pendingRecoverableSyncError).toBeNull();
     });
 
     it('markSyncRecoveredIfIdle 应同时清空 backgroundSyncNotice', () => {
@@ -118,6 +146,29 @@ describe('SyncStateService', () => {
       service.setBackgroundSyncNotice('foo');
       service.setBackgroundSyncNotice(null);
       expect(service.syncState().backgroundSyncNotice).toBeNull();
+    });
+
+    it('cloudSyncPausedReason 应默认为空，并支持 no-session / refresh-failed 显式标记', () => {
+      expect(service.syncState().cloudSyncPausedReason).toBeNull();
+      expect(service.cloudSyncPausedReason()).toBeNull();
+
+      service.setCloudSyncPausedReason('no-session');
+      expect(service.syncState().cloudSyncPausedReason).toBe('no-session');
+      expect(service.cloudSyncPausedReason()).toBe('no-session');
+
+      service.setCloudSyncPausedReason('refresh-failed');
+      expect(service.syncState().cloudSyncPausedReason).toBe('refresh-failed');
+
+      service.clearCloudSyncPausedReason();
+      expect(service.syncState().cloudSyncPausedReason).toBeNull();
+    });
+
+    it('markSyncRecoveredIfIdle 空闲成功收口时应清空 cloudSyncPausedReason', () => {
+      service.setCloudSyncPausedReason('no-session');
+
+      expect(service.markSyncRecoveredIfIdle('2026-05-16T00:00:00Z')).toBe(true);
+
+      expect(service.syncState().cloudSyncPausedReason).toBeNull();
     });
 
     it('setLoadingRemote 更新独立 signal', () => {

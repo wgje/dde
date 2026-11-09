@@ -106,6 +106,10 @@ android {
     buildConfig = true
     compose = true
   }
+
+  testOptions {
+    unitTests.isIncludeAndroidResources = true
+  }
 }
 
 dependencies {
@@ -127,4 +131,7 @@ dependencies {
   implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.9.0")
   implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
   testImplementation(kotlin("test"))
+  testImplementation("androidx.test:core:1.6.1")
+  testImplementation("androidx.work:work-testing:2.10.0")
+  testImplementation("org.robolectric:robolectric:4.14.1")
 }

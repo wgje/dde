@@ -302,48 +302,48 @@ export class ConflictTaskDiffComponent {
       const lt = localMap.get(id);
       const rt = remoteMap.get(id);
       const rec = recMap.get(id);
-
-      if (lt && rt) {
-        const fieldDiffs = this.compareFields(lt, rt);
-        diffs.push({
-          id,
-          title: lt.title || rt.title || '未命名',
-          inLocal: true,
-          inRemote: true,
-          status: fieldDiffs.length === 0 ? 'same' : 'modified',
-          fieldDiffs,
-          resolution: 'auto',
-          recommendation: rec,
-        });
-      } else if (lt) {
-        diffs.push({
-          id,
-          title: lt.title || '未命名',
-          inLocal: true,
-          inRemote: false,
-          status: 'local-only',
-          fieldDiffs: this.describeTask(lt, 'local'),
-          resolution: 'local',
-          recommendation: rec,
-        });
-      } else {
-        diffs.push({
-          id,
-          title: rt!.title || '未命名',
-          inLocal: false,
-          inRemote: true,
-          status: 'remote-only',
-          fieldDiffs: this.describeTask(rt!, 'remote'),
-          resolution: 'remote',
-          recommendation: rec,
-        });
-      }
+      diffs.push(this.buildTaskDiffItem(id, lt, rt, rec));
     });
 
     // 排序：modified > local-only > remote-only > same
     const order: Record<string, number> = { 'modified': 0, 'local-only': 1, 'remote-only': 2, 'same': 3 };
     return diffs.sort((a, b) => order[a.status] - order[b.status]);
   });
+
+  private buildTaskDiffItem(
+    id: string,
+    localTask: Task | undefined,
+    remoteTask: Task | undefined,
+    recommendation?: TaskResolutionRecommendation,
+  ): TaskDiffItem {
+    if (localTask && remoteTask) {
+      const fieldDiffs = this.compareFields(localTask, remoteTask);
+      return {
+        id,
+        title: localTask.title || remoteTask.title || '未命名',
+        inLocal: true,
+        inRemote: true,
+        status: fieldDiffs.length === 0 ? 'same' : 'modified',
+        fieldDiffs,
+        resolution: 'auto',
+        recommendation,
+      };
+    }
+
+    const existingTask = localTask ?? remoteTask;
+    const side = localTask ? 'local' : 'remote';
+
+    return {
+      id,
+      title: existingTask?.title || '未命名',
+      inLocal: !!localTask,
+      inRemote: !!remoteTask,
+      status: localTask ? 'local-only' : 'remote-only',
+      fieldDiffs: existingTask ? this.describeTask(existingTask, side) : [],
+      resolution: side,
+      recommendation,
+    };
+  }
 
   /** 按当前过滤条件筛选 */
   readonly filteredDiffs = computed(() => {
@@ -441,6 +441,7 @@ export class ConflictTaskDiffComponent {
       { key: 'wait_minutes', label: '等待时间', format: v => v ? `${v} 分钟` : '' },
       { key: 'attachments', label: '附件', format: v => this.formatAttachments(v) },
       { key: 'parkingMeta', label: '停泊状态', format: v => this.formatJson(v) },
+      { key: 'attentionMeta', label: '任务僚机', format: v => this.formatJson(v) },
       { key: 'stage', label: '阶段', format: v => String(v ?? '') },
       { key: 'order', label: '排序', format: v => String(v ?? '') },
       { key: 'parentId', label: '父任务', format: v => String(v ?? '') },

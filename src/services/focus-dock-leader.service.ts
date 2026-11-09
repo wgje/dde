@@ -28,6 +28,7 @@ export class FocusDockLeaderService implements OnDestroy {
   private channel: BroadcastChannel | null = null;
   private readonly heartbeatTimer = new IntervalHandle();
   private storageListener: ((event: StorageEvent) => void) | null = null;
+  private destroyed = false;
 
   readonly isLeader = computed(() => this.leaderState());
   readonly isFollower = computed(() => !this.leaderState());
@@ -66,23 +67,72 @@ export class FocusDockLeaderService implements OnDestroy {
   }
 
   ngOnDestroy(): void {
-    this.heartbeatTimer.stop();
-    if (this.channel) {
-      this.channel.close();
-      this.channel = null;
+    if (this.destroyed) {
+      return;
     }
-    if (this.storageListener && typeof window !== 'undefined') {
-      window.removeEventListener('storage', this.storageListener);
-      this.storageListener = null;
+
+    this.destroyed = true;
+    this.heartbeatTimer.stop();
+    this.releaseOwnedLease();
+    this.leaderState.set(false);
+    this.activeLeaderTabId.set(null);
+    this.leaseExpiresAt.set(0);
+    const channel = this.channel;
+    this.channel = null;
+    if (channel) {
+      try {
+        channel.close();
+      } catch (error) {
+        this.warnCleanupFailure('FocusDockLeader channel cleanup failed', error);
+      }
+    }
+
+    const storageListener = this.storageListener;
+    this.storageListener = null;
+    if (storageListener && typeof window !== 'undefined') {
+      try {
+        window.removeEventListener('storage', storageListener);
+      } catch (error) {
+        this.warnCleanupFailure('FocusDockLeader storage listener cleanup failed', error);
+      }
+    }
+  }
+
+  private releaseOwnedLease(): void {
+    const lease = this.readLease();
+    if (lease?.tabId !== this.tabId || typeof localStorage === 'undefined') {
+      return;
+    }
+
+    try {
+      localStorage.removeItem(PARKING_CONFIG.FOCUS_CONSOLE_LEADER_LEASE_KEY);
+    } catch (error) {
+      this.warnCleanupFailure('FocusDockLeader lease cleanup failed', error);
+    }
+  }
+
+  private warnCleanupFailure(message: string, error: unknown): void {
+    try {
+      this.logger.warn(message, error);
+    } catch {
+      // Cleanup warning sinks must not interrupt leader teardown.
     }
   }
 
   tryTakeover(): boolean {
-    this.writeLease({
+    if (this.destroyed) {
+      return false;
+    }
+
+    const lease: FocusDockLease = {
       tabId: this.tabId,
       updatedAt: Date.now(),
       expiresAt: Date.now() + PARKING_CONFIG.FOCUS_CONSOLE_LEASE_MS,
-    });
+    };
+    if (!this.writeLease(lease) || !this.isStoredLease(lease)) {
+      this.applyObservedLeaseState(Date.now());
+      return false;
+    }
     this.broadcast('takeover-request');
     this.refreshLeaseState();
     return this.isLeader();
@@ -100,6 +150,7 @@ export class FocusDockLeaderService implements OnDestroy {
   }
 
   private handleChannelMessage(raw: unknown): void {
+    if (this.destroyed) return;
     if (!raw || typeof raw !== 'object') return;
     const message = raw as Partial<FocusDockChannelMessage>;
     if (!message.type || !message.tabId) return;
@@ -111,6 +162,7 @@ export class FocusDockLeaderService implements OnDestroy {
   }
 
   private refreshLeaseState(): void {
+    if (this.destroyed) return;
     const now = Date.now();
     const lease = this.readLease();
 
@@ -120,7 +172,10 @@ export class FocusDockLeaderService implements OnDestroy {
         updatedAt: now,
         expiresAt: now + PARKING_CONFIG.FOCUS_CONSOLE_LEASE_MS,
       };
-      this.writeLease(nextLease);
+      if (!this.writeLease(nextLease) || !this.isStoredLease(nextLease)) {
+        this.applyObservedLeaseState(now);
+        return;
+      }
       this.leaderState.set(true);
       this.activeLeaderTabId.set(this.tabId);
       this.leaseExpiresAt.set(nextLease.expiresAt);
@@ -133,7 +188,16 @@ export class FocusDockLeaderService implements OnDestroy {
         updatedAt: now,
         expiresAt: now + PARKING_CONFIG.FOCUS_CONSOLE_LEASE_MS,
       };
-      this.writeLease(renewedLease);
+      if (!this.writeLease(renewedLease)) {
+        this.leaderState.set(true);
+        this.activeLeaderTabId.set(this.tabId);
+        this.leaseExpiresAt.set(lease.expiresAt);
+        return;
+      }
+      if (!this.isStoredLease(renewedLease)) {
+        this.applyObservedLeaseState(now);
+        return;
+      }
       this.leaderState.set(true);
       this.activeLeaderTabId.set(this.tabId);
       this.leaseExpiresAt.set(renewedLease.expiresAt);
@@ -149,6 +213,27 @@ export class FocusDockLeaderService implements OnDestroy {
     if (staleDeadline < now) {
       this.tryTakeover();
     }
+  }
+
+  private applyObservedLeaseState(now: number): void {
+    const lease = this.readLease();
+    if (lease && lease.expiresAt > now) {
+      this.leaderState.set(lease.tabId === this.tabId);
+      this.activeLeaderTabId.set(lease.tabId);
+      this.leaseExpiresAt.set(lease.expiresAt);
+      return;
+    }
+
+    this.leaderState.set(false);
+    this.activeLeaderTabId.set(null);
+    this.leaseExpiresAt.set(0);
+  }
+
+  private isStoredLease(expected: FocusDockLease): boolean {
+    const lease = this.readLease();
+    return lease?.tabId === expected.tabId &&
+      lease.expiresAt === expected.expiresAt &&
+      lease.updatedAt === expected.updatedAt;
   }
 
   private readLease(): FocusDockLease | null {
@@ -175,12 +260,14 @@ export class FocusDockLeaderService implements OnDestroy {
     }
   }
 
-  private writeLease(lease: FocusDockLease): void {
-    if (typeof localStorage === 'undefined') return;
+  private writeLease(lease: FocusDockLease): boolean {
+    if (typeof localStorage === 'undefined') return false;
     try {
       localStorage.setItem(PARKING_CONFIG.FOCUS_CONSOLE_LEADER_LEASE_KEY, JSON.stringify(lease));
+      return true;
     } catch (error) {
       this.logger.warn('FocusDockLeader write lease failed', error);
+      return false;
     }
   }
 

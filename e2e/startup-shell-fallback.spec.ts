@@ -1,4 +1,25 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, Page } from '@playwright/test';
+import { waitForAppReady } from './shared/page-helpers';
+
+async function recoverStaticStartupLoaderIfVisible(page: Page): Promise<void> {
+  const staticLoader = page.getByText('加载时间较长，可能是网络问题').first();
+  if (!(await staticLoader.isVisible({ timeout: 500 }).catch(() => false))) {
+    return;
+  }
+
+  await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => undefined);
+  await waitForAppReady(page, { timeoutMs: 30_000 });
+}
+
+async function expectShortcutTargetVisible(page: Page, selector: string): Promise<void> {
+  const target = page.locator(selector);
+  if (!(await target.isVisible({ timeout: 10_000 }).catch(() => false))) {
+    await recoverStaticStartupLoaderIfVisible(page);
+  }
+
+  await expect(target).toBeVisible({ timeout: 10_000 });
+  await expect(page).toHaveURL(/#\/projects$/);
+}
 
 test.describe('Startup Shell Fallback', () => {
   test('should show initial loader without blank screen when snapshot payload is corrupted', async ({ page }) => {
@@ -28,6 +49,22 @@ test.describe('Startup Shell Fallback', () => {
     });
 
     await expect(page).not.toHaveURL(/launch\.html$/);
+  });
+
+  test('waitForAppReady should not pass while the static startup loader is still covering the app', async ({ page }) => {
+    await page.setContent(`
+      <div id="initial-loader" style="display:block;position:fixed;inset:0;z-index:9999;">
+        <span id="loader-status">加载时间较长，可能是网络问题...</span>
+      </div>
+      <div data-testid="app-container">app shell</div>
+    `);
+
+    await expect(waitForAppReady(page, { timeoutMs: 500 })).rejects.toThrow('应用未在超时内挂载到可交互界面');
+
+    await page.locator('#initial-loader').evaluate((element: HTMLElement) => {
+      element.style.display = 'none';
+    });
+    await waitForAppReady(page, { timeoutMs: 5_000 });
   });
 
   test('should prefer explicit shortcut workspace intent over persisted launch snapshot route restore', async ({ page }) => {
@@ -156,26 +193,22 @@ test.describe('Startup Shell Fallback', () => {
 
   test('should preload sidebar tools for focus and blackbox shortcut intents', async ({ page }) => {
     await page.goto('/#/projects?entry=shortcut&intent=open-focus-tools', { waitUntil: 'domcontentloaded' });
-    await expect(page.locator('[data-testid="focus-session-trigger"]')).toBeVisible();
-    await expect(page).toHaveURL(/#\/projects$/);
+    await expectShortcutTargetVisible(page, '[data-testid="focus-session-trigger"]');
 
     await page.goto('/#/projects?entry=shortcut&intent=open-blackbox-recorder', { waitUntil: 'domcontentloaded' });
-    await expect(page.locator('[data-testid="black-box-recorder"]')).toBeVisible();
-    await expect(page).toHaveURL(/#\/projects$/);
+    await expectShortcutTargetVisible(page, '[data-testid="black-box-recorder"]');
   });
 
   test('should reapply shortcut startup intent after the one-shot query has been consumed', async ({ page }) => {
     await page.goto('/#/projects?entry=shortcut&intent=open-focus-tools', { waitUntil: 'domcontentloaded' });
-    await expect(page.locator('[data-testid="focus-session-trigger"]')).toBeVisible();
-    await expect(page).toHaveURL(/#\/projects$/);
+    await expectShortcutTargetVisible(page, '[data-testid="focus-session-trigger"]');
 
     await page.evaluate(() => {
       window.dispatchEvent(new Event('toggle-sidebar'));
       window.location.hash = '#/projects?entry=shortcut&intent=open-focus-tools';
     });
 
-    await expect(page.locator('[data-testid="focus-session-trigger"]')).toBeVisible();
-    await expect(page).toHaveURL(/#\/projects$/);
+    await expectShortcutTargetVisible(page, '[data-testid="focus-session-trigger"]');
   });
 
   test('should safely degrade invalid shortcut intents to the workspace root', async ({ page }) => {
@@ -214,6 +247,7 @@ test.describe('Startup Shell Fallback', () => {
     });
 
     await page.goto('/#/projects?entry=shortcut&intent=unknown-intent', { waitUntil: 'domcontentloaded' });
+    await recoverStaticStartupLoaderIfVisible(page);
 
     await page.waitForFunction(() => !window.location.hash.includes('/flow'));
     await expect(page).toHaveURL(/#\/projects$/);

@@ -19,16 +19,25 @@ import { Injector, runInInjectionContext } from '@angular/core';
 import { 
   AttachmentExportService, 
   ATTACHMENT_EXPORT_CONFIG,
-  AttachmentManifest 
+  AttachmentManifest,
+  appendAttachmentManifestReference,
+  buildSkippedAttachmentDownloadResult,
+  calculateAttachmentTotalSize,
+  summarizeAttachmentDownloadResults,
 } from './attachment-export.service';
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
 import { Project, Task, Attachment } from '../models';
+import { VirusScanService } from './virus-scan.service';
+import { SCAN_STATUS } from '../config/virus-scan.config';
 
 describe('AttachmentExportService', () => {
   let service: AttachmentExportService;
   let fetchSpy: ReturnType<typeof vi.spyOn>;
   let injector: Injector;
+  let mockVirusScan: {
+    checkBeforeDownload: ReturnType<typeof vi.fn>;
+  };
   
   const mockLogger = {
     category: () => ({
@@ -50,11 +59,15 @@ describe('AttachmentExportService', () => {
     // 启用 fake timers 避免重试延迟等待
     vi.useFakeTimers();
     vi.clearAllMocks();
+    mockVirusScan = {
+      checkBeforeDownload: vi.fn().mockResolvedValue({ success: true }),
+    };
     
     injector = Injector.create({
       providers: [
         { provide: LoggerService, useValue: mockLogger },
         { provide: ToastService, useValue: mockToast },
+        { provide: VirusScanService, useValue: mockVirusScan },
       ],
     });
     
@@ -117,13 +130,19 @@ describe('AttachmentExportService', () => {
   
   function createAttachment(overrides?: Partial<Attachment>): Attachment {
     return {
-      id: overrides?.id || `att-${Math.random().toString(36).slice(2)}`,
-      type: overrides?.type || 'file',
-      name: overrides?.name || 'test-file.pdf',
-      size: overrides?.size || 1024,
-      mimeType: overrides?.mimeType || 'application/pdf',
-      url: overrides?.url || 'https://example.com/file.pdf',
+      id: `att-${Math.random().toString(36).slice(2)}`,
+      type: 'file',
+      name: 'test-file.pdf',
+      size: 1024,
+      mimeType: 'application/pdf',
+      url: 'https://example.com/file.pdf',
       createdAt: new Date().toISOString(),
+      scanMetadata: {
+        fileId: 'scan-file-1',
+        fileHash: 'hash-1',
+        scanStatus: SCAN_STATUS.CLEAN,
+      },
+      ...overrides,
     };
   }
   
@@ -204,6 +223,32 @@ describe('AttachmentExportService', () => {
       expect(att?.taskIds).toContain('task-1');
       expect(att?.taskIds).toContain('task-2');
     });
+
+    it('共享附件的 taskIds 与 projectIds 应按引用位置保持配对', async () => {
+      const sharedAtt = createAttachment({ id: 'shared-att' });
+      const projectA = createProject({
+        id: 'project-a',
+        tasks: [
+          { id: 'task-a1', attachments: [sharedAtt] },
+          { id: 'task-a2', attachments: [sharedAtt] },
+        ],
+      });
+      const projectB = createProject({
+        id: 'project-b',
+        tasks: [
+          { id: 'task-b1', attachments: [sharedAtt] },
+        ],
+      });
+
+      mockSuccessfulFetch();
+
+      const result = await service.exportAttachments([projectA, projectB]);
+
+      const att = result.manifest?.attachments[0];
+      expect(result.success).toBe(true);
+      expect(att?.taskIds).toEqual(['task-a1', 'task-a2', 'task-b1']);
+      expect(att?.projectIds).toEqual(['project-a', 'project-a', 'project-b']);
+    });
     
     it('应跳过已删除任务的附件', async () => {
       const att = createAttachment();
@@ -217,6 +262,21 @@ describe('AttachmentExportService', () => {
       const result = await service.exportAttachments([project]);
       
       expect(result.manifest?.totalAttachments).toBe(0);
+    });
+
+    it('应跳过已软删除附件，避免导出墓碑数据', async () => {
+      const att = createAttachment({ deletedAt: '2026-06-01T00:00:00.000Z' });
+      const project = createProject({
+        tasks: [
+          { attachments: [att] },
+        ],
+      });
+
+      const result = await service.exportAttachments([project]);
+
+      expect(result.success).toBe(true);
+      expect(result.manifest?.totalAttachments).toBe(0);
+      expect(fetchSpy).not.toHaveBeenCalled();
     });
     
     it('无附件时应正常完成', async () => {
@@ -242,10 +302,32 @@ describe('AttachmentExportService', () => {
       
       expect(result.success).toBe(true);
       expect(result.manifest?.successCount).toBe(1);
+      expect(mockVirusScan.checkBeforeDownload).toHaveBeenCalledWith('scan-file-1', 'hash-1');
       expect(fetchSpy).toHaveBeenCalledWith(
         'https://example.com/file.pdf',
         expect.any(Object)
       );
+    });
+
+    it('安全检查失败时应跳过导出下载，且不 fetch 原始 URL', async () => {
+      const att = createAttachment();
+      const project = createProject({ tasks: [{ attachments: [att] }] });
+      mockVirusScan.checkBeforeDownload.mockResolvedValue({
+        success: false,
+        error: '检测到威胁',
+      });
+
+      const result = await service.exportAttachments([project]);
+
+      expect(result.success).toBe(false);
+      expect(result.blob).toBeUndefined();
+      expect(result.filename).toBeUndefined();
+      expect(result.manifest?.failedCount).toBe(0);
+      expect(result.manifest?.skippedCount).toBe(1);
+      expect(result.manifest?.attachments[0].downloadStatus).toBe('skipped');
+      expect(result.manifest?.attachments[0].failureReason).toContain('安全检查失败');
+      expect(service.progress().stage).toBe('failed');
+      expect(fetchSpy).not.toHaveBeenCalled();
     });
     
     it('应处理下载失败', async () => {
@@ -259,8 +341,12 @@ describe('AttachmentExportService', () => {
       await vi.runAllTimersAsync();
       const result = await resultPromise;
       
-      expect(result.success).toBe(true); // 部分失败不影响整体
+      expect(result.success).toBe(false);
+      expect(result.blob).toBeUndefined();
+      expect(result.filename).toBeUndefined();
       expect(result.manifest?.failedCount).toBe(1);
+      expect(result.manifest?.skippedCount).toBe(0);
+      expect(service.progress().stage).toBe('failed');
     });
     
     it('应跳过没有 URL 的附件', async () => {
@@ -284,9 +370,13 @@ describe('AttachmentExportService', () => {
       // 不需要 mock fetch，因为没有 URL 就不会调用 fetch
       
       const result = await service.exportAttachments([project]);
-      
-      // 没有 URL 的附件状态应该是 skipped 或 failed
-      expect(result.manifest?.attachments[0].downloadStatus).toMatch(/skipped|failed/);
+
+      expect(result.success).toBe(false);
+      expect(result.blob).toBeUndefined();
+      expect(result.filename).toBeUndefined();
+      expect(result.manifest?.failedCount).toBe(0);
+      expect(result.manifest?.skippedCount).toBe(1);
+      expect(result.manifest?.attachments[0].downloadStatus).toBe('skipped');
       expect(result.manifest?.attachments[0].failureReason).toContain('URL');
     });
     
@@ -297,7 +387,12 @@ describe('AttachmentExportService', () => {
       const project = createProject({ tasks: [{ attachments: [att] }] });
       
       const result = await service.exportAttachments([project]);
-      
+
+      expect(result.success).toBe(false);
+      expect(result.blob).toBeUndefined();
+      expect(result.filename).toBeUndefined();
+      expect(result.manifest?.failedCount).toBe(0);
+      expect(result.manifest?.skippedCount).toBe(1);
       expect(result.manifest?.attachments[0].downloadStatus).toBe('skipped');
       expect(result.manifest?.attachments[0].failureReason).toContain('过大');
     });
@@ -494,6 +589,24 @@ describe('AttachmentExportService', () => {
       mockCreateObjectURL.mockRestore();
       mockRevokeObjectURL.mockRestore();
     });
+
+    it('附件字节跳过时不应创建下载 URL 或点击下载', async () => {
+      const att = createAttachment({ url: '' });
+      const project = createProject({ tasks: [{ attachments: [att] }] });
+      const mockCreateElement = vi.spyOn(document, 'createElement');
+      const mockCreateObjectURL = vi.spyOn(URL, 'createObjectURL');
+
+      const result = await service.exportAndDownload([project]);
+
+      expect(result.success).toBe(false);
+      expect(result.blob).toBeUndefined();
+      expect(result.filename).toBeUndefined();
+      expect(mockCreateElement).not.toHaveBeenCalled();
+      expect(mockCreateObjectURL).not.toHaveBeenCalled();
+
+      mockCreateElement.mockRestore();
+      mockCreateObjectURL.mockRestore();
+    });
   });
   
   // ==================== Manifest 测试 ====================
@@ -523,9 +636,11 @@ describe('AttachmentExportService', () => {
       const result = await service.exportAttachments([project]);
       
       expect(result.manifest?.totalAttachments).toBe(2);
-      // att1 成功，att2 失败（没有URL）
+      expect(result.success).toBe(false);
+      expect(result.blob).toBeUndefined();
       expect(result.manifest?.successCount).toBe(1);
-      expect(result.manifest?.failedCount).toBe(1);
+      expect(result.manifest?.failedCount).toBe(0);
+      expect(result.manifest?.skippedCount).toBe(1);
     });
     
     it('应包含 bundlePath', async () => {
@@ -539,5 +654,66 @@ describe('AttachmentExportService', () => {
       expect(result.manifest?.attachments[0].bundlePath).toMatch(/^attachments\//);
       expect(result.manifest?.attachments[0].bundlePath).toContain('test-att');
     });
+  });
+});
+
+describe('attachment export helpers', () => {
+  it('adds paired task/project references without duplicating the same link', () => {
+    const manifest: AttachmentManifest = {
+      id: 'att-1',
+      taskIds: ['task-1'],
+      projectIds: ['proj-1'],
+      name: 'design.pdf',
+      mimeType: 'application/pdf',
+      size: 1024,
+      bundlePath: 'attachments/att-1.pdf',
+      downloadStatus: 'pending',
+    };
+
+    appendAttachmentManifestReference(manifest, 'task-1', 'proj-1');
+    appendAttachmentManifestReference(manifest, 'task-2', 'proj-1');
+
+    expect(manifest.taskIds).toEqual(['task-1', 'task-2']);
+    expect(manifest.projectIds).toEqual(['proj-1', 'proj-1']);
+  });
+
+  it('summarizes successful, failed, and skipped download results in one pass', () => {
+    const attachment: AttachmentManifest = {
+      id: 'att-1',
+      taskIds: ['task-1'],
+      projectIds: ['proj-1'],
+      name: 'design.pdf',
+      mimeType: 'application/pdf',
+      size: 1024,
+      bundlePath: 'attachments/att-1.pdf',
+      downloadStatus: 'pending',
+    };
+    const failedAttachment: AttachmentManifest = {
+      ...attachment,
+      id: 'att-2',
+      downloadStatus: 'failed',
+      failureReason: 'HTTP 500',
+    };
+    const skippedAttachment: AttachmentManifest = {
+      ...attachment,
+      id: 'att-3',
+    };
+
+    const summary = summarizeAttachmentDownloadResults([
+      { attachment, success: true, data: new Blob(['ok']) },
+      { attachment: failedAttachment, success: false, error: 'HTTP 500' },
+      buildSkippedAttachmentDownloadResult(skippedAttachment, 'URL 不存在'),
+    ]);
+
+    expect(summary).toEqual({ successCount: 1, failedCount: 1, skippedCount: 1 });
+    expect(skippedAttachment.downloadStatus).toBe('skipped');
+    expect(skippedAttachment.failureReason).toBe('URL 不存在');
+  });
+
+  it('calculates manifest total size from collected attachments', () => {
+    expect(calculateAttachmentTotalSize([
+      { size: 10 } as AttachmentManifest,
+      { size: 15 } as AttachmentManifest,
+    ])).toBe(25);
   });
 });

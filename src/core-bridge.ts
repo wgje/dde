@@ -24,8 +24,44 @@ export type { RetryableEntityType } from './app/core/services/sync/retry-queue.s
 // SessionManagerService — 被 app-lifecycle-orchestrator, event-driven-sync-pulse 使用
 export { SessionManagerService } from './app/core/services/sync/session-manager.service';
 
-// ProjectDataService — 被 parking 轻量停泊任务加载使用
+// ProjectDataService — 被 parking 轻量停泊任务加载、delta-sync-coordinator 使用
 export { ProjectDataService } from './app/core/services/sync/project-data.service';
+export type {
+  ParkedTaskCacheSaveOptions,
+  ParkedTaskDeltaResult,
+  ParkedTaskRemoval,
+} from './app/core/services/sync/project-parked-tasks-data.service';
+
+// ProjectSyncCursorService — 被 delta-sync-coordinator 使用（checkForDrift + commitProjectSyncCursor）
+export { ProjectSyncCursorService } from './app/core/services/sync/project-sync-cursor.service';
+
+// TaskSyncOperationsService — 被 conflict-resolution 使用（getTombstoneIdsWithStatus）
+export { TaskSyncOperationsService } from './app/core/services/sync/task-sync-operations.service';
+
+// ConnectionSyncOperationsService — 被 action-queue-processors 使用（连接 Outbox 回放）
+export { ConnectionSyncOperationsService } from './app/core/services/sync/connection-sync-operations.service';
+
+// ProjectSaveFlightCoordinatorService — 被 conflict-resolution 使用（save 单飞项目保存）
+export { ProjectSaveFlightCoordinatorService } from './app/core/services/sync/project-save-flight-coordinator.service';
+export type { ProjectSaveResult } from './app/core/services/sync/project-save-flight-coordinator.service';
+
+// RealtimePollingService — 被 app-lifecycle-orchestrator, action-queue-processors 使用
+export { RealtimePollingService } from './app/core/services/sync/realtime-polling.service';
+
+// SyncResumeCoordinatorService — 被 app-lifecycle-orchestrator 使用（recoverAfterResume 恢复自愈）
+export { SyncResumeCoordinatorService } from './app/core/services/sync/sync-resume-coordinator.service';
+
+// RetryQueueEnqueueService — 被 action-queue-processors 使用（hasPendingRetryRecovery + markSyncRecoveredIfIdle）
+export { RetryQueueEnqueueService } from './app/core/services/sync/retry-queue-enqueue.service';
+
+// ProjectDeleteCoordinatorService — 被 action-queue-processors 使用（deleteProjectFromCloud）
+export { ProjectDeleteCoordinatorService } from './app/core/services/sync/project-delete-coordinator.service';
+
+// UserPreferencesSyncService — 被 action-queue-processors 使用（saveUserPreferences）
+export { UserPreferencesSyncService } from './app/core/services/sync/user-preferences-sync.service';
+
+// FocusConsoleSyncService — 被 action-queue-processors 使用（saveFocusSession + upsertRoutineTask + incrementRoutineCompletion）
+export { FocusConsoleSyncService } from './app/core/services/sync/focus-console-sync.service';
 
 // TombstoneService — 被 delta-sync-coordinator 使用
 export { TombstoneService } from './app/core/services/sync/tombstone.service';

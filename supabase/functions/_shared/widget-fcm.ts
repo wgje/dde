@@ -82,9 +82,10 @@ function pemToPkcs8Bytes(pem: string): Uint8Array {
 
 async function importServiceAccountPrivateKey(privateKey: string): Promise<CryptoKey> {
   const keyBytes = pemToPkcs8Bytes(privateKey);
+  const keyBuffer = keyBytes.buffer.slice(keyBytes.byteOffset, keyBytes.byteOffset + keyBytes.byteLength) as ArrayBuffer;
   return await crypto.subtle.importKey(
     'pkcs8',
-    keyBytes,
+    keyBuffer,
     { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
     false,
     ['sign'],

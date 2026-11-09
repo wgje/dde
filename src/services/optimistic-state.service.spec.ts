@@ -23,6 +23,7 @@ import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
 import { Project } from '../models';
 import { OPTIMISTIC_CONFIG } from '../config';
+import { SessionRuntimeResetRegistry } from './session-runtime-reset.service';
 
 // ========== 模拟依赖服务 ==========
 
@@ -80,6 +81,7 @@ let mockActiveProjectIdSignal = signal<string | null>('proj-1');
 const mockProjectStateService = {
   projects: () => mockProjectsSignal(),
   activeProjectId: () => mockActiveProjectIdSignal(),
+  getProjectsWithCurrentData: vi.fn(() => mockProjectsSignal()),
   setProjects: vi.fn((projects: Project[]) => {
     mockProjectsSignal.set(projects);
   }),
@@ -114,6 +116,7 @@ const mockLoggerService = {
 describe('OptimisticStateService', () => {
   let service: OptimisticStateService;
   let injector: Injector;
+  let sessionRuntimeReset: SessionRuntimeResetRegistry;
   let consoleWarnSpy: ReturnType<typeof vi.spyOn> | undefined;
   let consoleErrorSpy: ReturnType<typeof vi.spyOn> | undefined;
 
@@ -126,16 +129,19 @@ describe('OptimisticStateService', () => {
 
     mockProjectsSignal = signal<Project[]>(createMockProjects());
     mockActiveProjectIdSignal = signal<string | null>('proj-1');
+    mockProjectStateService.getProjectsWithCurrentData = vi.fn(() => mockProjectsSignal());
 
     injector = Injector.create({
       providers: [
         { provide: ProjectStateService, useValue: mockProjectStateService },
         { provide: ToastService, useValue: mockToastService },
         { provide: LoggerService, useValue: mockLoggerService },
+        SessionRuntimeResetRegistry,
       ],
     });
 
     service = runInInjectionContext(injector, () => new OptimisticStateService());
+    sessionRuntimeReset = runInInjectionContext(injector, () => injector.get(SessionRuntimeResetRegistry));
   });
 
   afterEach(() => {
@@ -172,6 +178,15 @@ describe('OptimisticStateService', () => {
         
         service.createSnapshot('task-create');
         expect(service.activeSnapshotCount()).toBe(2);
+      });
+
+      it('应该通过只读接口返回快照创建时间，并在快照消失后返回 null', () => {
+        const snapshot = service.createSnapshot('task-update');
+
+        expect(service.getSnapshotCreatedAt(snapshot.id)).toBe(snapshot.createdAt);
+
+        service.commitSnapshot(snapshot.id);
+        expect(service.getSnapshotCreatedAt(snapshot.id)).toBeNull();
       });
     });
 
@@ -219,6 +234,32 @@ describe('OptimisticStateService', () => {
         );
       });
 
+      it('回滚项目更新时应该恢复完整项目数据而不是元数据壳', () => {
+        const fullProjects: Project[] = createMockProjects().map(project => ({
+          ...project,
+          tasks: project.tasks.map(task => ({ ...task })),
+          connections: project.connections.map(connection => ({ ...connection })),
+        }));
+        const projectShells: Project[] = fullProjects.map(project => ({
+          ...project,
+          tasks: [],
+          connections: [],
+        }));
+
+        mockProjectsSignal.set(projectShells);
+        mockProjectStateService.getProjectsWithCurrentData = vi.fn(() => fullProjects);
+
+        const snapshot = service.createSnapshot('project-update', 'rename');
+        const rolledBack = service.rollbackSnapshot(snapshot.id, false);
+
+        expect(rolledBack).toBe(true);
+        expect(mockProjectStateService.setProjects).toHaveBeenCalledWith(fullProjects);
+
+        const rolledBackProjects = mockProjectStateService.setProjects.mock.calls.at(-1)?.[0] as Project[];
+        expect(rolledBackProjects[0].tasks).toEqual(fullProjects[0].tasks);
+        expect(rolledBackProjects[0].connections).toEqual(fullProjects[0].connections);
+      });
+
       it('showToast=false 时不应显示提示', () => {
         const snapshot = service.createSnapshot('task-update', '更新任务');
         
@@ -231,9 +272,49 @@ describe('OptimisticStateService', () => {
         const result = service.rollbackSnapshot('non-existent-id');
         expect(result).toBe(false);
       });
+
+      it('会话重置后旧快照不得回滚新会话状态', () => {
+        const snapshot = service.createSnapshot('project-delete', '删除项目');
+        mockProjectStateService.updateProjects(projects => projects.map(project => ({
+          ...project,
+          name: 'new-session-project',
+        })));
+
+        sessionRuntimeReset.resetAll('owner-change');
+        const rolledBack = service.rollbackSnapshot(snapshot.id);
+
+        expect(rolledBack).toBe(false);
+        expect(service.activeSnapshotCount()).toBe(0);
+        expect(mockProjectStateService.setProjects).not.toHaveBeenCalled();
+        expect(mockToastService.error).not.toHaveBeenCalled();
+      });
     });
 
     describe('restoreTasksFromSnapshot（窄化回滚）', () => {
+      it('可以读取快照中的任务副本且不暴露可变引用', () => {
+        mockProjectsSignal.update(projects => projects.map(project => ({
+          ...project,
+          tasks: project.tasks.map(task => task.id === 'task-1'
+            ? { ...task, updatedAt: '2026-04-01T00:00:00.000Z' }
+            : task),
+        })));
+        const snapshot = service.createSnapshot('task-delete', '删除任务');
+
+        mockProjectsSignal.update(projects => projects.map(project => ({
+          ...project,
+          tasks: project.tasks.map(task => task.id === 'task-1'
+            ? { ...task, title: '乐观删除后的标题', updatedAt: '2026-04-01T00:00:03.000Z' }
+            : task),
+        })));
+
+        const snapshotTask = service.getTaskFromSnapshot(snapshot.id, 'task-1');
+        expect(snapshotTask?.updatedAt).toBe('2026-04-01T00:00:00.000Z');
+        expect(snapshotTask?.title).toBe('任务1');
+
+        snapshotTask!.title = '外部不应改到快照';
+        expect(service.getTaskFromSnapshot(snapshot.id, 'task-1')?.title).toBe('任务1');
+      });
+
       it('只把指定任务恢复到快照状态，其它任务保持现状', () => {
         // 模拟"删除前快照"：task-1 没有 deletedAt，task-2 已经被早期删除了（带 deletedAt）
         mockProjectsSignal.update(projects => projects.map(p => ({
@@ -435,6 +516,27 @@ describe('OptimisticStateService', () => {
         service.reset();
 
         expect(service.activeSnapshotCount()).toBe(0);
+      });
+
+      it('cleanup timer id 为 0 时 reset 也应清理旧 timer', () => {
+        const clearIntervalSpy = vi.spyOn(globalThis, 'clearInterval')
+          .mockImplementation(() => undefined);
+        (service as any).cleanupTimer = 0;
+
+        service.reset();
+
+        expect(clearIntervalSpy).toHaveBeenCalledWith(0);
+      });
+    });
+
+    describe('startCleanupTimer', () => {
+      it('cleanup timer id 为 0 时不应重复启动新的清理 timer', () => {
+        const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
+        (service as any).cleanupTimer = 0;
+
+        (service as any).startCleanupTimer();
+
+        expect(setIntervalSpy).not.toHaveBeenCalled();
       });
     });
   });

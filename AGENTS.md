@@ -1,129 +1,81 @@
-# NanoFlow - Global Agent Instructions
+# NanoFlow Agent Instructions
 
-> 最后更新：2026-04-08
-> 说明：本文件按 VS Code 官方建议组织为「仓库上下文 + 编码标准 + 测试与验证流程」执行手册。
+> 常驻项目合同；CodeGraph 机器合同见 `docs/codegraph-nanoflow-agent-contract.md`，运维说明见 `docs/codegraph-nanoflow-adaptation.md`。
 
-## 1. 目标与适用范围
+## Repository context gate
 
-- 适用对象：VS Code Copilot Coding Agent 及同类代码代理。
-- 目标：在保持 NanoFlow 既有架构理念下，完成可交付、可验证、可回滚的代码改动。
-- 原则：优先最小改动；不破坏同步一致性、离线可靠性、移动端可用性。
+- 代码、配置、调试、审查或实现任务在简短进度说明后，首个仓库事实动作必须使用 CodeGraph MCP。本仓库广泛上下文优先 `nanoflow_context_pack`，精确 NanoFlow 语义使用 `nanoflow_overlay_query`。
+- `functions.exec` 返回 `Script running...` 仍在运行；下一步只能对同一 `cell_id` 等待明确终态。仅明确 timeout/transport/failure/unavailable 才触发 fallback，运行中禁止并行 fallback 或绕过检查。
+- MCP 明确失败后下一事实动作必须是 `npm run codegraph:adapter:context -- --query "<query>" --json`；精确 overlay 可用 `npm run codegraph:overlay:query -- --query "<symbol-or-relation>" --skip-refresh`。两者失败后原生 `@colbymchenry/codegraph@1.5.0` 仅作 locator。
+- MCP 与 adapter 都失败前禁止普通搜索、文件、git、Context7 或 web。建立 CodeGraph 事实后，外部框架/API/安全/数据库/同步/离线问题再用 Context7并精读定位文件。
+- 项目 MCP 配置是 `D:\Code\dde\.codex\config.toml`；用户配置仅 fallback，`.vscode/mcp.json` 无效。wrapper/config 改后须 fresh adapter/wrapper 验证并重启 session。
+- 写入前检查 bytes、`git status`、lease/barrier、CodeGraph freshness；保留并发改动，不越权 stage/commit/push/release/cleanup。
 
-## 2. 指令层级（仓库内）
+### Worker evidence contract
 
-- `AGENTS.md`：Agent 执行手册、Hard Rules 权威来源与验收门禁。
-- `.github/copilot-instructions.md`：全局默认编码规则与 quick reference。
-- `.github/CUSTOMIZATION_MAP.md`：聊天定制文件索引；维护 instructions / skills / agents 前先读。
-- `.github/instructions/*.instructions.md`：按文件类型补充。
-- 冲突处理：Hard Rules 以本文件 §5 为准；其余定制文件优先链接已有说明，不并行复制完整规则。
+- Worker 必须分开报告请求设置与当前 turn 的有效运行设置。只有 `thread_settings_applied`、`turn_context` 或当前 App Server 响应等权威元数据存在时，才允许报告 `effective_model` 与 `effective_reasoning_effort`；不得从通用 Codex 系统文本、模型家族名、UI 标签或 model-switch warning 推断。
+- `xhigh` 与 `max` 是不同值，禁止互相翻译或猜测。当前 turn 未暴露字段时必须报告 `UNVERIFIED` 及证据来源，禁止用泛称 `GPT-5` 代替实际模型。
+- CodeGraph-first 必须直接调用已配置的 `nanoflow_context_pack`、`codegraph_explore` 或 `nanoflow_overlay_query`。`list_mcp_resources` 与 `list_mcp_resource_templates` 不是 CodeGraph 可用性探针；`resources=[]` 或 `resourceTemplates=[]` 只表示没有静态资源，不构成 MCP 失败。
+- 只有符合 schema 的直接 CodeGraph 工具调用明确返回 MCP/tool/transport failure 时，才允许下一仓库事实动作使用规定的 adapter fallback。回执必须标明 `DIRECT_MCP` 或 `ADAPTER_FALLBACK`、精确工具/命令、status 和 failure class。
 
-## 3. 技术栈基线
+- Context7 为 deferred MCP：先探测精确 `mcp__context7__*` 并遵循 schema；参数无效不是 MCP failure。外部指南先 `resolve_library_id` 再 `query_docs`，各最多 3 次；纯本地原子报 `CONTEXT7: N/A`。
 
-| 技术 | 版本 | 用途 |
-|------|------|------|
-| Angular | 19.2.x | Signals + 独立组件 + OnPush |
-| Supabase | 2.84+ | Auth + PostgreSQL + Storage + Edge Functions |
-| GoJS | 3.1.x | Flow 图渲染 |
-| Groq | whisper-large-v3 | 语音转写（经 Edge Function 代理） |
-| Sentry | 10.32+ | 错误监控 + 会话回放 |
-| Vitest | 4.0.x | 单元/服务/组件测试 |
-| Playwright | 1.48+ | E2E 测试 |
-| TypeScript | 5.8.x | 严格类型 |
+## Product priorities
 
-## 4. 核心哲学（必须保留）
-
-- 不要造轮子：优先复用现有服务、配置和工具。
-- 同步：Supabase + 增量拉取 + LWW（Last-Write-Wins）。
-- ID：实体 ID 由客户端 `crypto.randomUUID()` 生成。
-- 离线：PWA + IndexedDB（idb-keyval）先写后同步。
-- 监控：Sentry 按需懒加载。
-- 状态：Angular Signals 为主（响应式状态）；允许局部使用 RxJS Observable（事件流、HTTP），但禁止引入 NgRx/RxJS Store 类全局状态库。
+- 优先最小、可回滚改动；复用现有服务、配置和工具，不引入平行抽象。
+- 启动与移动端路径优先保证离线 Text 可立即编辑、Flow 秒开；网络、同步、诊断和 GoJS 不得阻塞编辑路径。
+- 数据安全高于功能速度：必须保持数据可导出、状态可恢复、同步可重放、写入可解释。存在可能丢功能的歧义时先询问用户。
 
 ## 5. Hard Rules（不可违反）
 
 ### 5.1 ID 策略
+
 - 所有实体 ID 必须客户端生成：`crypto.randomUUID()`。
 - 禁止数据库自增 ID、临时 ID、同步时 ID 映射转换。
 
 ### 5.2 Offline-first 数据流
+
 - 读路径：`IndexedDB -> 后台增量拉取(updated_at > last_sync_time)`。
 - 写路径：本地写入 + UI 即时更新 -> 3s 防抖推送 -> 失败进入 RetryQueue。
 - 冲突策略：LWW。
+- 同步查询 tasks 选择字段必须包含 `content`；`FIELD_SELECT_CONFIG.*_FIELDS` 中面向 tasks 的字段列表禁止为了流量优化删除 `content`。
 - 体验目标：点击立即生效，无阻塞 loading；断网可写，联网自动补同步。
 
 ### 5.3 GoJS（移动端）
+
 - 手机默认 Text 视图。
 - Flow 图必须按需 `@defer` 懒加载。
 - 禁止 `visibility:hidden` 持有图实例；必须销毁/重建。
 
 ### 5.4 树遍历
+
 - 仅允许迭代算法。
 - 深度上限：`FLOATING_TREE_CONFIG.MAX_SUBTREE_DEPTH = 100`。
 
 ### 5.5 依赖注入
+
 - 服务层直接注入具体 Store（`TaskStore` / `ProjectStore` / `ConnectionStore`）或具体子服务。
-- 禁止引入新的「门面 Store」聚合类（避免循环依赖与职责膨胀）。
-- 历史注释中提到的 `StoreService` 已拆分移除。2026-04-16 T2-1 删除了 `src/services/stores.ts` 过渡期重导出桥，`services/` 层改为直接从 `app/core/state/stores` 导入三个 Store 类；`eslint.config.js` 对 `services/ → app/core/services|shell` 反向引用升级为 `error` 级。
+- 禁止引入新的门面 Store 聚合类。
+- 历史 `StoreService` 已拆分移除；`services/` 直接从 `app/core/state/stores` 导入 Store。禁止恢复已删除的 `src/services/stores.ts` 过渡桥或反向引用 `app/core/services|shell`。
 
-## 6. 核心架构速览
+### 5.6 Personal Data Safety
 
-### 6.1 状态存储（Signals）
-`src/app/core/state/stores.ts`
-拆分为 3 个 `@Injectable` 单例：
-- **`TaskStore`**：`tasksMap`、`tasksByProject`（private）、`taskProjectMap`（private）、`parkedTaskIds`、`parkedTasks`
-- **`ProjectStore`**：`projectsMap`、`activeProjectId`、`activeProject`
-- **`ConnectionStore`**：`connectionsMap`、`connectionsByProject`（private）
-
-通过 `app/core/state/stores` 直接导入供服务层使用（过渡期桥接 `src/services/stores.ts` 已于 T2-1 删除）。
-
-要求：结构扁平、避免深层嵌套，统一使用 `signal()/computed()/effect()`。
-
-### 6.2 同步主干
-- `SimpleSyncService`：同步核心（LWW + RetryQueue + 增量拉取）。
-- 子服务位于 `src/app/core/services/sync/`：`batch-sync`、`retry-queue`、`realtime-polling`、`tombstone` 等。
-
-### 6.3 任务操作主干
-- `TaskOperationAdapterService`：任务操作与撤销协调。
-- 任务核心服务位于 `src/services/`：`task-operation`、`task-repository`、`task-creation`、`task-move` 等。
-
-### 6.4 GoJS 事件解耦
-`FlowTemplateService -> flow-template-events.ts -> FlowEventService`
-
-## 7. 数据模型约束（实现时必须检查）
-
-### 7.1 Task
-- `id`：客户端 UUID。
-- `updatedAt`：LWW 冲突判定关键字段。
-- `content`：同步查询不可漏字段。
-- `deletedAt`：软删除标记。
-- `parking_meta`（JSONB，可空）：停泊坞元数据。结构 `{ state, parkedAt, lastVisitedAt, contextSnapshot, reminder, pinned }`，`NULL` 表示非停泊任务。
-- `expected_minutes`（INTEGER，可空）：预估耗时（规划字段）。
-- `cognitive_load`（TEXT，可空，枚举 `'high'|'low'`）：认知负荷（规划字段）。
-- `wait_minutes`（INTEGER，可空）：等待时间（规划字段）。
-
-### 7.2 Connection / Attachment / Project
-- 均使用字符串 ID。
-- 软删除字段统一 `deletedAt/deleted_at` 语义。
-- `Project.updatedAt` 参与同步。
-
-### 7.3 Focus 模式
-- `BlackBoxEntry.updatedAt`：LWW 关键字段。
-- 每日语音额度：`FOCUS_CONFIG.SPEECH_TO_TEXT.DAILY_QUOTA = 50`。
-- 打盹上限：`FOCUS_CONFIG.GATE.MAX_SNOOZE_PER_DAY = 3`。
-
-## 8. 错误处理与可观测性
-
-- 统一 Result Pattern：
-  - `success(data)`
-  - `failure(ErrorCodes.XXX, message)`
-- Supabase 错误必须通过 `supabaseErrorToError()` 转换。
-- GlobalErrorHandler 分级：`SILENT` / `NOTIFY` / `RECOVERABLE` / `FATAL`。
-- 关键错误上报 Sentry；Sentry 采用懒加载。
+- NanoFlow must preserve four guarantees:
+  - Exportable: current local data, sync cursor, pending queue, and relevant metadata can be exported at any time.
+  - Restorable: a valid export can restore the local working state without ID remapping.
+  - Replayable: pending and recent sync actions can be replayed or inspected deterministically.
+  - Explainable: the app can explain the latest write, including entity, operation, local timestamp, updatedAt baseline, queue/RPC result, conflict/LWW decision, and lastSyncTime effect.
+- Do not change sync, migration, storage, or write paths unless tests preserve or improve these guarantees.
+- Launch snapshots and project-list rows are metadata-only shells: use `ProjectStateService.setProjectsMetadataOnly()` and never full `setProjects()` before validated entity state exists.
+- Before metadata sync writes an offline snapshot, entity arrays must be authoritative from hydration/local mutation or a validated owner-scoped durable snapshot with entity evidence. An empty snapshot does not prove remote emptiness; otherwise skip the write and do not advance the manifest watermark.
+- Owner changes and forced teardown must clear `ProjectStore`, `TaskStore`, and `ConnectionStore` together through `ProjectStateService.clearData()`; `setProjects([])` is not an owner-isolation primitive.
+- Startup snapshots fail closed before normalization: malformed structures, duplicate IDs, invalid references, or a task without string `content` rejects the whole candidate while preserving original bytes for export and diagnosis.
+- `ProjectStore.tasks/connections` are possibly stale metadata shells. Rebuild entity arrays through `ProjectStateService.getProjectWithCurrentData()` / `getProjectsWithCurrentData()` or an authoritative projection; never write shell arrays back as replacement data.
 
 ## 9. 关键配置基线
 
 | 配置 | 值 |
-|------|-----|
+|---|---|
 | `SYNC_CONFIG.DEBOUNCE_DELAY` | `3000ms` |
 | `SYNC_CONFIG.CLOUD_LOAD_TIMEOUT` | `30000ms` |
 | `SYNC_CONFIG.POLLING_INTERVAL` | `600000ms` |
@@ -139,152 +91,9 @@
 | `FOCUS_CONFIG.GATE.MAX_SNOOZE_PER_DAY` | `3` |
 | `FOCUS_CONFIG.SPEECH_TO_TEXT.DAILY_QUOTA` | `50` |
 
-## 10. Agent 工具与生命周期规则（必须遵守）
+## Implementation and verification
 
-### 10.1 Memory 路径 ≠ 文件系统路径
-- `/memories/repo/...`、`/memories/session/...` 是 **虚拟路径**，只能通过 `memory` 工具访问。
-- **禁止** 用 `read_file` 读取 `/memories/` 路径或 `d:\Code\dde\memories\repo\...` 等物理路径。
-- 正确用法：`memory` 工具的 `view` 命令 + 虚拟路径 `/memories/repo/xxx.md`。
-
-### 10.2 文件存在性验证
-- 调用 `read_file` 前，若文件由本次会话的终端命令或 subagent 生成，必须先用 `list_dir` 或 `file_search` 确认文件已存在。
-- 对 `tmp/` 等临时目录的文件尤其如此——不要假设上游步骤一定成功。
-
-### 10.3 task_complete 生命周期
-- 若当前宿主提供 `task_complete` 工具，所有会话（无论代码改动、问答、还是调研）完成后，**必须** 调用 `task_complete`。
-- 调用前先输出一段简短文字总结（1-3 句），然后立即调用 `task_complete`。
-- 若当前宿主未提供 `task_complete`（例如 Codex Desktop / CLI 的工具列表中不存在），不得为了满足本规则反复重试或阻塞结束；正常发送最终回复即可。
-- VS Code 内部 stop hook 可检测 `task_complete` 是否被调用；未调用可能触发 autopilot 重入循环并浪费 premium requests，因此本规则只在工具实际可用时强制执行。
-
-### 10.4 Subagent 注意事项
-- Subagent 不共享 memory 工具状态，不要在 subagent prompt 中引用 `/memories/` 虚拟路径。
-- Subagent 的工作结果通过其最终消息返回，不要依赖 subagent 写入的 tmp 文件。
-
-## 11. Agent 执行流程（标准作业）
-
-1. 读取上下文（包括检查 `/memories/repo/` 中的相关历史记录）
-- 先定位改动边界：功能、数据流、受影响服务。
-- 必读同目录测试与调用链，避免局部修复破坏全局。
-
-2. 设计改动
-- 优先复用现有服务与配置。
-- 明确同步、离线、冲突、移动端 GoJS 生命周期影响。
-
-3. 实施改动
-- 采用最小可回滚变更。
-- 保持现有命名和分层，不引入平行抽象。
-
-4. 自检与测试
-- 至少运行与改动范围匹配的测试。
-- 同步/离线/GoJS/专注模式改动需额外场景验证。
-
-5. 交付说明
-- 说明改了什么、为何这样改、潜在风险与回滚点。
-
-## 12. 代码规范
-
-- 中文注释解释业务意图；英文标识符。
-- `standalone: true` + `OnPush`。
-- Angular 19 优先 `input()`, `output()`, `viewChild()` 等函数式 API。
-- 严格类型：用 `unknown` + 类型守卫替代 `any`。
-- 测试同目录：`*.service.ts -> *.service.spec.ts`。
-- 规模约束：单文件建议 200-400 行（最大 800），函数 <= 50 行，嵌套 <= 4 层。
-
-## 13. 安全规则
-
-1. API Key 只允许存储于 Supabase Secrets，禁止前端硬编码。
-2. 所有表启用 RLS，数据按 `user_id` 隔离。
-3. 输入必须校验与消毒；Markdown 渲染做 XSS 防护。
-4. 文件上传必须经过类型验证与病毒扫描。
-5. Edge Function 代理第三方 API，前端不直连敏感凭证。
-
-## 14. 测试策略与命令
-
-### 14.1 测试金字塔
-`E2E(少量关键路径) -> Integration(服务边界) -> Unit(大量快速)`
-
-测试执行基于 `scripts/run-test-matrix.cjs`，支持 Lane 分片、Quarantine 隔离和 LPT 调度策略。
-
-### 14.2 常用命令
-
-```bash
-# 开发
-npm start
-npm run build
-npm run build:dev
-
-# 测试（本地）
-npm run test                # 等同于 test:run（matrix 模式，排除 quarantine）
-npm run test:run            # 本地默认：lane_node_minimal + lane_browser_minimal
-npm run test:run:verify     # 全 lane 不分片（不含 quarantine）
-npm run test:run:full       # 全量含 quarantine
-npm run test:run:pure       # vitest.pure 纯函数
-npm run test:run:services   # vitest.services 服务层
-npm run test:run:components # vitest.components 组件层
-
-# 测试（CI）
-npm run test:run:ci         # weighted + include-quarantine
-
-# E2E
-npm run test:e2e
-npm run test:e2e:ui
-
-# 测试维护
-npm run test:baseline:update   # 刷新 shard timing baseline
-npm run test:quarantine:update # 按 p95/失败率更新 quarantine 列表
-
-# 质量
-npm run lint
-npm run lint:fix
-npx knip
-
-# 性能门禁
-npm run perf:guard          # 构建 + nojit 检查 + startup + font + supabase-ready
-
-# 数据库类型
-npm run db:types
-```
-
-## 15. 目录导航（精简）
-
-```text
-src/
-  app/core/                 # 核心单例（sync/state/shell）
-  app/features/flow/        # GoJS 流程图
-  app/features/text/        # 移动端默认文本视图
-  app/features/focus/       # 专注模式（components/gate|strata|black-box）
-  app/features/parking/     # 停泊坞（任务暂存与提醒）
-  app/shared/               # 共享组件、模态框、管道
-  services/                 # 业务服务层（85+ 服务）
-  config/                   # 配置常量
-  models/                   # 数据模型
-  utils/                    # 工具函数（Result、error 转换等）
-
-supabase/functions/         # Edge Functions
-supabase/migrations/        # 数据库迁移
-```
-
-## 16. 常见陷阱与规避
-
-| 陷阱 | 规避 |
-|------|------|
-| 全量同步流量激增 | 严格使用增量条件 `updated_at > last_sync_time` |
-| GoJS 内存泄漏 | 视图切换时 `diagram.clear()` + 解绑全部监听 |
-| 递归爆栈 | 迭代遍历 + 深度限制 100 |
-| 离线写入丢失 | 失败操作必须进入 RetryQueue |
-| Sentry 上报信息不完整 | 先做 `supabaseErrorToError()` 统一转换 |
-| Edge Function API Key 泄露 | `supabase secrets set` 管理密钥 |
-| iOS Safari 不支持 webm | 运行时检测 mimeType，回退 mp4 |
-| 同步时 `content` 丢失覆盖 | 查询字段必须包含 `content` |
-| Memory 路径误用为文件路径 | `/memories/repo/` 只能通过 `memory` 工具访问，禁止 `read_file` |
-| tmp 文件不存在就读取 | 读取 tmp 产物前用 `list_dir` 或 `file_search` 确认存在 |
-| 未调用 `task_complete` 导致循环 | 宿主提供 `task_complete` 时任务结束必须调用；工具不可用时禁止反复重试 |
-| Subagent 依赖 tmp 文件交互 | Subagent 结果通过最终消息返回，不依赖文件交互 |
-
-## 17. 完成定义（Definition of Done）
-
-- 所有 Hard Rules 仍成立。
-- 关键路径（同步、离线、GoJS、专注模式）无回归。
-- 对应层级测试通过，或明确说明未执行项与原因。
-- 文档/类型/配置变更已同步更新。
-- 提交说明包含风险点和回滚策略。
+- Angular 19 使用 standalone + OnPush，优先函数式 `input()` / `output()` / query API；严格类型用 `unknown` + guard，禁止以 `any` 掩盖边界。
+- API key 只进 Supabase Secrets；前端不得持有敏感凭证。表启用 RLS 并按 `user_id` 隔离；输入与 Markdown 渲染必须防注入/XSS。
+- 测试与改动风险匹配：优先 focused spec，再跑相关类型检查、lint、`git diff --check`；同步/离线/GoJS/专注模式必须补场景验证。未运行项与原因要明确。
+- 完成时分别报告：实际改动、验证为绿的范围、仍为红的门禁、风险/回滚点与剩余目标；窄测试通过不等于项目完成。

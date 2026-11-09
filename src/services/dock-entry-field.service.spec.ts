@@ -55,15 +55,18 @@ function buildContext(initial?: DockEntry[]): {
   ctx: DockEntryFieldContext;
   entries: ReturnType<typeof signal<DockEntry[]>>;
   rebalanceAutoZones: ReturnType<typeof vi.fn>;
+  persistDockSnapshotNow: ReturnType<typeof vi.fn>;
 } {
   const entries = signal<DockEntry[]>(initial ?? []);
   const rebalanceAutoZones = vi.fn();
+  const persistDockSnapshotNow = vi.fn().mockResolvedValue(true);
   const ctx: DockEntryFieldContext = {
     entries,
     focusSessionContext: () => null,
     rebalanceAutoZones,
+    persistDockSnapshotNow,
   };
-  return { ctx, entries, rebalanceAutoZones };
+  return { ctx, entries, rebalanceAutoZones, persistDockSnapshotNow };
 }
 
 // ---------------------------------------------------------------------------
@@ -74,9 +77,12 @@ describe('DockEntryFieldService', () => {
   let service: DockEntryFieldService;
   let entries: ReturnType<typeof signal<DockEntry[]>>;
   let rebalanceAutoZones: ReturnType<typeof vi.fn>;
+  let persistDockSnapshotNow: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockTaskSync.syncTaskPlannerFields.mockResolvedValue(true);
+    mockTaskSync.syncTaskDetail.mockResolvedValue(true);
 
     TestBed.configureTestingModule({
       providers: [
@@ -94,6 +100,7 @@ describe('DockEntryFieldService', () => {
     ]);
     entries = built.entries;
     rebalanceAutoZones = built.rebalanceAutoZones;
+    persistDockSnapshotNow = built.persistDockSnapshotNow;
     service.init(built.ctx);
   });
 
@@ -102,8 +109,8 @@ describe('DockEntryFieldService', () => {
   // =========================================================================
 
   describe('toggleLoad', () => {
-    it('should cycle load to high when direction is up', () => {
-      service.toggleLoad('task-1', 'up');
+    it('should cycle load to high after durable local planner persistence succeeds', async () => {
+      await expect(service.toggleLoad('task-1', 'up')).resolves.toBe(true);
 
       const updated = entries().find(e => e.taskId === 'task-1')!;
       expect(updated.load).toBe('high');
@@ -112,8 +119,8 @@ describe('DockEntryFieldService', () => {
       });
     });
 
-    it('should cycle load to low when direction is down', () => {
-      service.toggleLoad('task-2', 'down');
+    it('should cycle load to low after durable local planner persistence succeeds', async () => {
+      await expect(service.toggleLoad('task-2', 'down')).resolves.toBe(true);
 
       const updated = entries().find(e => e.taskId === 'task-2')!;
       expect(updated.load).toBe('low');
@@ -122,14 +129,47 @@ describe('DockEntryFieldService', () => {
       });
     });
 
-    it('should no-op entries and skip sync for missing taskId', () => {
+    it('should no-op entries and skip sync for missing taskId', async () => {
       const before = entries();
-      service.toggleLoad('non-existent', 'up');
+      await expect(service.toggleLoad('non-existent', 'up')).resolves.toBe(false);
 
       // Entries remain unchanged (same content)
       expect(entries()).toEqual(before);
       // Sync is NOT called because entry doesn't exist (guard added)
       expect(mockTaskSync.syncTaskPlannerFields).not.toHaveBeenCalled();
+    });
+
+    it('should not update load when durable local planner persistence fails', async () => {
+      mockTaskSync.syncTaskPlannerFields.mockResolvedValueOnce(false);
+
+      await expect(service.toggleLoad('task-1', 'up')).resolves.toBe(false);
+
+      const updated = entries().find(e => e.taskId === 'task-1')!;
+      expect(updated.load).toBe('low');
+    });
+
+    it('should apply the latest rapid opposite load intent after pending persistence settles', async () => {
+      const firstSave = createDeferred<boolean>();
+      mockTaskSync.syncTaskPlannerFields
+        .mockReturnValueOnce(firstSave.promise)
+        .mockResolvedValueOnce(true);
+
+      const firstToggle = service.toggleLoad('task-2', 'down');
+      const secondToggle = service.toggleLoad('task-2', 'up');
+
+      expect(mockTaskSync.syncTaskPlannerFields).toHaveBeenCalledTimes(1);
+      firstSave.resolve(true);
+
+      await expect(Promise.all([firstToggle, secondToggle])).resolves.toEqual([true, true]);
+
+      const updated = entries().find(e => e.taskId === 'task-2')!;
+      expect(updated.load).toBe('high');
+      expect(mockTaskSync.syncTaskPlannerFields).toHaveBeenNthCalledWith(1, 'task-2', {
+        cognitive_load: 'low',
+      });
+      expect(mockTaskSync.syncTaskPlannerFields).toHaveBeenNthCalledWith(2, 'task-2', {
+        cognitive_load: 'high',
+      });
     });
   });
 
@@ -138,8 +178,8 @@ describe('DockEntryFieldService', () => {
   // =========================================================================
 
   describe('setExpectedTime', () => {
-    it('should update expectedMinutes on the matching entry', () => {
-      service.setExpectedTime('task-1', 45);
+    it('should update expectedMinutes after durable local planner persistence succeeds', async () => {
+      await expect(service.setExpectedTime('task-1', 45)).resolves.toBe(true);
 
       const updated = entries().find(e => e.taskId === 'task-1')!;
       expect(updated.expectedMinutes).toBe(45);
@@ -148,6 +188,15 @@ describe('DockEntryFieldService', () => {
         expect.objectContaining({ expected_minutes: 45 }),
       );
     });
+
+    it('should not update expectedMinutes when durable local planner persistence fails', async () => {
+      mockTaskSync.syncTaskPlannerFields.mockResolvedValueOnce(false);
+
+      await expect(service.setExpectedTime('task-1', 45)).resolves.toBe(false);
+
+      const updated = entries().find(e => e.taskId === 'task-1')!;
+      expect(updated.expectedMinutes).toBe(25);
+    });
   });
 
   // =========================================================================
@@ -155,8 +204,8 @@ describe('DockEntryFieldService', () => {
   // =========================================================================
 
   describe('setWaitTime', () => {
-    it('should update waitMinutes on the matching entry', () => {
-      service.setWaitTime('task-1', 10);
+    it('should update waitMinutes after durable local planner persistence succeeds', async () => {
+      await expect(service.setWaitTime('task-1', 10)).resolves.toBe(true);
 
       const updated = entries().find(e => e.taskId === 'task-1')!;
       expect(updated.waitMinutes).toBe(10);
@@ -165,6 +214,15 @@ describe('DockEntryFieldService', () => {
         expect.objectContaining({ wait_minutes: 10 }),
       );
     });
+
+    it('should not update waitMinutes when durable local planner persistence fails', async () => {
+      mockTaskSync.syncTaskPlannerFields.mockResolvedValueOnce(false);
+
+      await expect(service.setWaitTime('task-1', 10)).resolves.toBe(false);
+
+      const updated = entries().find(e => e.taskId === 'task-1')!;
+      expect(updated.waitMinutes).toBeNull();
+    });
   });
 
   // =========================================================================
@@ -172,8 +230,8 @@ describe('DockEntryFieldService', () => {
   // =========================================================================
 
   describe('setDetail', () => {
-    it('should update detail and sync to task store', () => {
-      service.setDetail('task-1', 'new detail text');
+    it('should update detail after durable local task persistence succeeds', async () => {
+      await expect(service.setDetail('task-1', 'new detail text')).resolves.toBe(true);
 
       const updated = entries().find(e => e.taskId === 'task-1')!;
       expect(updated.detail).toBe('new detail text');
@@ -186,6 +244,15 @@ describe('DockEntryFieldService', () => {
         }),
       );
     });
+
+    it('should not update detail when durable local task persistence fails', async () => {
+      mockTaskSync.syncTaskDetail.mockResolvedValueOnce(false);
+
+      await expect(service.setDetail('task-1', 'new detail text')).resolves.toBe(false);
+
+      const updated = entries().find(e => e.taskId === 'task-1')!;
+      expect(updated.detail).toBe('');
+    });
   });
 
   // =========================================================================
@@ -193,29 +260,47 @@ describe('DockEntryFieldService', () => {
   // =========================================================================
 
   describe('setLane', () => {
-    it('should update lane and zoneSource', () => {
-      service.setLane('task-1', 'backup', 'manual');
+    it('should update lane and zoneSource after snapshot persistence is queued', async () => {
+      await expect(service.setLane('task-1', 'backup', 'manual')).resolves.toBe(true);
 
       const updated = entries().find(e => e.taskId === 'task-1')!;
       expect(updated.lane).toBe('backup');
       expect(updated.zoneSource).toBe('manual');
+      expect(persistDockSnapshotNow).toHaveBeenCalledWith([
+        expect.objectContaining({
+          taskId: 'task-1',
+          lane: 'backup',
+          zoneSource: 'manual',
+        }),
+        expect.objectContaining({ taskId: 'task-2' }),
+      ]);
       expect(rebalanceAutoZones).not.toHaveBeenCalled();
     });
 
-    it('should default zoneSource to manual', () => {
-      service.setLane('task-1', 'backup');
+    it('should default zoneSource to manual', async () => {
+      await expect(service.setLane('task-1', 'backup')).resolves.toBe(true);
 
       const updated = entries().find(e => e.taskId === 'task-1')!;
       expect(updated.zoneSource).toBe('manual');
     });
 
-    it('should call rebalanceAutoZones when zoneSource is auto', () => {
-      service.setLane('task-1', 'backup', 'auto');
+    it('should call rebalanceAutoZones when zoneSource is auto', async () => {
+      await expect(service.setLane('task-1', 'backup', 'auto')).resolves.toBe(true);
 
       const updated = entries().find(e => e.taskId === 'task-1')!;
       expect(updated.lane).toBe('backup');
       expect(updated.zoneSource).toBe('auto');
       expect(rebalanceAutoZones).toHaveBeenCalledOnce();
+    });
+
+    it('should not update lane when snapshot persistence fails', async () => {
+      persistDockSnapshotNow.mockResolvedValueOnce(false);
+
+      await expect(service.setLane('task-1', 'backup', 'manual')).resolves.toBe(false);
+
+      const unchanged = entries().find(e => e.taskId === 'task-1')!;
+      expect(unchanged.lane).toBe('combo-select');
+      expect(unchanged.zoneSource).toBe('auto');
     });
   });
 
@@ -224,14 +309,28 @@ describe('DockEntryFieldService', () => {
   // =========================================================================
 
   describe('init guard', () => {
-    it('should throw if accessed before init()', () => {
+    it('should throw if accessed before init()', async () => {
       // Create a second instance via TestBed that hasn't had init() called
       const freshService = TestBed.inject(DockEntryFieldService);
       // Reset its internal context to simulate un-initialized state
       (freshService as unknown as { _ctx: unknown })._ctx = null;
-      expect(() => freshService.toggleLoad('task-1', 'up')).toThrow(
+      await expect(freshService.toggleLoad('task-1', 'up')).rejects.toThrow(
         /init\(\) must be called before use/,
       );
     });
   });
 });
+
+function createDeferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (reason?: unknown) => void;
+} {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}

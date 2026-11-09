@@ -88,17 +88,28 @@ export class DataPreloaderService {
    * 注意：此方法仅用于文档目的，实际脚本需要手动添加到 index.html
    */
   static getPreloadScript(): string {
-    return `
-<script>
-  // 【性能优化】数据预加载 - 在 JS 加载期间并行请求
-  (function() {
-    window.__PRELOADED_DATA__ = {
+    return [
+      '<script>',
+      '  // 【性能优化】数据预加载 - 在 JS 加载期间并行请求',
+      '  (function() {',
+      this.getPreloadBootstrapScript(),
+      this.getAuthTokenScript(),
+      this.getPreloadFetchScript(),
+      '  })();',
+      '</script>',
+    ].join('\n');
+  }
+
+  private static getPreloadBootstrapScript(): string {
+    return `    window.__PRELOADED_DATA__ = {
       serverTime: null,
       projects: null,
       timestamp: Date.now()
-    };
+    };`;
+  }
 
-    // 检查是否已登录（仅当前 Supabase 项目）
+  private static getAuthTokenScript(): string {
+    return `    // 检查是否已登录（仅当前 Supabase 项目）
     var authToken = null;
     var tokenExpiresAt = null;
     try {
@@ -124,7 +135,7 @@ export class DataPreloaderService {
           }
         }
       }
-    } catch (e) { console.debug('[Preloader] 读取 auth token 失败', e); }
+    } catch (_) { return; }
 
     if (!authToken) return;
     if (typeof tokenExpiresAt === 'number') {
@@ -133,9 +144,11 @@ export class DataPreloaderService {
       }
       // 令牌过期/即将过期时跳过预加载，避免无意义 401
       if (tokenExpiresAt <= Math.floor(Date.now() / 1000) + 30) return;
-    }
+    }`;
+  }
 
-    var headers = {
+  private static getPreloadFetchScript(): string {
+    return `    var headers = {
       'apikey': '${environment.supabaseAnonKey}',
       'Authorization': 'Bearer ' + authToken,
       'Content-Type': 'application/json'
@@ -150,7 +163,7 @@ export class DataPreloaderService {
       if (window.__PRELOADED_DATA__) {
         window.__PRELOADED_DATA__.serverTime = data;
       }
-    }).catch(function(e) { console.debug('[Preloader] 预加载 serverTime 失败', e); });
+    }).catch(function() {});
 
     fetch(baseUrl + '/projects?select=id,title,updated_at&deleted_at=is.null&order=updated_at.desc', {
       headers: headers
@@ -158,8 +171,6 @@ export class DataPreloaderService {
       if (window.__PRELOADED_DATA__) {
         window.__PRELOADED_DATA__.projects = data;
       }
-    }).catch(function(e) { console.debug('[Preloader] 预加载 projects 失败', e); });
-  })();
-</script>`;
+    }).catch(function() {});`;
   }
 }

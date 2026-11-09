@@ -15,96 +15,69 @@ import { Injectable, inject } from '@angular/core';
 import { SupabaseClientService } from '../../../../services/supabase-client.service';
 import { AuthService } from '../../../../services/auth.service';
 import { LoggerService } from '../../../../services/logger.service';
-import { RequestThrottleService } from '../../../../services/request-throttle.service';
 import { SyncStateService } from './sync-state.service';
 import { SessionManagerService } from './session-manager.service';
-import { TombstoneService } from './tombstone.service';
 import { Task, Project, Connection } from '../../../../models';
 import { TaskRow, ProjectRow, ConnectionRow } from '../../../../models/supabase-types';
 import { supabaseErrorToError, classifySupabaseClientFailure } from '../../../../utils/supabase-error';
-import { openIndexedDBAdaptive } from '../../../../utils/indexeddb-open';
-import { REQUEST_THROTTLE_CONFIG, FIELD_SELECT_CONFIG, CACHE_CONFIG, CIRCUIT_BREAKER_CONFIG } from '../../../../config/sync.config';
+import {
+  chunkIds as chunkIdsPure,
+  normalizeIds as normalizeIdsPure,
+} from './project-data-projection';
 import { AUTH_CONFIG } from '../../../../config/auth.config';
-import { FOCUS_CONFIG } from '../../../../config/focus.config';
-import { FEATURE_FLAGS } from '../../../../config/feature-flags.config';
-import { TIMEOUT_CONFIG } from '../../../../config/timeout.config';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 import { StartupPlaceholderStateService } from '../../../../services/startup-placeholder-state.service';
+import { mapTaskRowToTask } from './task-row.mapper';
 import {
-  createBrowserNetworkSuspendedError,
-  getRemainingBrowserNetworkResumeDelayMs,
-  isBrowserNetworkSuspendedError,
-  isBrowserNetworkSuspendedWindow,
-} from '../../../../utils/browser-network-suspension';
+  ProjectOfflineSnapshotService,
+  type OfflineSnapshotLoadOptions,
+  type OfflineSnapshotWriteOptions,
+  type StartupOfflineSnapshotLoadResult,
+  type StartupOfflineSnapshotSource,
+} from './project-offline-snapshot.service';
 import {
-  getCompatibleTaskSelectFields,
-  markTaskCompletedAtColumnUnavailable,
-} from '../../../../utils/task-schema-compat';
-import { hasTaskContentMissingFromSource, markTaskContentMissingFromSource } from '../../../../utils/task-content-guard';
+  ProjectParkedTasksDataService,
+  type ParkedTaskCacheSnapshot,
+  type ParkedTaskCacheSaveOptions,
+  type ParkedTaskDeltaResult,
+  type ParkedTaskEntry,
+  type ParkedTaskRemoval,
+} from './project-parked-tasks-data.service';
+import {
+  ProjectSyncProbeService,
+  type AccessibleProjectProbe,
+  type ProjectHead,
+  type ProjectSyncProbeDependencies,
+  type ResumeRecoveryProbe,
+} from './project-sync-probe.service';
+import {
+  ProjectCloudListService,
+  type ProjectCloudListDependencies,
+  type ProjectCloudIncrementalPullDependencies,
+  type ProjectListMetadataLoadOptions,
+} from './project-cloud-list.service';
+import {
+  ProjectDetailLoaderService,
+  type ProjectDetailLoadDependencies,
+} from './project-detail-loader.service';
+import { ProjectTaskDataService } from './project-task-data.service';
 
-interface ParkedTaskCacheRecord {
-  taskId: string;
-  projectId: string;
-  task: Task;
-  updatedAt: string;
-}
+export type {
+  ParkedTaskCacheSnapshot,
+  ParkedTaskDeltaResult,
+  ParkedTaskEntry,
+  ParkedTaskRemoval,
+};
 
-interface ParkedTaskDeltaRow extends Partial<TaskRow> {
-  project_id?: string;
-}
+export type { ProjectListMetadataLoadOptions };
 
-interface ProjectIdRow {
-  id?: string | null;
-}
-
-export interface ParkedTaskEntry {
-  task: Task;
-  projectId: string;
-}
-
-export interface ParkedTaskCacheSnapshot {
-  entries: ParkedTaskEntry[];
-  cursor: string | null;
-}
-
-export interface ParkedTaskDeltaResult {
-  entries: ParkedTaskEntry[];
-  removedTaskIds: string[];
-  nextCursor: string | null;
-}
-
-export interface ProjectListMetadataLoadOptions {
-  timeout?: number;
-  retries?: number;
-  silent?: boolean;
-  purpose?: string;
-  treatTransientFailureAsSoft?: boolean;
-}
-
-export type StartupOfflineSnapshotSource = 'idb' | 'localStorage' | 'none';
-
-export interface StartupOfflineSnapshotLoadResult {
-  source: StartupOfflineSnapshotSource;
-  projectCount: number;
-  bytes: number;
-  migratedLegacy: boolean;
-  projects: Project[];
-  ownerUserId?: string | null;
-}
-
-interface ParsedOfflineSnapshotEnvelope {
-  projects: Project[];
-  ownerUserId: string | null;
-  savedAt: string | null;
-}
-
-interface OfflineSnapshotLoadOptions {
-  allowOwnerHint?: boolean;
-  ownerUserId?: string | null;
-}
-
-export const PROJECT_BATCH_RPC_PROBE_GRACE_MS = 120;
+export type {
+  OfflineSnapshotLoadOptions,
+  StartupOfflineSnapshotLoadResult,
+  StartupOfflineSnapshotSource,
+};
+export { PROJECT_BATCH_RPC_PROBE_GRACE_MS } from './project-cloud-list.service';
 
 @Injectable({
   providedIn: 'root'
@@ -116,10 +89,14 @@ export class ProjectDataService {
   private readonly authService = inject(AuthService, { optional: true });
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('ProjectData');
-  private readonly throttle = inject(RequestThrottleService);
   private readonly syncState = inject(SyncStateService);
   private readonly sessionManager = inject(SessionManagerService, { optional: true });
-  private readonly tombstoneService = inject(TombstoneService);
+  private readonly offlineSnapshots = inject(ProjectOfflineSnapshotService);
+  private readonly parkedTasksData = inject(ProjectParkedTasksDataService);
+  private readonly syncProbes = inject(ProjectSyncProbeService);
+  private readonly cloudList = inject(ProjectCloudListService);
+  private readonly detailLoader = inject(ProjectDetailLoaderService);
+  private readonly taskData = inject(ProjectTaskDataService);
   
   /**
    * 是否正在从远程加载
@@ -132,18 +109,8 @@ export class ProjectDataService {
    */
   readonly isLoadingRemote = this.syncState.isLoadingRemote;
   
-  /** 离线缓存配置 */
-  private readonly OFFLINE_CACHE_KEY = CACHE_CONFIG.OFFLINE_CACHE_KEY;
-  private readonly CACHE_VERSION = CACHE_CONFIG.CACHE_VERSION;
-  private readonly LEGACY_OFFLINE_SNAPSHOT_RECORD_ID = 'offline-snapshot';
-  /** 停泊任务轻量缓存游标键（A3.4） */
-  private readonly PARKING_SYNC_CURSOR_KEY = 'parking_last_sync_time';
   /** 避免本地离线模式重复打印“未配置”告警 */
   private hasLoggedSupabaseMissingConfig = false;
-  /** 会话级熔断：当批量 RPC 不存在时，后续直接走顺序加载 */
-  private batchRpcUnavailable = false;
-  /** 瞬时故障短熔断：504/timeout 时短时间跳过批量 RPC，避免控制台持续刷屏。 */
-  private batchRpcTransientCooldownUntil = 0;
 
   private isSupabaseOfflineMode(): boolean {
     const maybeSignal = (this.supabase as unknown as { isOfflineMode?: (() => boolean) | boolean }).isOfflineMode;
@@ -175,48 +142,6 @@ export class ProjectDataService {
     }
 
     return false;
-  }
-
-  private isBatchRpcMissingError(error: {
-    code?: string;
-    message?: string;
-    details?: string;
-    hint?: string;
-  }): boolean {
-    const normalized = [error.message, error.details, error.hint]
-      .filter((value): value is string => typeof value === 'string' && value.length > 0)
-      .join(' ')
-      .toLowerCase();
-
-    return (
-      error.code === '42883' ||
-      error.code === 'PGRST202' ||
-      normalized.includes('does not exist') ||
-      normalized.includes('could not find the function') ||
-      normalized.includes('schema cache')
-    );
-  }
-
-  private getBatchRpcTransientCooldownRemainingMs(): number {
-    return Math.max(0, this.batchRpcTransientCooldownUntil - Date.now());
-  }
-
-  private isBatchRpcTransientCircuitOpen(): boolean {
-    return this.getBatchRpcTransientCooldownRemainingMs() > 0;
-  }
-
-  private tripBatchRpcTransientCircuit(projectId: string, error: Error): void {
-    const cooldownMs = CIRCUIT_BREAKER_CONFIG.RECOVERY_TIME;
-    const alreadyOpen = this.isBatchRpcTransientCircuitOpen();
-
-    this.batchRpcTransientCooldownUntil = Date.now() + cooldownMs;
-
-    this.logger.warn('批量 RPC 瞬时失败，短时熔断并回退到顺序加载', {
-      projectId,
-      cooldownMs,
-      reason: error.message,
-      alreadyOpen,
-    });
   }
 
   private resolveRemoteSessionUserId(): string | null {
@@ -327,168 +252,14 @@ export class ProjectDataService {
   /**
    * 加载完整项目数据。
    *
-   * 默认走分段读取，避免大项目在 get_full_project_data JSON 聚合阶段触发网关 504。
-   * 批量 RPC 快路仅通过 PROJECT_FULL_DATA_RPC_V1 显式打开，便于服务端优化后灰度恢复。
+   * 完整项目统一通过分页查询读取，避免单次 JSON 聚合受网关响应大小与时限限制。
    */
   async loadFullProjectOptimized(projectId: string, expectedUserId?: string): Promise<Project | null> {
-    if (!FEATURE_FLAGS.PROJECT_FULL_DATA_RPC_V1) {
-      this.logger.debug('完整项目批量 RPC 已关闭，使用分段加载', { projectId });
-      return this.loadFullProject(projectId, expectedUserId);
-    }
-
-    const client = await this.getSupabaseClient(expectedUserId);
-    if (!client) return null;
-
-    if (this.batchRpcUnavailable) {
-      this.logger.debug('批量 RPC 已熔断，直接走顺序加载', { projectId });
-      return this.loadFullProject(projectId, expectedUserId);
-    }
-
-    if (this.isBatchRpcTransientCircuitOpen()) {
-      this.logger.debug('批量 RPC 短时熔断中，直接走顺序加载', {
-        projectId,
-        remainingMs: this.getBatchRpcTransientCooldownRemainingMs(),
-      });
-      return this.loadFullProject(projectId, expectedUserId);
-    }
-
-    try {
-      this.logger.debug('使用 RPC 批量加载项目', { projectId });
-      
-      let { data, error } = await client.rpc('get_full_project_data', {
-        p_project_id: projectId
-      });
-
-      // 【JWT 自愈】RPC 返回 401/JWT expired 时主动刷新并重试一次，避免徒劳走
-      // fallback 链路再次触发 401。使用 tryRefreshSessionWithSession 绕过
-      // syncState.sessionExpired 短路。
-      if (error) {
-        const enhanced = supabaseErrorToError(error);
-        if (this.isSessionExpiredError(enhanced)) {
-          const refreshResult = await this.tryRefreshSessionWithSession('loadFullProjectOptimized');
-          if (refreshResult.refreshed) {
-            this.logger.info('loadFullProjectOptimized 会话已刷新，重试 RPC', { projectId });
-            const retry = await client.rpc('get_full_project_data', {
-              p_project_id: projectId
-            });
-            data = retry.data;
-            error = retry.error;
-          }
-        }
-      }
-
-      if (error) {
-        const isBatchRpcMissing = this.isBatchRpcMissingError(error);
-        if (isBatchRpcMissing) {
-          this.batchRpcUnavailable = true;
-          this.logger.warn('批量 RPC 不可用，切换到顺序加载并启用会话熔断', {
-            projectId,
-            errorCode: error.code,
-            error: error.message,
-          });
-          this.sentryLazyLoader.captureMessage('RPC get_full_project_data unavailable, fallback enabled', {
-            level: 'warning',
-            tags: {
-              operation: 'loadFullProjectOptimized',
-              classification: 'rpc_missing',
-            },
-            extra: {
-              projectId,
-              errorCode: error.code ?? 'unknown',
-              errorMessage: error.message ?? '',
-            }
-          });
-          return this.loadFullProject(projectId, expectedUserId);
-        }
-
-        // 【性能优化 2026-02-14】区分 Access Denied 与其他错误
-        // Access Denied（P0001）说明 projectId 无效或无权限，无需 fallback
-        const isAccessDenied = error.code === 'P0001' || error.message?.includes('Access denied');
-        if (isAccessDenied) {
-          this.logger.warn('项目访问被拒绝，跳过该项目（不走 fallback）', { projectId, errorCode: error.code });
-          // 【监控 2026-02-14】上报 RPC 400 Access Denied，用于 Sentry 告警
-          this.sentryLazyLoader.addBreadcrumb({
-            category: 'sync.rpc',
-            message: `RPC Access Denied: projectId=${projectId}`,
-            level: 'warning',
-            data: { projectId, errorCode: error.code },
-          });
-          this.sentryLazyLoader.captureMessage('RPC Access Denied (P0001, no fallback)', {
-            level: 'warning',
-            tags: {
-              operation: 'loadFullProjectOptimized',
-              classification: 'access_denied'
-            },
-            extra: {
-              projectId,
-              errorCode: error.code ?? 'P0001'
-            }
-          });
-          return null;
-        }
-        // 【鲁棒性 2026-04-16】浏览器网络 IO 挂起属瞬时错误（后台/节流/切页），
-        // 不走 fallback，否则顺序加载也会命中同样异常，累积 ERROR 风暴。
-        const rpcErrEnhanced = supabaseErrorToError(error);
-        if (isBrowserNetworkSuspendedError(rpcErrEnhanced) || isBrowserNetworkSuspendedWindow()) {
-          this.logger.debug('浏览器网络挂起，跳过 RPC 回退', { projectId });
-          return null;
-        }
-        if (this.isTransientMetadataLoadFailure(rpcErrEnhanced)) {
-          this.tripBatchRpcTransientCircuit(projectId, rpcErrEnhanced);
-          return this.loadFullProject(projectId, expectedUserId);
-        }
-        // 其他错误（网络、超时等）仍走 fallback 顺序加载
-        this.logger.warn('RPC 调用失败，回退到顺序加载', { error: error.message });
-        return this.loadFullProject(projectId, expectedUserId);
-      }
-
-      this.batchRpcTransientCooldownUntil = 0;
-      
-      if (!data?.project) {
-        this.logger.warn('RPC 返回空数据', { projectId });
-        return null;
-      }
-
-      // 转换 RPC 返回的数据格式
-      const project = this.rowToProject(data.project);
-      
-      // 过滤 tombstones 中的已删除项
-      const taskTombstoneSet = new Set<string>(data.task_tombstones || []);
-      const connectionTombstoneSet = new Set<string>(data.connection_tombstones || []);
-      
-      project.tasks = (data.tasks || [])
-        .filter((t: TaskRow) => !taskTombstoneSet.has(t.id))
-        .map((t: TaskRow) => this.rowToTask(t));
-      
-      project.connections = (data.connections || [])
-        .filter((c: ConnectionRow) => !connectionTombstoneSet.has(c.id))
-        .map((c: ConnectionRow) => this.rowToConnection(c));
-
-      this.logger.info('RPC 批量加载成功', { 
-        projectId, 
-        tasksCount: project.tasks.length,
-        connectionsCount: project.connections.length
-      });
-
-      return project;
-    } catch (e) {
-      const err = supabaseErrorToError(e);
-      // 【鲁棒性 2026-04-16】浏览器网络挂起错误降级为 debug，不上报 Sentry，不走 fallback
-      if (isBrowserNetworkSuspendedError(err) || isBrowserNetworkSuspendedWindow()) {
-        this.logger.debug('浏览器网络挂起，跳过批量加载', { projectId });
-        return null;
-      }
-      if (this.isTransientMetadataLoadFailure(err)) {
-        this.tripBatchRpcTransientCircuit(projectId, err);
-        return this.loadFullProject(projectId, expectedUserId);
-      }
-      this.logger.error('批量加载项目失败', err);
-      this.sentryLazyLoader.captureException(err, {
-        tags: { operation: 'loadFullProjectOptimized' },
-        extra: { projectId }
-      });
-      return this.loadFullProject(projectId, expectedUserId);
-    }
+    return await this.detailLoader.loadFullProjectOptimized(
+      projectId,
+      expectedUserId,
+      this.projectDetailDependencies(),
+    );
   }
   
   /**
@@ -496,114 +267,21 @@ export class ProjectDataService {
    * 使用请求限流避免连接池耗尽
    */
   async loadFullProject(projectId: string, expectedUserId?: string): Promise<Project | null> {
-    const client = await this.getSupabaseClient(expectedUserId);
-    if (!client) return null;
+    return await this.detailLoader.loadFullProject(
+      projectId,
+      expectedUserId,
+      this.projectDetailDependencies(),
+    );
+  }
 
-    if (isBrowserNetworkSuspendedWindow()) {
-      this.logger.debug('浏览器网络挂起，跳过顺序加载', {
-        projectId,
-        resumeDelayMs: getRemainingBrowserNetworkResumeDelayMs(),
-      });
-      return null;
-    }
-    
-    try {
-      // 1. 加载项目元数据
-      const projectData = await this.throttle.execute(
-        `project-meta:${projectId}`,
-        async () => this.withAuthRetry('loadFullProject.meta', async () => {
-          const { data, error } = await client
-            .from('projects')
-            .select(FIELD_SELECT_CONFIG.PROJECT_LIST_FIELDS)
-            .eq('id', projectId)
-            .is('deleted_at', null)
-            .maybeSingle();
-          if (error) throw supabaseErrorToError(error);
-          return data;
-        }),
-        { 
-          deduplicate: true, 
-          priority: 'normal',
-          timeout: REQUEST_THROTTLE_CONFIG.BATCH_SYNC_TIMEOUT
-        }
-      );
-      
-      if (!projectData) {
-        this.logger.warn('项目不存在或无权访问', { projectId });
-        return null;
-      }
-
-      // 2. 顺序加载任务和连接
-      const tasks = await this.pullTasksThrottled(projectId, client);
-      const connectionsData = await this.throttle.execute(
-        `connections:${projectId}`,
-        async () => {
-          if (isBrowserNetworkSuspendedWindow()) {
-            this.logger.debug('浏览器网络挂起，延后连接查询', {
-              projectId,
-              resumeDelayMs: getRemainingBrowserNetworkResumeDelayMs(),
-            });
-            throw createBrowserNetworkSuspendedError();
-          }
-
-          const { data, error } = await client
-            .from('connections')
-            .select(FIELD_SELECT_CONFIG.CONNECTION_FIELDS)
-            .eq('project_id', projectId);
-          if (error) {
-            const enhanced = supabaseErrorToError(error);
-            if (isBrowserNetworkSuspendedError(enhanced) || isBrowserNetworkSuspendedWindow()) {
-              this.logger.debug('浏览器网络挂起，延后连接查询', {
-                projectId,
-                resumeDelayMs: getRemainingBrowserNetworkResumeDelayMs(),
-              });
-              throw createBrowserNetworkSuspendedError();
-            }
-
-            this.logger.error('连接查询失败', { projectId, error: enhanced.message });
-            return [];
-          }
-          return data || [];
-        },
-        { 
-          deduplicate: true, 
-          priority: 'normal',
-          timeout: REQUEST_THROTTLE_CONFIG.BATCH_SYNC_TIMEOUT
-        }
-      );
-      
-      // 3. 转换连接数据
-      const connections: Connection[] = connectionsData.map((row: Record<string, unknown>) => ({
-        id: String(row.id),
-        source: String(row.source_id),
-        target: String(row.target_id),
-        title: row.title ? String(row.title) : undefined,
-        description: String(row.description || ''),
-        deletedAt: row.deleted_at ? String(row.deleted_at) : null,
-        updatedAt: row.updated_at ? String(row.updated_at) : undefined
-      }));
-      
-      const project = this.rowToProject(projectData);
-      project.tasks = tasks;
-      project.connections = connections;
-      
-      return project;
-    } catch (e) {
-      const err = supabaseErrorToError(e);
-      // 【鲁棒性 2026-04-16】浏览器网络挂起：降级为 debug，不上报 Sentry
-      if (isBrowserNetworkSuspendedError(err) || isBrowserNetworkSuspendedWindow()) {
-        this.logger.debug('浏览器网络挂起，跳过顺序加载', { projectId });
-        // eslint-disable-next-line no-restricted-syntax -- 瞬时挂起：返回 null 让上层沿用本地快照
-        return null;
-      }
-      this.logger.error('加载项目失败', err);
-      this.sentryLazyLoader.captureException(err, {
-        tags: { operation: 'loadFullProject' },
-        extra: { projectId }
-      });
-      // eslint-disable-next-line no-restricted-syntax -- 保持 API 契约：异常时返回 null 交由调用方进行回退处理
-      return null;
-    }
+  private projectDetailDependencies(): ProjectDetailLoadDependencies {
+    return {
+      getClient: (expectedUserId) => this.getSupabaseClient(expectedUserId),
+      withAuthRetry: <T>(context: string, fn: () => Promise<T>) => this.withAuthRetry(context, fn),
+      rowToProject: row => this.rowToProject(row),
+      rowToTask: row => this.rowToTask(row),
+      rowToConnection: row => this.rowToConnection(row),
+    };
   }
   
   /**
@@ -616,71 +294,11 @@ export class ProjectDataService {
     userId: string,
     options: ProjectListMetadataLoadOptions = {}
   ): Promise<Project[] | null> {
-    if (userId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
-      this.logger.debug('本地模式，跳过云端项目元数据加载');
-      return [];
-    }
-
-    const client = await this.getSupabaseClient(userId);
-    if (!client) return null;
-
-    const timeout = Math.max(TIMEOUT_CONFIG.QUICK, options.timeout ?? TIMEOUT_CONFIG.QUICK);
-    const retries = Math.max(0, options.retries ?? 0);
-
-    try {
-      const projectList = await this.throttle.execute(
-        this.buildProjectListMetadataRequestKey(userId, timeout, retries),
-        async () => this.withAuthRetry('loadProjectListMetadataFromCloud', async () => {
-          const { data, error } = await client
-            .from('projects')
-            .select(FIELD_SELECT_CONFIG.PROJECT_LIST_FIELDS)
-            .eq('owner_id', userId)
-            .is('deleted_at', null)
-            .order('updated_at', { ascending: false });
-
-          if (error) throw supabaseErrorToError(error);
-          return data || [];
-        }),
-        {
-          deduplicate: true,
-          priority: 'high',
-          timeout,
-          retries,
-          silent: options.silent ?? false,
-        }
-      );
-
-      return projectList.map(row => this.rowToProject(row));
-    } catch (e) {
-      const err = supabaseErrorToError(e);
-
-      if (options.treatTransientFailureAsSoft && this.isTransientMetadataLoadFailure(err)) {
-        this.logger.info('项目元数据列表拉取暂时不可用，已降级为软失败', {
-          userId,
-          purpose: options.purpose ?? 'default',
-          message: err.message,
-        });
-        return null;
-      }
-
-      this.logger.warn('加载项目元数据列表失败', err);
-      this.sentryLazyLoader.captureException(err, {
-        tags: {
-          operation: 'loadProjectListMetadataFromCloud',
-          ...(options.purpose ? { purpose: options.purpose } : {}),
-        }
-      });
-      // eslint-disable-next-line no-restricted-syntax -- 元数据加载失败时返回 null 触发调用方降级到本地快照
-      return null;
-    }
-  }
-
-  private buildProjectListMetadataRequestKey(
-    userId: string,
-    timeout: number,
-    retries: number
-  ): string {
-    return `project-list-metadata:${userId}:${timeout}:${retries}`;
+    return await this.cloudList.loadProjectListMetadataFromCloud(
+      userId,
+      options,
+      this.projectCloudListDependencies(),
+    );
   }
 
   private isTransientMetadataLoadFailure(error: Error): boolean {
@@ -702,170 +320,21 @@ export class ProjectDataService {
     );
   }
 
-  private async loadProjectForCloudBatch(
-    projectId: string,
-    userId: string,
-  ): Promise<PromiseSettledResult<Project | null>> {
-    try {
-      return {
-        status: 'fulfilled',
-        value: await this.loadFullProjectOptimized(projectId, userId),
-      };
-    } catch (reason) {
-      return {
-        status: 'rejected',
-        reason,
-      };
-    }
-  }
-
-  private async waitForBatchProbeWindow(firstProjectLoad: Promise<unknown>): Promise<void> {
-    let timerId: ReturnType<typeof setTimeout> | undefined;
-
-    try {
-      await Promise.race([
-        firstProjectLoad.then(() => undefined, () => undefined),
-        new Promise<void>((resolve) => {
-          timerId = setTimeout(resolve, PROJECT_BATCH_RPC_PROBE_GRACE_MS);
-        }),
-      ]);
-    } finally {
-      if (timerId !== undefined) {
-        clearTimeout(timerId);
-      }
-    }
-  }
-
   /**
    * 加载项目列表
    */
-  async loadProjectsFromCloud(userId: string): Promise<Project[]> {
-    // 本地模式不查询 Supabase
-    if (userId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
-      this.logger.debug('本地模式，跳过云端加载');
-      return [];
-    }
+  async loadProjectsFromCloud(userId: string): Promise<Project[] | null> {
+    return await this.cloudList.loadProjectsFromCloud(
+      userId,
+      this.projectCloudListDependencies(),
+    );
+  }
 
-    // 【鲁棒性 2026-04-16】浏览器网络挂起窗口内短路，避免整批进入失败级联
-    if (isBrowserNetworkSuspendedWindow()) {
-      this.logger.debug('浏览器网络挂起，跳过云端项目列表加载', { userId });
-      return [];
-    }
-
-    const client = await this.getSupabaseClient(userId);
-    if (!client) return [];
-    
-    this.syncState.setLoadingRemote(true);
-    
-    try {
-      // 1. 加载项目列表
-      const projectList = await this.throttle.execute(
-        `project-list:${userId}`,
-        async () => this.withAuthRetry('loadProjectsFromCloud', async () => {
-          const { data, error } = await client
-            .from('projects')
-            .select(FIELD_SELECT_CONFIG.PROJECT_LIST_FIELDS)
-            .eq('owner_id', userId)
-            .is('deleted_at', null)
-            .order('updated_at', { ascending: false });
-          
-          if (error) throw supabaseErrorToError(error);
-          return data || [];
-        }),
-        { 
-          deduplicate: true, 
-          priority: 'high',
-          timeout: REQUEST_THROTTLE_CONFIG.BATCH_SYNC_TIMEOUT, 
-          retries: 5 
-        }
-      );
-      
-      // 2. 批量加载完整项目数据
-      this.logger.debug('开始批量加载项目', { count: projectList.length });
-      const [firstProject, ...remainingProjects] = projectList;
-
-      const firstProjectResult = firstProject
-        ? this.loadProjectForCloudBatch(firstProject.id, userId)
-        : null;
-
-      // 给首个项目一个很短的探测窗口：若它快速触发 504/timeout 短熔断，后续同批项目
-      // 会直接观察到打开的熔断状态；若健康路径尚未返回，也不要整批串行等待首项目完成。
-      if (firstProjectResult && remainingProjects.length > 0) {
-        await this.waitForBatchProbeWindow(firstProjectResult);
-      }
-
-      const remainingResultsPromise = remainingProjects.length > 0
-        ? Promise.all(remainingProjects.map((row) => this.loadProjectForCloudBatch(row.id, userId)))
-        : Promise.resolve([] as Array<PromiseSettledResult<Project | null>>);
-
-      const results: Array<PromiseSettledResult<Project | null>> = [];
-      if (firstProjectResult) {
-        results.push(await firstProjectResult);
-      }
-      results.push(...(await remainingResultsPromise));
-      
-      const projects: Project[] = [];
-      let failedCount = 0;
-      let suspendedCount = 0;
-      
-      for (let i = 0; i < results.length; i++) {
-        const result = results[i];
-        if (result.status === 'fulfilled' && result.value) {
-          projects.push(result.value);
-        } else if (result.status === 'fulfilled') {
-          // 【鲁棒性 2026-04-16】网络挂起导致的 null 不计失败，仅降级调试
-          if (isBrowserNetworkSuspendedWindow()) {
-            suspendedCount++;
-            continue;
-          }
-          failedCount++;
-          this.logger.warn('加载项目返回空结果', {
-            projectId: projectList[i]?.id,
-          });
-        } else if (result.status === 'rejected') {
-          // 【鲁棒性 2026-04-16】分类浏览器网络挂起：debug 级别，不计失败
-          if (isBrowserNetworkSuspendedError(result.reason) || isBrowserNetworkSuspendedWindow()) {
-            suspendedCount++;
-            continue;
-          }
-          failedCount++;
-          this.logger.warn('加载项目失败', { 
-            projectId: projectList[i]?.id,
-            error: result.reason 
-          });
-        }
-      }
-      
-      if (suspendedCount > 0) {
-        this.logger.debug('部分项目因浏览器网络挂起跳过', {
-          total: projectList.length,
-          suspended: suspendedCount,
-          success: projects.length,
-        });
-      }
-      if (failedCount > 0) {
-        this.logger.warn('部分项目加载失败', { 
-          total: projectList.length, 
-          failed: failedCount,
-          success: projects.length 
-        });
-      }
-      
-      return projects;
-    } catch (e) {
-      // 【鲁棒性 2026-04-16】浏览器网络挂起：debug，不上报 Sentry
-      if (isBrowserNetworkSuspendedError(e) || isBrowserNetworkSuspendedWindow()) {
-        this.logger.debug('浏览器网络挂起，跳过云端项目列表加载');
-        return [];
-      }
-      this.logger.error('加载项目列表失败', e);
-      this.sentryLazyLoader.captureException(e, {
-        tags: { operation: 'loadProjectsFromCloud' }
-      });
-      return [];
-    } finally {
-      this.syncState.setLoadingRemote(false);
-    }
+  async pullProjects(
+    since: string | undefined,
+    dependencies: ProjectCloudIncrementalPullDependencies,
+  ): Promise<Project[]> {
+    return await this.cloudList.pullProjects(since, dependencies);
   }
   
   /**
@@ -881,126 +350,28 @@ export class ProjectDataService {
    * 用于恢复链路先判变更再决定是否拉取完整项目。
    */
   async getProjectSyncWatermark(projectId: string): Promise<string | null> {
-    if (isBrowserNetworkSuspendedWindow()) {
-      // eslint-disable-next-line no-restricted-syntax -- 挂起窗口：静默返回 null 触发调用方降级
-      return null;
-    }
-    const client = await this.getSupabaseClient();
-    if (!client) return null;
-
-    try {
-      return await this.withAuthRetry('getProjectSyncWatermark', async () => {
-        const { data, error } = await client.rpc('get_project_sync_watermark', {
-          p_project_id: projectId
-        });
-
-        if (error) {
-          throw supabaseErrorToError(error);
-        }
-
-        if (typeof data === 'string') {
-          return data;
-        }
-
-        if (Array.isArray(data) && data.length > 0 && typeof data[0] === 'string') {
-          return data[0];
-        }
-
-        return null;
-      });
-    } catch (e) {
-      if (isBrowserNetworkSuspendedError(e) || isBrowserNetworkSuspendedWindow()) {
-        // eslint-disable-next-line no-restricted-syntax -- 挂起窗口：静默返回 null
-        return null;
-      }
-      this.logger.warn('获取项目同步水位失败', {
-        projectId,
-        error: supabaseErrorToError(e).message
-      });
-      // eslint-disable-next-line no-restricted-syntax -- 水位 RPC 失败时降级为慢路拉取，由调用方决定后续策略
-      return null;
-    }
+    return await this.syncProbes.getProjectSyncWatermark(projectId, this.syncProbeDependencies());
   }
 
   /**
    * 获取当前用户项目域聚合同步水位
    */
   async getUserProjectsWatermark(): Promise<string | null> {
-    if (isBrowserNetworkSuspendedWindow()) {
-      // eslint-disable-next-line no-restricted-syntax -- 挂起窗口：静默降级
-      return null;
-    }
-    const client = await this.getSupabaseClient();
-    if (!client) return null;
-
-    try {
-      return await this.withAuthRetry('getUserProjectsWatermark', async () => {
-        const { data, error } = await client.rpc('get_user_projects_watermark');
-        if (error) {
-          throw supabaseErrorToError(error);
-        }
-
-        if (typeof data === 'string') {
-          return data;
-        }
-        if (Array.isArray(data) && data.length > 0 && typeof data[0] === 'string') {
-          return data[0];
-        }
-        return null;
-      });
-    } catch (e) {
-      if (isBrowserNetworkSuspendedError(e) || isBrowserNetworkSuspendedWindow()) {
-        // eslint-disable-next-line no-restricted-syntax -- 挂起窗口：静默降级
-        return null;
-      }
-      this.logger.warn('获取用户项目域同步水位失败', {
-        error: supabaseErrorToError(e).message
-      });
-      // eslint-disable-next-line no-restricted-syntax -- RPC 失败时降级为全量拉取（null 触发 fallback）
-      return null;
-    }
+    return await this.syncProbes.getUserProjectsWatermark(this.syncProbeDependencies());
   }
 
   /**
    * 拉取给定水位之后发生变化的项目头信息
    */
   async listProjectHeadsSince(
-    watermark: string | null
-  ): Promise<Array<{ id: string; updatedAt: string; version: number }>> {
-    if (isBrowserNetworkSuspendedWindow()) {
-      return [];
-    }
-    const client = await this.getSupabaseClient();
-    if (!client) return [];
-
-    try {
-      return await this.withAuthRetry('listProjectHeadsSince', async () => {
-        const { data, error } = await client.rpc('list_project_heads_since', {
-          p_since: watermark
-        });
-        if (error) {
-          throw supabaseErrorToError(error);
-        }
-
-        const rows = Array.isArray(data) ? data : [];
-        return rows
-          .map((row) => ({
-            id: String((row as Record<string, unknown>)['project_id'] ?? ''),
-            updatedAt: String((row as Record<string, unknown>)['updated_at'] ?? ''),
-            version: Number((row as Record<string, unknown>)['version'] ?? 1),
-          }))
-          .filter((row) => !!row.id && !!row.updatedAt);
-      });
-    } catch (e) {
-      if (isBrowserNetworkSuspendedError(e) || isBrowserNetworkSuspendedWindow()) {
-        return [];
-      }
-      this.logger.warn('拉取项目头信息失败', {
-        watermark,
-        error: supabaseErrorToError(e).message
-      });
-      return [];
-    }
+    watermark: string | null,
+    upperWatermark: string,
+  ): Promise<ProjectHead[] | null> {
+    return await this.syncProbes.listProjectHeadsSince(
+      watermark,
+      upperWatermark,
+      this.syncProbeDependencies(),
+    );
   }
 
   /**
@@ -1008,227 +379,52 @@ export class ProjectDataService {
    *
    * 单次 RPC 完成“可访问性 + 是否有更新”探测，避免恢复链路多步串行请求。
    */
-  async getAccessibleProjectProbe(projectId: string): Promise<{
-    projectId: string;
-    accessible: boolean;
-    watermark: string | null;
-  } | null> {
-    if (isBrowserNetworkSuspendedWindow()) {
-      // eslint-disable-next-line no-restricted-syntax -- 挂起窗口：静默降级
-      return null;
-    }
-    const client = await this.getSupabaseClient();
-    if (!client) return null;
-
-    try {
-      return await this.withAuthRetry('getAccessibleProjectProbe', async () => {
-        const { data, error } = await client.rpc('get_accessible_project_probe', {
-          p_project_id: projectId
-        });
-        if (error) {
-          throw supabaseErrorToError(error);
-        }
-
-        const row = Array.isArray(data) ? data[0] : data;
-        if (!row || typeof row !== 'object') {
-          return null;
-        }
-        const record = row as Record<string, unknown>;
-        return {
-          projectId: String(record['project_id'] ?? projectId),
-          accessible: Boolean(record['accessible']),
-          watermark: record['watermark'] ? String(record['watermark']) : null,
-        };
-      });
-    } catch (e) {
-      if (isBrowserNetworkSuspendedError(e) || isBrowserNetworkSuspendedWindow()) {
-        // eslint-disable-next-line no-restricted-syntax -- 挂起窗口：静默降级
-        return null;
-      }
-      this.logger.warn('获取项目访问探测失败', {
-        projectId,
-        error: supabaseErrorToError(e).message
-      });
-      // eslint-disable-next-line no-restricted-syntax -- RPC 失败时返回 null 触发调用方降级逻辑
-      return null;
-    }
+  async getAccessibleProjectProbe(projectId: string): Promise<AccessibleProjectProbe | null> {
+    return await this.syncProbes.getAccessibleProjectProbe(projectId, this.syncProbeDependencies());
   }
 
   /**
    * 获取黑匣子域聚合同步水位（当前用户）
    */
   async getBlackBoxSyncWatermark(): Promise<string | null> {
-    if (isBrowserNetworkSuspendedWindow()) {
-      // eslint-disable-next-line no-restricted-syntax -- 挂起窗口：静默降级
-      return null;
-    }
-    const client = await this.getSupabaseClient();
-    if (!client) return null;
-
-    try {
-      return await this.withAuthRetry('getBlackBoxSyncWatermark', async () => {
-        const { data, error } = await client.rpc('get_black_box_sync_watermark');
-        if (error) {
-          throw supabaseErrorToError(error);
-        }
-
-        if (typeof data === 'string') {
-          return data;
-        }
-        if (Array.isArray(data) && data.length > 0 && typeof data[0] === 'string') {
-          return data[0];
-        }
-        return null;
-      });
-    } catch (e) {
-      if (isBrowserNetworkSuspendedError(e) || isBrowserNetworkSuspendedWindow()) {
-        // eslint-disable-next-line no-restricted-syntax -- 挂起窗口：静默降级
-        return null;
-      }
-      this.logger.warn('获取黑匣子同步水位失败', {
-        error: supabaseErrorToError(e).message
-      });
-      // eslint-disable-next-line no-restricted-syntax -- RPC 失败时降级为明细拉取（null 触发 fallback）
-      return null;
-    }
+    return await this.syncProbes.getBlackBoxSyncWatermark(this.syncProbeDependencies());
   }
 
   /**
    * 恢复链路聚合探测：一次 RPC 返回 activeProject + 项目域 + 黑匣子域水位
    */
-  async getResumeRecoveryProbe(projectId?: string): Promise<{
-    activeProjectId: string | null;
-    activeAccessible: boolean;
-    activeWatermark: string | null;
-    projectsWatermark: string | null;
-    blackboxWatermark: string | null;
-    serverNow: string | null;
-  } | null> {
-    if (isBrowserNetworkSuspendedWindow()) {
-      // eslint-disable-next-line no-restricted-syntax -- 挂起窗口：静默降级
-      return null;
-    }
-    const client = await this.getSupabaseClient();
-    if (!client) return null;
+  async getResumeRecoveryProbe(projectId?: string): Promise<ResumeRecoveryProbe | null> {
+    return await this.syncProbes.getResumeRecoveryProbe(projectId, this.syncProbeDependencies());
+  }
 
-    try {
-      return await this.withAuthRetry('getResumeRecoveryProbe', async () => {
-        const { data, error } = await client.rpc('get_resume_recovery_probe', {
-          p_project_id: projectId ?? null,
-        });
-        if (error) {
-          throw supabaseErrorToError(error);
-        }
+  private syncProbeDependencies(): ProjectSyncProbeDependencies {
+    return {
+      getClient: () => this.getSupabaseClient(),
+      withAuthRetry: <T>(context: string, fn: () => Promise<T>) => this.withAuthRetry(context, fn),
+    };
+  }
 
-        const row = Array.isArray(data) ? data[0] : data;
-        if (!row || typeof row !== 'object') {
-          return null;
-        }
-        const record = row as Record<string, unknown>;
-        return {
-          activeProjectId: record['active_project_id'] ? String(record['active_project_id']) : null,
-          activeAccessible: Boolean(record['active_accessible']),
-          activeWatermark: record['active_watermark'] ? String(record['active_watermark']) : null,
-          projectsWatermark: record['projects_watermark'] ? String(record['projects_watermark']) : null,
-          blackboxWatermark: record['blackbox_watermark'] ? String(record['blackbox_watermark']) : null,
-          serverNow: record['server_now'] ? String(record['server_now']) : null,
-        };
-      });
-    } catch (e) {
-      if (isBrowserNetworkSuspendedError(e) || isBrowserNetworkSuspendedWindow()) {
-        // eslint-disable-next-line no-restricted-syntax -- 挂起窗口：静默降级
-        return null;
-      }
-      this.logger.warn('恢复链路聚合探测失败，降级为分步探测', {
-        projectId,
-        error: supabaseErrorToError(e).message
-      });
-      // eslint-disable-next-line no-restricted-syntax -- 聚合 RPC 失败时降级为分步探测（null 触发调用方 fallback）
-      return null;
-    }
+  private projectCloudListDependencies(): ProjectCloudListDependencies {
+    return {
+      getClient: (expectedUserId?: string) => this.getSupabaseClient(expectedUserId),
+      withAuthRetry: <T>(context: string, fn: () => Promise<T>) => this.withAuthRetry(context, fn),
+      rowToProject: (row) => this.rowToProject(row),
+      loadFullProjectOptimized: (projectId, expectedUserId) => this.loadFullProjectOptimized(projectId, expectedUserId),
+      isTransientMetadataLoadFailure: (error) => this.isTransientMetadataLoadFailure(error),
+    };
   }
   
   /**
    * 拉取任务（带限流和 tombstone 处理）
    */
   private async pullTasksThrottled(projectId: string, client: SupabaseClient): Promise<Task[]> {
-    this.sentryLazyLoader.addBreadcrumb({
-      category: 'sync',
-      message: 'Loading tasks with tombstones',
-      level: 'info',
-      data: { projectId }
-    });
-    
-    const tasksResult = await this.throttle.execute(
-      `tasks-data:${projectId}`,
-      async () => {
-        const loadTasks = async () => await client
-          .from('tasks')
-          .select(getCompatibleTaskSelectFields(FIELD_SELECT_CONFIG.TASK_LIST_FIELDS))
-          .eq('project_id', projectId);
-
-        let result = await loadTasks();
-        if (result.error && markTaskCompletedAtColumnUnavailable(result.error)) {
-          this.logger.warn('tasks.completed_at 缺失，已降级为旧 schema 任务字段', {
-            projectId,
-            error: result.error,
-          });
-          result = await loadTasks();
-        }
-
-        return result;
-      },
-      { 
-        deduplicate: true,
-        timeout: REQUEST_THROTTLE_CONFIG.BATCH_SYNC_TIMEOUT 
-      }
+    return await this.taskData.pullTasksThrottled(
+      projectId,
+      client,
+      (row) => this.rowToTask(row),
+      this.resolveRemoteSessionUserId() ?? 'anonymous',
+      (context, fn) => this.withAuthRetry(context, fn),
     );
-    
-    const tombstonesResult = await this.tombstoneService.getTombstonesWithCache(projectId, client);
-    
-    if (tasksResult.error) throw supabaseErrorToError(tasksResult.error);
-    
-    // 构建远端 tombstone 水位
-    const remoteTombstoneTimestamps = new Map<string, number>();
-    
-    if (!tombstonesResult.error) {
-      for (const t of (tombstonesResult.data || [])) {
-        if (!t.deleted_at) {
-          continue;
-        }
-        const deletedAt = new Date(t.deleted_at).getTime();
-        if (!Number.isNaN(deletedAt)) {
-          remoteTombstoneTimestamps.set(t.task_id, deletedAt);
-        }
-      }
-    }
-
-    // 转换任务并标记 tombstone
-    const allTasks = ((tasksResult.data || []) as unknown as TaskRow[]).map(row => this.rowToTask(row));
-    
-    return allTasks.map(task => {
-      const remoteDeletedAt = remoteTombstoneTimestamps.get(task.id);
-      if (this.tombstoneService.shouldMaterializeTaskDeletion(task.updatedAt, remoteDeletedAt)) {
-        const materializedTask = { ...task, deletedAt: task.deletedAt || new Date(remoteDeletedAt!).toISOString() };
-        return hasTaskContentMissingFromSource(task)
-          ? markTaskContentMissingFromSource(materializedTask)
-          : materializedTask;
-      }
-
-      const localDeletedAt = this.tombstoneService.getLocalTombstoneTimestamp(projectId, task.id);
-      if (this.tombstoneService.shouldMaterializeTaskDeletion(task.updatedAt, localDeletedAt)) {
-        const materializedTask = { ...task, deletedAt: task.deletedAt || new Date(localDeletedAt!).toISOString() };
-        return hasTaskContentMissingFromSource(task)
-          ? markTaskContentMissingFromSource(materializedTask)
-          : materializedTask;
-      }
-
-      if (localDeletedAt !== undefined) {
-        this.tombstoneService.clearLocalTombstones(projectId, [task.id]);
-      }
-
-      return task;
-    });
   }
   
   addLocalTombstones(
@@ -1236,14 +432,14 @@ export class ProjectDataService {
     taskIds: string[],
     timestampsByTaskId?: Record<string, string | number | null | undefined>,
   ): void {
-    this.tombstoneService.addLocalTombstones(projectId, taskIds, timestampsByTaskId);
+    this.taskData.addLocalTombstones(projectId, taskIds, timestampsByTaskId);
   }
   
   /**
    * 清除 tombstone 缓存
    */
   invalidateTombstoneCache(projectId: string): void {
-    this.tombstoneService.invalidateTombstoneCache(projectId);
+    this.taskData.invalidateTombstoneCache(projectId);
   }
   
   // ==================== 离线快照 ====================
@@ -1254,153 +450,15 @@ export class ProjectDataService {
    * 先写 IndexedDB，再保留 localStorage 作为迁移兼容兜底。
    */
   saveOfflineSnapshot(projects: Project[], ownerUserId?: string | null): void {
-    void this.persistOfflineSnapshot(projects, ownerUserId);
+    this.offlineSnapshots.saveOfflineSnapshot(projects, ownerUserId);
   }
 
-  async saveOfflineSnapshotAndWait(projects: Project[], ownerUserId?: string | null): Promise<void> {
-    await this.persistOfflineSnapshot(projects, ownerUserId);
-  }
-
-  private async persistOfflineSnapshot(projects: Project[], ownerUserId?: string | null): Promise<void> {
-    if (this.startupPlaceholderState?.isHintOnlyActive()) {
-      this.logger.debug('跳过 hint-only 启动占位快照持久化，等待 owner 确认后再写入真实离线快照');
-      return;
-    }
-
-    const cleanedProjects = projects.map(project => this.normalizeOfflineSnapshotProject(project));
-
-    const snapshotOwnerUserId = ownerUserId
-      ?? this.authService?.currentUserId()
-      ?? this.authService?.peekPersistedSessionIdentity?.()?.userId
-      ?? AUTH_CONFIG.LOCAL_MODE_USER_ID;
-    
-    const payload = JSON.stringify({
-      projects: cleanedProjects,
-      version: this.CACHE_VERSION,
-      ownerUserId: snapshotOwnerUserId,
-      savedAt: new Date().toISOString(),
-    });
-    
-    const sizeKB = Math.round(payload.length / 1024);
-    this.logger.debug('离线快照大小', { sizeKB, projectCount: projects.length });
-    
-    // 快照超过 4MB 时发出 Sentry 警告（接近 localStorage 5MB 上限）
-    if (sizeKB > 4096) {
-      this.sentryLazyLoader.captureMessage('Offline snapshot exceeds 4MB', {
-        level: 'warning',
-        tags: { sizeKB: String(sizeKB), projectCount: String(projects.length) }
-      });
-    }
-
-    // 先同步写 localStorage，再等待 IDB 落盘，避免 owner 改写后的首次恢复读到旧快照。
-    this.saveSnapshotToLocalStorage(payload, snapshotOwnerUserId);
-
-    try {
-      await this.saveSnapshotToIDB(payload, snapshotOwnerUserId);
-    } catch (error) {
-      this.logger.warn('离线快照保存失败（IndexedDB）', error);
-    }
-  }
-
-  private normalizeSnapshotOwnerUserId(ownerUserId?: string | null): string {
-    return typeof ownerUserId === 'string' && ownerUserId.length > 0
-      ? ownerUserId
-      : AUTH_CONFIG.LOCAL_MODE_USER_ID;
-  }
-
-  private getOfflineSnapshotStorageKey(ownerUserId: string = AUTH_CONFIG.LOCAL_MODE_USER_ID): string {
-    return `${this.OFFLINE_CACHE_KEY}.${ownerUserId}`;
-  }
-
-  private getOfflineSnapshotRecordId(ownerUserId: string = AUTH_CONFIG.LOCAL_MODE_USER_ID): string {
-    return `${this.LEGACY_OFFLINE_SNAPSHOT_RECORD_ID}:${ownerUserId}`;
-  }
-  
-  /** localStorage 保存快照 */
-  private saveSnapshotToLocalStorage(payload: string, ownerUserId: string): void {
-    if (typeof localStorage === 'undefined') return;
-    try {
-      const normalizedOwnerUserId = this.normalizeSnapshotOwnerUserId(ownerUserId);
-      localStorage.setItem(this.getOfflineSnapshotStorageKey(normalizedOwnerUserId), payload);
-      if (normalizedOwnerUserId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
-        localStorage.removeItem(this.OFFLINE_CACHE_KEY);
-      }
-    } catch (e) {
-      this.logger.warn('离线快照保存失败（localStorage）', e);
-    }
-  }
-  
-  /** IndexedDB 保存快照 */
-  private async saveSnapshotToIDB(payload: string, ownerUserId: string): Promise<void> {
-    const db = await this.openSnapshotDB();
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction('snapshots', 'readwrite');
-      tx.objectStore('snapshots').put({
-        id: this.getOfflineSnapshotRecordId(this.normalizeSnapshotOwnerUserId(ownerUserId)),
-        ownerUserId: this.normalizeSnapshotOwnerUserId(ownerUserId),
-        data: payload,
-      });
-      tx.oncomplete = () => {
-        db.close();
-        resolve();
-      };
-      tx.onerror = () => {
-        db.close();
-        reject(tx.error);
-      };
-    });
-  }
-
-  /** IndexedDB 加载快照 */
-  private async loadSnapshotFromIDB(options?: OfflineSnapshotLoadOptions): Promise<string | null> {
-    const db = await this.openSnapshotDB();
-    const ownerUserId = this.resolveSnapshotVisibleOwnerUserId(options);
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction('snapshots', 'readonly');
-      const store = tx.objectStore('snapshots');
-      const scopedReq = store.get(this.getOfflineSnapshotRecordId(ownerUserId));
-      scopedReq.onsuccess = () => {
-        const scopedPayload = scopedReq.result?.data ?? null;
-        if (scopedPayload || ownerUserId !== AUTH_CONFIG.LOCAL_MODE_USER_ID) {
-          db.close();
-          resolve(scopedPayload);
-          return;
-        }
-
-        const legacyReq = store.get(this.LEGACY_OFFLINE_SNAPSHOT_RECORD_ID);
-        legacyReq.onsuccess = () => {
-          db.close();
-          resolve(legacyReq.result?.data ?? null);
-        };
-        legacyReq.onerror = () => {
-          db.close();
-          reject(legacyReq.error);
-        };
-      };
-      scopedReq.onerror = () => {
-        db.close();
-        reject(scopedReq.error);
-      };
-      tx.onerror = () => {
-        db.close();
-        reject(tx.error);
-      };
-    });
-  }
-  
-  /** 打开快照 IndexedDB */
-  private openSnapshotDB(): Promise<IDBDatabase> {
-    return new Promise((resolve, reject) => {
-      const request = indexedDB.open('nanoflow-offline-snapshots', 1);
-      request.onupgradeneeded = () => {
-        const db = request.result;
-        if (!db.objectStoreNames.contains('snapshots')) {
-          db.createObjectStore('snapshots', { keyPath: 'id' });
-        }
-      };
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error);
-    });
+  async saveOfflineSnapshotAndWait(
+    projects: Project[],
+    ownerUserId?: string | null,
+    options?: OfflineSnapshotWriteOptions,
+  ): Promise<void> {
+    await this.offlineSnapshots.saveOfflineSnapshotAndWait(projects, ownerUserId, options);
   }
   
   /**
@@ -1408,7 +466,7 @@ export class ProjectDataService {
    * 兼容旧调用方：同步路径仍然只读 localStorage。
    */
   loadOfflineSnapshot(options?: OfflineSnapshotLoadOptions): Project[] | null {
-    return this.loadOfflineSnapshotFromLocalStorage(options);
+    return this.offlineSnapshots.loadOfflineSnapshot(options);
   }
 
   /**
@@ -1417,417 +475,21 @@ export class ProjectDataService {
    * 优先读取 IndexedDB；如果只有 legacy localStorage 快照，则加载后写回 IDB。
    */
   async loadStartupOfflineSnapshot(options?: OfflineSnapshotLoadOptions): Promise<StartupOfflineSnapshotLoadResult> {
-    const startupOptions: OfflineSnapshotLoadOptions = {
-      allowOwnerHint: true,
-      ...options,
-    };
-
-    // 快照 JSON 中可能缺少 ownerUserId（旧版本保存的快照），
-    // 但 IDB/localStorage key 本身就是按 userId 分区的，
-    // 因此可安全使用查找时的 userId 作为 fallback。
-    const resolvedOwnerUserId = this.resolveSnapshotVisibleOwnerUserId(startupOptions);
-
-    const idbPayload = await this.loadSnapshotFromIDB(startupOptions).catch((error) => {
-      this.logger.warn('启动快照加载失败（IndexedDB）', error);
-      return null;
-    });
-    const idbSnapshot = idbPayload ? this.parseSnapshotEnvelope(idbPayload) : null;
-    const localStoragePayload = this.loadSnapshotFromLocalStorageRaw(startupOptions);
-    const localStorageSnapshot = localStoragePayload ? this.parseSnapshotEnvelope(localStoragePayload) : null;
-
-    this.hydrateParsedSnapshotOwner(idbSnapshot, resolvedOwnerUserId);
-    this.hydrateParsedSnapshotOwner(localStorageSnapshot, resolvedOwnerUserId);
-
-    const preferredSnapshot = this.pickPreferredStartupSnapshot(
-      idbPayload,
-      idbSnapshot,
-      localStoragePayload,
-      localStorageSnapshot,
-    );
-
-    const alternateSnapshot = this.pickAlternateStartupSnapshot(
-      preferredSnapshot,
-      idbPayload,
-      idbSnapshot,
-      localStoragePayload,
-      localStorageSnapshot,
-    );
-
-    const selectedSnapshot = this.selectVisibleStartupSnapshot(
-      preferredSnapshot,
-      alternateSnapshot,
-      startupOptions,
-    );
-
-    if (selectedSnapshot?.snapshot) {
-      if (selectedSnapshot.source === 'idb' && selectedSnapshot.raw) {
-        return this.buildStartupSnapshotResult('idb', selectedSnapshot.raw, selectedSnapshot.snapshot, false);
-      }
-
-      if (selectedSnapshot.source === 'localStorage' && selectedSnapshot.raw) {
-        const migratedLegacy = await this.migrateLegacySnapshotToIDB(
-          selectedSnapshot.raw,
-          resolvedOwnerUserId
-        );
-        return this.buildStartupSnapshotResult('localStorage', selectedSnapshot.raw, selectedSnapshot.snapshot, migratedLegacy);
-      }
-    }
-
-    if (!localStoragePayload) {
-      return {
-        source: 'none',
-        projectCount: 0,
-        bytes: 0,
-        migratedLegacy: false,
-        projects: [],
-      };
-    }
-
-    return {
-      source: 'none',
-      projectCount: 0,
-      bytes: 0,
-      migratedLegacy: false,
-      projects: [],
-      ownerUserId: null,
-    };
+    return await this.offlineSnapshots.loadStartupOfflineSnapshot(options);
   }
 
   /**
    * 异步加载离线快照（支持 IDB）
    */
   async loadOfflineSnapshotAsync(options?: OfflineSnapshotLoadOptions): Promise<Project[] | null> {
-    const snapshot = await this.loadStartupOfflineSnapshot(options);
-    return snapshot.projectCount > 0 ? snapshot.projects : null;
-  }
-
-  /** 从 localStorage 读取快照原始内容 */
-  private loadSnapshotFromLocalStorageRaw(options?: OfflineSnapshotLoadOptions): string | null {
-    if (typeof localStorage === 'undefined') return null;
-    try {
-      const ownerUserId = this.resolveSnapshotVisibleOwnerUserId(options);
-      const scopedPayload = localStorage.getItem(this.getOfflineSnapshotStorageKey(ownerUserId));
-      if (scopedPayload !== null) {
-        return scopedPayload;
-      }
-
-      if (ownerUserId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
-        return localStorage.getItem(this.OFFLINE_CACHE_KEY);
-      }
-
-      return null;
-    } catch (e) {
-      this.logger.warn('离线快照加载失败（localStorage）', e);
-      // eslint-disable-next-line no-restricted-syntax -- localStorage 访问异常时返回 null 触发上层降级
-      return null;
-    }
-  }
-
-  /** 从 localStorage 加载快照 */
-  private loadOfflineSnapshotFromLocalStorage(options?: OfflineSnapshotLoadOptions): Project[] | null {
-    const cached = this.loadSnapshotFromLocalStorageRaw(options);
-    if (!cached) {
-      return null;
-    }
-
-    const snapshot = this.parseSnapshotEnvelope(cached);
-    if (!snapshot) {
-      return null;
-    }
-
-    if (!this.isSnapshotVisibleToCurrentOwner(snapshot.ownerUserId, 'sync-load', options)) {
-      return null;
-    }
-
-    return snapshot.projects;
-  }
-
-  private resolveSnapshotVisibleOwnerUserId(options?: OfflineSnapshotLoadOptions): string {
-    if (typeof options?.ownerUserId === 'string' && options.ownerUserId.length > 0) {
-      return options.ownerUserId;
-    }
-
-    const currentOwnerUserId = this.authService?.currentUserId();
-    if (typeof currentOwnerUserId === 'string' && currentOwnerUserId.length > 0) {
-      return currentOwnerUserId;
-    }
-
-    const persistedSessionUserId = this.authService?.peekPersistedSessionIdentity?.()?.userId ?? null;
-    if (typeof persistedSessionUserId === 'string' && persistedSessionUserId.length > 0) {
-      return persistedSessionUserId;
-    }
-
-    if (options?.allowOwnerHint) {
-      // owner hint 只用于非 trusted 的占位预填充，不应默认放宽同步读取的可见性边界。
-      const persistedOwnerHint = typeof this.authService?.peekPersistedOwnerHint === 'function'
-        ? this.authService.peekPersistedOwnerHint()
-        : null;
-      if (typeof persistedOwnerHint === 'string' && persistedOwnerHint.length > 0) {
-        return persistedOwnerHint;
-      }
-    }
-
-    return AUTH_CONFIG.LOCAL_MODE_USER_ID;
-  }
-
-  private isSnapshotVisibleToCurrentOwner(
-    ownerUserId: string | null,
-    stage: 'sync-load',
-    options?: OfflineSnapshotLoadOptions,
-  ): boolean {
-    const currentOwnerUserId = this.resolveSnapshotVisibleOwnerUserId(options);
-
-    if (!ownerUserId) {
-      this.logger.warn('同步快照缺少 owner 元数据，已忽略本次读取', {
-        stage,
-        currentOwnerUserId,
-      });
-      return false;
-    }
-
-    if (ownerUserId !== currentOwnerUserId) {
-      this.logger.warn('同步快照 owner 不匹配，已忽略本次读取', {
-        stage,
-        snapshotOwnerUserId: ownerUserId,
-        currentOwnerUserId,
-      });
-      return false;
-    }
-
-    return true;
-  }
-
-  private normalizeOfflineSnapshotProject(project: Project): Project {
-    const allTasks = project.tasks || [];
-    const activeTaskIds = new Set(
-      allTasks
-        .filter(task => !task.deletedAt)
-        .map(task => task.id)
-    );
-
-    return {
-      ...project,
-      // 软删除任务仍属于回收站保留窗口，离线快照恢复不能把它们误当作已永久销毁。
-      tasks: allTasks,
-      // 主视图只恢复活跃任务之间的连接，避免 deleted task 在图上重新挂回可见边。
-      connections: (project.connections || []).filter(connection =>
-        activeTaskIds.has(connection.source) && activeTaskIds.has(connection.target)
-      ),
-    };
-  }
-
-  private parseSnapshotEnvelope(raw: string): ParsedOfflineSnapshotEnvelope | null {
-    try {
-      const parsed = JSON.parse(raw) as { projects?: Project[]; ownerUserId?: unknown; savedAt?: unknown };
-      if (Array.isArray(parsed?.projects)) {
-        return {
-          projects: parsed.projects.map((project: Project) => this.normalizeOfflineSnapshotProject(project)),
-          ownerUserId: typeof parsed.ownerUserId === 'string' && parsed.ownerUserId.trim().length > 0
-            ? parsed.ownerUserId
-            : null,
-          savedAt: typeof parsed.savedAt === 'string' && parsed.savedAt.trim().length > 0
-            ? parsed.savedAt
-            : null,
-        };
-      }
-    } catch (e) {
-      this.logger.warn('快照数据解析失败', e);
-    }
-    return null;
-  }
-
-  /** 解析快照 JSON 数据 */
-  private parseSnapshotData(raw: string): Project[] | null {
-    return this.parseSnapshotEnvelope(raw)?.projects ?? null;
-  }
-
-  private buildStartupSnapshotResult(
-    source: StartupOfflineSnapshotSource,
-    raw: string,
-    snapshot: ParsedOfflineSnapshotEnvelope,
-    migratedLegacy: boolean
-  ): StartupOfflineSnapshotLoadResult {
-    return {
-      source,
-      projectCount: snapshot.projects.length,
-      bytes: this.getSnapshotByteSize(raw),
-      migratedLegacy,
-      projects: snapshot.projects,
-      ownerUserId: snapshot.ownerUserId,
-    };
-  }
-
-  private getSnapshotByteSize(raw: string): number {
-    try {
-      return new TextEncoder().encode(raw).byteLength;
-    } catch {
-      return raw.length;
-    }
-  }
-
-  private getSnapshotSavedAtTimestamp(snapshot: ParsedOfflineSnapshotEnvelope | null): number {
-    if (!snapshot?.savedAt) {
-      return 0;
-    }
-
-    const timestamp = new Date(snapshot.savedAt).getTime();
-    return Number.isNaN(timestamp) ? 0 : timestamp;
-  }
-
-  private hydrateParsedSnapshotOwner(snapshot: ParsedOfflineSnapshotEnvelope | null, resolvedOwnerUserId: string): void {
-    if (snapshot && !snapshot.ownerUserId && resolvedOwnerUserId) {
-      snapshot.ownerUserId = resolvedOwnerUserId;
-    }
-  }
-
-  private pickPreferredStartupSnapshot(
-    idbRaw: string | null,
-    idbSnapshot: ParsedOfflineSnapshotEnvelope | null,
-    localStorageRaw: string | null,
-    localStorageSnapshot: ParsedOfflineSnapshotEnvelope | null,
-  ): { source: 'idb' | 'localStorage'; raw: string; snapshot: ParsedOfflineSnapshotEnvelope } | null {
-    if (idbSnapshot && localStorageSnapshot && idbRaw && localStorageRaw) {
-      const idbSavedAt = this.getSnapshotSavedAtTimestamp(idbSnapshot);
-      const localStorageSavedAt = this.getSnapshotSavedAtTimestamp(localStorageSnapshot);
-
-      if (localStorageSavedAt > idbSavedAt) {
-        return {
-          source: 'localStorage',
-          raw: localStorageRaw,
-          snapshot: localStorageSnapshot,
-        };
-      }
-
-      return {
-        source: 'idb',
-        raw: idbRaw,
-        snapshot: idbSnapshot,
-      };
-    }
-
-    if (idbSnapshot && idbRaw) {
-      return {
-        source: 'idb',
-        raw: idbRaw,
-        snapshot: idbSnapshot,
-      };
-    }
-
-    if (localStorageSnapshot && localStorageRaw) {
-      return {
-        source: 'localStorage',
-        raw: localStorageRaw,
-        snapshot: localStorageSnapshot,
-      };
-    }
-
-    return null;
-  }
-
-  private pickAlternateStartupSnapshot(
-    preferredSnapshot: { source: 'idb' | 'localStorage'; raw: string; snapshot: ParsedOfflineSnapshotEnvelope } | null,
-    idbRaw: string | null,
-    idbSnapshot: ParsedOfflineSnapshotEnvelope | null,
-    localStorageRaw: string | null,
-    localStorageSnapshot: ParsedOfflineSnapshotEnvelope | null,
-  ): { source: 'idb' | 'localStorage'; raw: string; snapshot: ParsedOfflineSnapshotEnvelope } | null {
-    if (!preferredSnapshot) {
-      return null;
-    }
-
-    if (preferredSnapshot.source === 'idb' && localStorageRaw && localStorageSnapshot) {
-      return {
-        source: 'localStorage',
-        raw: localStorageRaw,
-        snapshot: localStorageSnapshot,
-      };
-    }
-
-    if (preferredSnapshot.source === 'localStorage' && idbRaw && idbSnapshot) {
-      return {
-        source: 'idb',
-        raw: idbRaw,
-        snapshot: idbSnapshot,
-      };
-    }
-
-    return null;
-  }
-
-  private selectVisibleStartupSnapshot(
-    preferredSnapshot: { source: 'idb' | 'localStorage'; raw: string; snapshot: ParsedOfflineSnapshotEnvelope } | null,
-    alternateSnapshot: { source: 'idb' | 'localStorage'; raw: string; snapshot: ParsedOfflineSnapshotEnvelope } | null,
-    options?: OfflineSnapshotLoadOptions,
-  ): { source: 'idb' | 'localStorage'; raw: string; snapshot: ParsedOfflineSnapshotEnvelope } | null {
-    if (
-      preferredSnapshot
-      && this.isSnapshotVisibleToCurrentOwner(preferredSnapshot.snapshot.ownerUserId, 'sync-load', options)
-    ) {
-      return preferredSnapshot;
-    }
-
-    if (
-      alternateSnapshot
-      && this.isSnapshotVisibleToCurrentOwner(alternateSnapshot.snapshot.ownerUserId, 'sync-load', options)
-    ) {
-      return alternateSnapshot;
-    }
-
-    return null;
-  }
-
-  private async migrateLegacySnapshotToIDB(payload: string, ownerUserId: string): Promise<boolean> {
-    try {
-      await this.saveSnapshotToIDB(payload, ownerUserId);
-      return true;
-    } catch (error) {
-      this.logger.warn('legacy 离线快照迁移到 IndexedDB 失败', error);
-      return false;
-    }
+    return await this.offlineSnapshots.loadOfflineSnapshotAsync(options);
   }
   
   /**
    * 清除离线快照
    */
   clearOfflineSnapshot(ownerUserId?: string | null): void {
-    const resolvedOwnerUserId = this.normalizeSnapshotOwnerUserId(
-      ownerUserId ?? this.authService?.currentUserId()
-    );
-    try {
-      if (typeof localStorage !== 'undefined') {
-        localStorage.removeItem(this.getOfflineSnapshotStorageKey(resolvedOwnerUserId));
-        if (resolvedOwnerUserId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
-          localStorage.removeItem(this.OFFLINE_CACHE_KEY);
-        }
-      }
-      this.logger.info('离线快照已清除', { ownerUserId: resolvedOwnerUserId });
-    } catch (e) {
-      this.logger.warn('清除离线快照失败', e);
-    }
-
-    void this.clearSnapshotFromIDB(resolvedOwnerUserId).catch((error) => {
-      this.logger.warn('清除离线快照失败（IndexedDB）', error);
-    });
-  }
-
-  private async clearSnapshotFromIDB(ownerUserId: string): Promise<void> {
-    const db = await this.openSnapshotDB();
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction('snapshots', 'readwrite');
-      const store = tx.objectStore('snapshots');
-      store.delete(this.getOfflineSnapshotRecordId(ownerUserId));
-      if (ownerUserId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
-        store.delete(this.LEGACY_OFFLINE_SNAPSHOT_RECORD_ID);
-      }
-      tx.oncomplete = () => {
-        db.close();
-        resolve();
-      };
-      tx.onerror = () => {
-        db.close();
-        reject(tx.error);
-      };
-    });
+    this.offlineSnapshots.clearOfflineSnapshot(ownerUserId);
   }
 
   // ==================== 停泊任务轻量缓存与增量拉取 ====================
@@ -1835,92 +497,31 @@ export class ProjectDataService {
   /**
    * 从 IndexedDB 读取停泊任务轻量缓存与同步游标
    */
-  async loadParkedTasksCache(): Promise<ParkedTaskCacheSnapshot> {
-    if (typeof indexedDB === 'undefined') {
-      return { entries: [], cursor: null };
-    }
-
-    try {
-      const db = await this.openFocusModeDB();
-      return await new Promise<ParkedTaskCacheSnapshot>((resolve, reject) => {
-        const tx = db.transaction(
-          [FOCUS_CONFIG.IDB_STORES.PARKED_TASKS, FOCUS_CONFIG.IDB_STORES.SYNC_METADATA],
-          'readonly'
-        );
-
-        const parkedStore = tx.objectStore(FOCUS_CONFIG.IDB_STORES.PARKED_TASKS);
-        const metaStore = tx.objectStore(FOCUS_CONFIG.IDB_STORES.SYNC_METADATA);
-
-        const parkedReq = parkedStore.getAll();
-        const cursorReq = metaStore.get(this.PARKING_SYNC_CURSOR_KEY);
-
-        tx.oncomplete = () => {
-          const rows = Array.isArray(parkedReq.result) ? parkedReq.result : [];
-          const entries: ParkedTaskEntry[] = rows
-            .filter((row): row is ParkedTaskCacheRecord =>
-              !!row &&
-              typeof row === 'object' &&
-              'taskId' in row &&
-              'projectId' in row &&
-              'task' in row
-            )
-            .map((row) => ({
-              task: row.task,
-              projectId: row.projectId,
-            }));
-
-          const cursor = cursorReq.result?.value
-            ? String(cursorReq.result.value)
-            : null;
-
-          resolve({ entries, cursor });
-        };
-
-        tx.onerror = () => reject(tx.error);
-      });
-    } catch (error) {
-      this.logger.warn('读取停泊任务缓存失败，降级为空缓存', { error });
-      return { entries: [], cursor: null };
-    }
+  async loadParkedTasksCache(ownerUserId?: string): Promise<ParkedTaskCacheSnapshot> {
+    const resolvedOwner = ownerUserId ?? this.resolveRemoteSessionUserId();
+    if (!resolvedOwner) return { entries: [], cursor: null };
+    return await this.parkedTasksData.loadParkedTasksCache(resolvedOwner);
   }
 
   /**
    * 保存停泊任务轻量缓存与同步游标
    */
-  async saveParkedTasksCache(snapshot: ParkedTaskCacheSnapshot): Promise<void> {
-    if (typeof indexedDB === 'undefined') return;
-
-    try {
-      const db = await this.openFocusModeDB();
-      await new Promise<void>((resolve, reject) => {
-        const tx = db.transaction(
-          [FOCUS_CONFIG.IDB_STORES.PARKED_TASKS, FOCUS_CONFIG.IDB_STORES.SYNC_METADATA],
-          'readwrite'
-        );
-        const parkedStore = tx.objectStore(FOCUS_CONFIG.IDB_STORES.PARKED_TASKS);
-        const metaStore = tx.objectStore(FOCUS_CONFIG.IDB_STORES.SYNC_METADATA);
-
-        parkedStore.clear();
-        for (const entry of snapshot.entries) {
-          const updatedAt = entry.task.updatedAt ?? new Date().toISOString();
-          parkedStore.put({
-            taskId: entry.task.id,
-            projectId: entry.projectId,
-            task: entry.task,
-            updatedAt,
-          } as ParkedTaskCacheRecord);
-        }
-        metaStore.put({
-          key: this.PARKING_SYNC_CURSOR_KEY,
-          value: snapshot.cursor ?? null,
-        });
-
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => reject(tx.error);
-      });
-    } catch (error) {
-      this.logger.warn('保存停泊任务缓存失败（不阻断主流程）', { error });
-    }
+  async saveParkedTasksCache(
+    ownerUserIdOrSnapshot: string | ParkedTaskCacheSnapshot,
+    snapshotOrOptions?: ParkedTaskCacheSnapshot | ParkedTaskCacheSaveOptions,
+    options?: ParkedTaskCacheSaveOptions,
+  ): Promise<void> {
+    const ownerUserId = typeof ownerUserIdOrSnapshot === 'string'
+      ? ownerUserIdOrSnapshot
+      : this.resolveRemoteSessionUserId();
+    const snapshot = typeof ownerUserIdOrSnapshot === 'string'
+      ? snapshotOrOptions as ParkedTaskCacheSnapshot
+      : ownerUserIdOrSnapshot;
+    const saveOptions = typeof ownerUserIdOrSnapshot === 'string'
+      ? options
+      : snapshotOrOptions as ParkedTaskCacheSaveOptions | undefined;
+    if (!ownerUserId || !snapshot) return;
+    await this.parkedTasksData.saveParkedTasksCache(ownerUserId, snapshot, saveOptions);
   }
 
   /**
@@ -1928,7 +529,7 @@ export class ProjectDataService {
    *
    * 返回：
    * - entries: 新增/更新的停泊任务
-   * - removedTaskIds: 已从停泊状态移除的任务 ID（由已知停泊任务集合推导）
+   * - removedTasks: 已从停泊状态移除的任务及其远端更新时间（用于 LWW）
    * - nextCursor: 下一次增量拉取游标
    */
   async pullParkedTasksDelta(
@@ -1936,207 +537,28 @@ export class ProjectDataService {
     knownParkedTaskIds: string[],
     projectIds: readonly string[] = [],
   ): Promise<ParkedTaskDeltaResult> {
-    if (isBrowserNetworkSuspendedWindow()) {
-      this.logger.debug('浏览器网络挂起窗口内跳过停泊任务增量拉取', { since });
-      return { entries: [], removedTaskIds: [], nextCursor: since };
-    }
-
-    const client = await this.getSupabaseClient();
-    if (!client) {
-      return { entries: [], removedTaskIds: [], nextCursor: since };
-    }
-
-    const updatedRows: ParkedTaskDeltaRow[] = [];
-    const entryMap = new Map<string, ParkedTaskEntry>();
-    const removedTaskIds = new Set<string>();
-    const localProjectIdHints = this.normalizeIds(projectIds);
-
-    try {
-      return await this.withAuthRetry('pullParkedTasksDelta', async () => {
-        const scopedProjectIds = await this.loadParkedSyncProjectIds(client);
-        if (scopedProjectIds.length === 0) {
-          this.logger.debug('停泊任务增量拉取缺少远端项目范围，跳过任务查询', {
-            since,
-            localProjectCount: localProjectIdHints.length,
-          });
-          return { entries: [], removedTaskIds: [], nextCursor: since };
-        }
-
-        const getSelectFields = () => getCompatibleTaskSelectFields(`project_id,${FIELD_SELECT_CONFIG.TASK_LIST_FIELDS}`);
-        const projectChunks = this.chunkIds(scopedProjectIds, 50);
-        const loadParkedRows = async () => {
-          const rows: ParkedTaskDeltaRow[] = [];
-
-          for (const projectChunk of projectChunks) {
-            let parkedQuery = client
-              .from('tasks')
-              .select(getSelectFields())
-              .not('parking_meta', 'is', null)
-              .is('deleted_at', null);
-
-            parkedQuery = parkedQuery.in('project_id', projectChunk);
-
-            if (since) {
-              parkedQuery = parkedQuery.gt('updated_at', since);
-            }
-
-            const result = await parkedQuery;
-            if (result.error) {
-              return { data: null, error: result.error };
-            }
-
-            rows.push(...((result.data ?? []) as ParkedTaskDeltaRow[]));
-          }
-
-          return { data: rows, error: null };
-        };
-
-        let parkedResult = await loadParkedRows();
-        if (parkedResult.error && markTaskCompletedAtColumnUnavailable(parkedResult.error)) {
-          this.logger.warn('tasks.completed_at 缺失，停泊任务增量拉取已降级为旧 schema 字段', {
-            since,
-            error: parkedResult.error,
-          });
-          parkedResult = await loadParkedRows();
-        }
-
-        if (parkedResult.error) {
-          throw supabaseErrorToError(parkedResult.error);
-        }
-
-        for (const rawRow of (parkedResult.data ?? []) as ParkedTaskDeltaRow[]) {
-          const projectId = rawRow.project_id ? String(rawRow.project_id) : '';
-          if (!projectId || !rawRow.id) continue;
-          const task = this.rowToTask(rawRow);
-          entryMap.set(task.id, { task, projectId });
-          updatedRows.push(rawRow);
-        }
-
-        // 仅对“已知停泊任务”做增量核验，找出已移出停泊的任务
-        if (since && knownParkedTaskIds.length > 0) {
-          for (const chunk of this.chunkTaskIds(knownParkedTaskIds, 100)) {
-            const { data: changedRows, error: changedError } = await client
-              .from('tasks')
-              .select(getSelectFields())
-              .in('id', chunk)
-              .gt('updated_at', since);
-
-            if (changedError) {
-              throw supabaseErrorToError(changedError);
-            }
-
-            for (const rawRow of (changedRows ?? []) as ParkedTaskDeltaRow[]) {
-              updatedRows.push(rawRow);
-              if (!rawRow.id) continue;
-
-              const isParked = (rawRow as { parking_meta?: unknown }).parking_meta !== null
-                && (rawRow as { parking_meta?: unknown }).parking_meta !== undefined
-                && rawRow.deleted_at === null;
-              if (!isParked) {
-                removedTaskIds.add(String(rawRow.id));
-                entryMap.delete(String(rawRow.id));
-                continue;
-              }
-
-              const projectId = rawRow.project_id ? String(rawRow.project_id) : '';
-              if (!projectId) continue;
-              const task = this.rowToTask(rawRow);
-              entryMap.set(task.id, { task, projectId });
-            }
-          }
-        }
-
-        const nextCursor = this.computeParkedCursor(since, updatedRows);
-        return {
-          entries: Array.from(entryMap.values()),
-          removedTaskIds: Array.from(removedTaskIds),
-          nextCursor,
-        };
-      });
-    } catch (error) {
-      if (isBrowserNetworkSuspendedError(error)) {
-        this.logger.debug('浏览器网络挂起期间已跳过停泊任务增量拉取', { since });
-        return { entries: [], removedTaskIds: [], nextCursor: since };
-      }
-
-      this.logger.warn('增量拉取停泊任务失败，保持现有缓存', { error, since });
-      return { entries: [], removedTaskIds: [], nextCursor: since };
-    }
-  }
-
-  private computeParkedCursor(since: string | null, rows: ParkedTaskDeltaRow[]): string | null {
-    let maxTs = since ? Date.parse(since) : 0;
-    for (const row of rows) {
-      if (!row.updated_at) continue;
-      const ts = Date.parse(String(row.updated_at));
-      if (!Number.isNaN(ts)) {
-        maxTs = Math.max(maxTs, ts);
-      }
-    }
-    if (!maxTs) return since;
-    return new Date(maxTs).toISOString();
-  }
-
-  private async loadParkedSyncProjectIds(client: SupabaseClient): Promise<string[]> {
-    const { data, error } = await client
-      .from('projects')
-      .select('id')
-      .is('deleted_at', null);
-
-    if (error) {
-      throw supabaseErrorToError(error);
-    }
-
-    return this.normalizeIds(
-      ((data ?? []) as ProjectIdRow[])
-        .map((row) => row.id ? String(row.id) : '')
+    return await this.parkedTasksData.pullParkedTasksDelta(
+      since,
+      knownParkedTaskIds,
+      projectIds,
+      {
+        getClient: () => this.getSupabaseClient(),
+        withAuthRetry: (context, fn) => this.withAuthRetry(context, fn),
+        rowToTask: (row) => this.rowToTask(row),
+        normalizeIds: (ids) => this.normalizeIds(ids),
+        chunkIds: (ids, size) => this.chunkIds(ids, size),
+      },
     );
   }
 
-  private chunkTaskIds(taskIds: string[], size: number): string[][] {
-    return this.chunkIds(taskIds, size);
-  }
-
   private chunkIds(ids: readonly string[], size: number): string[][] {
-    if (ids.length <= size) return [Array.from(ids)];
-    const chunks: string[][] = [];
-    for (let index = 0; index < ids.length; index += size) {
-      chunks.push(ids.slice(index, index + size));
-    }
-    return chunks;
+    return chunkIdsPure(ids, size);
   }
 
   private normalizeIds(ids: readonly string[]): string[] {
-    const normalized = new Set<string>();
-    for (const id of ids) {
-      const value = id.trim();
-      if (value.length > 0) {
-        normalized.add(value);
-      }
-    }
-    return Array.from(normalized);
+    return normalizeIdsPure(ids);
   }
 
-  private async openFocusModeDB(): Promise<IDBDatabase> {
-    return openIndexedDBAdaptive({
-      dbName: FOCUS_CONFIG.SYNC.IDB_NAME,
-      targetVersion: FOCUS_CONFIG.SYNC.IDB_VERSION,
-      requiredStores: [
-        FOCUS_CONFIG.IDB_STORES.PARKED_TASKS,
-        FOCUS_CONFIG.IDB_STORES.SYNC_METADATA,
-      ],
-      ensureStores: db => {
-        if (!db.objectStoreNames.contains(FOCUS_CONFIG.IDB_STORES.PARKED_TASKS)) {
-          const parkedStore = db.createObjectStore(FOCUS_CONFIG.IDB_STORES.PARKED_TASKS, { keyPath: 'taskId' });
-          parkedStore.createIndex('by-updatedAt', 'updatedAt', { unique: false });
-        }
-        if (!db.objectStoreNames.contains(FOCUS_CONFIG.IDB_STORES.SYNC_METADATA)) {
-          db.createObjectStore(FOCUS_CONFIG.IDB_STORES.SYNC_METADATA, { keyPath: 'key' });
-        }
-      }
-    });
-  }
-  
   // ==================== 数据转换（Public API）====================
   
   /**
@@ -2163,62 +585,26 @@ export class ProjectDataService {
    * 【P0 防护】检测 content 字段是否缺失
    */
   rowToTask(row: TaskRow | Partial<TaskRow>): Task {
-    const contentMissingFromSource = !Object.prototype.hasOwnProperty.call(row, 'content')
-      || row.content === undefined;
-
-    // 【P0 防护】检测 content 字段是否缺失
-    if (contentMissingFromSource) {
-      this.logger.warn('rowToTask: content 字段缺失，可能导致数据丢失！', { 
-        taskId: row.id,
-        hasTitle: 'title' in row,
-        hasStage: 'stage' in row
-      });
-      
-      // 【Sentry 监控】采样率 10% 上报
-      const isDev = typeof window !== 'undefined' && window.location?.hostname === 'localhost';
-      if (isDev || Math.random() < 0.1) {
-        this.sentryLazyLoader.captureMessage('Sync Warning: Task content field missing', {
-          level: 'warning',
-          tags: { operation: 'rowToTask', taskId: row.id || 'unknown' },
-          extra: { rowKeys: Object.keys(row) }
+    return mapTaskRowToTask(row, {
+      warnContentMissing: details => {
+        this.logger.warn('rowToTask: content 字段缺失，可能导致数据丢失！', {
+          taskId: details.taskId,
+          hasTitle: details.hasTitle,
+          hasStage: details.hasStage,
         });
-      }
-    }
-
-    const task: Task = {
-      id: row.id || '',
-      title: row.title || '',
-      content: row.content ?? '',
-      stage: row.stage ?? null,
-      parentId: row.parent_id ?? null,
-      order: row.order || 0,
-      rank: row.rank || 0,
-      status: (row.status as 'active' | 'completed' | 'archived') || 'active',
-      x: row.x || 0,
-      y: row.y || 0,
-      createdDate: row.created_at || '',
-      updatedAt: row.updated_at,
-      completedAt: row.completed_at ?? null,
-      displayId: '',
-      shortId: row.short_id || undefined,
-      deletedAt: row.deleted_at || undefined,
-      // 【修复】同步层必须映射所有持久化字段，防止增量同步覆盖丢失
-      attachments: (row.attachments as unknown as import('../../../../models').Attachment[]) ?? [],
-      tags: (row.tags as unknown as string[]) ?? [],
-      priority: (row.priority as 'low' | 'medium' | 'high' | 'urgent') ?? undefined,
-      dueDate: row.due_date ?? undefined,
-      expected_minutes: row.expected_minutes ?? null,
-      cognitive_load: row.cognitive_load ?? null,
-      wait_minutes: row.wait_minutes ?? null,
-      // State Overlap 停泊元数据
-      parkingMeta: (row as { parking_meta?: unknown }).parking_meta as import('../../../../models/parking').TaskParkingMeta | undefined ?? undefined,
-    };
-
-    if (contentMissingFromSource) {
-      markTaskContentMissingFromSource(task);
-    }
-
-    return task;
+      },
+      captureContentMissing: details => {
+        // 【Sentry 监控】采样率 10% 上报
+        const isDev = typeof window !== 'undefined' && window.location?.hostname === 'localhost';
+        if (isDev || Math.random() < 0.1) {
+          this.sentryLazyLoader.captureMessage('Sync Warning: Task content field missing', {
+            level: 'warning',
+            tags: { operation: 'rowToTask', taskId: details.taskId || 'unknown' },
+            extra: { rowKeys: details.rowKeys },
+          });
+        }
+      },
+    });
   }
   
   /**

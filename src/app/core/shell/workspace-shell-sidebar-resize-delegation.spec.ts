@@ -1,0 +1,34 @@
+import { describe, expect, it } from 'vitest';
+
+import {
+  readWorkspaceShellSource,
+  readWorkspaceShellTemplates,
+} from './workspace-shell-source.spec-helpers';
+
+describe('WorkspaceShellComponent sidebar resize delegation', () => {
+  it('binds resize state and drag startup directly to the sidebar resize controller', () => {
+    // 中文注释：resize 状态绑定在拆分后的侧栏子模板，拖拽入口保留在根模板，用联合视图断言
+    const template = readWorkspaceShellTemplates();
+
+    expect(template).toContain('template.interaction.sidebarResize.isResizingAny()');
+    expect(template).toContain(
+      'template.interaction.sidebarResize.startSidebarResize($event)',
+    );
+    expect(template).not.toContain('isResizingAny"');
+    expect(template).not.toContain('(mousedown)="startSidebarResize($event)"');
+    expect(template).not.toContain('(mousedown)="startContentResize($event)"');
+    expect(template).not.toMatch(/(?<!template\.interaction\.)sidebarResize\./);
+  });
+
+  it('keeps sidebar resize forwarding wrappers out of the component class', () => {
+    const source = readWorkspaceShellSource();
+
+    expect(source).not.toMatch(/\bget\s+isResizingAny\s*\(/);
+    expect(source).not.toMatch(/\bstartSidebarResize\s*\(/);
+    expect(source).not.toMatch(/\bstartContentResize\s*\(/);
+    expect(source).not.toMatch(/\bonDocumentMouseMove\s*\(/);
+    expect(source).not.toMatch(/\bonDocumentMouseUp\s*\(/);
+    expect(source).not.toContain("@HostListener('document:mousemove'");
+    expect(source).not.toContain("@HostListener('document:mouseup'");
+  });
+});

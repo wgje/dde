@@ -1,6 +1,9 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const dotenv = require('dotenv');
+const {
+  resolveSupabaseBrowserCredentials,
+} = require('./lib/supabase-browser-key-safety.cjs');
 
 function escapeString(value) {
   return String(value).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
@@ -64,14 +67,30 @@ function ensureEnvFiles() {
   const devPath = path.join(envDir, 'environment.development.ts');
   const prodPath = path.join(envDir, 'environment.ts');
   const envLocalPath = path.resolve(__dirname, '../.env.local');
-  const localEnv = dotenv.config({ path: envLocalPath, quiet: true }).parsed || {};
+  const processSupabaseUrl = process.env.NG_APP_SUPABASE_URL;
+  const processSupabaseAnonKey = process.env.NG_APP_SUPABASE_ANON_KEY;
+  const localEnvSource = fs.existsSync(envLocalPath) ? fs.readFileSync(envLocalPath) : null;
+  if (localEnvSource) resolveSupabaseBrowserCredentials({ localEnvSource });
+  const localEnv = localEnvSource ? dotenv.parse(localEnvSource) : {};
+  const supabaseReceipt = resolveSupabaseBrowserCredentials({
+    processUrl: processSupabaseUrl,
+    processKey: processSupabaseAnonKey,
+    localUrl: localEnv.NG_APP_SUPABASE_URL,
+    localKey: localEnv.NG_APP_SUPABASE_ANON_KEY,
+  });
+  const supabaseUrl = (supabaseReceipt.urlSource === 'process'
+    ? processSupabaseUrl
+    : supabaseReceipt.urlSource === 'local' ? localEnv.NG_APP_SUPABASE_URL : undefined)
+    || 'YOUR_SUPABASE_URL';
+  const supabaseAnonKey = (supabaseReceipt.keySource === 'process'
+    ? processSupabaseAnonKey
+    : supabaseReceipt.keySource === 'local' ? localEnv.NG_APP_SUPABASE_ANON_KEY : undefined)
+    || 'YOUR_SUPABASE_ANON_KEY';
 
   if (!fs.existsSync(envDir)) {
     fs.mkdirSync(envDir, { recursive: true });
   }
 
-  const supabaseUrl = process.env.NG_APP_SUPABASE_URL || localEnv.NG_APP_SUPABASE_URL || 'YOUR_SUPABASE_URL';
-  const supabaseAnonKey = process.env.NG_APP_SUPABASE_ANON_KEY || localEnv.NG_APP_SUPABASE_ANON_KEY || 'YOUR_SUPABASE_ANON_KEY';
   const sentryDsn = process.env.NG_APP_SENTRY_DSN || process.env.SENTRY_DSN || localEnv.NG_APP_SENTRY_DSN || localEnv.SENTRY_DSN || '';
   const gojsLicenseKey = process.env.NG_APP_GOJS_LICENSE_KEY || localEnv.NG_APP_GOJS_LICENSE_KEY || '';
   const devAutoLoginEmail = process.env.NG_APP_DEV_AUTO_LOGIN_EMAIL || localEnv.NG_APP_DEV_AUTO_LOGIN_EMAIL;
@@ -88,7 +107,7 @@ function ensureEnvFiles() {
   const supabaseProjectAlias = process.env.NG_APP_SUPABASE_PROJECT_ALIAS || localEnv.NG_APP_SUPABASE_PROJECT_ALIAS || 'local';
   const sentryRelease = process.env.NG_APP_SENTRY_RELEASE || localEnv.NG_APP_SENTRY_RELEASE || '';
   const syncRpcEnabled = parseBooleanEnv(process.env.NG_APP_SYNC_RPC_ENABLED || localEnv.NG_APP_SYNC_RPC_ENABLED, false);
-  const syncLeaseEnabled = parseBooleanEnv(process.env.NG_APP_SYNC_LEASE_ENABLED || localEnv.NG_APP_SYNC_LEASE_ENABLED, false);
+  const syncLeaseEnabled = parseBooleanEnv(process.env.NG_APP_SYNC_LEASE_ENABLED || localEnv.NG_APP_SYNC_LEASE_ENABLED, true);
   const syncProtocolVersion = parseNumberEnv(process.env.NG_APP_SYNC_PROTOCOL_VERSION || localEnv.NG_APP_SYNC_PROTOCOL_VERSION, 1);
   const deploymentEpoch = parseNumberEnv(process.env.NG_APP_DEPLOYMENT_EPOCH || localEnv.NG_APP_DEPLOYMENT_EPOCH, 0);
   const logs = [];
@@ -149,5 +168,10 @@ function ensureEnvFiles() {
 module.exports = { ensureEnvFiles };
 
 if (require.main === module) {
-  ensureEnvFiles();
+  try {
+    ensureEnvFiles();
+  } catch (error) {
+    console.error(`[ensure-env-files] ${error.code || error.message}`);
+    process.exitCode = 1;
+  }
 }

@@ -10,60 +10,68 @@
  * 从 ActionQueueService 拆分，降低单文件复杂度
  */
 import { Injectable, inject, signal, WritableSignal } from '@angular/core';
-import { QUEUE_CONFIG } from '../config';
-import { AUTH_CONFIG } from '../config/auth.config';
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { NetworkAwarenessService } from './network-awareness.service';
-import { AuthService } from './auth.service';
-import { QueueBackupService } from './queue-backup.service';
-import { DeadLetterItem, QueuedAction, TaskDeletePayload, TaskPayload } from './action-queue.types';
+import { DeadLetterItem, OutboxSyncState, QueuedAction } from './action-queue.types';
+import { ActionQueueOwnerStorageService } from './action-queue-owner-storage.service';
+import type { QueueBackupStrictUpdateResult } from './queue-backup.service';
 import {
-  getRemainingBrowserNetworkResumeDelayMs,
-  isBrowserNetworkSuspendedWindow,
-} from '../utils/browser-network-suspension';
-
-/**
- * 操作队列本地配置
- */
-export const LOCAL_QUEUE_CONFIG = {
-  /** 最大重试次数 */
-  MAX_RETRIES: 5,
-  /** 重试延迟基数（毫秒） */
-  RETRY_BASE_DELAY: QUEUE_CONFIG.RETRY_BASE_DELAY,
-  /** 队列存储键 */
-  QUEUE_STORAGE_KEY: 'nanoflow.action-queue',
-  /** 死信队列存储键 */
-  DEAD_LETTER_STORAGE_KEY: 'nanoflow.dead-letter-queue',
-  /** 最大队列大小 */
-  MAX_QUEUE_SIZE: 100,
-  /** 死信队列最大大小 */
-  MAX_DEAD_LETTER_SIZE: 50,
-  /** 死信队列条目最大存活时间（毫秒）- 24小时 */
-  DEAD_LETTER_TTL: 24 * 60 * 60 * 1000,
-  /** 无处理器操作超时（毫秒）- 5分钟后移入死信队列 */
-  NO_PROCESSOR_TIMEOUT: QUEUE_CONFIG.NO_PROCESSOR_TIMEOUT,
-  /** 业务错误模式（这些错误不需要重试） */
-  BUSINESS_ERROR_PATTERNS: [
-    'not found',
-    'permission denied',
-    'unauthorized',
-    'forbidden',
-    'row level security',
-    'rls',
-    'violates',
-    'duplicate key',
-    'unique constraint',
-    'foreign key',
-    'invalid input'
-  ],
-  /** 关键操作失败通知阈值 */
-  CRITICAL_FAILURE_NOTIFY_THRESHOLD: 3,
-  /** 低优先级队列最大大小 */
-  LOW_PRIORITY_MAX_SIZE: 20
-} as const;
-
+  beginLocalBackupUiRestoreWriter,
+  trackLocalBackupUiRestoreWriterPromise,
+} from './local-backup-ui-restore-writer-quiescence-tracker';
+import { localBackupUiRestoreWriterQuiescence } from './local-backup-ui-restore-writer-quiescence.service';
+import { ActionQueueRestoreBarrierController, type ActionQueueRestoreBarrierRelease, type OwnerStorageRestoreOutcome } from './action-queue-restore-barrier.controller';
+import type { ActionQueueOwnerStorageRuntime } from './action-queue-owner-storage.types';
+import {
+  haveSameActionQueueOwnerStorageState,
+  type ActionQueueOwnerStorageStagedState,
+  type ActionQueueOwnerStorageStageResult,
+} from './action-queue-owner-storage-load.helpers';
+import {
+  ActionQueueSchedulerService,
+  type ActionQueueSchedulerRuntime,
+} from './action-queue-scheduler.service';
+import { pushStartupTrace } from '../utils/startup-trace';
+import {
+  appendCappedDeadLetterItem,
+  buildFailedOwnerDeadLetterReason,
+  classifyQueueRetryError,
+  getActionDescription as getActionDescriptionPure,
+  getActionLabel as getActionLabelPure,
+  LOCAL_QUEUE_CONFIG,
+  resolveQueueRetryDelay,
+  type QueueRetryError,
+  type QueueRetryErrorClassification,
+} from './action-queue-storage.helpers';
+import {
+  resolveBrowserSuspensionDelay as resolveBrowserSuspensionDelayPure,
+} from './action-queue-retry-serialization';
+import { ActionQueueDeadLetterNotifier } from './action-queue-dead-letter-notifier';
+import {
+  buildActionQueueEscapeExportJson,
+  downloadActionQueueEscapeExport,
+} from './action-queue-escape-export.helpers';
+import { ActionQueueFrozenRetryController } from './action-queue-frozen-retry.controller';
+import { ActionQueueRetrySettlementController, type ActionQueueDurableRetrySettlementResult } from './action-queue-retry-settlement.controller';
+import { buildDeadLetterRetryAction, upsertDeadLetterRetryAction } from './action-queue-storage-dead-letter-transition.helpers';
+import { createSyncOperationId } from '../utils/sync-operation-id';
+import {
+  handleQueuedActionRetryDurably,
+  markQueuedActionSyncState,
+  stageQueuedActionDeadLetter,
+  type ActionQueueProcessingMutationRuntime,
+} from './action-queue-processing.helpers';
+import { ActionQueueExactOwnerMutationController, type ActionQueueExactOwnerMutationResult } from './action-queue-retry-supersession.controller';
+export {
+  appendCappedDeadLetterItem,
+  buildFailedOwnerDeadLetterReason,
+  classifyQueueRetryError,
+  LOCAL_QUEUE_CONFIG,
+  resolveQueueRetryDelay,
+};
+export type { QueueRetryError };
 /**
  * 操作队列上下文 — 由 ActionQueueService 在初始化时提供
  * 避免循环依赖：storage 不注入 ActionQueueService
@@ -74,22 +82,9 @@ export interface ActionQueueContext {
   processQueue: () => Promise<unknown>;
   pendingActions: WritableSignal<QueuedAction[]>;
   queueSize: WritableSignal<number>;
+  canPersistCurrentOwner?: () => boolean;
+  captureCurrentOwnerStorageFence?: () => (() => boolean) | null;
 }
-
-export interface QueueRetryError {
-  code?: string;
-  message: string;
-  details?: Record<string, unknown>;
-}
-
-interface LegacyActionReviewItem {
-  action: QueuedAction;
-  source: 'legacy-global-queue' | 'legacy-idb-backup';
-  capturedAt: string;
-  ownerUserId: string;
-}
-
-const LEGACY_UNKNOWN_OWNER_USER_ID = '__legacy_unknown__';
 
 @Injectable({ providedIn: 'root' })
 export class ActionQueueStorageService {
@@ -97,8 +92,16 @@ export class ActionQueueStorageService {
   private readonly toast = inject(ToastService);
   private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly networkAwareness = inject(NetworkAwarenessService);
-  private readonly authService = inject(AuthService);
-  private readonly queueBackup = inject(QueueBackupService);
+  private readonly ownerStorage = inject(ActionQueueOwnerStorageService);
+  private readonly scheduler = inject(ActionQueueSchedulerService);
+  private readonly deadLetterNotifier = new ActionQueueDeadLetterNotifier({
+    logger: this.logger,
+    toast: this.toast,
+    sentryLazyLoader: this.sentryLazyLoader,
+    getFailureCallbacks: () => this.failureCallbacks,
+    getDeadLetterQueue: () => this.deadLetterQueue(),
+    getActionDescription: (action) => this.getActionDescription(action),
+  });
 
   // ========== 死信队列 ==========
   readonly deadLetterQueue = signal<DeadLetterItem[]>([]);
@@ -118,32 +121,59 @@ export class ActionQueueStorageService {
   // ========== 失败回调 ==========
   private failureCallbacks: Array<(item: DeadLetterItem) => void> = [];
 
-  // ========== 网络监听器引用 ==========
-  private onlineHandler: (() => void) | null = null;
-  private offlineHandler: (() => void) | null = null;
-  private visibilityChangeHandler: (() => void) | null = null;
-  private pageShowHandler: ((event: PageTransitionEvent) => void) | null = null;
-
-  // ========== 重试定时器 ==========
-  private retryTimer: ReturnType<typeof setTimeout> | null = null;
-  private retryTimerDueAt: number | null = null;
-
-  private readonly LEGACY_QUEUE_BACKUP_RECORD_ID = 'queue';
-  private readonly LEGACY_REVIEW_STORAGE_KEY_PREFIX = 'nanoflow.action-queue.legacy-review.';
-  private legacyReviewWarningShown = false;
   private queueRestoreGeneration = 0;
-  
-  /** 冻结期定时重试落盘的定时器 */
-  private frozenRetryTimer: ReturnType<typeof setTimeout> | null = null;
-  /** 冻结期重试次数 */
-  private frozenRetryCount = 0;
-  /** 冻结期重试最大次数 */
-  private readonly FROZEN_RETRY_MAX = 10;
-  /** 冻结期重试初始间隔（毫秒） */
-  private readonly FROZEN_RETRY_BASE_DELAY = 30000;
-  /** 冻结期重试最大间隔（毫秒） */
-  private readonly FROZEN_RETRY_MAX_DELAY = 300000;
-
+  private deadLetterRestoreGeneration = 0;
+  private readonly restoreBarrier = new ActionQueueRestoreBarrierController();
+  private readonly exactOwnerMutation = new ActionQueueExactOwnerMutationController({
+    getCurrentOwnerUserId: () => this.getCurrentOwnerUserId(),
+    captureCurrentOwnerStorageFence: () => this.captureCurrentOwnerStorageFence(),
+    persistQueueMutationForOwner: (ownerUserId, updater) =>
+      this.ownerStorage.persistQueueMutationForOwner(ownerUserId, updater, this.ownerStorageRuntime()),
+    publishCurrentOwnerQueue: queue => {
+      this.ctx.pendingActions.set(queue); this.ctx.queueSize.set(queue.length);
+      this.syncSentryContextSafely('persist-owner-queue', { ownerUserId: this.getCurrentOwnerUserId() });
+    },
+  });
+  private readonly frozenRetry = new ActionQueueFrozenRetryController({
+    logger: this.logger,
+    toast: this.toast,
+    isQueueFrozen: () => this.queueFrozen(),
+    saveQueueToStorage: () => this.saveQueueToStorage(),
+  });
+  /** 重试裁决逻辑（错误分类 → 重试/延后/死信）委托给非 DI 控制器 */
+  private readonly retrySettlement = new ActionQueueRetrySettlementController({
+    logger: this.logger,
+    toast: this.toast,
+    updatePendingActions: (updater) => this.ctx.pendingActions.update(updater),
+    saveQueueToStorage: () => this.saveQueueToStorage(),
+    moveToDeadLetter: (action, reason) => this.moveToDeadLetter(action, reason),
+    scheduleRetry: (delay) => this.scheduleRetry(delay),
+    getActionLabel: (action) => this.getActionLabel(action),
+    getCurrentOwnerUserId: () => this.getCurrentOwnerUserId(),
+    persistQueueMutationForOwner: (ownerUserId, updater) => this.persistQueueMutationForOwner(ownerUserId, updater),
+    applyPersistedQueue: queue => {
+      this.ctx.pendingActions.set(queue); this.ctx.queueSize.set(queue.length); this.ctx.syncSentryContext();
+    },
+    stageDeadLetter: (action, reason) => this.stageDeadLetter(action, reason),
+    notifyDeadLetterMoved: (item, reason) => this.deadLetterNotifier.handleDeadLetterMoved(item, reason),
+    failClosed: reason => this.freezeQueueWrites(reason),
+  });
+  private readonly processingMutations: ActionQueueProcessingMutationRuntime = {
+    updatePendingActions: updater => this.ctx.pendingActions.update(updater),
+    getDeadLetters: () => this.deadLetterQueue(),
+    updateDeadLetters: updater => this.deadLetterQueue.update(updater),
+    setDeadLetterSize: size => this.deadLetterSize.set(size),
+    saveQueue: () => this.saveQueueToStorage(),
+    saveDeadLetters: () => this.saveDeadLetterToStorage(),
+    syncSentryContext: () => this.ctx.syncSentryContext(),
+    getCurrentOwnerUserId: () => this.getCurrentOwnerUserId(),
+    persistQueueMutationForOwner: (ownerUserId, updater) =>
+      this.persistQueueMutationForOwner(ownerUserId, updater),
+    settleRetry: (action, error) => this.retrySettlement.handleRetryDurably(action, error),
+    freezeQueueWrites: () => this.freezeQueueWrites('storage_failure'),
+    warn: (message, context) => this.logger.warn(message, context),
+    warnSafely: (message, context) => this.warnSafely(message, context),
+  };
   // ========== 来自主服务的上下文引用 ==========
   private _ctx: ActionQueueContext | null = null;
   /** 安全访问上下文，未初始化时抛出明确错误而非 undefined 崩溃 */
@@ -153,7 +183,6 @@ export class ActionQueueStorageService {
     }
     return this._ctx;
   }
-
   /**
    * 初始化上下文引用（由 ActionQueueService 构造时调用）
    */
@@ -177,170 +206,136 @@ export class ActionQueueStorageService {
     this.storageFailureCallback = callback;
   }
 
+  private ownerStorageRuntime(): ActionQueueOwnerStorageRuntime {
+    return {
+      pendingActions: () => this.ctx.pendingActions(),
+      setPendingActions: (queue) => this.ctx.pendingActions.set(queue),
+      setQueueSize: (size) => this.ctx.queueSize.set(size),
+      deadLetterQueue: () => this.deadLetterQueue(),
+      setDeadLetterQueue: (queue) => this.deadLetterQueue.set(queue),
+      setDeadLetterSize: (size) => this.deadLetterSize.set(size),
+      syncSentryContext: () => this.ctx.syncSentryContext(),
+      freezeQueueWrites: (reason) => this.freezeQueueWrites(reason),
+      clearQueueFreeze: () => this.clearQueueFreeze(),
+      triggerStorageFailureEscapeMode: () => this.triggerStorageFailureEscapeMode(),
+      saveQueueToStorage: () => this.saveQueueToStorage(),
+      requestQueueProcessing: (reason) => this.requestQueueProcessing(reason),
+    };
+  }
+
+  private schedulerRuntime(): ActionQueueSchedulerRuntime {
+    return {
+      isOnline: () => this._isOnline,
+      setOnline: (online) => { this._isOnline = online; },
+      processQueue: () => this.ctx.processQueue(),
+      scheduleRetry: (delay) => this.scheduleRetry(delay),
+      clearRetryTimer: () => this.clearRetryTimer(),
+    };
+  }
+
   private getCurrentOwnerUserId(): string {
-    return this.authService.currentUserId() ?? AUTH_CONFIG.LOCAL_MODE_USER_ID;
+    return this.ownerStorage.getCurrentOwnerUserId();
   }
 
-  private getScopedStorageKey(baseKey: string, ownerUserId = this.getCurrentOwnerUserId()): string {
-    return `${baseKey}.${ownerUserId}`;
+  private canPersistCurrentOwner(): boolean {
+    return this.ctx.canPersistCurrentOwner?.() ?? true;
   }
 
-  private getLegacyReviewStorageKey(ownerUserId = this.getCurrentOwnerUserId()): string {
-    return `${this.LEGACY_REVIEW_STORAGE_KEY_PREFIX}${ownerUserId}`;
+  private captureCurrentOwnerStorageFence(): (() => boolean) | null {
+    const capture = this.ctx.captureCurrentOwnerStorageFence;
+    return capture ? capture() : this.canPersistCurrentOwner()
+      ? () => this.canPersistCurrentOwner() : null;
   }
 
-  private invalidateLocalQueueSnapshot(ownerUserId = this.getCurrentOwnerUserId()): void {
-    if (typeof localStorage === 'undefined') {
-      return;
-    }
-
+  private warnSafely(message: string, ...args: unknown[]): void {
     try {
-      localStorage.removeItem(this.getScopedStorageKey(LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY, ownerUserId));
-      if (ownerUserId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
-        localStorage.removeItem(LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY);
-      }
-    } catch (error) {
-      this.logger.warn('清理失效的 localStorage 队列快照失败', { ownerUserId, error });
+      this.logger.warn(message, ...args);
+    } catch {
+      // Observability failures must not break durable queue state transitions.
     }
-  }
-
-  private readQueueSnapshotFromLocalStorage(ownerUserId: string): {
-    found: boolean;
-    queue: QueuedAction[];
-  } {
-    if (typeof localStorage === 'undefined') {
-      return { found: false, queue: [] };
-    }
-
-    const scopedKey = this.getScopedStorageKey(LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY, ownerUserId);
-    const scopedValue = localStorage.getItem(scopedKey);
-    if (scopedValue !== null) {
-      try {
-        const queue = JSON.parse(scopedValue) as QueuedAction[];
-        return { found: true, queue: Array.isArray(queue) ? queue : [] };
-      } catch (error) {
-        this.logger.warn('读取 owner-scoped 队列失败，按空队列处理', { ownerUserId, error });
-        return { found: true, queue: [] };
-      }
-    }
-
-    return { found: false, queue: [] };
-  }
-
-  private readDeadLetterSnapshotFromLocalStorage(ownerUserId: string): DeadLetterItem[] {
-    if (typeof localStorage === 'undefined') {
-      return [];
-    }
-
-    const scopedKey = this.getScopedStorageKey(LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY, ownerUserId);
-    const scopedValue = localStorage.getItem(scopedKey);
-    if (scopedValue !== null) {
-      try {
-        const queue = JSON.parse(scopedValue) as DeadLetterItem[];
-        return Array.isArray(queue) ? queue : [];
-      } catch (error) {
-        this.logger.warn('读取 owner-scoped dead-letter 失败，按空队列处理', { ownerUserId, error });
-        return [];
-      }
-    }
-
-    return [];
-  }
-
-  private async loadPersistedQueueForOwner(ownerUserId: string): Promise<QueuedAction[]> {
-    const localSnapshot = this.readQueueSnapshotFromLocalStorage(ownerUserId);
-    if (localSnapshot.found) {
-      return localSnapshot.queue;
-    }
-
-    const backupQueue = await this.queueBackup.restoreQueue(ownerUserId, (legacyItems) => {
-      this.quarantineLegacyQueueForReview(
-        legacyItems.map((item) => item.action),
-        'legacy-idb-backup'
-      );
-    });
-    return backupQueue ?? [];
-  }
-
-  private async saveQueueSnapshotForOwner(ownerUserId: string, queue: QueuedAction[]): Promise<void> {
-    let localSnapshotSaved = false;
-    if (typeof localStorage !== 'undefined') {
-      try {
-        localStorage.setItem(
-          this.getScopedStorageKey(LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY, ownerUserId),
-          JSON.stringify(queue)
-        );
-        if (ownerUserId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
-          localStorage.removeItem(LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY);
-        }
-        localSnapshotSaved = true;
-      } catch (error) {
-        this.logger.warn('保存 owner-scoped 队列快照失败，降级写入 IndexedDB 备份', {
-          ownerUserId,
-          error,
-        });
-      }
-    }
-
-    const backupSucceeded = await this.queueBackup.backupQueue(queue, ownerUserId);
-    if (!localSnapshotSaved && backupSucceeded) {
-      this.invalidateLocalQueueSnapshot(ownerUserId);
-      return;
-    }
-
-    if (localSnapshotSaved || backupSucceeded) {
-      return;
-    }
-
-    this.freezeQueueWrites('storage_failure');
-    this.triggerStorageFailureEscapeMode();
-    throw new Error(`owner-scoped 队列保存失败: ${ownerUserId}`);
   }
 
   async persistQueueSnapshotForOwner(ownerUserId: string, queue: QueuedAction[]): Promise<boolean> {
-    try {
-      await this.saveQueueSnapshotForOwner(ownerUserId, queue);
-      return true;
-    } catch (error) {
-      this.logger.warn('持久化 owner-scoped 队列快照失败', {
-        ownerUserId,
-        error,
-      });
-      return false;
-    }
+    if (ownerUserId === this.getCurrentOwnerUserId() && !this.canPersistCurrentOwner()) return false;
+    return this.ownerStorage.persistQueueSnapshotForOwner(
+      ownerUserId,
+      queue,
+      this.ownerStorageRuntime(),
+    );
   }
 
-  private saveDeadLetterSnapshotForOwner(ownerUserId: string, queue: DeadLetterItem[]): void {
-    if (typeof localStorage === 'undefined') {
-      return;
-    }
+  async persistQueueMutationForOwner(
+    ownerUserId: string,
+    updater: (queue: QueuedAction[]) => QueuedAction[],
+  ): Promise<QueuedAction[] | null> {
+    return this.exactOwnerMutation.persistLegacy(ownerUserId, updater);
+  }
 
-    try {
-      localStorage.setItem(
-        this.getScopedStorageKey(LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY, ownerUserId),
-        JSON.stringify(queue)
-      );
-      if (ownerUserId === AUTH_CONFIG.LOCAL_MODE_USER_ID) {
-        localStorage.removeItem(LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY);
-      }
-    } catch (error) {
-      this.logger.warn('保存 owner-scoped dead-letter 快照失败', { ownerUserId, error });
-    }
+  persistExactQueueMutationForOwner(
+    ownerUserId: string,
+    updater: (queue: QueuedAction[]) => QueuedAction[],
+  ): Promise<ActionQueueExactOwnerMutationResult> {
+    return this.exactOwnerMutation.persistExact(ownerUserId, updater);
+  }
+
+  persistQueueMutationStrictlyForOwner(
+    ownerUserId: string,
+    updater: (queue: QueuedAction[]) => QueuedAction[],
+  ): Promise<QueueBackupStrictUpdateResult> {
+    if (ownerUserId === this.getCurrentOwnerUserId() && !this.canPersistCurrentOwner()) return Promise.resolve({ status: 'storage-failed' });
+    return this.ownerStorage.persistQueueMutationStrictlyForOwner(
+      ownerUserId,
+      updater,
+      this.ownerStorageRuntime(),
+    );
   }
 
   async settleSuccessfulActionForOwner(ownerUserId: string, actionId: string): Promise<boolean> {
-    const queue = await this.loadPersistedQueueForOwner(ownerUserId);
-    const nextQueue = queue.filter(action => action.id !== actionId);
-    if (nextQueue.length === queue.length) {
-      this.logger.debug('旧 owner 队列中未找到待收口的成功 action', { ownerUserId, actionId });
-      return false;
-    }
-    await this.saveQueueSnapshotForOwner(ownerUserId, nextQueue);
-    return true;
+    return this.ownerStorage.settleSuccessfulActionForOwner(
+      ownerUserId,
+      actionId,
+      this.ownerStorageRuntime(),
+    );
   }
 
   async loadQueueSnapshotForOwner(ownerUserId: string): Promise<QueuedAction[]> {
-    return this.loadPersistedQueueForOwner(ownerUserId);
+    return this.ownerStorage.loadQueueSnapshotForOwner(ownerUserId, this.ownerStorageRuntime());
+  }
+
+  stageCurrentOwnerStorage(
+    generation: number,
+    ownerUserId: string,
+    getCurrentGeneration: () => number,
+  ): Promise<ActionQueueOwnerStorageStageResult> {
+    return this.ownerStorage.stageCurrentOwnerStorage(
+      generation,
+      ownerUserId,
+      getCurrentGeneration,
+    );
+  }
+
+  captureCurrentOwnerStorageState(): ActionQueueOwnerStorageStagedState {
+    return {
+      queue: this.ctx.pendingActions(),
+      queueSize: this.ctx.queueSize(),
+      deadLetters: this.deadLetterQueue(),
+      deadLetterSize: this.deadLetterSize(),
+      queueFrozen: this.queueFrozen(),
+      queueFreezeReason: this.queueFreezeReason(),
+    };
+  }
+
+  publishCurrentOwnerStorageState(state: ActionQueueOwnerStorageStagedState): void {
+    this.ctx.pendingActions.set(state.queue as QueuedAction[]);
+    this.ctx.queueSize.set(state.queueSize);
+    this.deadLetterQueue.set(state.deadLetters as DeadLetterItem[]);
+    this.deadLetterSize.set(state.deadLetterSize);
+    this.queueFrozen.set(state.queueFrozen);
+    this.queueFreezeReason.set(state.queueFreezeReason);
+  }
+
+  currentOwnerStorageStateMatches(state: ActionQueueOwnerStorageStagedState): boolean {
+    return haveSameActionQueueOwnerStorageState(state, this.captureCurrentOwnerStorageState());
   }
 
   async settleProjectDeleteSuccessForOwner(
@@ -348,36 +343,12 @@ export class ActionQueueStorageService {
     projectId: string,
     actionId?: string,
   ): Promise<number> {
-    const queue = await this.loadPersistedQueueForOwner(ownerUserId);
-    const nextQueue = queue.filter(action => {
-      if (actionId && action.id === actionId) {
-        return false;
-      }
-
-      if (action.entityType === 'project' && action.entityId === projectId) {
-        return false;
-      }
-
-      if (action.entityType === 'task') {
-        const payload = action.payload as TaskPayload | TaskDeletePayload;
-        return payload.projectId !== projectId;
-      }
-
-      return true;
-    });
-
-    const removedCount = queue.length - nextQueue.length;
-    if (removedCount === 0) {
-      this.logger.debug('旧 owner 队列中未找到待收口的项目删除关联 action', {
-        ownerUserId,
-        projectId,
-        actionId,
-      });
-      return 0;
-    }
-
-    await this.saveQueueSnapshotForOwner(ownerUserId, nextQueue);
-    return removedCount;
+    return this.ownerStorage.settleProjectDeleteSuccessForOwner(
+      ownerUserId,
+      projectId,
+      actionId,
+      this.ownerStorageRuntime(),
+    );
   }
 
   async settleFailedActionForOwner(
@@ -385,237 +356,44 @@ export class ActionQueueStorageService {
     action: QueuedAction,
     error: string | QueueRetryError
   ): Promise<'retry' | 'dead-letter' | 'missing'> {
-    const queue = await this.loadPersistedQueueForOwner(ownerUserId);
-    const existingAction = queue.find(item => item.id === action.id);
-    if (!existingAction) {
-      this.logger.debug('旧 owner 队列中未找到待收口的失败 action', {
-        ownerUserId,
-        actionId: action.id,
-      });
-      return 'missing';
-    }
-
-    const normalizedError = this.normalizeRetryError(error);
-    const errorMessage = this.formatRetryError(normalizedError);
-    const errorType = this.classifyError(normalizedError);
-    if (errorType === 'business' || errorType === 'permission' || existingAction.retryCount >= LOCAL_QUEUE_CONFIG.MAX_RETRIES) {
-      const nextQueue = queue.filter(item => item.id !== action.id);
-      const deadLetterItem: DeadLetterItem = {
-        action: {
-          ...existingAction,
-          lastError: errorMessage,
-          errorType,
-        },
-        failedAt: new Date().toISOString(),
-        reason: errorType === 'business' || errorType === 'permission'
-          ? `${errorType === 'business' ? '业务' : '权限'}错误: ${errorMessage}`
-          : `超过最大重试次数 (${LOCAL_QUEUE_CONFIG.MAX_RETRIES}): ${errorMessage}`,
-      };
-
-      const deadLetters = this.readDeadLetterSnapshotFromLocalStorage(ownerUserId)
-        .filter(item => item.action.id !== action.id);
-      deadLetters.push(deadLetterItem);
-
-      await this.saveQueueSnapshotForOwner(ownerUserId, nextQueue);
-      this.saveDeadLetterSnapshotForOwner(
-        ownerUserId,
-        deadLetters.slice(-LOCAL_QUEUE_CONFIG.MAX_DEAD_LETTER_SIZE)
-      );
-      return 'dead-letter';
-    }
-
-    const nextQueue = queue.map(item => item.id === action.id
-      ? {
-          ...item,
-          retryCount: errorType === 'deferred' ? item.retryCount : item.retryCount + 1,
-          lastError: errorMessage,
-          errorType,
-        }
-      : item
+    return this.ownerStorage.settleFailedActionForOwner(
+      ownerUserId,
+      action,
+      error,
+      this.ownerStorageRuntime(),
     );
-    await this.saveQueueSnapshotForOwner(ownerUserId, nextQueue);
-    return 'retry';
   }
 
   async appendActionForOwner(ownerUserId: string, action: QueuedAction): Promise<void> {
-    const queue = await this.loadPersistedQueueForOwner(ownerUserId);
-    await this.saveQueueSnapshotForOwner(ownerUserId, [
-      ...queue.filter(existing => existing.id !== action.id),
-      action,
-    ]);
-  }
-
-  private clearLegacyGlobalStorageIfLocalOwner(baseKey: string): void {
-    if (this.getCurrentOwnerUserId() !== AUTH_CONFIG.LOCAL_MODE_USER_ID) {
-      return;
-    }
-
-    localStorage.removeItem(baseKey);
-  }
-
-  private readScopedDeadLetterQueueFromStorage(): DeadLetterItem[] {
-    if (typeof localStorage === 'undefined') {
-      return [];
-    }
-
-    try {
-      const raw = localStorage.getItem(this.getScopedStorageKey(LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY));
-      if (!raw) {
-        return [];
-      }
-
-      const parsed = JSON.parse(raw) as DeadLetterItem[];
-      return Array.isArray(parsed) ? parsed : [];
-    } catch (error) {
-      this.logger.warn('读取 scoped dead-letter 失败，已退回内存态合并', { error });
-      return [];
-    }
-  }
-
-  private mergeLegacyDeadLetters(deadLetters: DeadLetterItem[], ownerUserId: string): void {
-    if (deadLetters.length === 0) {
-      return;
-    }
-
-    const mergedByActionId = new Map<string, DeadLetterItem>();
-    const existingDeadLetters = ownerUserId === this.getCurrentOwnerUserId()
-      ? [
-          ...this.readScopedDeadLetterQueueFromStorage(),
-          ...this.deadLetterQueue(),
-        ]
-      : this.readDeadLetterSnapshotFromLocalStorage(ownerUserId);
-
-    for (const item of [...existingDeadLetters, ...deadLetters]) {
-      mergedByActionId.set(item.action.id, item);
-    }
-
-    const mergedQueue = Array.from(mergedByActionId.values()).slice(-LOCAL_QUEUE_CONFIG.MAX_DEAD_LETTER_SIZE);
-    this.saveDeadLetterSnapshotForOwner(ownerUserId, mergedQueue);
-
-    if (ownerUserId === this.getCurrentOwnerUserId()) {
-      this.deadLetterQueue.set(mergedQueue);
-      this.deadLetterSize.set(mergedQueue.length);
-      this.ctx.syncSentryContext();
-    }
-  }
-
-  private quarantineLegacyQueueForReview(
-    actions: QueuedAction[],
-    source: 'legacy-global-queue' | 'legacy-idb-backup'
-  ): void {
-    if (typeof localStorage === 'undefined' || actions.length === 0) {
-      return;
-    }
-
-    const ownerUserId = LEGACY_UNKNOWN_OWNER_USER_ID;
-    const key = this.getLegacyReviewStorageKey(ownerUserId);
-
-    try {
-      const existing = localStorage.getItem(key);
-      const records = existing ? JSON.parse(existing) as LegacyActionReviewItem[] : [];
-      const deduped = records.filter(record => !actions.some(action => action.id === record.action.id));
-      const nextRecords = [
-        ...deduped,
-        ...actions.map(action => ({
-          action,
-          source,
-          capturedAt: new Date().toISOString(),
-          ownerUserId,
-        } satisfies LegacyActionReviewItem)),
-      ];
-      localStorage.setItem(key, JSON.stringify(nextRecords));
-      this.mergeLegacyDeadLetters(actions.map(action => ({
-        action,
-        failedAt: new Date().toISOString(),
-        reason: source === 'legacy-global-queue'
-          ? '旧版全局离线队列已隔离待确认'
-          : '旧版离线备份队列已隔离待确认',
-      })), ownerUserId);
-
-      if (!this.legacyReviewWarningShown) {
-        this.legacyReviewWarningShown = true;
-        this.toast.warning('检测到待确认的离线操作', '旧版离线队列已隔离保留，不会在当前账号下自动执行');
-      }
-
-      this.logger.warn('检测到 legacy ActionQueue 数据，已隔离保留待人工确认', {
-        ownerUserId,
-        source,
-        count: actions.length,
-      });
-    } catch (error) {
-      this.logger.warn('隔离 legacy ActionQueue 数据失败，已保留原始存储键', { source, error });
-    }
-  }
-
-  private quarantineLegacyDeadLetters(deadLetters: DeadLetterItem[]): void {
-    if (deadLetters.length === 0) {
-      return;
-    }
-
-    const ownerUserId = LEGACY_UNKNOWN_OWNER_USER_ID;
-
-    const migratedDeadLetters = deadLetters.map(item => ({
-      ...item,
-      reason: `旧版全局死信已隔离待确认: ${item.reason}`,
-    }));
-    this.mergeLegacyDeadLetters(migratedDeadLetters, ownerUserId);
-
-    if (!this.legacyReviewWarningShown) {
-      this.legacyReviewWarningShown = true;
-      this.toast.warning('检测到待确认的离线操作', '旧版离线死信已隔离保留，不会并入当前账号的失败队列');
-    }
-
-    this.logger.warn('检测到 legacy dead-letter 数据，已隔离到未知 owner 桶', {
+    await this.ownerStorage.appendActionForOwner(
       ownerUserId,
-      count: deadLetters.length,
-    });
+      action,
+      this.ownerStorageRuntime(),
+    );
   }
 
-  private loadScopedOrLegacyStorage(baseKey: string): string | null {
-    const scopedKey = this.getScopedStorageKey(baseKey);
-    const scopedValue = localStorage.getItem(scopedKey);
-    if (scopedValue !== null) {
-      return scopedValue;
+  restoreDeadLettersFromBackupItems(items: unknown[], ownerUserId: string): number {
+    if (ownerUserId === this.getCurrentOwnerUserId() && !this.canPersistCurrentOwner()) return 0;
+    if (typeof localStorage === 'undefined') {
+      return this.ownerStorage.restoreDeadLettersFromBackupItems(
+        ownerUserId,
+        items,
+        this.ownerStorageRuntime(),
+      );
     }
 
-    const legacyValue = localStorage.getItem(baseKey);
-    if (legacyValue === null) {
-      return null;
+    const writer = beginLocalBackupUiRestoreWriter(ownerUserId, 'action-queue', {
+      heartbeat: false,
+    });
+    try {
+      return this.ownerStorage.restoreDeadLettersFromBackupItems(
+        ownerUserId,
+        items,
+        this.ownerStorageRuntime(),
+      );
+    } finally {
+      writer.release();
     }
-
-    if (baseKey === LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY) {
-      try {
-        const legacyQueue = JSON.parse(legacyValue) as QueuedAction[];
-        if (Array.isArray(legacyQueue) && legacyQueue.length > 0) {
-          try {
-            this.quarantineLegacyQueueForReview(legacyQueue, 'legacy-global-queue');
-          } finally {
-            localStorage.removeItem(baseKey);
-          }
-        }
-      } catch (error) {
-        this.logger.warn('读取 legacy 全局队列失败，已保留原始存储键', { error });
-      }
-      return null;
-    }
-
-    if (baseKey === LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY) {
-      try {
-        const legacyDeadLetters = JSON.parse(legacyValue) as DeadLetterItem[];
-        if (Array.isArray(legacyDeadLetters) && legacyDeadLetters.length > 0) {
-          try {
-            this.quarantineLegacyDeadLetters(legacyDeadLetters);
-          } finally {
-            localStorage.removeItem(baseKey);
-          }
-        }
-      } catch (error) {
-        this.logger.warn('读取 legacy 全局死信失败，已保留原始存储键', { error });
-      }
-      return null;
-    }
-
-    return null;
   }
 
   // ========== 死信队列公共操作 ==========
@@ -623,46 +401,118 @@ export class ActionQueueStorageService {
   clearDeadLetterQueue(): void {
     this.deadLetterQueue.set([]);
     this.deadLetterSize.set(0);
-    this.saveDeadLetterToStorage();
-    this.ctx.syncSentryContext();
+    this.saveDeadLetterMutationSafely('clear-dead-letter-queue');
+    this.syncSentryContextSafely('clear-dead-letter-queue');
   }
 
-  retryDeadLetter(itemId: string): void {
+  async retryDeadLetter(itemId: string): Promise<boolean> {
     const item = this.deadLetterQueue().find(d => d.action.id === itemId);
-    if (!item) return;
+    if (!item) return false;
 
-    const resetAction: QueuedAction = {
-      ...item.action,
-      retryCount: 0,
-      lastError: undefined,
-      errorType: undefined
-    };
+    const resetAction = buildDeadLetterRetryAction(item.action, createSyncOperationId);
 
-    // 从死信移除
+    const ownerUserId = this.getCurrentOwnerUserId();
+    const persistedQueue = await this.persistQueueMutationForOwner(
+      ownerUserId,
+      queue => upsertDeadLetterRetryAction(queue, resetAction),
+    );
+    if (persistedQueue === null) {
+      this.warnSafely('死信重试未能持久化到 pending 队列，保留 dead-letter 条目', {
+        actionId: itemId,
+        ownerUserId,
+      });
+      return false;
+    }
+
+    // pending 已可靠持久化后再从死信移除；若后续死信保存失败，最多产生重复可恢复记录，不会丢操作。
+    this.ctx.pendingActions.set(persistedQueue);
+    this.ctx.queueSize.set(persistedQueue.length);
     this.deadLetterQueue.update(q => q.filter(d => d.action.id !== itemId));
     this.deadLetterSize.set(this.deadLetterQueue().length);
-    this.saveDeadLetterToStorage();
+    this.saveDeadLetterAfterRetry(itemId, ownerUserId);
+    this.syncSentryContextAfterDeadLetterRetry(itemId, ownerUserId);
+    this.triggerDeadLetterRetryProcessing(itemId, ownerUserId);
+    return true;
+  }
 
-    // 重新加入主队列
-    this.ctx.pendingActions.update(q => [...q, resetAction]);
-    this.ctx.queueSize.set(this.ctx.pendingActions().length);
-    this.saveQueueToStorage();
-    this.ctx.syncSentryContext();
+  private saveDeadLetterAfterRetry(itemId: string, ownerUserId: string): void {
+    this.saveDeadLetterMutationSafely('retry-dead-letter', {
+      actionId: itemId,
+      ownerUserId,
+    });
+  }
 
-    if (this._isOnline) {
-      void this.ctx.processQueue();
+  private saveDeadLetterMutationSafely(operation: string, metadata: Record<string, unknown> = {}): void {
+    try {
+      if (this.saveDeadLetterToStorage()) {
+        return;
+      }
+      this.warnSafely('死信队列持久化失败，已保留当前内存状态等待后续恢复', {
+        operation,
+        ...metadata,
+      });
+    } catch (error) {
+      this.warnSafely('死信队列持久化异常，已保留当前内存状态等待后续恢复', {
+        operation,
+        ...metadata,
+        error,
+      });
+    }
+  }
+
+  private syncSentryContextAfterDeadLetterRetry(itemId: string, ownerUserId: string): void {
+    this.syncSentryContextSafely('retry-dead-letter', {
+      actionId: itemId,
+      ownerUserId,
+    });
+  }
+
+  private syncSentryContextSafely(operation: string, metadata: Record<string, unknown> = {}): void {
+    try {
+      this.ctx.syncSentryContext();
+    } catch (error) {
+      this.warnSafely('死信队列 Sentry 上下文同步失败，已保留队列状态', {
+        operation,
+        ...metadata,
+        error,
+      });
+    }
+  }
+
+  private triggerDeadLetterRetryProcessing(itemId: string, ownerUserId: string): void {
+    if (!this._isOnline) {
+      return;
+    }
+    try {
+      void this.ctx.processQueue().catch(error => {
+        this.warnSafely('死信重试后台处理失败，已保留 pending 队列等待后续触发', {
+          actionId: itemId,
+          ownerUserId,
+          error,
+        });
+      });
+    } catch (error) {
+      this.warnSafely('死信重试后台处理触发失败，已保留 pending 队列等待后续触发', {
+        actionId: itemId,
+        ownerUserId,
+        error,
+      });
     }
   }
 
   dismissDeadLetter(itemId: string): void {
     this.deadLetterQueue.update(q => q.filter(d => d.action.id !== itemId));
     this.deadLetterSize.set(this.deadLetterQueue().length);
-    this.saveDeadLetterToStorage();
-    this.ctx.syncSentryContext();
+    this.saveDeadLetterMutationSafely('dismiss-dead-letter', { actionId: itemId });
+    this.syncSentryContextSafely('dismiss-dead-letter', { actionId: itemId });
   }
 
   hasDeadLetters(): boolean {
     return this.deadLetterQueue().length > 0;
+  }
+
+  markActionSyncState(actionId: string, syncState: OutboxSyncState): QueuedAction | null {
+    return markQueuedActionSyncState(actionId, syncState, this.processingMutations);
   }
 
   // ========== 死信队列内部操作 ==========
@@ -672,96 +522,22 @@ export class ActionQueueStorageService {
    * 按优先级策略：low 静默丢弃，normal 正常入队，critical 通知用户
    */
   moveToDeadLetter(action: QueuedAction, reason: string): void {
-    const deadLetterItem: DeadLetterItem = {
-      action,
-      failedAt: new Date().toISOString(),
-      reason
-    };
+    const deadLetterItem = this.stageDeadLetter(action, reason);
+    if (!deadLetterItem) return;
 
     this.ctx.dequeue(action.id);
+    this.deadLetterNotifier.handleDeadLetterMoved(deadLetterItem, reason);
+  }
 
-    this.deadLetterQueue.update(queue => {
-      const updated = [...queue, deadLetterItem];
-      // 限制死信队列大小，移除最老的条目
-      if (updated.length > LOCAL_QUEUE_CONFIG.MAX_DEAD_LETTER_SIZE) {
-        const overflow = updated.length - LOCAL_QUEUE_CONFIG.MAX_DEAD_LETTER_SIZE;
-        this.logger.warn('死信队列超出上限，移除最旧的条目', { overflow, maxSize: LOCAL_QUEUE_CONFIG.MAX_DEAD_LETTER_SIZE });
-        return updated.slice(overflow);
-      }
-      return updated;
-    });
-
-    this.deadLetterSize.set(this.deadLetterQueue().length);
-    this.saveDeadLetterToStorage();
-    this.ctx.syncSentryContext();
-
-    // 通知监听者
-    this.failureCallbacks.forEach(cb => {
-      try { cb(deadLetterItem); } catch (e) { this.logger.error('Dead letter callback error', { error: e }); }
-    });
-
-    // 关键操作失败通知
-    if (action.priority === 'critical') {
-      const criticalFailures = this.deadLetterQueue().filter(d => d.action.priority === 'critical');
-      if (criticalFailures.length === 1) {
-        this.toast.warning('操作未能同步', `"${this.getActionDescription(action)}" 同步失败，稍后将自动重试`);
-        this.logger.warn('首次关键操作失败，已通知用户', {
-          actionId: action.id, entityType: action.entityType, type: action.type
-        });
-      } else if (criticalFailures.length >= LOCAL_QUEUE_CONFIG.CRITICAL_FAILURE_NOTIFY_THRESHOLD) {
-        this.toast.error('同步失败', `有 ${criticalFailures.length} 个重要操作无法完成同步，请检查网络或稍后重试`);
-        this.logger.warn('关键操作失败超过阈值，已通知用户', {
-          count: criticalFailures.length, threshold: LOCAL_QUEUE_CONFIG.CRITICAL_FAILURE_NOTIFY_THRESHOLD
-        });
-      }
-    }
-
-    this.sentryLazyLoader.addBreadcrumb({
-      category: 'sync',
-      message: `Action moved to dead letter`,
-      level: 'warning',
-      data: {
-        actionId: action.id, entityType: action.entityType, entityId: action.entityId,
-        type: action.type, priority: action.priority, reason,
-        deadLetterSize: this.deadLetterQueue().length
-      }
-    });
-
-    this.logger.warn('Action moved to dead letter queue:', {
-      actionId: action.id, type: action.type, entityType: action.entityType,
-      entityId: action.entityId, priority: action.priority, reason
-    });
+  private stageDeadLetter(action: QueuedAction, reason: string): DeadLetterItem | null {
+    return stageQueuedActionDeadLetter(action, reason, this.processingMutations);
   }
 
   /**
    * 暂停依赖于失败 Create 的操作
    */
   pauseDependentActions(entityType: string, entityId: string, queue: QueuedAction[]): void {
-    const dependentActions = queue.filter(a =>
-      a.entityType === entityType && a.entityId === entityId && a.type !== 'create'
-    );
-
-    if (dependentActions.length > 0) {
-      this.logger.warn('Create 失败，暂停依赖操作', {
-        entityType, entityId,
-        dependentCount: dependentActions.length,
-        dependentTypes: dependentActions.map(a => a.type)
-      });
-
-      this.sentryLazyLoader.captureMessage('Create failed, dependent actions paused', {
-        level: 'warning',
-        tags: { operation: 'pauseDependentActions', entityType },
-        extra: {
-          entityId, dependentCount: dependentActions.length,
-          dependentActions: dependentActions.map(a => ({ id: a.id, type: a.type }))
-        }
-      });
-
-      const hasCriticalBlocked = dependentActions.some(a => a.priority === 'critical');
-      if (hasCriticalBlocked) {
-        this.toast.warning('同步受阻', '有操作因前置操作失败而暂停，请检查网络连接');
-      }
-    }
+    this.deadLetterNotifier.pauseDependentActions(entityType, entityId, queue);
   }
 
   // ========== 重试逻辑 ==========
@@ -771,355 +547,100 @@ export class ActionQueueStorageService {
    * 根据错误分类决定：重试 or 移入死信队列
    */
   handleRetry(action: QueuedAction, error: string | QueueRetryError): 'retry' | 'dead-letter' {
-    const normalizedError = this.normalizeRetryError(error);
-    const errorMessage = this.formatRetryError(normalizedError);
-    const errorType = this.classifyError(normalizedError);
+    return this.retrySettlement.handleRetry(action, error);
+  }
 
-    // 业务/权限错误不可重试
-    if (errorType === 'business' || errorType === 'permission') {
-      this.logger.warn(`${errorType === 'business' ? '业务' : '权限'}错误，不可重试`, {
-        actionId: action.id,
-        error: errorMessage,
-      });
-      this.moveToDeadLetter(action, `${errorType === 'business' ? '业务' : '权限'}错误: ${errorMessage}`);
-      return 'dead-letter';
-    }
-
-    if (errorType === 'deferred') {
-      const delay = this.resolveDeferredRetryDelay(normalizedError);
-      const deferredReason = this.describeDeferredRetryReason(normalizedError);
-      this.ctx.pendingActions.update(queue =>
-        queue.map(a => a.id === action.id
-          ? { ...a, lastError: errorMessage, errorType }
-          : a
-        )
-      );
-      this.saveQueueToStorage();
-
-      this.logger.info('延后队列重试且不消耗 retry budget', {
-        actionId: action.id,
-        type: action.type,
-        entityType: action.entityType,
-        entityId: action.entityId,
-        deferredReason,
-        delay,
-      });
-      this.scheduleRetry(delay);
-      return 'retry';
-    }
-
-    // 超过最大重试次数
-    if (action.retryCount >= LOCAL_QUEUE_CONFIG.MAX_RETRIES) {
-      this.logger.error('超过最大重试次数，移入死信队列', {
-        actionId: action.id, type: action.type,
-        entityType: action.entityType, entityId: action.entityId, error: errorMessage
-      });
-      this.moveToDeadLetter(action, `超过最大重试次数 (${LOCAL_QUEUE_CONFIG.MAX_RETRIES}): ${errorMessage}`);
-
-      if (action.priority === 'critical') {
-        this.toast.error('重要操作失败', `${this.getActionLabel(action)} 失败，请检查网络后重试`);
-      }
-      return 'dead-letter';
-    }
-
-    // 更新重试次数
-    this.ctx.pendingActions.update(queue =>
-      queue.map(a => a.id === action.id
-        ? { ...a, retryCount: a.retryCount + 1, lastError: errorMessage, errorType }
-        : a
-      )
-    );
-    this.saveQueueToStorage();
-
-    // 动态重试延迟策略
-    let delay: number;
-    if (errorType === 'network') {
-      delay = Math.min(QUEUE_CONFIG.RETRY_BASE_DELAY * (action.retryCount + 1), 5000);
-    } else if (errorType === 'timeout') {
-      delay = QUEUE_CONFIG.RETRY_BASE_DELAY * Math.pow(1.5, action.retryCount);
-    } else {
-      delay = QUEUE_CONFIG.RETRY_BASE_DELAY * Math.pow(2, action.retryCount);
-    }
-
-    this.logger.debug(`调度重试`, {
-      actionId: action.id, errorType,
-      retryCount: action.retryCount + 1, delay: `${delay}ms`
-    });
-
-    this.scheduleRetry(delay);
-    return 'retry';
+  async handleRetryDurably(action: QueuedAction, error: string | QueueRetryError):
+    Promise<ActionQueueDurableRetrySettlementResult> {
+    return handleQueuedActionRetryDurably(action, error, this.processingMutations);
   }
 
   // ========== 错误分类（纯函数） ==========
 
-  classifyError(error: string | QueueRetryError): 'network' | 'timeout' | 'permission' | 'business' | 'deferred' | 'unknown' {
-    const normalizedError = this.normalizeRetryError(error);
-
-    if (
-      this.isBrowserSuspensionError(normalizedError)
-      || this.isPartialRetryHandoffError(normalizedError)
-      || this.isAuthPendingRetryError(normalizedError)
-    ) {
-      return 'deferred';
-    }
-
-    const msg = normalizedError.message.toLowerCase();
-
-    if (msg.includes('network') || msg.includes('failed to fetch') ||
-        msg.includes('networkerror') || msg.includes('connection') || msg.includes('offline') ||
-        msg.includes('browsernetworksuspendederror') || msg.includes('network io suspended') ||
-        msg.includes('离线') || msg.includes('网络')) {
-      return 'network';
-    }
-    if (msg.includes('timeout') || msg.includes('timed out') || msg.includes('deadline exceeded') ||
-        msg.includes('超时')) {
-      return 'timeout';
-    }
-    if (msg.includes('permission') || msg.includes('unauthorized') || msg.includes('forbidden') ||
-        msg.includes('401') || msg.includes('403') || msg.includes('jwt') ||
-        msg.includes('token') || msg.includes('policy') || msg.includes('42501') ||
-        msg.includes('autherror') || msg.includes('expired') || msg.includes('权限不足') ||
-        msg.includes('登录已过期') || msg.includes('未授权') || msg.includes('重新登录')) {
-      return 'permission';
-    }
-    for (const pattern of LOCAL_QUEUE_CONFIG.BUSINESS_ERROR_PATTERNS) {
-      if (msg.includes(pattern.toLowerCase())) return 'business';
-    }
-    return 'unknown';
-  }
-
-  private normalizeRetryError(error: string | QueueRetryError): QueueRetryError {
-    if (typeof error === 'string') {
-      return this.parseRetryErrorMessage(error);
-    }
-
-    const message = typeof error.message === 'string' ? error.message : String(error.message ?? '');
-    const parsed = this.parseRetryErrorMessage(message);
-    return {
-      code: typeof error.code === 'string' ? error.code : parsed.code,
-      message: parsed.message,
-      details: error.details && typeof error.details === 'object'
-        ? error.details
-        : undefined,
-    };
-  }
-
-  private parseRetryErrorMessage(message: string): QueueRetryError {
-    const parts = message.split('|').map(part => part.trim()).filter(part => part.length > 0);
-    const firstPart = parts[0] ?? '';
-    const looksLikeErrorCode = /^[A-Z0-9_]+$/.test(firstPart);
-
-    if (!looksLikeErrorCode) {
-      return { message };
-    }
-
-    return {
-      code: firstPart,
-      message: parts.slice(1).join(' | ') || message,
-    };
-  }
-
-  private formatRetryError(error: QueueRetryError): string {
-    return [error.code, error.message].filter((part): part is string => typeof part === 'string' && part.length > 0).join(' | ');
-  }
-
-  private isBrowserSuspensionError(error: QueueRetryError): boolean {
-    if (error.details?.['reason'] === 'browser-network-suspended') {
-      return true;
-    }
-
-    const msg = `${error.code ?? ''} ${error.message}`.toLowerCase();
-    return msg.includes('browser-network-suspended')
-      || msg.includes('browsernetworksuspendederror')
-      || msg.includes('network io suspended')
-      || (error.code === 'SYNC_OFFLINE' && error.message.includes('浏览器恢复连接中'))
-      || msg.includes('resuming connection');
-  }
-
-  private isPartialRetryHandoffError(error: QueueRetryError): boolean {
-    return error.details?.['reason'] === 'partial-retry-handoff'
-      || error.code === 'SYNC_RETRY_HANDOFF_PENDING';
-  }
-
-  private isAuthPendingRetryError(error: QueueRetryError): boolean {
-    return error.details?.['reason'] === 'auth-pending'
-      || error.code === 'SYNC_AUTH_PENDING';
-  }
-
-  private resolveDeferredRetryDelay(error: QueueRetryError): number {
-    if (this.isPartialRetryHandoffError(error)) {
-      const requestedDelay = error.details?.['retryAfterMs'];
-      if (typeof requestedDelay === 'number' && Number.isFinite(requestedDelay)) {
-        return Math.max(0, requestedDelay);
-      }
-
-      return QUEUE_CONFIG.RETRY_BASE_DELAY;
-    }
-
-    // auth 认证过渡期使用固定基础间隔，避免降级到浏览器挂起延迟计算产生 100ms 快速重试噪声
-    if (this.isAuthPendingRetryError(error)) {
-      return QUEUE_CONFIG.RETRY_BASE_DELAY;
-    }
-
-    return this.resolveBrowserSuspensionDelay(error);
-  }
-
-  private describeDeferredRetryReason(error: QueueRetryError): 'browser-network-suspended' | 'partial-retry-handoff' | 'auth-pending' {
-    if (this.isPartialRetryHandoffError(error)) {
-      return 'partial-retry-handoff';
-    }
-
-    if (this.isAuthPendingRetryError(error)) {
-      return 'auth-pending';
-    }
-
-    return 'browser-network-suspended';
+  classifyError(error: string | QueueRetryError): QueueRetryErrorClassification {
+    return classifyQueueRetryError(error);
   }
 
   private resolveBrowserSuspensionDelay(error?: QueueRetryError): number {
-    const requestedDelay = error?.details?.['resumeDelayMs'];
-    if (typeof requestedDelay === 'number' && Number.isFinite(requestedDelay)) {
-      return Math.max(0, requestedDelay);
-    }
-
-    return Math.max(100, getRemainingBrowserNetworkResumeDelayMs() + 50);
+    return resolveBrowserSuspensionDelayPure(error);
   }
 
   getActionDescription(action: QueuedAction): string {
-    const typeMap: Record<string, string> = { 'create': '创建', 'update': '更新', 'delete': '删除' };
-    const entityMap: Record<string, string> = {
-      'project': '项目',
-      'task': '任务',
-      'preference': '设置',
-      'focus-session': '专注会话',
-      'routine-task': '日常任务',
-      'routine-completion': '日常计数',
-    };
-    return `${typeMap[action.type] || action.type}${entityMap[action.entityType] || action.entityType}`;
+    return getActionDescriptionPure(action);
   }
 
   getActionLabel(action: QueuedAction): string {
-    const typeLabels: Record<string, string> = { create: '创建', update: '更新', delete: '删除' };
-    const entityLabels: Record<string, string> = {
-      project: '项目',
-      task: '任务',
-      preference: '偏好设置',
-      'focus-session': '专注会话',
-      'routine-task': '日常任务',
-      'routine-completion': '日常计数',
-    };
-    return `${typeLabels[action.type]}${entityLabels[action.entityType]}`;
+    return getActionLabelPure(action);
   }
 
   // ========== 网络管理 ==========
 
   setupNetworkListeners(): void {
-    if (typeof window === 'undefined') return;
-
-    this.onlineHandler = () => {
-      this._isOnline = true;
-      this.requestQueueProcessing('online');
-    };
-    this.offlineHandler = () => {
-      this._isOnline = false;
-    };
-    this.visibilityChangeHandler = () => {
-      if (typeof document === 'undefined' || document.visibilityState !== 'visible') {
-        return;
-      }
-      this.requestQueueProcessing('visibilitychange');
-    };
-    this.pageShowHandler = (_event: PageTransitionEvent) => {
-      this.requestQueueProcessing('pageshow');
-    };
-
-    window.addEventListener('online', this.onlineHandler);
-    window.addEventListener('offline', this.offlineHandler);
-    if (typeof document !== 'undefined') {
-      document.addEventListener('visibilitychange', this.visibilityChangeHandler);
-    }
-    window.addEventListener('pageshow', this.pageShowHandler as EventListener);
-    this._isOnline = navigator.onLine;
+    this.scheduler.setupNetworkListeners(this.schedulerRuntime());
   }
 
   removeNetworkListeners(): void {
-    if (typeof window === 'undefined') return;
-    if (this.onlineHandler) { window.removeEventListener('online', this.onlineHandler); this.onlineHandler = null; }
-    if (this.offlineHandler) { window.removeEventListener('offline', this.offlineHandler); this.offlineHandler = null; }
-    if (typeof document !== 'undefined' && this.visibilityChangeHandler) {
-      document.removeEventListener('visibilitychange', this.visibilityChangeHandler);
-      this.visibilityChangeHandler = null;
-    }
-    if (this.pageShowHandler) {
-      window.removeEventListener('pageshow', this.pageShowHandler as EventListener);
-      this.pageShowHandler = null;
-    }
+    this.scheduler.removeNetworkListeners();
   }
 
   // ========== 重试调度 ==========
 
   shouldDeferQueueProcessing(): boolean {
-    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
-      return true;
-    }
-
-    return isBrowserNetworkSuspendedWindow();
+    return this.scheduler.shouldDeferQueueProcessing();
   }
 
   requestQueueProcessing(reason: string): void {
-    if (!this._isOnline) {
+    pushStartupTrace('action_queue.storage_request', { reason });
+    this.debugSafely('ActionQueue storage request', { reason });
+    if (this.restoreBarrier.deferProcessing()) {
+      pushStartupTrace('action_queue.storage_decision', { reason, decision: 'restore-barrier' });
+      this.debugSafely('ActionQueue storage restore barrier', { reason, decision: 'deferred' });
+      this.logger.debug('ActionQueue 恢复尚未完成，延后后台处理', { reason });
       return;
     }
-
-    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
-      this.logger.debug('页面仍处于后台，延后队列处理直到重新可见', { reason });
+    if (this.ctx.pendingActions().length === 0) {
+      pushStartupTrace('action_queue.storage_decision', { reason, decision: 'empty' });
+      this.debugSafely('ActionQueue storage empty suppression', {
+        reason,
+        decision: 'empty',
+        pending: 0,
+      });
+      this.logger.debug('ActionQueue 为空，跳过后台处理', { reason });
       return;
     }
-
-    if (isBrowserNetworkSuspendedWindow()) {
-      this.scheduleDeferredQueueProcessing(reason);
-      return;
-    }
-
-    this.clearRetryTimer();
-    void this.ctx.processQueue();
+    pushStartupTrace('action_queue.storage_decision', {
+      reason,
+      decision: 'scheduler-forward',
+      pending: this.ctx.pendingActions().length,
+    });
+    this.debugSafely('ActionQueue storage scheduler forward', {
+      reason,
+      decision: 'forward',
+      pending: this.ctx.pendingActions().length,
+    });
+    this.scheduler.requestQueueProcessing(reason, this.schedulerRuntime());
   }
 
+  private debugSafely(message: string, context: Record<string, unknown>): void {
+    try {
+      this.logger.debug(message, context);
+    } catch {
+      // Queue processing must not depend on observability.
+    }
+  }
+
+
   scheduleDeferredQueueProcessing(reason: string, explicitDelay?: number): void {
-    if (!this._isOnline) {
-      return;
-    }
-
-    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
-      this.logger.debug('页面仍处于后台，跳过 defer 队列定时器，等待可见恢复事件', { reason });
-      return;
-    }
-
-    const delay = Math.max(0, explicitDelay ?? this.resolveBrowserSuspensionDelay());
-    this.logger.debug('浏览器恢复窗口未结束，延后队列处理', { reason, delay });
-    this.scheduleRetry(delay);
+    const delay = explicitDelay ?? this.resolveBrowserSuspensionDelay();
+    this.scheduler.scheduleDeferredQueueProcessing(reason, this.schedulerRuntime(), delay);
   }
 
   scheduleRetry(delay: number): void {
-    const normalizedDelay = Math.max(0, delay);
-    const nextDueAt = Date.now() + normalizedDelay;
-
-    if (this.retryTimer && this.retryTimerDueAt !== null && this.retryTimerDueAt <= nextDueAt) {
-      return;
-    }
-
-    this.clearRetryTimer();
-    this.retryTimerDueAt = nextDueAt;
-    this.retryTimer = setTimeout(() => {
-      this.retryTimer = null;
-      this.retryTimerDueAt = null;
-      this.requestQueueProcessing('retry-timer');
-    }, normalizedDelay);
+    this.scheduler.scheduleRetry(delay, () => this.requestQueueProcessing('retry-timer'));
   }
 
   clearRetryTimer(): void {
-    if (this.retryTimer) { clearTimeout(this.retryTimer); this.retryTimer = null; }
-    this.retryTimerDueAt = null;
+    this.scheduler.clearRetryTimer();
   }
 
   // ========== 存储操作 ==========
@@ -1129,135 +650,90 @@ export class ActionQueueStorageService {
    * 处理 QuotaExceededError：尝试 IndexedDB 备份 → 逃生模式
    */
   saveQueueToStorage(): void {
-    if (typeof localStorage === 'undefined') return;
-
-    try {
-      const queueStorageKey = this.getScopedStorageKey(LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY);
-      localStorage.setItem(
-        queueStorageKey,
-        JSON.stringify(this.ctx.pendingActions())
-      );
-      this.clearLegacyGlobalStorageIfLocalOwner(LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY);
-      this.clearQueueFreeze();
-    } catch (e: unknown) {
-      const isQuotaError =
-        (e instanceof DOMException && (e.name === 'QuotaExceededError' || e.code === 22)) ||
-        (e instanceof Error && e.name === 'QuotaExceededError');
-
-      if (isQuotaError) {
-        const currentQueue = this.ctx.pendingActions();
-        this.logger.warn('LocalStorage 配额不足，启用队列冻结保护');
-        // 同步冻结写入，防止后续操作在备份完成前继续写入
-        this.freezeQueueWrites('quota_exceeded');
-        void this.queueBackup.backupQueue(currentQueue, this.getCurrentOwnerUserId()).then(success => {
-          if (success) {
-            this.invalidateLocalQueueSnapshot();
-            this.toast.warning('存储空间不足', '同步队列已冻结。请释放浏览器存储后继续写入。', {
-              duration: 10000
-            });
-          } else {
-            this.freezeQueueWrites('backup_failed');
-            this.triggerStorageFailureEscapeMode();
-          }
-        });
-      } else {
-        this.logger.warn('Failed to save action queue to storage', e);
+    if (!this.canPersistCurrentOwner()) return;
+    const save = () => {
+      if (this.restoreBarrier.deferQueueSave()) {
+        this.logger.debug('ActionQueue 恢复尚未完成，跳过 transient full-snapshot 写入');
+        return;
       }
+      this.ownerStorage.saveCurrentQueueToStorage(this.ownerStorageRuntime());
+    };
+    if (typeof localStorage === 'undefined') {
+      save();
+      return;
     }
+    return localBackupUiRestoreWriterQuiescence.runSync(
+      this.getCurrentOwnerUserId(), 'action-queue', save,
+    );
   }
 
   /**
    * 从 localStorage 加载队列（含 IndexedDB 回退）
    */
-  loadQueueFromStorage(): void {
-    if (typeof localStorage === 'undefined') return;
-
-    try {
+  loadQueueFromStorage(): Promise<OwnerStorageRestoreOutcome> {
+    const restoreOwnerUserId = this.getCurrentOwnerUserId();
+    return trackLocalBackupUiRestoreWriterPromise(restoreOwnerUserId, 'action-queue', async () => {
       const restoreGeneration = ++this.queueRestoreGeneration;
-      const restoreOwnerUserId = this.getCurrentOwnerUserId();
-      const saved = this.loadScopedOrLegacyStorage(LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY);
-      if (saved) {
-        const queue = JSON.parse(saved) as QueuedAction[];
-        if (Array.isArray(queue)) {
-          this.ctx.pendingActions.set(queue);
-          this.ctx.queueSize.set(queue.length);
-          this.ctx.syncSentryContext();
-          return;
-        }
-      }
+      this.restoreBarrier.beginQueue(restoreGeneration);
+      const outcome = await this.ownerStorage.loadCurrentQueueFromStorage(
+        restoreGeneration,
+        restoreOwnerUserId,
+        () => this.queueRestoreGeneration,
+        this.ownerStorageRuntime(),
+      );
+      this.finishQueueRestore(restoreGeneration, outcome);
+      return outcome;
+    });
+  }
 
-      // localStorage 为空，尝试从 IndexedDB 恢复
-      void this.queueBackup.restoreQueue(this.getCurrentOwnerUserId(), (legacyItems) => {
-        this.quarantineLegacyQueueForReview(
-          legacyItems.map((item) => item.action),
-          'legacy-idb-backup'
-        );
-      }).then(backupQueue => {
-        if (restoreGeneration !== this.queueRestoreGeneration || restoreOwnerUserId !== this.getCurrentOwnerUserId()) {
-          this.logger.debug('忽略过期的队列备份恢复结果', { restoreOwnerUserId });
-          return;
-        }
-
-        if (backupQueue && backupQueue.length > 0) {
-          this.ctx.pendingActions.set(backupQueue);
-          this.ctx.queueSize.set(backupQueue.length);
-          this.ctx.syncSentryContext();
-          this.toast.info('队列恢复', `从备用存储恢复了 ${backupQueue.length} 个待处理操作`);
-          this.clearQueueFreeze();
-          this.saveQueueToStorage();
-        }
-      });
-    } catch (e) {
-      this.logger.warn('Failed to load action queue from storage', { error: e });
-    }
+  private finishQueueRestore(restoreGeneration: number, outcome: OwnerStorageRestoreOutcome): void {
+    this.applyRestoreBarrierRelease(this.restoreBarrier.finishQueue(restoreGeneration, outcome));
   }
 
   /** 保存死信队列到 localStorage */
-  saveDeadLetterToStorage(): void {
-    if (typeof localStorage === 'undefined') return;
-
-    try {
-      const deadLetterStorageKey = this.getScopedStorageKey(LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY);
-      localStorage.setItem(
-        deadLetterStorageKey,
-        JSON.stringify(this.deadLetterQueue())
-      );
-      this.clearLegacyGlobalStorageIfLocalOwner(LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY);
-    } catch (e) {
-      this.logger.warn('Failed to save dead letter queue to storage', { error: e });
-    }
+  saveDeadLetterToStorage(): boolean {
+    if (!this.canPersistCurrentOwner()) return false;
+    const save = () => {
+      if (this.restoreBarrier.deferDeadLetterSave()) {
+        this.logger.debug('Dead-letter 恢复尚未完成，跳过 transient full-snapshot 写入');
+        return false;
+      }
+      return this.ownerStorage.saveCurrentDeadLettersToStorage(this.ownerStorageRuntime());
+    };
+    return typeof localStorage === 'undefined'
+      ? save()
+      : localBackupUiRestoreWriterQuiescence.runSync(
+          this.getCurrentOwnerUserId(), 'action-queue', save,
+        );
   }
 
   /**
    * 从 localStorage 加载死信队列（含 TTL 清理）
    */
   loadDeadLetterFromStorage(): void {
-    if (typeof localStorage === 'undefined') return;
+    const restoreOwnerUserId = this.getCurrentOwnerUserId();
+    void trackLocalBackupUiRestoreWriterPromise(restoreOwnerUserId, 'action-queue', async () => {
+      const restoreGeneration = ++this.deadLetterRestoreGeneration;
+      this.restoreBarrier.beginDeadLetters(restoreGeneration);
+      const outcome = await this.ownerStorage.loadCurrentDeadLettersFromStorage(
+        restoreGeneration,
+        restoreOwnerUserId,
+        () => this.deadLetterRestoreGeneration,
+        this.ownerStorageRuntime(),
+      );
+      this.finishDeadLetterRestore(restoreGeneration, outcome);
+    });
+  }
+  private finishDeadLetterRestore(restoreGeneration: number, outcome: OwnerStorageRestoreOutcome): void {
+    this.applyRestoreBarrierRelease(this.restoreBarrier.finishDeadLetters(restoreGeneration, outcome));
+  }
 
-    try {
-      const saved = this.loadScopedOrLegacyStorage(LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY);
-      if (saved) {
-        const queue = JSON.parse(saved) as DeadLetterItem[];
-        if (Array.isArray(queue)) {
-          const now = Date.now();
-          const validQueue = queue.filter(item => {
-            const failedTime = new Date(item.failedAt).getTime();
-            return (now - failedTime) < LOCAL_QUEUE_CONFIG.DEAD_LETTER_TTL;
-          });
-
-          this.deadLetterQueue.set(validQueue);
-          this.deadLetterSize.set(validQueue.length);
-          this.ctx.syncSentryContext();
-
-          if (validQueue.length < queue.length) {
-            this.saveDeadLetterToStorage();
-            this.logger.info(`清理了 ${queue.length - validQueue.length} 个过期的死信队列条目`);
-          }
-        }
-      }
-    } catch (e) {
-      this.logger.warn('Failed to load dead letter queue from storage', { error: e });
-    }
+  private applyRestoreBarrierRelease(release: ActionQueueRestoreBarrierRelease): void {
+    if (!this.canPersistCurrentOwner()) return;
+    const runtime = this.ownerStorageRuntime();
+    if (release.flushQueue) this.ownerStorage.saveCurrentQueueToStorage(runtime);
+    if (release.flushDeadLetters) this.ownerStorage.saveCurrentDeadLettersToStorage(runtime);
+    if (release.resumeProcessing) this.scheduler.requestQueueProcessing('owner-restore-ready', this.schedulerRuntime());
   }
 
   // ========== 存储失败逃生模式 ==========
@@ -1292,58 +768,11 @@ export class ActionQueueStorageService {
    * 失败则指数退避（30s → 60s → 120s → max 5min），最多重试 10 次
    */
   startFrozenRetryTimer(): void {
-    if (this.frozenRetryTimer) return;
-    this.frozenRetryCount = 0;
-    this.scheduleFrozenRetry();
-  }
-
-  private scheduleFrozenRetry(): void {
-    if (this.frozenRetryCount >= this.FROZEN_RETRY_MAX) {
-      this.logger.warn('冻结期重试已达上限，停止自动重试', { count: this.frozenRetryCount });
-      return;
-    }
-
-    const delay = Math.min(
-      this.FROZEN_RETRY_BASE_DELAY * Math.pow(2, this.frozenRetryCount),
-      this.FROZEN_RETRY_MAX_DELAY
-    );
-
-    this.frozenRetryTimer = setTimeout(() => {
-      this.frozenRetryTimer = null;
-      if (!this.queueFrozen()) return; // 已解冻，无需重试
-
-      this.frozenRetryCount++;
-      this.logger.info('冻结期定时重试落盘', { attempt: this.frozenRetryCount });
-
-      try {
-        // 尝试写入 localStorage
-        const testKey = 'nanoflow.freeze-probe';
-        localStorage.setItem(testKey, '1');
-        localStorage.removeItem(testKey);
-        
-        // 写入成功，尝试保存队列
-        this.saveQueueToStorage();
-        
-        if (!this.queueFrozen()) {
-          this.logger.info('存储恢复，队列自动解冻');
-          this.toast.success('存储恢复', '同步队列已自动解冻');
-        } else {
-          // 保存失败重新触发了冻结，继续重试
-          this.scheduleFrozenRetry();
-        }
-      } catch (_e) {
-        this.logger.debug('冻结期重试写入仍然失败', { attempt: this.frozenRetryCount });
-        this.scheduleFrozenRetry();
-      }
-    }, delay);
+    this.frozenRetry.start();
   }
 
   private stopFrozenRetryTimer(): void {
-    if (this.frozenRetryTimer) {
-      clearTimeout(this.frozenRetryTimer);
-      this.frozenRetryTimer = null;
-    }
-    this.frozenRetryCount = 0;
+    this.frozenRetry.stop();
   }
 
   /**
@@ -1351,15 +780,12 @@ export class ActionQueueStorageService {
    * 用于队列冻结时用户手动下载备份
    */
   exportPendingActionsAsJson(): string {
-    const data = {
-      exportedAt: new Date().toISOString(),
+    return buildActionQueueEscapeExportJson({
       pendingActions: this.ctx.pendingActions(),
       deadLetterQueue: this.deadLetterQueue(),
       frozenState: this.queueFrozen(),
       freezeReason: this.queueFreezeReason(),
-      metadata: { version: 1, source: 'action-queue-escape' }
-    };
-    return JSON.stringify(data, null, 2);
+    });
   }
 
   /**
@@ -1367,16 +793,7 @@ export class ActionQueueStorageService {
    */
   downloadEscapeExport(): void {
     try {
-      const json = this.exportPendingActionsAsJson();
-      const blob = new Blob([json], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `nanoflow-pending-sync-${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.json`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+      downloadActionQueueEscapeExport(this.exportPendingActionsAsJson());
       this.toast.success('导出成功', '待同步数据已下载');
     } catch (e) {
       this.logger.error('逃生导出失败', e);
@@ -1385,6 +802,9 @@ export class ActionQueueStorageService {
   }
 
   reset(): void {
+    this.queueRestoreGeneration += 1;
+    this.deadLetterRestoreGeneration += 1;
+    this.restoreBarrier.reset();
     this.removeNetworkListeners();
     this.clearRetryTimer();
     this.stopFrozenRetryTimer();
@@ -1398,15 +818,6 @@ export class ActionQueueStorageService {
     this.storageFailureCallback = null;
     this._isOnline = true;
 
-    // 清除 localStorage 中的持久化数据
-    if (typeof localStorage !== 'undefined') {
-      try {
-        localStorage.removeItem(LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY);
-        localStorage.removeItem(LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY);
-      } catch (e) {
-        this.logger.warn('清除 localStorage 队列数据失败', { error: e });
-      }
-    }
   }
 
   private freezeQueueWrites(reason: string): void {
@@ -1428,7 +839,6 @@ export class ActionQueueStorageService {
     this.queueFrozen.set(false);
     this.queueFreezeReason.set(null);
     this.networkAwareness.setStoragePressure(false, null);
-    // 停止冻结期重试
     this.stopFrozenRetryTimer();
   }
 }

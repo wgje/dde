@@ -16,11 +16,19 @@ import { ModalService } from './modal.service';
 import { SupabaseError } from '../utils/supabase-error';
 import { PERMISSION_DENIED_CONFIG } from '../config/sync.config';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
+import { openIndexedDBAdaptive } from '../utils/indexeddb-open';
+
+export interface PermissionDeniedHandlingContext {
+  ownerUserId: string;
+  shouldNotify: () => boolean;
+}
 /**
  * 被拒数据隔离记录
  */
 export interface RejectedDataRecord {
   id: string;
+  /** null is reserved for the ownerless legacy `main` bucket. */
+  ownerUserId?: string | null;
   type: 'task' | 'connection';
   projectId: string;
   data: Task | Connection;
@@ -34,6 +42,7 @@ export interface RejectedDataRecord {
  * 被拒数据隔离存储
  */
 export interface RejectedDataStore {
+  ownerUserId?: string | null;
   records: RejectedDataRecord[];
   totalSize: number;
   createdAt: string;
@@ -56,8 +65,12 @@ export class PermissionDeniedHandlerService {
   async handlePermissionDenied(
     error: SupabaseError,
     rejectedData: (Task | Connection)[],
-    projectId: string
+    projectId: string,
+    context: PermissionDeniedHandlingContext,
   ): Promise<void> {
+    if (!context.ownerUserId.trim()) {
+      throw new Error('Permission-denied handling requires an owner user id');
+    }
     this.logger.warn('检测到权限拒绝错误', {
       errorCode: error.code,
       dataCount: rejectedData.length,
@@ -66,10 +79,12 @@ export class PermissionDeniedHandlerService {
     });
 
     // 1. 隔离被拒数据
-    const isolatedRecords = await this.isolateRejectedData(rejectedData, projectId, error);
+    const isolatedRecords = await this.isolateRejectedData(rejectedData, projectId, error, context.ownerUserId);
 
     // 2. 通知用户并提供操作选项
-    await this.notifyUserOfRejectedData(isolatedRecords, error);
+    if (context.shouldNotify()) {
+      await this.notifyUserOfRejectedData(isolatedRecords, error);
+    }
 
     // 3. 上报到 Sentry 用于监控
     this.sentryLazyLoader.captureMessage('Permission denied during data sync', {
@@ -94,10 +109,12 @@ export class PermissionDeniedHandlerService {
   private async isolateRejectedData(
     rejectedData: (Task | Connection)[],
     projectId: string,
-    error: SupabaseError
+    error: SupabaseError,
+    ownerUserId: string,
   ): Promise<RejectedDataRecord[]> {
-    const isolatedRecords: RejectedDataRecord[] = rejectedData.map((item, index) => ({
-      id: `rejected-${Date.now()}-${index}`,
+    const isolatedRecords: RejectedDataRecord[] = rejectedData.map(item => ({
+      id: `rejected-${crypto.randomUUID()}`,
+      ownerUserId,
       type: 'source' in item ? 'connection' as const : 'task' as const,
       projectId,
       data: item,
@@ -109,12 +126,12 @@ export class PermissionDeniedHandlerService {
 
     // 存储到 IndexedDB（容量更大，支持结构化数据）
     try {
-      const store = await this.loadRejectedDataStore();
-      store.records.push(...isolatedRecords);
-      store.lastUpdatedAt = new Date().toISOString();
-      store.totalSize += isolatedRecords.length;
-
-      await this.saveRejectedDataStore(store);
+      const store = await this.mutateRejectedDataStore(ownerUserId, current => ({
+        ...current,
+        records: [...current.records, ...isolatedRecords],
+        lastUpdatedAt: new Date().toISOString(),
+        totalSize: current.totalSize + isolatedRecords.length,
+      }));
 
       this.logger.info('被拒数据已隔离', {
         count: isolatedRecords.length,
@@ -146,8 +163,8 @@ export class PermissionDeniedHandlerService {
         {
           duration: 8000,
           action: {
-            label: '查看隔离数据',
-            onClick: () => this.openRejectedDataModal(isolatedRecords)
+            label: '导出隔离数据',
+            onClick: () => this.exportRejectedData(isolatedRecords)
           }
         }
       );
@@ -177,6 +194,40 @@ export class PermissionDeniedHandlerService {
     this.toast.success('', `已隔离 ${records.length} 条数据，可通过以下方式处理：`, {
       duration: 0 // 不自动关闭
     });
+  }
+
+  /** Export ownerless legacy data separately; it must never be merged into a user bucket. */
+  async exportLegacyRejectedData(): Promise<RejectedDataRecord[]> {
+    const store = await this.readRejectedDataStore(null);
+    this.downloadJson({
+      exportedAt: new Date().toISOString(),
+      ownerUserId: null,
+      recordCount: store.records.length,
+      records: store.records,
+    }, `rejected-data-legacy-${Date.now()}.json`);
+    return store.records;
+  }
+
+  private exportRejectedData(records: RejectedDataRecord[]): void {
+    const projectId = records[0]?.projectId ?? 'unknown-project';
+    this.downloadJson({
+      exportedAt: new Date().toISOString(),
+      ownerUserId: records[0]?.ownerUserId ?? null,
+      recordCount: records.length,
+      records,
+    }, `rejected-data-${projectId}-${Date.now()}.json`);
+
+    this.logger.info('已导出被拒数据', { projectId, count: records.length });
+  }
+
+  private downloadJson(data: unknown, filename: string): void {
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = filename;
+    anchor.click();
+    URL.revokeObjectURL(url);
   }
 
   /**
@@ -209,40 +260,94 @@ export class PermissionDeniedHandlerService {
     this.logger.info('已触发数据紧急下载', { projectId, count: rejectedData.length });
   }
 
-  /**
-   * 加载被拒数据存储
-   */
-  private async loadRejectedDataStore(): Promise<RejectedDataStore> {
-    try {
-      const db = await this.openIndexedDB();
-      const tx = db.transaction(['rejectedData'], 'readonly');
-      const store = tx.objectStore('rejectedData');
-      const request = store.get('main');
-
-      return new Promise((resolve, reject) => {
-        request.onsuccess = () => {
-          resolve(request.result || this.createEmptyStore());
-        };
-        request.onerror = () => reject(request.error);
-      });
-    } catch (e) {
-      this.logger.error('加载被拒数据存储失败', e);
-      return this.createEmptyStore();
-    }
+  private bucketKey(ownerUserId: string | null): string {
+    return ownerUserId === null ? 'main' : `owner:${ownerUserId}`;
   }
 
-  /**
-   * 保存被拒数据存储
-   */
-  private async saveRejectedDataStore(store: RejectedDataStore): Promise<void> {
+  private normalizeStore(value: unknown, ownerUserId: string | null): RejectedDataStore {
+    if (!value || typeof value !== 'object') return this.createEmptyStore(ownerUserId);
+    const candidate = value as Partial<RejectedDataStore> & { records?: unknown };
+    const records = Array.isArray(candidate.records)
+      ? candidate.records
+        .filter((record): record is RejectedDataRecord => !!record && typeof record === 'object')
+        .map(record => ({
+          ...record,
+          ownerUserId,
+        }))
+      : [];
+    return {
+      ownerUserId,
+      records,
+      totalSize: typeof candidate.totalSize === 'number' ? candidate.totalSize : records.length,
+      createdAt: typeof candidate.createdAt === 'string' ? candidate.createdAt : new Date().toISOString(),
+      lastUpdatedAt: typeof candidate.lastUpdatedAt === 'string' ? candidate.lastUpdatedAt : new Date().toISOString(),
+    };
+  }
+
+  private async readRejectedDataStore(ownerUserId: string | null): Promise<RejectedDataStore> {
+    const db = await this.openIndexedDB();
+    const tx = db.transaction(['rejectedData'], 'readonly');
+    const objectStore = tx.objectStore('rejectedData');
+    const request = objectStore.get(this.bucketKey(ownerUserId));
+
+    return new Promise((resolve, reject) => {
+      let result: RejectedDataStore | undefined;
+      let settled = false;
+      const fail = (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        reject(error instanceof Error ? error : new Error(String(error ?? 'IndexedDB read failed')));
+      };
+      request.onsuccess = () => {
+        result = this.normalizeStore(request.result, ownerUserId);
+      };
+      request.onerror = () => fail(request.error);
+      tx.onerror = () => fail(tx.error);
+      tx.onabort = () => fail(tx.error ?? new Error('IndexedDB read transaction aborted'));
+      tx.oncomplete = () => {
+        if (settled) return;
+        settled = true;
+        resolve(result ?? this.createEmptyStore(ownerUserId));
+      };
+    });
+  }
+
+  private async mutateRejectedDataStore(
+    ownerUserId: string,
+    updater: (current: RejectedDataStore) => RejectedDataStore,
+  ): Promise<RejectedDataStore> {
     const db = await this.openIndexedDB();
     const tx = db.transaction(['rejectedData'], 'readwrite');
     const objectStore = tx.objectStore('rejectedData');
+    const key = this.bucketKey(ownerUserId);
+    const request = objectStore.get(key);
 
     return new Promise((resolve, reject) => {
-      const request = objectStore.put(store, 'main');
-      request.onsuccess = () => resolve();
-      request.onerror = () => reject(request.error);
+      let nextStore: RejectedDataStore | undefined;
+      let settled = false;
+      const fail = (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        reject(error instanceof Error ? error : new Error(String(error ?? 'IndexedDB write failed')));
+      };
+      request.onerror = () => fail(request.error);
+      request.onsuccess = () => {
+        try {
+          const current = this.normalizeStore(request.result, ownerUserId);
+          nextStore = this.normalizeStore(updater(current), ownerUserId);
+          objectStore.put(nextStore, key);
+        } catch (error) {
+          try { tx.abort(); } catch { /* transaction may already be terminal */ }
+          fail(error);
+        }
+      };
+      tx.onerror = () => fail(tx.error);
+      tx.onabort = () => fail(tx.error ?? new Error('IndexedDB write transaction aborted'));
+      tx.oncomplete = () => {
+        if (settled) return;
+        settled = true;
+        resolve(nextStore ?? this.createEmptyStore(ownerUserId));
+      };
     });
   }
 
@@ -250,34 +355,24 @@ export class PermissionDeniedHandlerService {
    * 打开或初始化 IndexedDB
    */
   private async openIndexedDB(): Promise<IDBDatabase> {
-    return new Promise((resolve, reject) => {
-      const request = indexedDB.open('NanoFlow', 1);
-
-      request.onsuccess = () => {
-        const db = request.result;
-        // 确保 rejectedData 存储区存在
-        if (!db.objectStoreNames.contains('rejectedData')) {
-          // 需要在 onupgradeneeded 中创建，这里不处理
-        }
-        resolve(db);
-      };
-
-      request.onupgradeneeded = () => {
-        const db = request.result;
+    return openIndexedDBAdaptive({
+      dbName: 'NanoFlow',
+      targetVersion: 1,
+      requiredStores: ['rejectedData'],
+      ensureStores: db => {
         if (!db.objectStoreNames.contains('rejectedData')) {
           db.createObjectStore('rejectedData');
         }
-      };
-
-      request.onerror = () => reject(request.error);
+      },
     });
   }
 
   /**
    * 创建空的被拒数据存储
    */
-  private createEmptyStore(): RejectedDataStore {
+  private createEmptyStore(ownerUserId: string | null): RejectedDataStore {
     return {
+      ownerUserId,
       records: [],
       totalSize: 0,
       createdAt: new Date().toISOString(),
@@ -289,25 +384,28 @@ export class PermissionDeniedHandlerService {
    * 清理过期的被拒数据
    * 【定期调用】在应用启动时清理超过 7 天的记录
    */
-  async cleanupExpiredRejectedData(): Promise<void> {
+  async cleanupExpiredRejectedData(ownerUserId: string): Promise<void> {
     try {
-      const store = await this.loadRejectedDataStore();
       const retentionTime = PERMISSION_DENIED_CONFIG.REJECTED_DATA_RETENTION;
       const now = Date.now();
-
-      const filtered = store.records.filter(record => {
-        const recordTime = new Date(record.rejectedAt).getTime();
-        return now - recordTime < retentionTime;
+      let removedCount = 0;
+      await this.mutateRejectedDataStore(ownerUserId, store => {
+        const filtered = store.records.filter(record => {
+          const recordTime = new Date(record.rejectedAt).getTime();
+          return now - recordTime < retentionTime;
+        });
+        removedCount = store.records.length - filtered.length;
+        return removedCount === 0
+          ? store
+          : {
+            ...store,
+            records: filtered,
+            totalSize: filtered.length,
+            lastUpdatedAt: new Date().toISOString(),
+          };
       });
 
-      const removedCount = store.records.length - filtered.length;
-      if (removedCount > 0) {
-        store.records = filtered;
-        store.lastUpdatedAt = new Date().toISOString();
-        await this.saveRejectedDataStore(store);
-
-        this.logger.info('已清理过期被拒数据', { removedCount });
-      }
+      if (removedCount > 0) this.logger.info('已清理过期被拒数据', { ownerUserId, removedCount });
     } catch (e) {
       this.logger.error('清理过期被拒数据失败', e);
     }
@@ -317,8 +415,8 @@ export class PermissionDeniedHandlerService {
    * 获取所有被拒数据
    * 【用于调试和数据恢复】
    */
-  async getAllRejectedData(): Promise<RejectedDataRecord[]> {
-    const store = await this.loadRejectedDataStore();
+  async getAllRejectedData(ownerUserId: string): Promise<RejectedDataRecord[]> {
+    const store = await this.readRejectedDataStore(ownerUserId);
     return store.records;
   }
 
@@ -326,17 +424,22 @@ export class PermissionDeniedHandlerService {
    * 清除指定项目的被拒数据
    * 【用于用户手动清理】
    */
-  async clearRejectedDataForProject(projectId: string): Promise<number> {
-    const store = await this.loadRejectedDataStore();
-    const initialCount = store.records.length;
+  async clearRejectedDataForProject(ownerUserId: string, projectId: string): Promise<number> {
+    let removedCount = 0;
+    await this.mutateRejectedDataStore(ownerUserId, store => {
+      const records = store.records.filter(record => record.projectId !== projectId);
+      removedCount = store.records.length - records.length;
+      return removedCount === 0
+        ? store
+        : {
+          ...store,
+          records,
+          totalSize: records.length,
+          lastUpdatedAt: new Date().toISOString(),
+        };
+    });
 
-    store.records = store.records.filter(r => r.projectId !== projectId);
-    store.lastUpdatedAt = new Date().toISOString();
-
-    await this.saveRejectedDataStore(store);
-
-    const removedCount = initialCount - store.records.length;
-    this.logger.info('已清除项目的被拒数据', { projectId, removedCount });
+    this.logger.info('已清除项目的被拒数据', { ownerUserId, projectId, removedCount });
 
     return removedCount;
   }

@@ -1,4 +1,4 @@
-import { Injectable, inject, signal } from '@angular/core';
+import { Injectable, effect, inject, signal, untracked } from '@angular/core';
 import { ProjectStateService } from '../../../../services/project-state.service';
 import { ToastService } from '../../../../services/toast.service';
 import { LoggerService } from '../../../../services/logger.service';
@@ -6,6 +6,12 @@ import { FlowSelectionService } from './flow-selection.service';
 import { FlowTaskOperationsService } from './flow-task-operations.service';
 import { BatchDeleteDialogData } from '../components/flow-batch-delete-dialog.component';
 import { Task } from '../../../../models';
+
+interface BatchDeleteOwner {
+  projectId: string | null;
+  generation: number;
+  dialogToken: number;
+}
 
 /**
  * 批量删除服务
@@ -21,6 +27,24 @@ export class FlowBatchDeleteService {
 
   /** 批量删除确认对话框状态 */
   readonly dialogData = signal<BatchDeleteDialogData | null>(null);
+  private projectId = this.projectState.activeProjectId();
+  private generation = 0;
+  private nextDialogToken = 0;
+  private activeOwner: BatchDeleteOwner | null = null;
+  private dialogOwner: BatchDeleteOwner | null = null;
+  private confirmingOwner: BatchDeleteOwner | null = null;
+  private readonly projectOwnerEffect = effect(() => {
+    this.projectState.activeProjectId();
+    untracked(() => this.syncProjectOwner());
+  });
+
+  constructor() {
+    this.projectState.registerBeforeActiveProjectChange((_previousProjectId, nextProjectId) => {
+      this.projectId = nextProjectId;
+      this.generation++;
+      this.retireCurrentOperation(true);
+    });
+  }
 
   /**
    * 请求批量删除（由 Delete 键或工具栏按钮触发）
@@ -28,6 +52,8 @@ export class FlowBatchDeleteService {
    * @returns 单选时返回需要删除的单个任务，否则返回 null
    */
   requestBatchDelete(): Task | null {
+    this.syncProjectOwner();
+    this.retireCurrentOperation(false);
     const selectedIds = Array.from(this.selectionService.selectedTaskIds());
     if (selectedIds.length === 0) return null;
 
@@ -49,7 +75,10 @@ export class FlowBatchDeleteService {
 
     // 多选时计算删除影响并显示批量确认弹窗
     const impact = this.taskOps.calculateBatchDeleteImpact(validIds);
+    const owner = this.captureOwner();
 
+    this.activeOwner = owner;
+    this.dialogOwner = owner;
     this.dialogData.set({
       selectedIds: validIds,
       impact
@@ -63,35 +92,50 @@ export class FlowBatchDeleteService {
    * @param clearSelectionCallback 清空选择的回调
    * @returns 删除的任务数量
    */
-  confirmBatchDelete(clearSelectionCallback?: () => void): number {
+  async confirmBatchDelete(clearSelectionCallback?: () => void): Promise<number> {
+    this.syncProjectOwner();
     const dialogData = this.dialogData();
-    if (!dialogData) return 0;
+    const owner = this.dialogOwner;
+    if (!dialogData || !owner || !this.isOwnerCurrent(owner)) return 0;
+    if (this.confirmingOwner && this.sameOwner(this.confirmingOwner, owner)) return 0;
 
-    // 清空选择
-    this.selectionService.clearSelection();
-    if (clearSelectionCallback) {
-      clearSelectionCallback();
-    }
+    this.confirmingOwner = owner;
+    const canPublishUi = () => this.isOwnerCurrent(owner);
+    try {
+      // 执行批量删除
+      const deletedCount = await this.taskOps.deleteTasksBatch(dialogData.selectedIds, canPublishUi);
+      if (deletedCount <= 0 || !canPublishUi()) {
+        return 0;
+      }
 
-    // 执行批量删除
-    const deletedCount = this.taskOps.deleteTasksBatch(dialogData.selectedIds);
+      // 清空选择
+      this.selectionService.clearSelection();
+      if (clearSelectionCallback) {
+        clearSelectionCallback();
+      }
 
-    // 关闭弹窗
-    this.dialogData.set(null);
+      // 关闭弹窗
+      this.dialogOwner = null;
+      this.dialogData.set(null);
 
-    // 显示成功提示
-    if (deletedCount > 0) {
+      // 显示成功提示
       this.toast.success('操作成功', `已删除 ${deletedCount} 个任务`);
-    }
 
-    return deletedCount;
+      return deletedCount;
+    } finally {
+      this.syncProjectOwner();
+      if (this.confirmingOwner && this.sameOwner(this.confirmingOwner, owner)) {
+        this.confirmingOwner = null;
+      }
+    }
   }
 
   /**
    * 取消批量删除
    */
   cancelBatchDelete(): void {
-    this.dialogData.set(null);
+    this.syncProjectOwner();
+    this.retireCurrentOperation(false);
   }
 
   /**
@@ -99,10 +143,53 @@ export class FlowBatchDeleteService {
    * @returns 单选时返回需要删除的单个任务，否则返回 null
    */
   handleDeleteKeyPressed(): Task | null {
+    this.syncProjectOwner();
     const selectedIds = Array.from(this.selectionService.selectedTaskIds());
     if (selectedIds.length === 0) return null;
 
     this.logger.debug(`Delete 键删除: ${selectedIds.length} 个选中任务`);
     return this.requestBatchDelete();
+  }
+
+  reset(): void {
+    this.syncProjectOwner();
+    this.generation++;
+    this.retireCurrentOperation(true);
+  }
+
+  private captureOwner(): BatchDeleteOwner {
+    return {
+      projectId: this.projectId,
+      generation: this.generation,
+      dialogToken: ++this.nextDialogToken,
+    };
+  }
+
+  private isOwnerCurrent(owner: BatchDeleteOwner): boolean {
+    this.syncProjectOwner();
+    return this.projectState.activeProjectId() === owner.projectId
+      && !!this.activeOwner && this.sameOwner(this.activeOwner, owner);
+  }
+
+  private syncProjectOwner(): void {
+    const projectId = this.projectState.activeProjectId();
+    if (projectId === this.projectId) return;
+    this.projectId = projectId;
+    this.generation++;
+    this.retireCurrentOperation(true);
+  }
+
+  private retireCurrentOperation(clearSelection: boolean): void {
+    this.activeOwner = null;
+    this.dialogOwner = null;
+    this.confirmingOwner = null;
+    this.dialogData.set(null);
+    if (clearSelection) this.selectionService.clearSelection();
+  }
+
+  private sameOwner(left: BatchDeleteOwner, right: BatchDeleteOwner): boolean {
+    return left.projectId === right.projectId
+      && left.generation === right.generation
+      && left.dialogToken === right.dialogToken;
   }
 }

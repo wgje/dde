@@ -358,6 +358,65 @@ export function buildComboSectorBuckets(
   return buckets;
 }
 
+interface ComboPlacementContext {
+  readonly pointByTaskId: Map<string, { x: number; y: number }>;
+  readonly placed: Array<{ x: number; y: number }>;
+  readonly minDist: number;
+  readonly comboSpreadX: number;
+  readonly comboSpreadY: number;
+  readonly anchors: Record<ComboSector, { x: number; y: number }>;
+  readonly config: RadarLayoutConfig;
+  readonly avoidRects: readonly RadarAvoidRect[];
+}
+
+function buildComboAnchors(
+  comboSpreadX: number,
+  comboSpreadY: number,
+): Record<ComboSector, { x: number; y: number }> {
+  return {
+    left: { x: -comboSpreadX * SECTOR_ANCHOR_X, y: -comboSpreadY * SECTOR_ANCHOR_Y },
+    top: { x: 0, y: -comboSpreadY * SECTOR_ANCHOR_TOP_Y },
+    right: { x: comboSpreadX * SECTOR_ANCHOR_X, y: -comboSpreadY * SECTOR_ANCHOR_Y },
+  };
+}
+
+function placeComboSectorEntries(
+  sector: ComboSector,
+  bucket: readonly DockEntry[],
+  context: ComboPlacementContext,
+): void {
+  const columnCount = bucket.length >= COLUMN_THRESHOLD ? 2 : 1;
+  const horizontalGap = context.comboSpreadX * (sector === 'top' ? HORIZONTAL_GAP_TOP : HORIZONTAL_GAP_SIDE);
+  const verticalGap = Math.max(
+    VERTICAL_GAP_MIN,
+    context.comboSpreadY * (sector === 'top' ? VERTICAL_GAP_FACTOR_TOP : VERTICAL_GAP_FACTOR_SIDE),
+  );
+
+  bucket.forEach((entry, index) => {
+    const row = Math.floor(index / columnCount);
+    const column = index % columnCount;
+    const centeredColumn = column - ((columnCount - 1) / 2);
+    const jitter = computeSectorJitter(entry.taskId, sector);
+    const point = {
+      x: context.anchors[sector].x + (centeredColumn * horizontalGap) + jitter.x,
+      y: context.anchors[sector].y + (row * verticalGap) + jitter.y,
+    };
+    const adjusted = resolveSpacingConflicts(
+      point,
+      context.placed,
+      context.minDist,
+      context.comboSpreadX,
+      context.comboSpreadY,
+      'combo-select',
+      entry.taskId,
+      context.config.occlusionSafePadding,
+      context.avoidRects,
+    );
+    context.placed.push(adjusted);
+    context.pointByTaskId.set(entry.taskId, adjusted);
+  });
+}
+
 // ─── Main layout dispatchers ──────────────────────────────────
 
 export function layoutComboEntries(
@@ -374,41 +433,20 @@ export function layoutComboEntries(
   const comboSpreadX = radiusX * config.comboSpreadXFactor;
   const comboSpreadY = radiusY * config.comboSpreadYFactor;
   const sectors = buildComboSectorBuckets(entries, groupByTaskId, config.comboSectorSequence);
-  const anchors: Record<ComboSector, { x: number; y: number }> = {
-    left: { x: -comboSpreadX * SECTOR_ANCHOR_X, y: -comboSpreadY * SECTOR_ANCHOR_Y },
-    top: { x: 0, y: -comboSpreadY * SECTOR_ANCHOR_TOP_Y },
-    right: { x: comboSpreadX * SECTOR_ANCHOR_X, y: -comboSpreadY * SECTOR_ANCHOR_Y },
+  const context: ComboPlacementContext = {
+    pointByTaskId,
+    placed,
+    minDist,
+    comboSpreadX,
+    comboSpreadY,
+    anchors: buildComboAnchors(comboSpreadX, comboSpreadY),
+    config,
+    avoidRects,
   };
 
   for (const sector of config.comboSectorSequence) {
     const bucket = sectors.get(sector) ?? [];
-    const columnCount = bucket.length >= COLUMN_THRESHOLD ? 2 : 1;
-    const horizontalGap = comboSpreadX * (sector === 'top' ? HORIZONTAL_GAP_TOP : HORIZONTAL_GAP_SIDE);
-    const verticalGap = Math.max(VERTICAL_GAP_MIN, comboSpreadY * (sector === 'top' ? VERTICAL_GAP_FACTOR_TOP : VERTICAL_GAP_FACTOR_SIDE));
-
-    bucket.forEach((entry, index) => {
-      const row = Math.floor(index / columnCount);
-      const column = index % columnCount;
-      const centeredColumn = column - ((columnCount - 1) / 2);
-      const jitter = computeSectorJitter(entry.taskId, sector);
-      const point = {
-        x: anchors[sector].x + (centeredColumn * horizontalGap) + jitter.x,
-        y: anchors[sector].y + (row * verticalGap) + jitter.y,
-      };
-      const adjusted = resolveSpacingConflicts(
-        point,
-        placed,
-        minDist,
-        comboSpreadX,
-        comboSpreadY,
-        'combo-select',
-        entry.taskId,
-        config.occlusionSafePadding,
-        avoidRects,
-      );
-      placed.push(adjusted);
-      pointByTaskId.set(entry.taskId, adjusted);
-    });
+    placeComboSectorEntries(sector, bucket, context);
   }
 
   return entries.map(entry => ({

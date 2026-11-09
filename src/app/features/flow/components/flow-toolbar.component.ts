@@ -6,6 +6,7 @@ import { UserSessionService } from '../../../../services/user-session.service';
 import { ToastService } from '../../../../services/toast.service';
 import { Task } from '../../../../models';
 import { TIMEOUT_CONFIG } from '../../../../config';
+import type { FlowRelationDisplayMode } from '../services/flow-diagram-config.service';
 
 /**
  * 流程图工具栏组件
@@ -130,6 +131,30 @@ import { TIMEOUT_CONFIG } from '../../../../config';
                      [class.h-5]="!uiState.isMobile()" [class.w-5]="!uiState.isMobile()" 
                      [class.h-4]="uiState.isMobile()" [class.w-4]="uiState.isMobile()">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+                </svg>
+            </button>
+
+            <button
+              type="button"
+              (click)="toggleRelationDisplayMode.emit()"
+              class="backdrop-blur rounded-lg shadow-sm border transition-all"
+              [class.p-2]="!uiState.isMobile()"
+              [class.p-1.5]="uiState.isMobile()"
+              [class.bg-amber-500]="relationDisplayMode() !== 'all'"
+              [class.text-white]="relationDisplayMode() !== 'all'"
+              [class.border-amber-500]="relationDisplayMode() !== 'all'"
+              [class.theme-toolbar-btn]="relationDisplayMode() === 'all'"
+              [title]="relationDisplayModeLabel()">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"
+                     [class.h-5]="!uiState.isMobile()" [class.w-5]="!uiState.isMobile()"
+                     [class.h-4]="uiState.isMobile()" [class.w-4]="uiState.isMobile()">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7a4 4 0 018 0M6 17a4 4 0 018 0" />
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7l6 10" />
+                  @if (relationDisplayMode() === 'hidden') {
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.4" d="M4 20L20 4" />
+                  } @else if (relationDisplayMode() === 'focused') {
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M12 9v6m-3-3h6" />
+                  }
                 </svg>
             </button>
             
@@ -293,6 +318,7 @@ export class FlowToolbarComponent {
   readonly drawerHeightVh = input<number>(35);
   /** 移动端：是否处于框选模式 */
   readonly isSelectMode = input<boolean>(false);
+  readonly relationDisplayMode = input<FlowRelationDisplayMode>('all');
   
   // 输出事件
   readonly zoomIn = output<void>();
@@ -311,6 +337,7 @@ export class FlowToolbarComponent {
   readonly saveToCloudCallback = input<(() => Promise<{ ok: boolean; message?: string }>) | null>(null);
   /** 移动端：切换框选模式 */
   readonly toggleSelectMode = output<void>();
+  readonly toggleRelationDisplayMode = output<void>();
   
   // 导出菜单状态
   isExportMenuOpen = false;
@@ -318,6 +345,17 @@ export class FlowToolbarComponent {
   
   /** 工具栏折叠状态 */
   readonly isCollapsed = signal(false);
+
+  readonly relationDisplayModeLabel = computed(() => {
+    switch (this.relationDisplayMode()) {
+      case 'focused':
+        return '关系降噪：仅显示当前任务关联';
+      case 'hidden':
+        return '关系降噪：隐藏跨树关联线';
+      default:
+        return '关系降噪：显示全部关联线';
+    }
+  });
 
   /** 当前视口高度（回退到基准高度） */
   private viewportHeight(): number {
@@ -417,7 +455,8 @@ export class FlowToolbarComponent {
   
   setUploadComplete() {
     this.isUploading = false;
-    if (this.uploadTimeoutId) {
+    // 显式 null 判断：timer handle 为 0 时也要清理，否则上一次上传的超时定时器会在 30s 后强制复位新一次在途上传
+    if (this.uploadTimeoutId !== null) {
       clearTimeout(this.uploadTimeoutId);
       this.uploadTimeoutId = null;
     }

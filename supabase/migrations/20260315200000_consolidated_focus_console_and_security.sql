@@ -26,7 +26,7 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 -- 1.1 focus_sessions —— 专注会话快照表
 CREATE TABLE IF NOT EXISTS public.focus_sessions (
-  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  id              UUID PRIMARY KEY,
   user_id         UUID NOT NULL,
   started_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
   ended_at        TIMESTAMPTZ,
@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS public.focus_sessions (
 );
 -- 1.2 routine_tasks —— 日常任务定义表
 CREATE TABLE IF NOT EXISTS public.routine_tasks (
-  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  id                UUID PRIMARY KEY,
   user_id           UUID NOT NULL,
   title             TEXT NOT NULL,
   max_times_per_day INT NOT NULL DEFAULT 1,
@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS public.routine_tasks (
 );
 -- 1.3 routine_completions —— 日常任务完成记录表
 CREATE TABLE IF NOT EXISTS public.routine_completions (
-  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  id              UUID PRIMARY KEY,
   routine_id      UUID NOT NULL,
   user_id         UUID NOT NULL,
   date_key        DATE NOT NULL,
@@ -83,7 +83,7 @@ DO $$ BEGIN
     ALTER TABLE public.focus_sessions RENAME COLUMN id_uuid TO id;
     ALTER TABLE public.focus_sessions ADD PRIMARY KEY (id);
     ALTER TABLE public.focus_sessions ALTER COLUMN id SET NOT NULL;
-    ALTER TABLE public.focus_sessions ALTER COLUMN id SET DEFAULT gen_random_uuid();
+    ALTER TABLE public.focus_sessions ALTER COLUMN id DROP DEFAULT;
   END IF;
 END $$;
 -- focus_sessions: started_at TEXT->TIMESTAMPTZ 修复
@@ -122,7 +122,7 @@ DO $$ BEGIN
     ALTER TABLE public.routine_tasks RENAME COLUMN id_uuid TO id;
     ALTER TABLE public.routine_tasks ADD PRIMARY KEY (id);
     ALTER TABLE public.routine_tasks ALTER COLUMN id SET NOT NULL;
-    ALTER TABLE public.routine_tasks ALTER COLUMN id SET DEFAULT gen_random_uuid();
+    ALTER TABLE public.routine_tasks ALTER COLUMN id DROP DEFAULT;
     -- 切换 FK
     IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='routine_completions' AND column_name='routine_id_uuid') THEN
       ALTER TABLE public.routine_completions DROP COLUMN IF EXISTS routine_id;
@@ -151,7 +151,7 @@ DO $$ BEGIN
     ALTER TABLE public.routine_completions RENAME COLUMN id_uuid TO id;
     ALTER TABLE public.routine_completions ADD PRIMARY KEY (id);
     ALTER TABLE public.routine_completions ALTER COLUMN id SET NOT NULL;
-    ALTER TABLE public.routine_completions ALTER COLUMN id SET DEFAULT gen_random_uuid();
+    ALTER TABLE public.routine_completions ALTER COLUMN id DROP DEFAULT;
   END IF;
 END $$;
 -- routine_completions: completed_date -> date_key 列名迁移
@@ -225,9 +225,8 @@ ALTER TABLE public.tasks ADD COLUMN IF NOT EXISTS expected_minutes INTEGER;
 ALTER TABLE public.tasks ADD COLUMN IF NOT EXISTS cognitive_load TEXT;
 ALTER TABLE public.tasks ADD COLUMN IF NOT EXISTS wait_minutes INTEGER;
 ALTER TABLE public.tasks ADD COLUMN IF NOT EXISTS parking_meta JSONB DEFAULT NULL;
--- 2.2 tasks cognitive_load 默认值 + 回填
-ALTER TABLE public.tasks ALTER COLUMN cognitive_load SET DEFAULT 'low';
-UPDATE public.tasks SET cognitive_load = 'low' WHERE cognitive_load IS NULL;
+-- 2.2 tasks cognitive_load 保持 nullable：NULL 表示“未规划/未评估”，不得默认成 low。
+ALTER TABLE public.tasks ALTER COLUMN cognitive_load DROP DEFAULT;
 -- 2.3 tasks 约束
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='tasks_cognitive_load_check' AND conrelid='public.tasks'::regclass)
@@ -419,9 +418,11 @@ GRANT ALL ON TABLE public.attachment_scans TO service_role;
 GRANT ALL ON TABLE public.cleanup_logs TO service_role;
 GRANT ALL ON TABLE public.quarantined_files TO service_role;
 -- 视图权限
-DO $$ BEGIN GRANT ALL ON TABLE public.active_tasks TO authenticated; EXCEPTION WHEN undefined_table THEN NULL; END $$;
+DO $$ BEGIN REVOKE INSERT, UPDATE, DELETE ON TABLE public.active_tasks FROM authenticated; EXCEPTION WHEN undefined_table THEN NULL; END $$;
+DO $$ BEGIN GRANT SELECT ON TABLE public.active_tasks TO authenticated; EXCEPTION WHEN undefined_table THEN NULL; END $$;
 DO $$ BEGIN GRANT ALL ON TABLE public.active_tasks TO service_role; EXCEPTION WHEN undefined_table THEN NULL; END $$;
-DO $$ BEGIN GRANT ALL ON TABLE public.active_connections TO authenticated; EXCEPTION WHEN undefined_table THEN NULL; END $$;
+DO $$ BEGIN REVOKE INSERT, UPDATE, DELETE ON TABLE public.active_connections FROM authenticated; EXCEPTION WHEN undefined_table THEN NULL; END $$;
+DO $$ BEGIN GRANT SELECT ON TABLE public.active_connections TO authenticated; EXCEPTION WHEN undefined_table THEN NULL; END $$;
 DO $$ BEGIN GRANT ALL ON TABLE public.active_connections TO service_role; EXCEPTION WHEN undefined_table THEN NULL; END $$;
 -- ============================================================================
 -- §7  RLS 策略补充（使用 (SELECT auth.uid()) 缓存优化，性能提升 10-100×）
@@ -653,7 +654,7 @@ BEGIN
       (v_task->>'deletedAt')::timestamptz,
       '[]'::jsonb,
       v_expected,
-      COALESCE(v_cognitive, 'low'),
+      v_cognitive,
       v_wait,
       v_task->'parkingMeta'
     )

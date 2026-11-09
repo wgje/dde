@@ -17,7 +17,8 @@ import {
   output,
   OnDestroy,
   ElementRef,
-  viewChild
+  viewChild,
+  ViewChild,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
@@ -72,10 +73,15 @@ import { LoggerService } from '../../../../../services/logger.service';
                dark:hover:border-stone-500/50"
         [class]="getButtonClass()"
         [class.pointer-events-none]="voiceService.isTranscribing()"
+        role="button"
+        tabindex="0"
+        [attr.aria-disabled]="isRecordZoneDisabled()"
         (mousedown)="onZoneMouseDown($event)"
         (touchstart)="onZoneTouchStart($event)"
         (keydown.space)="onKeyStart($event)"
         (keyup.space)="onKeyStop()"
+        (keydown.enter)="onKeyStart($event)"
+        (keyup.enter)="onKeyStop()"
         [attr.aria-pressed]="voiceService.isRecording()"
         [attr.aria-label]="getAriaLabel()"
         data-testid="black-box-recorder">
@@ -173,24 +179,49 @@ export class BlackBoxRecorderComponent implements OnDestroy {
 
   /** 全局事件清理函数集合 */
   private globalCleanups: (() => void)[] = [];
+  private readonly recordingOwnerToken = Symbol('BlackBoxRecorderComponent');
   private isPressActive = false;
+  private startPending = false;
+  private ownsRecording = false;
   private startRequestId = 0;
+  private stopRequestId = 0;
+  private stopTranscribeInFlight = false;
   
   readonly recordZone = viewChild<ElementRef<HTMLElement>>('recordZone');
+  @ViewChild('recordZone', { static: true })
+  private primaryFocusZone!: ElementRef<HTMLElement>;
   
   transcribed = output<string>();
 
   ngOnDestroy(): void {
     this.removeGlobalListeners();
     this.isPressActive = false;
-    if (this.voiceService.isRecording()) {
-      this.voiceService.cancelRecording();
+    const shouldCancelRecording = this.startPending || this.ownsRecording;
+    this.startRequestId += 1;
+    this.startPending = false;
+    this.ownsRecording = false;
+    this.stopRequestId += 1;
+    this.stopTranscribeInFlight = false;
+    if (shouldCancelRecording) {
+      this.voiceService.cancelRecording(this.recordingOwnerToken);
     }
   }
 
   // ===============================================
   // 公共 API
   // ===============================================
+
+  focusPrimaryAction(): boolean {
+    const zone = this.primaryFocusZone.nativeElement;
+    zone.focus();
+    return document.activeElement === zone;
+  }
+
+  isRecordZoneDisabled(): boolean {
+    return this.startPending
+      || this.voiceService.isTranscribing()
+      || Boolean(this.transcription());
+  }
 
   /**
    * 格式化录音时长为 mm:ss 格式
@@ -233,8 +264,7 @@ export class BlackBoxRecorderComponent implements OnDestroy {
     // 阻止冒泡到父层（如手机抽屉 mobile-black-box-drawer、专注面板）的 swipe
     // 手势检测，避免按住录音后释放时被误判为“左右滑动切换视图”。
     event.stopPropagation();
-    // 【修复 P3-05】增加 isRecording 检查，防止双击创建双重 MediaRecorder
-    if (this.voiceService.isTranscribing() || this.transcription() || this.voiceService.isRecording()) return;
+    if (this.isStartBlocked()) return;
     
     this.isPressActive = true;
     void this.startRecording();
@@ -269,8 +299,7 @@ export class BlackBoxRecorderComponent implements OnDestroy {
     // swipeToSwitch，造成「录音与手势冲突」。这里提前截断传播，使父层根本不会启动
     // swipeState，从根源上隔离这两种手势。
     event.stopPropagation();
-    // 【修复 P3-05】增加 isRecording 检查，防止双击创建双重 MediaRecorder
-    if (this.voiceService.isTranscribing() || this.transcription() || this.voiceService.isRecording()) return;
+    if (this.isStartBlocked()) return;
     
     this.isPressActive = true;
     void this.startRecording();
@@ -303,7 +332,7 @@ export class BlackBoxRecorderComponent implements OnDestroy {
 
   onKeyStart(event: Event): void {
     event.preventDefault();
-    if (this.voiceService.isTranscribing() || this.transcription()) return;
+    if (this.isStartBlocked()) return;
     if ((event as KeyboardEvent).repeat) return;
     this.isPressActive = true;
     void this.startRecording();
@@ -311,9 +340,8 @@ export class BlackBoxRecorderComponent implements OnDestroy {
 
   onKeyStop(): void {
     this.isPressActive = false;
-    if (!this.voiceService.isRecording()) return;
     this.isOutOfZone.set(false);
-    this.doStopAndTranscribe();
+    this.stopOrCancel();
   }
 
   // ===============================================
@@ -386,24 +414,44 @@ export class BlackBoxRecorderComponent implements OnDestroy {
    * 导致「录音中... 0:00」卡死。
    */
   private async startRecording(): Promise<void> {
+    this.stopRequestId += 1;
+    this.stopTranscribeInFlight = false;
     this.transcription.set('');
     this.editableText = '';
     this.isOutOfZone.set(false);
 
     const requestId = ++this.startRequestId;
-    await this.voiceService.startRecording();
-
-    if (requestId !== this.startRequestId) {
-      this.cancelRecordingIfPressEnded();
+    this.startPending = true;
+    let started: boolean;
+    try {
+      started = await this.voiceService.startRecording(this.recordingOwnerToken);
+    } catch (error) {
+      if (requestId === this.startRequestId) this.startPending = false;
+      this.logger.error('BlackBoxRecorder', 'Failed to start recording', error);
       return;
     }
 
+    if (requestId !== this.startRequestId) {
+      if (started) {
+        this.voiceService.cancelRecording(this.recordingOwnerToken);
+      }
+      return;
+    }
+
+    this.startPending = false;
+    this.ownsRecording = started;
     this.cancelRecordingIfPressEnded();
   }
 
+  private isStartBlocked(): boolean {
+    return this.isRecordZoneDisabled()
+      || this.voiceService.isRecording();
+  }
+
   private cancelRecordingIfPressEnded(): void {
-    if (!this.isPressActive && this.voiceService.isRecording()) {
-      this.voiceService.cancelRecording();
+    if (!this.isPressActive && this.ownsRecording) {
+      this.ownsRecording = false;
+      this.voiceService.cancelRecording(this.recordingOwnerToken);
       this.isOutOfZone.set(false);
     }
   }
@@ -434,12 +482,22 @@ export class BlackBoxRecorderComponent implements OnDestroy {
   private stopOrCancel(): void {
     this.removeGlobalListeners();
     this.isPressActive = false;
+    const startWasPending = this.startPending;
+    const ownedRecording = this.ownsRecording;
+    this.startPending = false;
+    this.ownsRecording = false;
+    this.startRequestId += 1;
 
-    if (!this.voiceService.isRecording()) return;
+    if (!startWasPending && !ownedRecording) return;
+    if (startWasPending || !this.voiceService.isRecording()) {
+      this.voiceService.cancelRecording(this.recordingOwnerToken);
+      this.isOutOfZone.set(false);
+      return;
+    }
     
     if (this.isOutOfZone()) {
       // 超出区域 → 取消录音
-      this.voiceService.cancelRecording();
+      this.voiceService.cancelRecording(this.recordingOwnerToken);
       this.isOutOfZone.set(false);
       this.logger.debug('BlackBoxRecorder', 'Recording cancelled: pointer left zone');
     } else {
@@ -452,10 +510,19 @@ export class BlackBoxRecorderComponent implements OnDestroy {
    * 停止录音并进行转写
    */
   private async doStopAndTranscribe(): Promise<void> {
+    if (this.stopTranscribeInFlight) {
+      return;
+    }
+
     this.removeGlobalListeners();
-    
+    const requestId = ++this.stopRequestId;
+    this.stopTranscribeInFlight = true;
+
     try {
-      const text = await this.voiceService.stopAndTranscribe();
+      const text = await this.voiceService.stopAndTranscribe(this.recordingOwnerToken);
+      if (requestId !== this.stopRequestId) {
+        return;
+      }
       
       if (text.trim()) {
         // 显示可编辑的转录结果，等待用户确认
@@ -464,6 +531,10 @@ export class BlackBoxRecorderComponent implements OnDestroy {
       }
     } catch (e) {
       this.logger.error('BlackBoxRecorder', 'Recording failed', e);
+    } finally {
+      if (requestId === this.stopRequestId) {
+        this.stopTranscribeInFlight = false;
+      }
     }
   }
 
@@ -479,9 +550,15 @@ export class BlackBoxRecorderComponent implements OnDestroy {
    * 移除所有全局事件监听
    */
   private removeGlobalListeners(): void {
-    for (const cleanup of this.globalCleanups) {
-      cleanup();
-    }
+    const cleanups = this.globalCleanups;
     this.globalCleanups = [];
+
+    for (const cleanup of cleanups) {
+      try {
+        cleanup();
+      } catch (err) {
+        this.logger.error('BlackBoxRecorder', 'Failed to remove global listener', err instanceof Error ? err.message : String(err));
+      }
+    }
   }
 }

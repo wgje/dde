@@ -9,6 +9,7 @@ describe('createPostHandoffSwRegistrationStrategy', () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.useRealTimers();
     delete window.__NANOFLOW_BOOT_STAGE__;
   });
@@ -48,5 +49,31 @@ describe('createPostHandoffSwRegistrationStrategy', () => {
 
     vi.advanceTimersByTime(1);
     await expect(registerPromise).resolves.toBeUndefined();
+  });
+
+  it('should treat delayed timer handle 0 as scheduled and clear it on unsubscribe', () => {
+    const timeoutHandles = [42, 0, 7];
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout')
+      .mockImplementation(() => timeoutHandles.shift() as unknown as ReturnType<typeof setTimeout>);
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout')
+      .mockImplementation(() => undefined);
+
+    const subscription = createPostHandoffSwRegistrationStrategy({ delayMs: 120, fallbackMs: 800 })()
+      .subscribe();
+
+    expect(setTimeoutSpy).toHaveBeenCalledTimes(1);
+
+    window.dispatchEvent(new CustomEvent('nanoflow:boot-stage', {
+      detail: { stage: 'handoff' },
+    }));
+    window.dispatchEvent(new CustomEvent('nanoflow:boot-stage', {
+      detail: { stage: 'ready' },
+    }));
+
+    expect(setTimeoutSpy).toHaveBeenCalledTimes(2);
+
+    subscription.unsubscribe();
+
+    expect(clearTimeoutSpy).toHaveBeenCalledWith(0);
   });
 });

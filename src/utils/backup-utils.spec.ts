@@ -153,4 +153,89 @@ describe('backup-utils', () => {
     expect(result.ok).toBe(false);
     expect(result.errors.some(error => error.includes('blackBoxEntries'))).toBe(true);
   });
+
+  it('BackupLocalState should carry a typed data-safety snapshot for restore/replay/explain', () => {
+    const payload = createBackupData({
+      coverage: {
+        includesProjectData: true,
+        includesCloudUserState: true,
+        includesLocalState: true,
+      },
+      localState: {
+        dataSafety: {
+          schemaVersion: '1.0.0',
+          exportedAt: '2026-06-16T00:00:00.000Z',
+          ownerUserId: 'user-1',
+          syncSnapshot: {
+            syncState: {
+              lastSyncTime: '2026-06-16T00:00:00.000Z',
+              pendingCount: 1,
+            },
+            projectCursors: [],
+            queueCounts: {
+              retryQueue: 1,
+              actionQueue: 0,
+              deadLetters: 0,
+            },
+          },
+          replayLog: [
+            {
+              operationId: 'op-1',
+              entityType: 'task',
+              entityId: 'task-1',
+              operation: 'upsert',
+              localCommittedAt: 1781539200000,
+              queue: { enteredRetryQueue: true, retryCount: 0 },
+              rpc: { status: 'remote-newer' },
+              lww: { decision: 'remote-kept', reason: 'remote-newer' },
+              lastSyncTime: { before: null, after: null, advanced: false },
+            },
+          ],
+          replayPlan: {
+            idempotencyKey: 'a'.repeat(64),
+            ownerUserId: 'user-1',
+            exportedAt: '2026-06-16T00:00:00.000Z',
+            steps: [
+              {
+                source: 'retryQueue',
+                operationId: 'op-1',
+                entityType: 'task',
+                entityId: 'task-1',
+                operation: 'upsert',
+                replayable: true,
+                reason: 'retry-queue-restored',
+                localTimestamp: 1781539200000,
+                retryCount: 0,
+                queue: { enteredRetryQueue: true, retryCount: 0 },
+                rpc: { status: 'pending-retry' },
+                lww: { decision: 'unknown', reason: 'retryQueue' },
+                lastSyncTime: { before: null, after: null, advanced: false },
+              },
+            ],
+            summary: {
+              replayable: 1,
+              inspectOnly: 0,
+              retryQueue: 1,
+              actionQueue: 0,
+              auditLog: 0,
+            },
+          },
+          lastWriteExplain: {
+            operationId: 'op-1',
+            actor: { sourceUserId: 'user-1' },
+            entity: { type: 'task', id: 'task-1' },
+            operation: 'upsert',
+            localTimestamp: 1781539200000,
+            queueResult: { enteredRetryQueue: true, retryCount: 0 },
+            rpcResult: { status: 'remote-newer' },
+            lwwDecision: { decision: 'remote-kept', reason: 'remote-newer' },
+            lastSyncTime: { before: null, after: null, advanced: false },
+          },
+        },
+      },
+    });
+
+    expect(payload.localState?.dataSafety?.replayLog[0]?.operationId).toBe('op-1');
+    expect(validateBackup(payload).ok).toBe(true);
+  });
 });

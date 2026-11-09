@@ -1,0 +1,76 @@
+:host {
+  container-type: inline-size;
+  display: block;
+  min-width: 0;
+}
+
+.text-task-editor-layout {
+  align-items: flex-start;
+}
+
+.text-task-editor-main {
+  flex: 1 1 18rem;
+}
+
+.text-task-editor-layout > app-text-task-connections {
+  flex: 0 1 9rem;
+  max-width: 100%;
+  min-width: min(100%, 8rem);
+}
+
+.text-task-editor-layout--mobile > app-text-task-connections {
+  flex-basis: 100%;
+  min-width: 0;
+  width: 100%;
+}
+
+.text-task-planning-grid > * {
+  min-width: 0;
+}
+
+.text-task-editor-actions > .text-task-action-button {
+  min-width: 4.75rem;
+}
+
+.text-task-editor-actions > .text-task-action-button--delete {
+  flex: 0 0 auto;
+  min-width: 2rem;
+}
+
+@container (max-width: 36rem) {
+  .text-task-editor-layout {
+    gap: 0.5rem;
+  }
+
+  .text-task-editor-main,
+  .text-task-editor-layout > app-text-task-connections {
+    flex-basis: 100%;
+    width: 100%;
+  }
+
+  .text-task-editor-layout > app-text-task-connections {
+    min-width: 0;
+  }
+
+  .text-task-editor-actions > .text-task-action-button:not(.text-task-action-button--delete) {
+    flex-basis: calc(50% - 0.25rem);
+  }
+}
+
+@container (max-width: 20rem) {
+  .text-task-planning-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .text-task-editor-actions > .text-task-action-button:not(.text-task-action-button--delete) {
+    flex-basis: 100%;
+  }
+}
+
+.animate-collapse-open {
+  animation: collapseOpen 0.15s ease-out;
+}
+@keyframes collapseOpen {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}

@@ -4,7 +4,7 @@
  * 负责：停泊坞内联任务创建、容量检查、归档候选筛选、
  * 归档到活跃项目、任务 ID 重写等。
  */
-import { Injectable, Signal, WritableSignal, inject } from '@angular/core';
+import { Injectable, Injector, Signal, WritableSignal, inject } from '@angular/core';
 import { PARKING_CONFIG } from '../config/parking.config';
 import { DOCK_TOAST } from '../config/dock-i18n.config';
 import {
@@ -21,6 +21,26 @@ import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
 import { TaskOperationAdapterService } from './task-operation-adapter.service';
 import { ProjectStateService } from './project-state.service';
+
+type InlineCreateOptions = {
+  expectedMinutes?: number | null;
+  waitMinutes?: number | null;
+  detail?: string;
+};
+
+type InlineCreateDraft = {
+  taskId: string;
+  title: string;
+  detail: string;
+  lane: DockLane;
+  load: CognitiveLoad;
+  plannerFields: ReturnType<typeof sanitizePlannerFields>;
+};
+
+type InlineBlackBoxCreateResult = {
+  sourceBlackBoxEntryId: string | null;
+  inlineArchiveStatus: DockEntry['inlineArchiveStatus'];
+};
 
 // ---------------------------------------------------------------------------
 //  Context interface — engine 在 constructor 中调用 init() 注入信号引用
@@ -46,13 +66,17 @@ export interface DockInlineCreationContext {
   providedIn: 'root',
 })
 export class DockInlineCreationService {
+  private readonly injector = inject(Injector);
   private readonly blackBoxService = inject(BlackBoxService);
   private readonly logger = inject(LoggerService).category('DockInlineCreation');
   private readonly toast = inject(ToastService);
-  private readonly taskOps = inject(TaskOperationAdapterService);
   private readonly projectState = inject(ProjectStateService);
 
   private _ctx: DockInlineCreationContext | null = null;
+
+  private get taskOps(): TaskOperationAdapterService {
+    return this.injector.get(TaskOperationAdapterService);
+  }
 
   /**
    * 获取上下文——必须在 DockEngineService 构造期间调用 init() 注入。
@@ -84,64 +108,98 @@ export class DockInlineCreationService {
   //  内联创建
   // ---------------------------------------------------------------------------
 
-  createInDock(
+  async createInDock(
     title: string,
     lane: DockLane,
     load: CognitiveLoad = 'low',
-    options?: { expectedMinutes?: number | null; waitMinutes?: number | null; detail?: string },
-  ): string | null {
-    const taskId = crypto.randomUUID();
+    options?: InlineCreateOptions,
+  ): Promise<string | null> {
     const normalizedTitle = title.trim() || 'Untitled task';
     if (!this.ensureDockCapacity(normalizedTitle)) return null;
-    const normalizedDetail = options?.detail?.trim() ?? '';
-    const plannerFields = sanitizePlannerFields({
-      expectedMinutes: options?.expectedMinutes,
-      waitMinutes: options?.waitMinutes,
-      cognitiveLoad: load,
-    });
+
+    const draft = this.createInlineDraft(normalizedTitle, lane, load, options);
+    const blackBoxResult = await this.createInlineBlackBoxEntry(draft);
+    if (!blackBoxResult.sourceBlackBoxEntryId) {
+      return null;
+    }
+    const entry = this.createDockEntryDraft(draft, blackBoxResult);
+    this.notifyPlannerCorrectionIfNeeded(draft);
+    this.ctx.entries.update(prev => [...prev, entry]);
+    this.promoteFirstInlineEntryIfNeeded(draft.taskId);
+    return draft.taskId;
+  }
+
+  private createInlineDraft(
+    normalizedTitle: string,
+    lane: DockLane,
+    load: CognitiveLoad,
+    options?: InlineCreateOptions
+  ): InlineCreateDraft {
+    return {
+      taskId: crypto.randomUUID(),
+      title: normalizedTitle,
+      detail: options?.detail?.trim() ?? '',
+      lane,
+      load,
+      plannerFields: sanitizePlannerFields({
+        expectedMinutes: options?.expectedMinutes,
+        waitMinutes: options?.waitMinutes,
+        cognitiveLoad: load,
+      }),
+    };
+  }
+
+  private async createInlineBlackBoxEntry(draft: InlineCreateDraft): Promise<InlineBlackBoxCreateResult> {
     const focusMeta: BlackBoxFocusMeta = {
       source: 'focus-console-inline',
       sessionId: this.ctx.focusSessionContext()?.id ?? crypto.randomUUID(),
-      title: normalizedTitle,
-      detail: normalizedDetail.length > 0 ? normalizedDetail : null,
-      lane,
-      expectedMinutes: plannerFields.expectedMinutes,
-      waitMinutes: plannerFields.waitMinutes,
-      cognitiveLoad: plannerFields.cognitiveLoad ?? load,
-      dockEntryId: taskId,
+      title: draft.title,
+      detail: draft.detail.length > 0 ? draft.detail : null,
+      lane: draft.lane,
+      expectedMinutes: draft.plannerFields.expectedMinutes,
+      waitMinutes: draft.plannerFields.waitMinutes,
+      cognitiveLoad: draft.plannerFields.cognitiveLoad ?? draft.load,
+      dockEntryId: draft.taskId,
     };
-
-    const blackBoxCreate = this.blackBoxService.create({
+    const blackBoxCreate = await this.blackBoxService.createDurably({
       projectId: null,
-      content: normalizedDetail.length > 0 ? normalizedDetail : normalizedTitle,
+      content: draft.detail.length > 0 ? draft.detail : draft.title,
       focusMeta,
     });
-    const sourceBlackBoxEntryId = blackBoxCreate.ok ? blackBoxCreate.value.id : null;
-    const inlineArchiveStatus: DockEntry['inlineArchiveStatus'] = blackBoxCreate.ok ? 'pending' : 'failed';
     if (!blackBoxCreate.ok) {
       this.logger.warn('Inline dock creation persisted locally but black-box create failed', {
-        dockEntryId: taskId,
+        dockEntryId: draft.taskId,
         message: blackBoxCreate.error.message,
       });
     }
 
-    const entry: DockEntry = {
-      taskId,
-      title: normalizedTitle,
+    return {
+      sourceBlackBoxEntryId: blackBoxCreate.ok ? blackBoxCreate.value.id : null,
+      inlineArchiveStatus: blackBoxCreate.ok ? 'pending' : 'failed',
+    };
+  }
+
+  private createDockEntryDraft(
+    draft: InlineCreateDraft,
+    blackBoxResult: InlineBlackBoxCreateResult
+  ): DockEntry {
+    return {
+      taskId: draft.taskId,
+      title: draft.title,
       sourceProjectId: null,
       status: 'pending_start',
-      load: plannerFields.cognitiveLoad ?? load,
-      expectedMinutes: plannerFields.expectedMinutes,
-      waitMinutes: plannerFields.waitMinutes,
+      load: draft.plannerFields.cognitiveLoad ?? draft.load,
+      expectedMinutes: draft.plannerFields.expectedMinutes,
+      waitMinutes: draft.plannerFields.waitMinutes,
       waitStartedAt: null,
-      lane,
+      lane: draft.lane,
       zoneSource: 'manual',
       isMain: false,
       dockedOrder: this.ctx.entries().length,
-      detail: normalizedDetail,
+      detail: draft.detail,
       sourceKind: 'dock-created',
-      sourceBlackBoxEntryId,
-      inlineArchiveStatus,
+      sourceBlackBoxEntryId: blackBoxResult.sourceBlackBoxEntryId,
+      inlineArchiveStatus: blackBoxResult.inlineArchiveStatus,
       inlineArchivedTaskId: null,
       systemSelected: false,
       recommendedScore: null,
@@ -149,18 +207,27 @@ export class DockInlineCreationService {
       manualMainSelected: false,
       recommendationLocked: false,
       snoozeRingMuted: this.ctx.muteWaitTone(),
-      relationScore: lane === 'combo-select' ? PARKING_CONFIG.ZONE_MANUAL_COMBO_SCORE : PARKING_CONFIG.ZONE_MANUAL_BACKUP_SCORE,
-      relationReason: lane === 'combo-select' ? 'manual:create-combo-select' : 'manual:create-backup',
+      relationScore: draft.lane === 'combo-select'
+        ? PARKING_CONFIG.ZONE_MANUAL_COMBO_SCORE
+        : PARKING_CONFIG.ZONE_MANUAL_BACKUP_SCORE,
+      relationReason: draft.lane === 'combo-select' ? 'manual:create-combo-select' : 'manual:create-backup',
     };
-    if (plannerFields.adjusted) {
-      this.toast.info(DOCK_TOAST.WAIT_CORRECTION_TITLE, DOCK_TOAST.waitCorrectionBody(plannerFields.expectedMinutes ?? 0));
+  }
+
+  private notifyPlannerCorrectionIfNeeded(draft: InlineCreateDraft): void {
+    if (draft.plannerFields.adjusted) {
+      this.toast.info(
+        DOCK_TOAST.WAIT_CORRECTION_TITLE,
+        DOCK_TOAST.waitCorrectionBody(draft.plannerFields.expectedMinutes ?? 0)
+      );
     }
-    this.ctx.entries.update(prev => [...prev, entry]);
+  }
+
+  private promoteFirstInlineEntryIfNeeded(taskId: string): void {
     if (!this.ctx.firstDragIntervened()) {
       this.ctx.setMainTask(taskId);
       this.ctx.firstDragIntervened.set(true);
     }
-    return taskId;
   }
 
   // ---------------------------------------------------------------------------
@@ -196,7 +263,7 @@ export class DockInlineCreationService {
     return this.ctx.entries().filter(entry => entry.sourceKind === 'dock-created');
   }
 
-  archiveInlineEntriesToActiveProject(): { converted: number; failed: number } {
+  async archiveInlineEntriesToActiveProject(): Promise<{ converted: number; failed: number }> {
     const candidates = this.getInlineArchiveCandidates();
     if (candidates.length === 0) {
       return { converted: 0, failed: 0 };
@@ -220,7 +287,7 @@ export class DockInlineCreationService {
     let failed = 0;
 
     for (const entry of candidates) {
-      const archived = this.replaceInlineEntryWithProjectTask(entry, activeProjectId);
+      const archived = await this.replaceInlineEntryWithProjectTask(entry, activeProjectId);
       if (archived) {
         converted += 1;
       } else {
@@ -238,98 +305,154 @@ export class DockInlineCreationService {
   //  内部：替换内联条目为项目任务
   // ---------------------------------------------------------------------------
 
-  private replaceInlineEntryWithProjectTask(entry: DockEntry, activeProjectId: string): boolean {
-    let blackBoxEntryId = entry.sourceBlackBoxEntryId ?? null;
-    if (!blackBoxEntryId) {
-      const rebuildResult = this.blackBoxService.create({
-        projectId: null,
-        content: entry.detail?.trim() ? entry.detail : entry.title,
-        focusMeta: {
-          source: 'focus-console-inline',
-          sessionId: this.ctx.focusSessionContext()?.id ?? crypto.randomUUID(),
-          title: entry.title,
-          detail: entry.detail?.trim() ? entry.detail : null,
-          lane: entry.lane,
-          expectedMinutes: normalizeNullableNumber(entry.expectedMinutes),
-          waitMinutes: normalizeNullableNumber(entry.waitMinutes),
-          cognitiveLoad: entry.load,
-          dockEntryId: entry.taskId,
-        },
-      });
+  private async replaceInlineEntryWithProjectTask(entry: DockEntry, activeProjectId: string): Promise<boolean> {
+    const blackBoxEntryId = await this.ensureArchiveBlackBoxEntry(entry);
+    if (!blackBoxEntryId) return false;
 
-      if (!rebuildResult.ok) {
-        this.ctx.entries.update(prev =>
-          prev.map(item =>
-            item.taskId === entry.taskId
-              ? { ...item, inlineArchiveStatus: 'failed' }
-              : item,
-          ),
-        );
-        this.logger.warn('Inline archive failed: cannot rebuild source black-box entry', {
-          dockEntryId: entry.taskId,
-          message: rebuildResult.error.message,
-        });
-        return false;
-      }
+    const newTaskId = await this.createArchivedProjectTask(entry, activeProjectId);
+    if (!newTaskId) return false;
 
-      blackBoxEntryId = rebuildResult.value.id;
-      this.ctx.entries.update(prev =>
-        prev.map(item =>
-          item.taskId === entry.taskId
-            ? {
-                ...item,
-                sourceBlackBoxEntryId: blackBoxEntryId,
-                inlineArchiveStatus: 'archiving',
-              }
-            : item,
-        ),
-      );
-    } else {
-      // blackBoxEntryId 已存在，仅切换状态
-      this.ctx.entries.update(prev =>
-        prev.map(item =>
-          item.taskId === entry.taskId
-            ? { ...item, inlineArchiveStatus: 'archiving' }
-            : item,
-        ),
-      );
+    if (entry.status === 'completed') {
+      const completed = await this.completeArchivedProjectTask(entry, newTaskId, blackBoxEntryId);
+      if (!completed) return false;
     }
 
-    const createResult = this.taskOps.addTask(entry.title, entry.detail ?? '', null, null, false);
+    await this.archiveSourceBlackBoxEntry(entry, blackBoxEntryId);
+    this.rewriteArchivedDockEntry(entry, newTaskId, activeProjectId, blackBoxEntryId);
+    this.rewriteDockReferences(entry.taskId, newTaskId);
+    return true;
+  }
+
+  private async ensureArchiveBlackBoxEntry(entry: DockEntry): Promise<string | null> {
+    const blackBoxEntryId = entry.sourceBlackBoxEntryId ?? null;
+    if (blackBoxEntryId) {
+      this.setInlineArchiveStatus(entry.taskId, 'archiving');
+      return blackBoxEntryId;
+    }
+
+    const rebuildResult = await this.blackBoxService.createDurably({
+      projectId: null,
+      content: entry.detail?.trim() ? entry.detail : entry.title,
+      focusMeta: this.createArchiveFocusMeta(entry),
+    });
+
+    if (!rebuildResult.ok) {
+      this.setInlineArchiveStatus(entry.taskId, 'failed');
+      this.logger.warn('Inline archive failed: cannot rebuild source black-box entry', {
+        dockEntryId: entry.taskId,
+        message: rebuildResult.error.message,
+      });
+      return null;
+    }
+
+    this.ctx.entries.update(prev =>
+      prev.map(item =>
+        item.taskId === entry.taskId
+          ? {
+              ...item,
+              sourceBlackBoxEntryId: rebuildResult.value.id,
+              inlineArchiveStatus: 'archiving',
+            }
+          : item,
+      ),
+    );
+    return rebuildResult.value.id;
+  }
+
+  private createArchiveFocusMeta(entry: DockEntry): BlackBoxFocusMeta {
+    return {
+      source: 'focus-console-inline',
+      sessionId: this.ctx.focusSessionContext()?.id ?? crypto.randomUUID(),
+      title: entry.title,
+      detail: entry.detail?.trim() ? entry.detail : null,
+      lane: entry.lane,
+      expectedMinutes: normalizeNullableNumber(entry.expectedMinutes),
+      waitMinutes: normalizeNullableNumber(entry.waitMinutes),
+      cognitiveLoad: entry.load,
+      dockEntryId: entry.taskId,
+    };
+  }
+
+  private async createArchivedProjectTask(entry: DockEntry, activeProjectId: string): Promise<string | null> {
+    const createResult = await this.taskOps.addTask(entry.title, entry.detail ?? '', null, null, false);
     if (!createResult.ok) {
-      this.ctx.entries.update(prev =>
-        prev.map(item =>
-          item.taskId === entry.taskId
-            ? { ...item, inlineArchiveStatus: 'failed' }
-            : item,
-        ),
-      );
+      this.setInlineArchiveStatus(entry.taskId, 'failed');
       this.logger.warn('Inline archive failed: cannot create project task', {
         dockEntryId: entry.taskId,
         projectId: activeProjectId,
         message: createResult.error.message,
       });
-      return false;
+      return null;
     }
 
     const newTaskId = createResult.value;
-    this.taskOps.updateTaskExpectedMinutes(newTaskId, normalizeNullableNumber(entry.expectedMinutes));
-    this.taskOps.updateTaskCognitiveLoad(newTaskId, entry.load);
-    this.taskOps.updateTaskWaitMinutes(newTaskId, normalizeNullableNumber(entry.waitMinutes));
+    const plannerSaved = await this.persistArchivedTaskPlannerFields(entry, newTaskId, activeProjectId);
+    if (!plannerSaved) {
+      return null;
+    }
+    return newTaskId;
+  }
 
-    if (entry.status === 'completed') {
-      this.taskOps.updateTaskStatus(newTaskId, 'completed');
-      const completedResult = this.blackBoxService.markAsCompleted(blackBoxEntryId);
-      if (!completedResult.ok) {
-        this.logger.warn('Inline archive warning: failed to mark source black-box entry completed', {
-          dockEntryId: entry.taskId,
-          blackBoxEntryId,
-          message: completedResult.error.message,
-        });
-      }
+  private async completeArchivedProjectTask(
+    entry: DockEntry,
+    newTaskId: string,
+    blackBoxEntryId: string
+  ): Promise<boolean> {
+    const statusSaved = await this.taskOps.updateTaskStatus(newTaskId, 'completed');
+    if (!statusSaved) {
+      this.setInlineArchiveStatus(entry.taskId, 'failed');
+      this.logger.warn('Inline archive failed: cannot mark created project task completed', {
+        dockEntryId: entry.taskId,
+        newTaskId,
+        blackBoxEntryId,
+      });
+      return false;
     }
 
-    const archiveResult = this.blackBoxService.archive(blackBoxEntryId);
+    const completedResult = await this.blackBoxService.markAsCompletedDurably(blackBoxEntryId);
+    if (!completedResult.ok) {
+      this.logger.warn('Inline archive warning: failed to mark source black-box entry completed', {
+        dockEntryId: entry.taskId,
+        blackBoxEntryId,
+        message: completedResult.error.message,
+      });
+    }
+    return true;
+  }
+
+  private async persistArchivedTaskPlannerFields(
+    entry: DockEntry,
+    newTaskId: string,
+    activeProjectId: string,
+  ): Promise<boolean> {
+    const expectedSaved = await this.taskOps.updateTaskExpectedMinutes(
+      newTaskId,
+      normalizeNullableNumber(entry.expectedMinutes),
+    );
+    const loadSaved = await this.taskOps.updateTaskCognitiveLoad(newTaskId, entry.load);
+    const waitSaved = await this.taskOps.updateTaskWaitMinutes(
+      newTaskId,
+      normalizeNullableNumber(entry.waitMinutes),
+    );
+
+    if (expectedSaved && loadSaved && waitSaved) {
+      return true;
+    }
+
+    this.setInlineArchiveStatus(entry.taskId, 'failed');
+    this.logger.warn('Inline archive failed: cannot persist created project task planner fields', {
+      dockEntryId: entry.taskId,
+      projectId: activeProjectId,
+      newTaskId,
+      expectedSaved,
+      loadSaved,
+      waitSaved,
+    });
+    return false;
+  }
+
+  private async archiveSourceBlackBoxEntry(entry: DockEntry, blackBoxEntryId: string): Promise<void> {
+    const archiveResult = await this.blackBoxService.archiveDurably(blackBoxEntryId);
     if (!archiveResult.ok) {
       this.logger.warn('Inline archive warning: failed to archive source black-box entry', {
         dockEntryId: entry.taskId,
@@ -337,11 +460,30 @@ export class DockInlineCreationService {
         message: archiveResult.error.message,
       });
     }
+  }
 
-    const oldTaskId = entry.taskId;
+  private setInlineArchiveStatus(
+    taskId: string,
+    inlineArchiveStatus: DockEntry['inlineArchiveStatus']
+  ): void {
     this.ctx.entries.update(prev =>
       prev.map(item =>
-        item.taskId === oldTaskId
+        item.taskId === taskId
+          ? { ...item, inlineArchiveStatus }
+          : item,
+      ),
+    );
+  }
+
+  private rewriteArchivedDockEntry(
+    entry: DockEntry,
+    newTaskId: string,
+    activeProjectId: string,
+    blackBoxEntryId: string
+  ): void {
+    this.ctx.entries.update(prev =>
+      prev.map(item =>
+        item.taskId === entry.taskId
           ? {
               ...item,
               taskId: newTaskId,
@@ -354,9 +496,6 @@ export class DockInlineCreationService {
           : item,
       ),
     );
-
-    this.rewriteDockReferences(oldTaskId, newTaskId);
-    return true;
   }
 
   // ---------------------------------------------------------------------------

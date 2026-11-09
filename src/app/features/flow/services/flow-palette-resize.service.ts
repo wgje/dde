@@ -10,6 +10,7 @@ export class FlowPaletteResizeService {
   private startY = 0;
   private startHeight = 0;
   private heightSignal: WritableSignal<number> | null = null;
+  private activeResizeCleanup: (() => void) | null = null;
 
   // 桌面端的高度限制
   private readonly DESKTOP_MIN_HEIGHT = 100;
@@ -32,7 +33,9 @@ export class FlowPaletteResizeService {
    */
   startMouseResize(e: MouseEvent): void {
     if (!this.heightSignal) return;
-    
+
+    this.cancelActiveResize();
+
     e.preventDefault();
     this.isResizing = true;
     this.startY = e.clientY;
@@ -51,11 +54,14 @@ export class FlowPaletteResizeService {
     };
 
     const onUp = () => {
-      this.isResizing = false;
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
+      this.cancelActiveResize();
+    };
+
+    this.activeResizeCleanup = () => {
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
     };
 
     window.addEventListener('mousemove', onMove);
@@ -68,7 +74,9 @@ export class FlowPaletteResizeService {
   startTouchResize(e: TouchEvent): void {
     if (!this.heightSignal) return;
     if (e.touches.length !== 1) return;
-    
+
+    this.cancelActiveResize();
+
     e.preventDefault();
     this.isResizing = true;
     this.startY = e.touches[0].clientY;
@@ -85,8 +93,9 @@ export class FlowPaletteResizeService {
       this.heightSignal.set(newHeight);
     };
 
-    const onEnd = () => {
-      this.isResizing = false;
+    const onEnd = () => this.cancelActiveResize();
+
+    this.activeResizeCleanup = () => {
       window.removeEventListener('touchmove', onMove);
       window.removeEventListener('touchend', onEnd);
       window.removeEventListener('touchcancel', onEnd);
@@ -95,6 +104,15 @@ export class FlowPaletteResizeService {
     window.addEventListener('touchmove', onMove, { passive: false });
     window.addEventListener('touchend', onEnd);
     window.addEventListener('touchcancel', onEnd);
+  }
+
+  cancelActiveResize(): void {
+    const cleanup = this.activeResizeCleanup;
+    this.activeResizeCleanup = null;
+    this.isResizing = false;
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+    cleanup?.();
   }
 
   /**

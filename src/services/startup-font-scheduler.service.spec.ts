@@ -82,6 +82,121 @@ describe('StartupFontSchedulerService', () => {
     expect(appendedLinks[1].getAttribute('data-nanoflow-cdn-font')).toBe('true');
   });
 
+  it('交互监听解绑失败时仍应继续加载增强字体', () => {
+    service.initialize();
+    const removeWindowListener = vi
+      .spyOn(window, 'removeEventListener')
+      .mockImplementationOnce(() => {
+        throw new Error('remove pointerdown failed');
+      });
+
+    try {
+      expect(() => {
+        vi.advanceTimersByTime(STARTUP_PERF_CONFIG.FONT_ENHANCED_LOAD_DELAY_MS);
+      }).not.toThrow();
+      expect(removeWindowListener).toHaveBeenCalledWith('keydown', expect.any(Function));
+      expect(removeWindowListener).toHaveBeenCalledWith('touchstart', expect.any(Function));
+      expect(appendedLinks.length).toBe(1);
+    } finally {
+      removeWindowListener.mockRestore();
+    }
+  });
+
+  it('交互监听注册失败时应回滚并允许后续 initialize 重试', () => {
+    const setupError = new Error('keydown listener failed');
+    const originalWindowAdd = window.addEventListener.bind(window);
+    const originalWindowRemove = window.removeEventListener.bind(window);
+    let addWindowListenerRestored = false;
+    const addWindowListener = vi
+      .spyOn(window, 'addEventListener')
+      .mockImplementation((...args: Parameters<typeof window.addEventListener>) => {
+        if (args[0] === 'keydown') {
+          throw setupError;
+        }
+        return originalWindowAdd(...args);
+      });
+    const removeWindowListener = vi
+      .spyOn(window, 'removeEventListener')
+      .mockImplementation((...args: Parameters<typeof window.removeEventListener>) => {
+        return originalWindowRemove(...args);
+      });
+
+    try {
+      expect(() => service.initialize()).not.toThrow();
+      expect(removeWindowListener).toHaveBeenCalledWith('pointerdown', expect.any(Function));
+
+      addWindowListener.mockRestore();
+      addWindowListenerRestored = true;
+      service.initialize();
+
+      window.dispatchEvent(new Event('pointerdown'));
+      expect(appendedLinks.length).toBe(1);
+    } finally {
+      if (!addWindowListenerRestored) {
+        addWindowListener.mockRestore();
+      }
+      removeWindowListener.mockRestore();
+    }
+  });
+
+  it('timer handle 为 0 时交互加载也应清理兜底定时器', () => {
+    const timerHandle = 0 as unknown as ReturnType<typeof setTimeout>;
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(() => timerHandle);
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout').mockImplementation(() => undefined);
+
+    try {
+      service.initialize();
+      window.dispatchEvent(new Event('pointerdown'));
+
+      expect(setTimeoutSpy).toHaveBeenCalled();
+      expect(clearTimeoutSpy).toHaveBeenCalledWith(0);
+      expect(appendedLinks.length).toBe(1);
+    } finally {
+      setTimeoutSpy.mockRestore();
+      clearTimeoutSpy.mockRestore();
+    }
+  });
+
+  it('销毁后应清除增强字体失败重试，避免旧实例继续追加 link', () => {
+    service.initialize();
+    window.dispatchEvent(new Event('pointerdown'));
+    expect(appendedLinks.length).toBe(1);
+
+    appendedLinks[0].onerror?.(new Event('error'));
+    expect(appendedLinks.length).toBe(2);
+    appendedLinks[1].onerror?.(new Event('error'));
+
+    TestBed.resetTestingModule();
+    vi.advanceTimersByTime(5_000);
+
+    expect(appendedLinks.length).toBe(2);
+  });
+
+  it('销毁后 late onload 不应标记字体已加载或注入 CDN link', () => {
+    service.initialize();
+    window.dispatchEvent(new Event('pointerdown'));
+    expect(appendedLinks.length).toBe(1);
+
+    TestBed.resetTestingModule();
+    appendedLinks[0].onload?.(new Event('load'));
+
+    expect(service.isEnhancedFontLoaded()).toBe(false);
+    expect(appendedLinks.length).toBe(1);
+  });
+
+  it('销毁后 late onerror 不应继续追加备用字体 link', () => {
+    service.initialize();
+    window.dispatchEvent(new Event('pointerdown'));
+    expect(appendedLinks.length).toBe(1);
+
+    TestBed.resetTestingModule();
+    appendedLinks[0].onerror?.(new Event('error'));
+    vi.advanceTimersByTime(5_000);
+
+    expect(service.isEnhancedFontLoaded()).toBe(false);
+    expect(appendedLinks.length).toBe(1);
+  });
+
   it('重复 initialize 应保持幂等且只注入一次样式链接', () => {
     service.initialize();
     service.initialize();

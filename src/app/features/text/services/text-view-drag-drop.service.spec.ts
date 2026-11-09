@@ -89,6 +89,7 @@ describe('TextViewDragDropService', () => {
   afterEach(() => {
     service?.cleanup();
     vi.runOnlyPendingTimers();
+    vi.restoreAllMocks();
     vi.useRealTimers();
     document.querySelectorAll('[data-drag-ghost="true"]').forEach(node => node.remove());
   });
@@ -115,6 +116,155 @@ describe('TextViewDragDropService', () => {
     expect(service.isTouchDragging).toBe(true);
     expect(service.touchDragTask).toMatchObject({ id: task.id });
     expect(service.draggingTaskId()).toBe(task.id);
+  });
+
+  it('should clear long-press timer handle 0 when movement becomes scroll intent', () => {
+    const longPressTimer = 0 as unknown as ReturnType<typeof setTimeout>;
+    vi.spyOn(globalThis, 'setTimeout').mockImplementation(() => longPressTimer);
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout').mockImplementation(() => undefined);
+    const task = createTask();
+
+    service.startTouchDrag(task, createTouch(100, 100), vi.fn());
+    service.handleTouchMove(createTouch(104, 130));
+
+    expect(clearTimeoutSpy).toHaveBeenCalledWith(0);
+    expect(service.touchDragTask).toBeNull();
+  });
+
+  it('should clear move timeout handle 0 when touch drag ends', () => {
+    const timer = 0 as unknown as ReturnType<typeof setTimeout>;
+    vi.spyOn(globalThis, 'setTimeout').mockImplementation(() => timer);
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout').mockImplementation(() => undefined);
+    const task = createTask();
+
+    service.startTouchDrag(task, createTouch(100, 100), vi.fn(), { gestureMode: 'handle' });
+    service.handleTouchMove(createTouch(130, 130));
+    clearTimeoutSpy.mockClear();
+
+    service.endTouchDrag();
+
+    expect(clearTimeoutSpy).toHaveBeenCalledWith(0);
+  });
+
+  it('should clear move timeout handle 0 when cleanup runs during touch drag', () => {
+    const timer = 0 as unknown as ReturnType<typeof setTimeout>;
+    vi.spyOn(globalThis, 'setTimeout').mockImplementation(() => timer);
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout').mockImplementation(() => undefined);
+    const task = createTask();
+
+    service.startTouchDrag(task, createTouch(100, 100), vi.fn(), { gestureMode: 'handle' });
+    service.handleTouchMove(createTouch(130, 130));
+    clearTimeoutSpy.mockClear();
+
+    service.cleanup();
+
+    expect(clearTimeoutSpy).toHaveBeenCalledWith(0);
+  });
+
+  describe('鼠标拖拽丢失看门狗', () => {
+    const startMouseDrag = (taskId = 'task-watchdog') => {
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      service.startDrag(createTask({ id: taskId }));
+      service.startAutoScroll(container, 120);
+      return container;
+    };
+
+    it('拖拽源节点被移除且 dragover 静默 1.5s 后应广播 mouseDragLost 自愈事件', () => {
+      const lostListener = vi.fn();
+      document.addEventListener('mouseDragLost', lostListener);
+      const container = startMouseDrag();
+
+      try {
+        // 源节点从未挂到 DOM（等价于拖拽中被远端同步移除）
+        vi.advanceTimersByTime(1500);
+
+        expect(lostListener).toHaveBeenCalledTimes(1);
+        expect(logger.warn).toHaveBeenCalledWith(
+          '[MouseDrag] 拖拽源节点已被移除且 dragover 静默，dragend 可能已丢失，触发自愈清理',
+          { draggingTaskId: 'task-watchdog' },
+        );
+      } finally {
+        document.removeEventListener('mouseDragLost', lostListener);
+        container.remove();
+      }
+    });
+
+    it('源节点仍在 DOM 时（拖出窗口场景）不应误判，只重新武装看门狗', () => {
+      const lostListener = vi.fn();
+      document.addEventListener('mouseDragLost', lostListener);
+      const container = startMouseDrag();
+      const sourceCard = document.createElement('div');
+      sourceCard.setAttribute('data-task-id', 'task-watchdog');
+      document.body.appendChild(sourceCard);
+
+      try {
+        vi.advanceTimersByTime(1500 * 3);
+
+        expect(lostListener).not.toHaveBeenCalled();
+
+        // 源节点消失后，下一轮看门狗才触发自愈
+        sourceCard.remove();
+        vi.advanceTimersByTime(1500);
+        expect(lostListener).toHaveBeenCalledTimes(1);
+      } finally {
+        document.removeEventListener('mouseDragLost', lostListener);
+        sourceCard.remove();
+        container.remove();
+      }
+    });
+
+    it('dragover 心跳应重置看门狗计时', () => {
+      const lostListener = vi.fn();
+      document.addEventListener('mouseDragLost', lostListener);
+      const container = startMouseDrag();
+
+      try {
+        vi.advanceTimersByTime(1400);
+        // dragover 心跳到达 -> 重新计时
+        (service as unknown as { handleDragAutoScroll: (e: { clientY: number }) => void })
+          .handleDragAutoScroll({ clientY: 200 });
+        vi.advanceTimersByTime(1400);
+
+        expect(lostListener).not.toHaveBeenCalled();
+
+        vi.advanceTimersByTime(200);
+        expect(lostListener).toHaveBeenCalledTimes(1);
+      } finally {
+        document.removeEventListener('mouseDragLost', lostListener);
+        container.remove();
+      }
+    });
+
+    it('endDrag 后看门狗必须被清除，不再广播丢失事件', () => {
+      const lostListener = vi.fn();
+      document.addEventListener('mouseDragLost', lostListener);
+      const container = startMouseDrag();
+
+      try {
+        service.endDrag();
+        vi.advanceTimersByTime(1500 * 2);
+
+        expect(lostListener).not.toHaveBeenCalled();
+      } finally {
+        document.removeEventListener('mouseDragLost', lostListener);
+        container.remove();
+      }
+    });
+  });
+
+  it('should keep DOM update guard active until the latest beginDOMUpdate timer expires', () => {
+    service.beginDOMUpdate();
+    vi.advanceTimersByTime(80);
+
+    service.beginDOMUpdate();
+    vi.advanceTimersByTime(20);
+
+    expect(service.isDOMUpdating).toBe(true);
+
+    vi.advanceTimersByTime(80);
+
+    expect(service.isDOMUpdating).toBe(false);
   });
 
   it('should use a shorter long-press delay for handle gestures', () => {

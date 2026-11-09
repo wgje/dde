@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 const root = process.cwd();
@@ -309,6 +310,56 @@ describe('Cloudflare migration artifact contracts', () => {
     expect(smoke).toContain('GlobalErrorHandler chunk self-heal contract present');
   });
 
+  it('keeps the standalone Cloudflare browser smoke off local dev-server origins', () => {
+    const smoke = read('scripts/smoke/cloudflare-playwright-smoke.cjs');
+    const helper = read('scripts/smoke/deployed-smoke-origin.cjs');
+
+    expect(smoke).toContain('isDeployedSmokeOrigin');
+    expect(smoke).toContain("require('./deployed-smoke-origin.cjs')");
+    expect(helper).toContain('function isBlockedIpv4');
+    expect(helper).toContain('function isBlockedIpv6');
+    expect(helper).toContain('ipv4FromMappedIpv6');
+    expect(helper).toContain('a === 0');
+    expect(helper).toContain('a === 10');
+    expect(helper).toContain('a === 127');
+    expect(helper).toContain('a === 192 && b === 168');
+    expect(helper).toContain("replace(/^\\[|\\]$/g, '')");
+    expect(helper).toContain("'::1'");
+    expect(smoke).toContain('PLAYWRIGHT_BASE_URL must be an http(s) deployed origin');
+  });
+
+  it('standalone Cloudflare browser smoke rejects loopback and private network origins at runtime', async () => {
+    const smoke = await import(pathToFileURL(path.join(root, 'scripts', 'smoke', 'deployed-smoke-origin.cjs')).href) as {
+      isDeployedSmokeOrigin?: (url: string | undefined) => boolean;
+    };
+
+    expect(smoke.isDeployedSmokeOrigin).toBeTypeOf('function');
+
+    for (const localOrigin of [
+      'http://localhost:4200',
+      'http://127.0.0.1:4200',
+      'http://127.0.0.2:4200',
+      'http://10.0.0.5',
+      'http://172.16.0.5',
+      'http://172.31.255.255',
+      'http://192.168.1.10',
+      'http://[::1]:4200',
+      'http://[fc00::1]',
+      'http://[fd12:3456::1]',
+      'http://[fe80::1]',
+      'http://[2001:db8::1]',
+      'http://[::ffff:127.0.0.1]:4200',
+      'http://[::ffff:10.0.0.1]',
+      'http://[::ffff:c0a8:0101]',
+      'http://[0:0:0:0:0:ffff:c0a8:0101]',
+    ]) {
+      expect(smoke.isDeployedSmokeOrigin?.(localOrigin), localOrigin).toBe(false);
+    }
+
+    expect(smoke.isDeployedSmokeOrigin?.('https://nanoflow.pages.dev')).toBe(true);
+    expect(smoke.isDeployedSmokeOrigin?.('https://8.8.8.8')).toBe(true);
+  });
+
   it('keeps the PR cloudflare smoke spec aligned with the Pages fallback self-heal contract', () => {
     const pkg = JSON.parse(read('package.json')) as { scripts: Record<string, string> };
     const specPath = path.join(root, 'e2e', 'cloudflare-smoke.spec.ts');
@@ -322,6 +373,15 @@ describe('Cloudflare migration artifact contracts', () => {
     expect(spec).toContain('X-Robots-Tag');
     expect(spec).toContain('GlobalErrorHandler chunk self-heal contract present');
     expect(spec).not.toContain('缺失的 hashed chunk 必须返回 4xx 或 application/javascript');
+  });
+
+  it('keeps the PR cloudflare smoke spec off local dev-server origins', () => {
+    const spec = read('e2e/cloudflare-smoke.spec.ts');
+
+    expect(spec).toContain('isDeployedSmokeOrigin');
+    expect(spec).toContain('createRequire');
+    expect(spec).toContain('../scripts/smoke/deployed-smoke-origin.cjs');
+    expect(spec).toContain('PLAYWRIGHT_BASE_URL must point at a deployed http(s) origin');
   });
 
   it('Cloudflare workflows use the pinned Wrangler version env instead of hardcoded command versions', () => {
@@ -369,6 +429,29 @@ describe('Cloudflare migration artifact contracts', () => {
     expect(indexHtml).toContain('https://your-project.supabase.co');
     expect(indexHtml).toContain('YOUR_SUPABASE_ANON_KEY');
     expect(indexHtml).not.toContain('https://fkhihclpghmmtbbywvoj.supabase.co');
+  });
+
+  it('builds from a generated ignored index.html without mutating the repo template', () => {
+    const angularJson = JSON.parse(read('angular.json')) as {
+      projects: {
+        app: {
+          architect: {
+            build: { options: { index: { input: string; output: string } } };
+          };
+        };
+      };
+    };
+    const setEnv = read('scripts/set-env.cjs');
+    const gitignore = read('.gitignore');
+
+    expect(angularJson.projects.app.architect.build.options.index).toEqual({
+      input: '.tmp/index.generated.html',
+      output: 'index.html',
+    });
+    expect(gitignore).toMatch(/(?:^|\n)\.tmp\/\r?\n/);
+    expect(setEnv).toContain('generatedIndexHtmlPath');
+    expect(setEnv).toContain('index.generated.html');
+    expect(setEnv).not.toContain('fs.writeFileSync(indexHtmlPath, indexHtml)');
   });
 
   it('deterministic guard normalizes volatile ngsw timestamp while comparing stable SW content', () => {

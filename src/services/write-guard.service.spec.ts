@@ -36,6 +36,7 @@ describe('WriteGuardService', () => {
   let originalEnv: MutableEnv;
 
   beforeEach(() => {
+    delete (window as Window & { __NANOFLOW_ORIGIN_GATE__?: unknown }).__NANOFLOW_ORIGIN_GATE__;
     mockLoggerCategory.info.mockReset();
     vi.useRealTimers();
     if (typeof sessionStorage !== 'undefined') {
@@ -54,6 +55,7 @@ describe('WriteGuardService', () => {
   });
 
   afterEach(() => {
+    delete (window as Window & { __NANOFLOW_ORIGIN_GATE__?: unknown }).__NANOFLOW_ORIGIN_GATE__;
     const env = environment as unknown as MutableEnv;
     env.readOnlyPreview = originalEnv.readOnlyPreview;
     env.originGateMode = originalEnv.originGateMode;

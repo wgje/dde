@@ -29,6 +29,14 @@ vi.mock('./flow-task-operations.service', () => ({
   FlowTaskOperationsService: class FlowTaskOperationsService {},
 }));
 
+vi.mock('./flow-batch-delete.service', () => ({
+  FlowBatchDeleteService: class FlowBatchDeleteService {},
+}));
+
+vi.mock('./flow-palette-resize.service', () => ({
+  FlowPaletteResizeService: class FlowPaletteResizeService {},
+}));
+
 vi.mock('./flow-command.service', () => ({
   FlowCommandService: class FlowCommandService {},
 }));
@@ -49,6 +57,8 @@ describe('FlowViewCleanupService', () => {
   let FlowLinkServiceClass: typeof import('./flow-link.service').FlowLinkService;
   let FlowDragDropServiceClass: typeof import('./flow-drag-drop.service').FlowDragDropService;
   let FlowTaskOperationsServiceClass: typeof import('./flow-task-operations.service').FlowTaskOperationsService;
+  let FlowBatchDeleteServiceClass: typeof import('./flow-batch-delete.service').FlowBatchDeleteService;
+  let FlowPaletteResizeServiceClass: typeof import('./flow-palette-resize.service').FlowPaletteResizeService;
   let FlowCommandServiceClass: typeof import('./flow-command.service').FlowCommandService;
   let flowTemplateEventHandlers: import('./flow-template-events').FlowTemplateEventHandlers;
 
@@ -75,6 +85,10 @@ describe('FlowViewCleanupService', () => {
   const taskOps = {
     dispose: vi.fn(),
   };
+  const batchDelete = { reset: vi.fn() };
+  const paletteResize = {
+    cancelActiveResize: vi.fn(),
+  };
   const flowCommand = {
     markViewDestroyed: vi.fn(),
   };
@@ -93,6 +107,8 @@ describe('FlowViewCleanupService', () => {
     ({ FlowLinkService: FlowLinkServiceClass } = await import('./flow-link.service'));
     ({ FlowDragDropService: FlowDragDropServiceClass } = await import('./flow-drag-drop.service'));
     ({ FlowTaskOperationsService: FlowTaskOperationsServiceClass } = await import('./flow-task-operations.service'));
+    ({ FlowBatchDeleteService: FlowBatchDeleteServiceClass } = await import('./flow-batch-delete.service'));
+    ({ FlowPaletteResizeService: FlowPaletteResizeServiceClass } = await import('./flow-palette-resize.service'));
     ({ FlowCommandService: FlowCommandServiceClass } = await import('./flow-command.service'));
     ({ flowTemplateEventHandlers } = await import('./flow-template-events'));
 
@@ -106,11 +122,21 @@ describe('FlowViewCleanupService', () => {
         { provide: FlowLinkServiceClass, useValue: link },
         { provide: FlowDragDropServiceClass, useValue: dragDrop },
         { provide: FlowTaskOperationsServiceClass, useValue: taskOps },
+        { provide: FlowBatchDeleteServiceClass, useValue: batchDelete },
+        { provide: FlowPaletteResizeServiceClass, useValue: paletteResize },
         { provide: FlowCommandServiceClass, useValue: flowCommand },
       ],
     });
 
     service = TestBed.inject(FlowViewCleanupServiceClass);
+  });
+
+  it('retires the reusable batch-delete owner during view cleanup', () => {
+    service.performCleanup({
+      pendingTimers: [], pendingRetryRafIds: [], overviewResizeTimer: null, idleInitHandle: null,
+    }, vi.fn());
+
+    expect(batchDelete.reset).toHaveBeenCalledOnce();
   });
 
   afterEach(() => {
@@ -172,7 +198,137 @@ describe('FlowViewCleanupService', () => {
     expect(link.dispose).toHaveBeenCalledTimes(1);
     expect(dragDrop.dispose).toHaveBeenCalledTimes(1);
     expect(taskOps.dispose).toHaveBeenCalledTimes(1);
+    expect(paletteResize.cancelActiveResize).toHaveBeenCalledTimes(1);
     expect(flowTemplateEventHandlers.onDeleteKeyPressed).toBeUndefined();
+
+    cancelAnimationFrameSpy.mockRestore();
+  });
+
+  it('performCleanup 中某个清理步骤抛错时仍应继续清理后续资源', () => {
+    const cancelAnimationFrameSpy = vi
+      .spyOn(globalThis, 'cancelAnimationFrame')
+      .mockImplementation(() => undefined);
+    const cancelIdleCallbackSpy = vi.fn();
+    Object.defineProperty(globalThis, 'cancelIdleCallback', {
+      configurable: true,
+      value: cancelIdleCallbackSpy,
+    });
+
+    flowTemplateEventHandlers.onDeleteKeyPressed = vi.fn();
+
+    const resources = {
+      pendingTimers: [setTimeout(() => undefined, 1000)],
+      pendingRetryRafIds: [33],
+      overviewResizeTimer: setTimeout(() => undefined, 3000),
+      idleInitHandle: 88,
+    };
+    const uninstallMobileListeners = vi.fn(() => {
+      throw new Error('listener teardown failed');
+    });
+
+    expect(() => service.performCleanup(resources, uninstallMobileListeners)).not.toThrow();
+
+    expect(flowCommand.markViewDestroyed).toHaveBeenCalledTimes(1);
+    expect(uninstallMobileListeners).toHaveBeenCalledTimes(1);
+    expect(touch.endDiagramNodeDragGhost).toHaveBeenCalledTimes(1);
+    expect(diagramEffects.cancelPendingRaf).toHaveBeenCalledTimes(1);
+    expect(mobileDrawer.cancelPendingDrawerRaf).toHaveBeenCalledTimes(1);
+    expect(cancelAnimationFrameSpy).toHaveBeenCalledWith(33);
+    expect(cancelIdleCallbackSpy).toHaveBeenCalledWith(88);
+    expect(diagram.cancelIdleOverviewInit).toHaveBeenCalledTimes(1);
+    expect(diagram.dispose).toHaveBeenCalledTimes(1);
+    expect(touch.dispose).toHaveBeenCalledTimes(1);
+    expect(link.dispose).toHaveBeenCalledTimes(1);
+    expect(dragDrop.dispose).toHaveBeenCalledTimes(1);
+    expect(taskOps.dispose).toHaveBeenCalledTimes(1);
+    expect(paletteResize.cancelActiveResize).toHaveBeenCalledTimes(1);
+    expect(flowTemplateEventHandlers.onDeleteKeyPressed).toBeUndefined();
+    expect(resources.pendingTimers).toHaveLength(0);
+    expect(resources.pendingRetryRafIds).toHaveLength(0);
+    expect(resources.overviewResizeTimer).toBeNull();
+    expect(resources.idleInitHandle).toBeNull();
+
+    cancelAnimationFrameSpy.mockRestore();
+  });
+
+  it('定时器清理单个句柄失败时仍应清空后续 timer 与 overview timer 状态', () => {
+    const clearTimeoutSpy = vi
+      .spyOn(globalThis, 'clearTimeout')
+      .mockImplementationOnce(() => {
+        throw new Error('pending timer clear failed');
+      })
+      .mockImplementation(() => undefined);
+    const cancelAnimationFrameSpy = vi
+      .spyOn(globalThis, 'cancelAnimationFrame')
+      .mockImplementation(() => undefined);
+
+    const resources = {
+      pendingTimers: [
+        setTimeout(() => undefined, 1000),
+        setTimeout(() => undefined, 2000),
+      ],
+      pendingRetryRafIds: [],
+      overviewResizeTimer: setTimeout(() => undefined, 3000),
+      idleInitHandle: null,
+    };
+
+    expect(() => service.performCleanup(resources, vi.fn())).not.toThrow();
+
+    expect(clearTimeoutSpy).toHaveBeenCalledTimes(3);
+    expect(resources.pendingTimers).toHaveLength(0);
+    expect(resources.overviewResizeTimer).toBeNull();
+
+    clearTimeoutSpy.mockRestore();
+    cancelAnimationFrameSpy.mockRestore();
+  });
+
+  it('rAF 清理单个句柄失败时仍应清空后续 retry rAF 状态', () => {
+    const cancelAnimationFrameSpy = vi
+      .spyOn(globalThis, 'cancelAnimationFrame')
+      .mockImplementationOnce(() => {
+        throw new Error('retry raf cancel failed');
+      })
+      .mockImplementation(() => undefined);
+
+    const resources = {
+      pendingTimers: [],
+      pendingRetryRafIds: [11, 22],
+      overviewResizeTimer: null,
+      idleInitHandle: null,
+    };
+
+    expect(() => service.performCleanup(resources, vi.fn())).not.toThrow();
+
+    expect(cancelAnimationFrameSpy).toHaveBeenCalledWith(11);
+    expect(cancelAnimationFrameSpy).toHaveBeenCalledWith(22);
+    expect(resources.pendingRetryRafIds).toHaveLength(0);
+
+    cancelAnimationFrameSpy.mockRestore();
+  });
+
+  it('idle callback 取消失败时仍应置空句柄并继续清理 overview idle', () => {
+    const cancelAnimationFrameSpy = vi
+      .spyOn(globalThis, 'cancelAnimationFrame')
+      .mockImplementation(() => undefined);
+    Object.defineProperty(globalThis, 'cancelIdleCallback', {
+      configurable: true,
+      value: vi.fn(() => {
+        throw new Error('idle cancel failed');
+      }),
+    });
+
+    const resources = {
+      pendingTimers: [],
+      pendingRetryRafIds: [],
+      overviewResizeTimer: null,
+      idleInitHandle: 99,
+    };
+
+    expect(() => service.performCleanup(resources, vi.fn())).not.toThrow();
+
+    expect(globalThis.cancelIdleCallback).toHaveBeenCalledWith(99);
+    expect(resources.idleInitHandle).toBeNull();
+    expect(diagram.cancelIdleOverviewInit).toHaveBeenCalledTimes(1);
 
     cancelAnimationFrameSpy.mockRestore();
   });

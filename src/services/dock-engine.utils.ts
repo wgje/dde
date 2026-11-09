@@ -10,6 +10,7 @@ import {
   DockEntry,
   DockLane,
   DockSourceSection,
+  DockSnapshot,
   DockTaskStatus,
   DockUiStatus,
   DockZoneSource,
@@ -20,6 +21,12 @@ import {
 import { type PlannerFieldSet } from '../utils/planner-fields';
 import { normalizeNullableNumber } from './dock-snapshot-persistence.service';
 import { rankDockCandidates } from './dock-scheduler.rules';
+
+export interface DockSnapshotOverrideFields {
+  isDockExpanded?: boolean;
+  muteWaitTone?: boolean;
+  focusScrimOn?: boolean;
+}
 
 // ---------------------------------------------------------------------------
 //  Entry ordering（纯函数）
@@ -228,6 +235,74 @@ export function buildConsoleVisibleOrderHint(
   ].slice(0, PARKING_CONFIG.CONSOLE_STACK_VISIBLE_MAX);
 }
 
+export function applyDockSnapshotOverrides(
+  snapshot: DockSnapshot,
+  overrides: DockSnapshotOverrideFields,
+): DockSnapshot {
+  return {
+    ...snapshot,
+    isDockExpanded: overrides.isDockExpanded ?? snapshot.isDockExpanded,
+    muteWaitTone: overrides.muteWaitTone ?? snapshot.muteWaitTone,
+    session: {
+      ...snapshot.session,
+      focusScrimOn: overrides.focusScrimOn ?? snapshot.session.focusScrimOn,
+    },
+  };
+}
+
+interface DockDisplaySortContext {
+  readonly rootProjectId: string | null;
+  readonly scoreMap: ReadonlyMap<string, number>;
+  readonly resolveSourceProjectId: (entry: DockEntry) => string | null;
+}
+
+type DockDisplayCandidateMapper = (entry: DockEntry) => SchedulerCandidate;
+
+function buildDockDisplayScoreMap(
+  entries: readonly DockEntry[],
+  root: DockEntry | null,
+  remainingMinutes: number,
+  toSchedulerCandidate: DockDisplayCandidateMapper,
+  rootProjectId: string | null,
+): Map<string, number> {
+  const ranked = rankDockCandidates(
+    entries.map(entry => toSchedulerCandidate(entry)),
+    remainingMinutes,
+    {
+      rootLoad: root?.load ?? null,
+      rootProjectId,
+    },
+  );
+  return new Map(ranked.map(item => [item.taskId, item.score] as const));
+}
+
+function compareDockEntriesForDisplay(
+  a: DockEntry,
+  b: DockEntry,
+  context: DockDisplaySortContext,
+): number {
+  if (a.isMain !== b.isMain) return a.isMain ? -1 : 1;
+
+  const aManual = normalizeNullableNumber(a.manualOrder);
+  const bManual = normalizeNullableNumber(b.manualOrder);
+  if (aManual !== null || bManual !== null) {
+    if (aManual === null) return 1;
+    if (bManual === null) return -1;
+    if (aManual !== bManual) return aManual - bManual;
+  }
+
+  const aScore = context.scoreMap.get(a.taskId) ?? Number.MIN_SAFE_INTEGER;
+  const bScore = context.scoreMap.get(b.taskId) ?? Number.MIN_SAFE_INTEGER;
+  if (aScore !== bScore) return bScore - aScore;
+
+  const aSameProject = context.rootProjectId && context.resolveSourceProjectId(a) === context.rootProjectId ? 1 : 0;
+  const bSameProject = context.rootProjectId && context.resolveSourceProjectId(b) === context.rootProjectId ? 1 : 0;
+  if (aSameProject !== bSameProject) return bSameProject - aSameProject;
+
+  if (a.dockedOrder !== b.dockedOrder) return a.dockedOrder - b.dockedOrder;
+  return a.taskId.localeCompare(b.taskId);
+}
+
 // ---------------------------------------------------------------------------
 //  Sorting helper
 // ---------------------------------------------------------------------------
@@ -240,17 +315,7 @@ export function buildConsoleVisibleOrderHint(
  */
 export function sortDockEntriesForDisplay(
   entries: DockEntry[],
-  toSchedulerCandidate: (entry: DockEntry) => {
-    taskId: string;
-    lane: import('../models/parking-dock').DockLane;
-    load: import('../models/parking-dock').CognitiveLoad;
-    expectedMinutes: number | null;
-    waitMinutes: number | null;
-    dockedOrder: number;
-    manualOrder: number | null;
-    relationScore: number | null;
-    sourceProjectId: string | null;
-  },
+  toSchedulerCandidate: DockDisplayCandidateMapper,
   resolveSourceProjectId: (entry: DockEntry) => string | null,
 ): DockEntry[] {
   if (entries.length <= 1) return entries;
@@ -261,44 +326,21 @@ export function sortDockEntriesForDisplay(
     null;
   const rootProjectId = root ? resolveSourceProjectId(root) : null;
   const remainingMinutes = resolveOrderingWindowMinutes(root);
-  const scoreMap = new Map<string, number>();
-  const ranked = rankDockCandidates(
-    entries.map(entry => toSchedulerCandidate(entry)),
+  const scoreMap = buildDockDisplayScoreMap(
+    entries,
+    root,
     remainingMinutes,
-    {
-      rootLoad: root?.load ?? null,
-      rootProjectId,
-    },
+    toSchedulerCandidate,
+    rootProjectId,
   );
-  for (const item of ranked) {
-    scoreMap.set(item.taskId, item.score);
-  }
 
   // 排序优先级：主任务 > 手动序 > 调度分数 > 同项目（最低优先级） > 入坞序 > 稳定ID
   // 策划案规定"同项目为最低优先级"，树距离/调度分数应主导排列
-  return [...entries].sort((a, b) => {
-    if (a.isMain !== b.isMain) return a.isMain ? -1 : 1;
-
-    const aManual = normalizeNullableNumber(a.manualOrder);
-    const bManual = normalizeNullableNumber(b.manualOrder);
-    if (aManual !== null || bManual !== null) {
-      if (aManual === null) return 1;
-      if (bManual === null) return -1;
-      if (aManual !== bManual) return aManual - bManual;
-    }
-
-    const aScore = scoreMap.get(a.taskId) ?? Number.MIN_SAFE_INTEGER;
-    const bScore = scoreMap.get(b.taskId) ?? Number.MIN_SAFE_INTEGER;
-    if (aScore !== bScore) return bScore - aScore;
-
-    // 同项目为最低优先级弱上下文，仅在调度分数一致时参与排序
-    const aSameProject = rootProjectId && resolveSourceProjectId(a) === rootProjectId ? 1 : 0;
-    const bSameProject = rootProjectId && resolveSourceProjectId(b) === rootProjectId ? 1 : 0;
-    if (aSameProject !== bSameProject) return bSameProject - aSameProject;
-
-    if (a.dockedOrder !== b.dockedOrder) return a.dockedOrder - b.dockedOrder;
-    return a.taskId.localeCompare(b.taskId);
-  });
+  return [...entries].sort((a, b) => compareDockEntriesForDisplay(a, b, {
+    rootProjectId,
+    scoreMap,
+    resolveSourceProjectId,
+  }));
 }
 
 // ---------------------------------------------------------------------------

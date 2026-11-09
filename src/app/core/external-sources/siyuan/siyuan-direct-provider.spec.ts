@@ -8,8 +8,10 @@ const BLOCK_ID = '20260426123456-abc1234';
 
 describe('SiyuanDirectProvider', () => {
   let fetchMock: ReturnType<typeof vi.fn>;
+  let loadConfig: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
+    vi.stubGlobal('location', new URL('http://localhost/') as unknown as Location);
     fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
       const path = new URL(readFetchUrl(input)).pathname;
       const body = readJsonBody(init);
@@ -33,6 +35,7 @@ describe('SiyuanDirectProvider', () => {
       }
     });
     vi.stubGlobal('fetch', fetchMock);
+    loadConfig = vi.fn().mockResolvedValue(directConfig());
 
     TestBed.configureTestingModule({
       providers: [
@@ -40,11 +43,7 @@ describe('SiyuanDirectProvider', () => {
         {
           provide: ExternalSourceCacheService,
           useValue: {
-            loadConfig: vi.fn().mockResolvedValue({
-              runtimeMode: 'direct',
-              baseUrl: 'http://127.0.0.1:6806',
-              token: 'test-token',
-            }),
+            loadConfig,
           },
         },
       ],
@@ -104,7 +103,42 @@ describe('SiyuanDirectProvider', () => {
       vi.useRealTimers();
     }
   });
+
+  it('does not fetch when the signal is already aborted before loading config', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const provider = TestBed.inject(SiyuanDirectProvider);
+
+    await expect(provider.getBlockPreview(BLOCK_ID, controller.signal)).rejects.toMatchObject({
+      name: 'AbortError',
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('does not fetch when the signal aborts while config is loading', async () => {
+    const configRead = createDeferred<ReturnType<typeof directConfig>>();
+    loadConfig.mockReturnValueOnce(configRead.promise);
+    const controller = new AbortController();
+    const provider = TestBed.inject(SiyuanDirectProvider);
+
+    const pending = provider.getBlockPreview(BLOCK_ID, controller.signal);
+    await vi.waitFor(() => expect(loadConfig).toHaveBeenCalledTimes(1));
+    controller.abort();
+    configRead.resolve(directConfig());
+
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 });
+
+function directConfig() {
+  return {
+    runtimeMode: 'direct' as const,
+    baseUrl: 'http://127.0.0.1:6806',
+    token: 'test-token',
+  };
+}
 
 function readFetchUrl(input: string | URL | Request): string {
   return input instanceof Request ? input.url : input.toString();
@@ -130,4 +164,15 @@ function abortablePendingResponse(signal: AbortSignal | null | undefined): Promi
     }
     signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true });
   });
+}
+
+function createDeferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+} {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(resolvePromise => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
 }

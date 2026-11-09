@@ -54,8 +54,8 @@ export const VIRUS_SCAN_CONFIG = {
     /** 扫描失败后的处理策略 */
     ON_FAILURE: 'reject' as const, // 'reject' | 'allow_with_warning' | 'queue_for_async'
     
-    /** 最大文件大小（字节）- 超过此大小跳过扫描 */
-    MAX_FILE_SIZE: 50 * 1024 * 1024, // 50MB
+    /** 最大文件大小（字节）- 与 Edge Function 10MB 原始文件上限保持一致 */
+    MAX_FILE_SIZE: 10 * 1024 * 1024, // 10MB
     
     /** 需要扫描的文件类型（MIME 类型匹配） */
     SCAN_MIME_TYPES: [
@@ -102,11 +102,11 @@ export const VIRUS_SCAN_CONFIG = {
     /** 扫描状态过期时间（毫秒）- 7 天 */
     STATUS_EXPIRY: 7 * 24 * 60 * 60 * 1000,
     
-    /** 状态过期后的处理 */
-    ON_EXPIRED_STATUS: 'rescan' as const, // 'allow' | 'warn' | 'rescan' | 'block'
+    /** 状态过期后的处理；重扫闭环完成前必须 fail-closed */
+    ON_EXPIRED_STATUS: 'block' as const, // 'allow' | 'warn' | 'rescan' | 'block'
     
     /** 未扫描文件的处理 */
-    ON_UNSCANNED: 'warn' as const, // 'allow' | 'warn' | 'block'
+    ON_UNSCANNED: 'block' as const, // 'allow' | 'warn' | 'block'
   },
   
   // ==================== 扫描结果处理 ====================
@@ -181,6 +181,8 @@ export type ScanStatus = typeof SCAN_STATUS[keyof typeof SCAN_STATUS];
 export interface ScanResult {
   /** 文件 ID */
   fileId: string;
+  /** 文件 SHA-256 哈希，用于下载前 TOCTOU 校验 */
+  fileHash?: string;
   /** 扫描状态 */
   status: ScanStatus;
   /** 威胁名称（如果有） */
@@ -202,8 +204,12 @@ export interface ScanResult {
  * 存储在 attachments JSONB 字段中
  */
 export interface AttachmentScanMetadata {
+  /** 扫描服务返回的文件 ID，用于下载前状态复查 */
+  fileId?: string;
   /** 最后扫描时间 */
   lastScannedAt?: string;
+  /** 扫描时的文件 SHA-256 哈希 */
+  fileHash?: string;
   /** 扫描状态 */
   scanStatus?: ScanStatus;
   /** 威胁信息（如果有） */
@@ -294,4 +300,3 @@ export const TOCTOU_PROTECTION = {
  * │                                                                 │
  * └─────────────────────────────────────────────────────────────────┘
  */
-

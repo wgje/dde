@@ -1,0 +1,31 @@
+.task-stack {
+  touch-action: pan-y pinch-zoom;
+  overscroll-behavior-y: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-gutter: stable;
+  overflow-anchor: none;
+  /* 隔离内层任务列表滚动产生的布局/重绘，避免拖慢外层阶段列表 */
+  contain: layout paint;
+}
+
+/* 阶段卡片整体作为独立合成层，降低外层滚动时的逐帧重绘成本 */
+.text-stage-card {
+  contain: layout paint;
+  backface-visibility: hidden;
+}
+
+.animate-collapse-open {
+  animation: collapseOpen 0.15s ease-out;
+}
+
+@keyframes collapseOpen {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}

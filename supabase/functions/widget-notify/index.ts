@@ -1,5 +1,3 @@
-import 'jsr:@supabase/functions-js/edge-runtime.d.ts';
-
 import { Webhook } from 'https://esm.sh/standardwebhooks@1.0.0';
 
 import {
@@ -14,11 +12,15 @@ import {
   extractWidgetClientVersion,
   getClientIp,
   getCorsHeaders,
+  hasServiceRoleConfig,
+  isWidgetRequestBodyTooLargeError,
   jsonResponse,
   loadWidgetCapabilities,
   loadWidgetLimits,
   logWidgetEvent,
+  readWidgetRequestText,
   redactId,
+  serviceNotConfiguredPayload,
   sha256Hex,
   verifyJwtUser,
   withPrivateNoStoreHeaders,
@@ -28,6 +30,15 @@ import {
   loadFcmServiceAccount,
   sendFcmDataPush,
 } from '../_shared/widget-fcm.ts';
+import {
+  mapWithConcurrency,
+  WIDGET_NOTIFY_DEVICE_LIMIT,
+  WIDGET_NOTIFY_FCM_CONCURRENCY,
+} from './fanout.ts';
+import {
+  buildFocusHintPayload,
+  type WidgetNotifySource,
+} from './focus-hint-payload.ts';
 
 type DatabaseWebhookEventType = 'INSERT' | 'UPDATE' | 'DELETE';
 type AllowedWidgetNotifyTable = 'focus_sessions' | 'black_box_entries' | 'tasks' | 'projects';
@@ -69,11 +80,6 @@ interface WidgetDeviceRow {
   capabilities: Record<string, unknown> | null;
   push_token: string | null;
   expires_at: string;
-}
-
-interface ActiveWidgetInstanceBindingRow {
-  device_id: string;
-  binding_generation: number;
 }
 
 type BeginNotifyEventResult =
@@ -248,39 +254,6 @@ function extractSummaryCursor(payload: DatabaseWebhookPayload): string | null {
   }
 
   return null;
-}
-
-/**
- * 2026-04-22 颠覆性压缩：从 focus_sessions 事件中抽取 focusMode / focusSessionId 提示字段，
- * 作为轻量 hint 直接塞进 FCM data payload，供小组件在首屏（summary fetch 仍在途中）就把
- * 专注模式按钮/图标切换到正确的视觉状态——避免额外等待 ~2s 的 summary 回环。
- *
- * 只在 focus_sessions 事件且 ended_at 可解析时返回。hint 是「乐观」视图，
- * 后续 summary fetch 成功后仍以服务端权威答案为准。
- */
-function extractFocusHint(payload: DatabaseWebhookPayload): { active: string; sessionId: string } | null {
-  if (payload.table !== 'focus_sessions') {
-    return null;
-  }
-  // DELETE 会话语义等同于结束，active = false。
-  if (payload.type === 'DELETE') {
-    const sessionId = asNonEmptyText(payload.old_record?.id, 64) ?? '';
-    return { active: 'false', sessionId };
-  }
-
-  const record = payload.record;
-  if (!isPlainObject(record)) {
-    return null;
-  }
-
-  const endedAt = record['ended_at'];
-  const endedAtIsNullOrEmpty = endedAt === null || endedAt === undefined
-    || (typeof endedAt === 'string' && endedAt.trim().length === 0);
-  // ended_at=null 意味着当前会话仍处于活跃态 → active=true；反之为 false。
-  // 这个口径跟主 App 客户端对 focusMode 的标定一致（dock-engine.service.ts 的 focusMode signal）。
-  const active = endedAtIsNullOrEmpty;
-  const sessionId = asNonEmptyText(record['id'], 64) ?? '';
-  return { active: active ? 'true' : 'false', sessionId };
 }
 
 function hasConfiguredPushProvider(): boolean {
@@ -516,38 +489,11 @@ async function upsertNotifyThrottle(
 async function loadActiveAndroidDevices(
   client: ReturnType<typeof createServiceRoleClient>,
   userId: string,
-  nowIso: string,
 ): Promise<WidgetDeviceRow[]> {
-  const nowMs = Date.parse(nowIso);
-  const { data: instanceData, error: instanceError } = await client
-    .from('widget_instances')
-    .select('device_id, binding_generation')
-    .eq('user_id', userId)
-    .eq('platform', 'android-widget')
-    .is('uninstalled_at', null);
-
-  if (instanceError) {
-    throw new Error(`loadActiveAndroidDevices(instance bindings) failed: ${instanceError.message}`);
-  }
-
-  const activeBindingKeys = new Set(
-    (Array.isArray(instanceData) ? instanceData : [])
-      .filter((row): row is ActiveWidgetInstanceBindingRow => isPlainObject(row)
-        && typeof row.device_id === 'string'
-        && typeof row.binding_generation === 'number'
-        && Number.isFinite(row.binding_generation))
-      .map((row) => `${row.device_id}:${Math.trunc(row.binding_generation)}`),
-  );
-  if (activeBindingKeys.size === 0) {
-    return [];
-  }
-
-  const { data, error } = await client
-    .from('widget_devices')
-    .select('id, binding_generation, installation_id, capabilities, push_token, expires_at')
-    .eq('user_id', userId)
-    .eq('platform', 'android-widget')
-    .is('revoked_at', null);
+  const { data, error } = await client.rpc<WidgetDeviceRow[]>('list_widget_notify_devices', {
+    p_user_id: userId,
+    p_limit: WIDGET_NOTIFY_DEVICE_LIMIT,
+  });
 
   if (error) {
     throw new Error(`loadActiveAndroidDevices failed: ${error.message}`);
@@ -559,15 +505,10 @@ async function loadActiveAndroidDevices(
       && typeof row.binding_generation === 'number'
       && Number.isFinite(row.binding_generation)
       && typeof row.installation_id === 'string'
-      && typeof row.expires_at === 'string')
-    .filter((row) => {
-      const expiresAtMs = Date.parse(row.expires_at);
-      return typeof row.push_token === 'string'
-        && row.push_token.trim().length > 0
-        && Number.isFinite(expiresAtMs)
-        && expiresAtMs > nowMs
-        && activeBindingKeys.has(`${row.id}:${Math.trunc(row.binding_generation)}`);
-    });
+      && typeof row.expires_at === 'string'
+      && typeof row.push_token === 'string'
+      && row.push_token.trim().length > 0)
+    .slice(0, WIDGET_NOTIFY_DEVICE_LIMIT);
 }
 
 Deno.serve(async (req) => {
@@ -583,9 +524,25 @@ Deno.serve(async (req) => {
     return jsonResponse({ error: 'Method not allowed', code: 'METHOD_NOT_ALLOWED' }, responseHeaders, 405);
   }
 
+  if (!hasServiceRoleConfig()) {
+    return jsonResponse(serviceNotConfiguredPayload(), responseHeaders, 503);
+  }
+
   const client = createServiceRoleClient();
   const limits = await loadWidgetLimits(client);
-  const rawBody = await req.text();
+  let rawBody: string;
+  try {
+    rawBody = await readWidgetRequestText(req);
+  } catch (error) {
+    if (isWidgetRequestBodyTooLargeError(error)) {
+      return jsonResponse(
+        { error: 'Request body too large', code: 'REQUEST_BODY_TOO_LARGE' },
+        responseHeaders,
+        413,
+      );
+    }
+    throw error;
+  }
   const webhookSecret = normalizeWidgetWebhookSecret(Deno.env.get('WIDGET_NOTIFY_WEBHOOK_SECRET') ?? null);
   if (!webhookSecret) {
     return jsonResponse({ error: 'Webhook secret is not configured', code: 'WEBHOOK_SECRET_MISSING' }, responseHeaders, 503);
@@ -593,6 +550,7 @@ Deno.serve(async (req) => {
 
   let verifiedPayload: unknown;
   let webhookId: string | null = null;
+  let notifySource: WidgetNotifySource;
   // 2026-04-22 颠覆性压缩 (plan D)：新增 JWT 直调路径。PWA 在 focus 翻转瞬间可并行
   // 调用本函数（带 Authorization: Bearer <user_jwt>）绕过 DB trigger + pg_net 的 ~3s 轮询，
   // 端到端从「ended_at → FCM 抵达」压缩 2-5s。
@@ -614,6 +572,7 @@ Deno.serve(async (req) => {
     try {
       const webhook = new Webhook(webhookSecret);
       verifiedPayload = webhook.verify(rawBody, Object.fromEntries(req.headers));
+      notifySource = 'committed-db-webhook';
       webhookId = asNonEmptyText(req.headers.get('webhook-id'), 256)
         ?? asNonEmptyText(req.headers.get('svix-id'), 256);
     } catch {
@@ -633,6 +592,7 @@ Deno.serve(async (req) => {
     if (!isPlainObject(parsedBody) || parsedBody['directNotify'] !== true) {
       return jsonResponse({ error: 'Direct notify flag required', code: 'INVALID_PAYLOAD' }, responseHeaders, 400);
     }
+    notifySource = 'direct-notify';
 
     const directWebhookId = asNonEmptyText(parsedBody['webhookId'], 256);
     const directTable = asNonEmptyText(parsedBody['table'], 64) ?? 'focus_sessions';
@@ -698,6 +658,7 @@ Deno.serve(async (req) => {
       return jsonResponse({ error: 'Invalid webhook signature', code: 'INVALID_SIGNATURE' }, responseHeaders, 401);
     }
     verifiedPayload = customWebhook.payload;
+    notifySource = 'committed-db-webhook';
     webhookId = customWebhook.eventId;
   }
 
@@ -711,7 +672,6 @@ Deno.serve(async (req) => {
   }
 
   const summaryCursor = extractSummaryCursor(payload);
-  const focusHint = extractFocusHint(payload);
   const beginResult = await beginNotifyEvent(client, webhookId, payload, summaryCursor);
   if (beginResult.kind === 'retry-later') {
     return jsonResponse({
@@ -738,7 +698,7 @@ Deno.serve(async (req) => {
 
     const capabilities = await loadWidgetCapabilities(client);
     const nowIso = new Date().toISOString();
-    const devices = await loadActiveAndroidDevices(client, userId, nowIso);
+    const devices = await loadActiveAndroidDevices(client, userId);
     if (devices.length === 0) {
       await finishNotifyEvent(client, webhookId, 'skipped-no-devices', userId, summaryCursor);
       logWidgetEvent('widget_push_dirty_dropped', { userId, webhookId, reason: 'no-active-android-devices' });
@@ -935,8 +895,17 @@ Deno.serve(async (req) => {
       }, responseHeaders, 202);
     }
 
-    const fanoutResults = await Promise.all(
-      eligibleDevices.map(async (device) => {
+    const fanoutResults = await mapWithConcurrency(
+      eligibleDevices,
+      WIDGET_NOTIFY_FCM_CONCURRENCY,
+      async (device) => {
+        const focusHintForDevice = buildFocusHintPayload({
+          source: notifySource,
+          payload,
+          eventId: webhookId,
+          deviceId: device.id,
+          bindingGeneration: device.binding_generation,
+        });
         const result = await sendFcmDataPush({
           account: serviceAccount,
           accessToken,
@@ -948,15 +917,11 @@ Deno.serve(async (req) => {
             eventType: payload.type,
             summaryCursor: summaryCursor ?? '',
             action: 'widget-refresh',
-            // 2026-04-22 颠覆性压缩：专注态乐观 hint。当表为 focus_sessions 时，端上可在
-            // summary fetch 完成前先用这两个字段把专注按钮/图标翻过来，感知延迟从 ~8s 压到 <1s。
-            ...(focusHint
-              ? { focusActiveHint: focusHint.active, focusSessionHint: focusHint.sessionId }
-              : {}),
+            ...(focusHintForDevice ? focusHintForDevice : {}),
           },
         });
         return { device, result };
-      }),
+      },
     );
 
     // 清理失效 token：unregistered / invalid-token 触发 push_token 置空。

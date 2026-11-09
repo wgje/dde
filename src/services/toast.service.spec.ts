@@ -125,6 +125,16 @@ describe('ToastService', () => {
       // 消息应该仍然存在
       expect(service.messages().length).toBe(1);
     });
+
+    it('ngOnDestroy 应清理待执行的自动关闭定时器', () => {
+      service.info('销毁前消息', undefined, 3000);
+
+      expect(vi.getTimerCount()).toBe(1);
+
+      (service as ToastService & { ngOnDestroy(): void }).ngOnDestroy();
+
+      expect(vi.getTimerCount()).toBe(0);
+    });
   });
 
   describe('error 去重', () => {
@@ -261,6 +271,33 @@ describe('ToastService', () => {
       // 再过剩余时间后应自动关闭
       vi.advanceTimersByTime(800);
       expect(service.messages().length).toBe(0);
+    });
+
+    it('相同消息合并时应该更新 action，避免点击旧闭包', () => {
+      const staleAction = vi.fn();
+      const latestAction = vi.fn();
+
+      service.info('同步完成', '点击查看', {
+        duration: 0,
+        action: { label: '查看旧项目', onClick: staleAction },
+      });
+      const firstToast = service.messages()[0];
+      expect(firstToast).toBeDefined();
+
+      service.info('同步完成', '点击查看', {
+        duration: 0,
+        action: { label: '查看新项目', onClick: latestAction },
+      });
+
+      const mergedToast = service.messages()[0];
+      expect(service.messages().length).toBe(1);
+      expect(mergedToast.id).toBe(firstToast.id);
+      expect(mergedToast.action?.label).toBe('查看新项目');
+
+      mergedToast.action?.onClick();
+
+      expect(staleAction).not.toHaveBeenCalled();
+      expect(latestAction).toHaveBeenCalledTimes(1);
     });
   });
 

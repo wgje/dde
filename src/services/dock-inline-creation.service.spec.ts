@@ -1,5 +1,5 @@
 import { TestBed } from '@angular/core/testing';
-import { signal, computed } from '@angular/core';
+import { signal, computed, Injector, runInInjectionContext } from '@angular/core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   DockInlineCreationService,
@@ -47,8 +47,14 @@ const mockBlackBox = {
     ok: true,
     value: { id: 'bb-entry-1', content: 'inline entry' },
   }),
+  createDurably: vi.fn().mockResolvedValue({
+    ok: true,
+    value: { id: 'bb-entry-1', content: 'inline entry' },
+  }),
   markAsCompleted: vi.fn().mockReturnValue({ ok: true, value: { id: 'bb-entry-1', content: 'inline entry' } }),
+  markAsCompletedDurably: vi.fn().mockResolvedValue({ ok: true, value: { id: 'bb-entry-1', content: 'inline entry' } }),
   archive: vi.fn().mockReturnValue({ ok: true, value: { id: 'bb-entry-1', content: 'inline entry' } }),
+  archiveDurably: vi.fn().mockResolvedValue({ ok: true, value: { id: 'bb-entry-1', content: 'inline entry' } }),
 };
 
 // LoggerService：测试不关注日志输出，提供最小无操作实现
@@ -64,7 +70,7 @@ const mockToast = {
 };
 
 const mockTaskOps = {
-  addTask: vi.fn().mockReturnValue({ ok: true, value: 'new-task-id' }),
+  addTask: vi.fn().mockResolvedValue({ ok: true, value: 'new-task-id' }),
   updateTaskExpectedMinutes: vi.fn(),
   updateTaskCognitiveLoad: vi.fn(),
   updateTaskWaitMinutes: vi.fn(),
@@ -140,12 +146,38 @@ describe('DockInlineCreationService', () => {
     });
 
     service = TestBed.inject(DockInlineCreationService);
+    mockTaskOps.updateTaskExpectedMinutes.mockResolvedValue(true);
+    mockTaskOps.updateTaskCognitiveLoad.mockResolvedValue(true);
+    mockTaskOps.updateTaskWaitMinutes.mockResolvedValue(true);
+    mockTaskOps.updateTaskStatus.mockResolvedValue(true);
 
     const built = buildContext();
     entries = built.entries;
     setMainTask = built.setMainTask;
     rebalanceAutoZones = built.rebalanceAutoZones;
     service.init(built.ctx);
+  });
+
+  it('should not resolve task operation adapter during construction', () => {
+    const throwingTaskOpsProvider = vi.fn(() => {
+      throw new Error('TaskOperationAdapterService should not be resolved during dock inline startup');
+    });
+    const isolatedInjector = Injector.create({
+      providers: [
+        DockInlineCreationService,
+        { provide: BlackBoxService, useValue: mockBlackBox },
+        { provide: LoggerService, useValue: mockLogger },
+        { provide: ToastService, useValue: mockToast },
+        { provide: TaskOperationAdapterService, useFactory: throwingTaskOpsProvider },
+        { provide: ProjectStateService, useValue: mockProjectState },
+      ],
+    });
+
+    expect(() => runInInjectionContext(
+      isolatedInjector,
+      () => isolatedInjector.get(DockInlineCreationService),
+    )).not.toThrow();
+    expect(throwingTaskOpsProvider).not.toHaveBeenCalled();
   });
 
   // =========================================================================
@@ -186,8 +218,8 @@ describe('DockInlineCreationService', () => {
   // =========================================================================
 
   describe('createInDock', () => {
-    it('should add an entry to the entries signal', () => {
-      const taskId = service.createInDock('My Task', 'backup');
+    it('should add an entry to the entries signal after durable black-box create', async () => {
+      const taskId = await service.createInDock('My Task', 'backup');
 
       expect(taskId).toBeTypeOf('string');
       expect(taskId).not.toBeNull();
@@ -197,20 +229,25 @@ describe('DockInlineCreationService', () => {
       expect(current[0].title).toBe('My Task');
       expect(current[0].lane).toBe('backup');
       expect(current[0].sourceKind).toBe('dock-created');
+      expect(current[0].sourceBlackBoxEntryId).toBe('bb-entry-1');
       expect(current[0].status).toBe('pending_start');
+      expect(mockBlackBox.createDurably).toHaveBeenCalledWith(expect.objectContaining({
+        content: 'My Task',
+      }));
+      expect(mockBlackBox.create).not.toHaveBeenCalled();
     });
 
     // =========================================================================
     //  4. createInDock — returns null when capacity exceeded
     // =========================================================================
 
-    it('should return null when capacity exceeded', () => {
+    it('should return null when capacity exceeded', async () => {
       const hardLimit = PARKING_CONFIG.DOCK_CONSOLE_HARD_LIMIT;
       const built = buildContext({ dockedCount: hardLimit });
       entries = built.entries;
       service.init(built.ctx);
 
-      const taskId = service.createInDock('Overflow Task', 'combo-select');
+      const taskId = await service.createInDock('Overflow Task', 'combo-select');
       expect(taskId).toBeNull();
       // entries should remain empty
       expect(built.entries()).toHaveLength(0);
@@ -244,7 +281,7 @@ describe('DockInlineCreationService', () => {
   // =========================================================================
 
   describe('archiveInlineEntriesToActiveProject', () => {
-    it('should create tasks in project for dock-created entries', () => {
+    it('should create tasks in project for dock-created entries', async () => {
       const built = buildContext({
         entries: [
           makeEntry({
@@ -259,9 +296,9 @@ describe('DockInlineCreationService', () => {
       });
       service.init(built.ctx);
 
-      mockTaskOps.addTask.mockReturnValue({ ok: true, value: 'created-task-1' });
+      mockTaskOps.addTask.mockResolvedValue({ ok: true, value: 'created-task-1' });
 
-      const result = service.archiveInlineEntriesToActiveProject();
+      const result = await service.archiveInlineEntriesToActiveProject();
 
       expect(result.converted).toBe(1);
       expect(result.failed).toBe(0);
@@ -281,18 +318,49 @@ describe('DockInlineCreationService', () => {
       expect(updated!.inlineArchiveStatus).toBe('archived');
     });
 
-    it('should return {0,0} when no dock-created entries exist', () => {
+    it('should fail archive when the completed task status cannot be durably saved', async () => {
+      const built = buildContext({
+        entries: [
+          makeEntry({
+            taskId: 'inline-completed',
+            title: 'Completed Inline Task',
+            sourceKind: 'dock-created',
+            status: 'completed',
+            sourceBlackBoxEntryId: 'bb-1',
+            inlineArchiveStatus: 'pending',
+          }),
+        ],
+      });
+      service.init(built.ctx);
+      mockTaskOps.addTask.mockResolvedValue({ ok: true, value: 'created-task-1' });
+      mockTaskOps.updateTaskExpectedMinutes.mockResolvedValue(true);
+      mockTaskOps.updateTaskCognitiveLoad.mockResolvedValue(true);
+      mockTaskOps.updateTaskWaitMinutes.mockResolvedValue(true);
+      mockTaskOps.updateTaskStatus.mockResolvedValue(false);
+
+      const result = await service.archiveInlineEntriesToActiveProject();
+
+      expect(result).toEqual({ converted: 0, failed: 1 });
+      expect(mockTaskOps.updateTaskStatus).toHaveBeenCalledWith('created-task-1', 'completed');
+      expect(mockBlackBox.markAsCompletedDurably).not.toHaveBeenCalled();
+      expect(mockBlackBox.archiveDurably).not.toHaveBeenCalled();
+      const updated = built.entries().find(e => e.taskId === 'inline-completed');
+      expect(updated!.inlineArchiveStatus).toBe('failed');
+      expect(built.rebalanceAutoZones).not.toHaveBeenCalled();
+    });
+
+    it('should return {0,0} when no dock-created entries exist', async () => {
       const built = buildContext({
         entries: [makeEntry({ taskId: 'proj-1', sourceKind: 'project-task' })],
       });
       service.init(built.ctx);
 
-      const result = service.archiveInlineEntriesToActiveProject();
+      const result = await service.archiveInlineEntriesToActiveProject();
       expect(result).toEqual({ converted: 0, failed: 0 });
       expect(mockTaskOps.addTask).not.toHaveBeenCalled();
     });
 
-    it('should mark entries as failed when no active project', () => {
+    it('should mark entries as failed when no active project', async () => {
       mockProjectState.activeProjectId.mockReturnValue(null);
 
       const built = buildContext({
@@ -306,7 +374,7 @@ describe('DockInlineCreationService', () => {
       });
       service.init(built.ctx);
 
-      const result = service.archiveInlineEntriesToActiveProject();
+      const result = await service.archiveInlineEntriesToActiveProject();
       expect(result).toEqual({ converted: 0, failed: 1 });
 
       const updated = built.entries().find(e => e.taskId === 'inline-1');

@@ -1,7 +1,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { createRequire } from 'node:module';
 import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
+import {
+  normalizeSql,
+  type SchemaCoverageModule,
+} from './supabase-fresh-init-table-coverage-repository.spec-helpers';
 
 import {
   buildWidgetWebhookSigningMessage,
@@ -9,8 +14,20 @@ import {
   normalizeWidgetWebhookSecret,
 } from '../../../supabase/functions/_shared/widget-normalization.ts';
 
+const require = createRequire(import.meta.url);
+const coverage = require('../../../scripts/lib/supabase-schema-coverage.cjs') as SchemaCoverageModule;
+
 function readText(relativePath: string): string {
   return fs.readFileSync(path.join(process.cwd(), relativePath), 'utf8');
+}
+
+function readModelDatabaseTypes(): string {
+  return [
+    'src/models/supabase-types.ts',
+    'src/models/supabase-auxiliary-types.ts',
+  ]
+    .map(readText)
+    .join('\n');
 }
 
 function expectTypeScriptToParse(relativePath: string): void {
@@ -24,8 +41,10 @@ function expectTypeScriptToParse(relativePath: string): void {
 }
 
 function extractFunctionSource(sourceText: string, functionName: string): string {
-  const signature = `function ${functionName}(`;
-  const start = sourceText.indexOf(signature);
+  const asyncStart = sourceText.indexOf(`async function ${functionName}`);
+  const start = asyncStart >= 0
+    ? asyncStart
+    : sourceText.indexOf(`function ${functionName}`);
   expect(start, `Function ${functionName} should exist`).toBeGreaterThanOrEqual(0);
 
   const bodyStart = sourceText.indexOf('{', start);
@@ -87,6 +106,37 @@ function loadWidgetSummaryFocusHelpers(): {
     toFocusSessionState: (value: unknown) => unknown;
     pickPrimaryFocusSlot: (value: unknown) => { taskId?: string | null } | null;
   };
+}
+
+interface WidgetSummaryRowsResult<Row> {
+  data: Row[] | null;
+  error: unknown | null;
+}
+
+type WidgetSummaryKnownIdCollector = <Row>(
+  ids: readonly string[],
+  loadChunk: (chunk: string[]) => PromiseLike<WidgetSummaryRowsResult<Row>>,
+) => Promise<WidgetSummaryRowsResult<Row>>;
+
+function loadWidgetSummaryKnownIdCollector(): WidgetSummaryKnownIdCollector {
+  const sourceText = readText('supabase/functions/widget-summary/index.ts');
+  const snippet = extractFunctionSource(sourceText, 'collectWidgetSummaryRowsById');
+  const transpiled = ts.transpileModule(
+    `const WIDGET_SUMMARY_POSTGREST_ID_CHUNK_SIZE = 100;\n${snippet}\nmodule.exports = { collectWidgetSummaryRowsById };`,
+    {
+      compilerOptions: {
+        module: ts.ModuleKind.CommonJS,
+        target: ts.ScriptTarget.ES2022,
+      },
+    },
+  ).outputText;
+
+  const module = { exports: {} as Record<string, unknown> };
+  const evaluator = new Function('module', 'exports', transpiled);
+  evaluator(module, module.exports);
+
+  return (module.exports as { collectWidgetSummaryRowsById: WidgetSummaryKnownIdCollector })
+    .collectWidgetSummaryRowsById;
 }
 
 describe('Widget backend foundation contract', () => {
@@ -200,7 +250,7 @@ describe('Widget backend foundation contract', () => {
 
   it('database type files must include widget tables and rate limit RPC', () => {
     const databaseTypes = readText('src/types/supabase.ts');
-    const modelTypes = readText('src/models/supabase-types.ts');
+    const modelTypes = readModelDatabaseTypes();
 
     for (const content of [databaseTypes, modelTypes]) {
       expect(content).toContain('widget_devices');
@@ -214,6 +264,118 @@ describe('Widget backend foundation contract', () => {
     }
   });
 
+  it('widget legacy retired archive tables must converge existing id indexes into primary keys without relaxing service-role-only hardening', () => {
+    const androidOnlyRetirementMigration = readText('supabase/migrations/20260427163000_reconcile_remote_migration_drift.sql');
+    const securityHardeningCompatMigration = readText('supabase/migrations/20260427170000_security_hardening_compat.sql');
+    const advisorFollowupMigration = readText(
+      'supabase/migrations/20260531123000_advisor_followup_rls_and_function_exposure.sql',
+    );
+    const retiredPrimaryKeyConvergenceMigration = readText(
+      'supabase/migrations/20260728000100_widget_legacy_retired_primary_keys.sql',
+    );
+    const finalMigrationChain = [
+      androidOnlyRetirementMigration,
+      securityHardeningCompatMigration,
+      advisorFollowupMigration,
+      retiredPrimaryKeyConvergenceMigration,
+    ].join('\n');
+    const normalizedFinalMigrationChain = normalizeSql(finalMigrationChain);
+    const retiredArchivePreConvergenceSchema = `
+      CREATE TABLE public.widget_devices_legacy_retired (
+        id uuid,
+        retired_at timestamptz NOT NULL DEFAULT now(),
+        retirement_reason text
+      );
+      CREATE UNIQUE INDEX idx_widget_devices_legacy_retired_id
+        ON public.widget_devices_legacy_retired (id);
+      CREATE TABLE public.widget_instances_legacy_retired (
+        id uuid,
+        retired_at timestamptz NOT NULL DEFAULT now(),
+        retirement_reason text
+      );
+      CREATE UNIQUE INDEX idx_widget_instances_legacy_retired_id
+        ON public.widget_instances_legacy_retired (id);
+    `;
+    const replayNotNullColumns = coverage.extractPublicNotNullColumns(
+      `${retiredArchivePreConvergenceSchema}\n${retiredPrimaryKeyConvergenceMigration}`,
+    );
+
+    expect(retiredPrimaryKeyConvergenceMigration).toContain(
+      'ALTER TABLE public.widget_devices_legacy_retired',
+    );
+    expect(retiredPrimaryKeyConvergenceMigration).toContain('ALTER COLUMN id SET NOT NULL');
+    expect(retiredPrimaryKeyConvergenceMigration).toMatch(
+      /ADD CONSTRAINT widget_devices_legacy_retired_pkey\s+PRIMARY KEY USING INDEX idx_widget_devices_legacy_retired_id/,
+    );
+    expect(retiredPrimaryKeyConvergenceMigration).toMatch(
+      /ADD CONSTRAINT widget_instances_legacy_retired_pkey\s+PRIMARY KEY USING INDEX idx_widget_instances_legacy_retired_id/,
+    );
+    expect(retiredPrimaryKeyConvergenceMigration).not.toMatch(/\bCREATE\s+UNIQUE\s+INDEX\b/i);
+    expect(retiredPrimaryKeyConvergenceMigration).not.toMatch(/\bCONCURRENTLY\b/i);
+    expect(retiredPrimaryKeyConvergenceMigration).not.toContain(
+      'INSERT INTO public.widget_devices_legacy_retired',
+    );
+    expect(retiredPrimaryKeyConvergenceMigration).not.toContain(
+      'INSERT INTO public.widget_instances_legacy_retired',
+    );
+    expect(retiredPrimaryKeyConvergenceMigration).not.toContain(
+      'UPDATE public.widget_devices_legacy_retired',
+    );
+    expect(retiredPrimaryKeyConvergenceMigration).not.toContain(
+      'UPDATE public.widget_instances_legacy_retired',
+    );
+    expect(retiredPrimaryKeyConvergenceMigration).not.toContain(
+      'DELETE FROM public.widget_devices_legacy_retired',
+    );
+    expect(retiredPrimaryKeyConvergenceMigration).not.toContain(
+      'DELETE FROM public.widget_instances_legacy_retired',
+    );
+    expect(replayNotNullColumns.widget_devices_legacy_retired).toEqual(['id', 'retired_at']);
+    expect(replayNotNullColumns.widget_instances_legacy_retired).toEqual(['id', 'retired_at']);
+
+    expect(finalMigrationChain).toContain(
+      'ALTER TABLE public.widget_devices_legacy_retired ENABLE ROW LEVEL SECURITY;',
+    );
+    expect(finalMigrationChain).toContain(
+      'ALTER TABLE public.widget_devices_legacy_retired FORCE ROW LEVEL SECURITY;',
+    );
+    expect(finalMigrationChain).toContain(
+      'ALTER TABLE public.widget_instances_legacy_retired ENABLE ROW LEVEL SECURITY;',
+    );
+    expect(finalMigrationChain).toContain(
+      'ALTER TABLE public.widget_instances_legacy_retired FORCE ROW LEVEL SECURITY;',
+    );
+    expect(advisorFollowupMigration).toContain("'widget_devices_legacy_retired'");
+    expect(advisorFollowupMigration).toContain("'widget_instances_legacy_retired'");
+    expect(normalizedFinalMigrationChain).toContain(
+      "execute format('revoke all on public.%i from public, anon, authenticated', v_table);",
+    );
+    expect(normalizedFinalMigrationChain).toContain(
+      "execute format('grant all on public.%i to service_role', v_table);",
+    );
+    expect(normalizedFinalMigrationChain).toContain(
+      "create policy %i on public.%i for all to service_role using (true) with check (true)",
+    );
+    expect(finalMigrationChain).toContain(
+      'REVOKE ALL ON TABLE public.widget_devices_legacy_retired FROM PUBLIC, anon, authenticated;',
+    );
+    expect(finalMigrationChain).toContain(
+      'REVOKE ALL ON TABLE public.widget_instances_legacy_retired FROM PUBLIC, anon, authenticated;',
+    );
+    expect(finalMigrationChain).not.toContain(
+      'GRANT SELECT ON TABLE public.widget_devices_legacy_retired TO authenticated;',
+    );
+    expect(finalMigrationChain).not.toContain(
+      'GRANT SELECT ON TABLE public.widget_instances_legacy_retired TO authenticated;',
+    );
+    expect(finalMigrationChain).not.toContain(
+      'GRANT SELECT ON TABLE public.widget_devices_legacy_retired TO anon;',
+    );
+    expect(finalMigrationChain).not.toContain(
+      'GRANT SELECT ON TABLE public.widget_instances_legacy_retired TO anon;',
+    );
+  });
+
   it('widget runtime helpers must preserve notify zero limits and signing normalization semantics', () => {
     expect(normalizeWidgetLimitNumber(0, 120, true)).toBe(0);
     expect(normalizeWidgetLimitNumber(0, 120)).toBe(120);
@@ -223,6 +385,122 @@ describe('Widget backend foundation contract', () => {
     expect(normalizeWidgetWebhookSecret(' plain-secret ')).toBe('plain-secret');
     expect(normalizeWidgetWebhookSecret('   ')).toBeNull();
     expect(buildWidgetWebhookSigningMessage('event-1', '1700000000', '{"ok":true}')).toBe('event-1.1700000000.{"ok":true}');
+  });
+
+  it('widget summary known-ID collector chunks 1001 UUIDs without loss or duplication', async () => {
+    const collectWidgetSummaryRowsById = loadWidgetSummaryKnownIdCollector();
+    const ids = Array.from(
+      { length: 1001 },
+      (_, index) => `00000000-0000-4000-8000-${index.toString(16).padStart(12, '0')}`,
+    );
+    const requestedChunks: string[][] = [];
+
+    const result = await collectWidgetSummaryRowsById(ids, async chunk => {
+      requestedChunks.push([...chunk]);
+      return {
+        data: chunk.map(id => ({ id })),
+        error: null,
+      };
+    });
+
+    expect(requestedChunks).toHaveLength(11);
+    expect(requestedChunks.every(chunk => chunk.length <= 100)).toBe(true);
+    expect(requestedChunks.flat()).toEqual(ids);
+    expect(result.error).toBeNull();
+    expect(result.data?.map(row => row.id)).toEqual(ids);
+    expect(new Set(result.data?.map(row => row.id)).size).toBe(ids.length);
+  });
+
+  it('widget summary known-ID collector fails closed on the first chunk error', async () => {
+    const collectWidgetSummaryRowsById = loadWidgetSummaryKnownIdCollector();
+    const ids = Array.from(
+      { length: 201 },
+      (_, index) => `00000000-0000-4000-8000-${index.toString(16).padStart(12, '0')}`,
+    );
+    const exactError = { code: 'PGRST_TEST', message: 'chunk 2 failed' };
+    const requestedChunks: string[][] = [];
+
+    const result = await collectWidgetSummaryRowsById(ids, async chunk => {
+      requestedChunks.push([...chunk]);
+      if (requestedChunks.length === 2) {
+        return { data: null, error: exactError };
+      }
+      return {
+        data: chunk.map(id => ({ id })),
+        error: null,
+      };
+    });
+
+    expect(requestedChunks).toHaveLength(2);
+    expect(result.data).toBeNull();
+    expect(result.error).toBe(exactError);
+  });
+
+  it('widget summary hydration bounds known-ID queries and filters accessible projects in memory', () => {
+    const summaryFn = readText('supabase/functions/widget-summary/index.ts');
+
+    expect.soft(summaryFn).not.toContain(".in('id', taskIds)");
+    expect.soft(summaryFn).not.toContain(".in('project_id', accessibleProjectIds)");
+    expect.soft(summaryFn).not.toContain(".in('id', projectIds)");
+    expect.soft(summaryFn).toContain('const WIDGET_SUMMARY_POSTGREST_ID_CHUNK_SIZE = 100;');
+    expect.soft(summaryFn).toMatch(
+      /collectWidgetSummaryRowsById<TaskRow>\(\s*taskIds,[\s\S]*?\.from\('tasks'\)[\s\S]*?\.in\('id', chunk\)[\s\S]*?\.is\('deleted_at', null\)/,
+    );
+    expect.soft(summaryFn).toMatch(
+      /collectWidgetSummaryRowsById<ProjectRow>\(\s*projectIds,[\s\S]*?\.from\('projects'\)[\s\S]*?\.in\('id', chunk\)[\s\S]*?\.eq\('owner_id', device\.user_id\)[\s\S]*?\.is\('deleted_at', null\)/,
+    );
+    expect.soft(summaryFn).toContain('const accessibleProjectIdSet = new Set(accessibleProjectIds);');
+    expect.soft(summaryFn).toContain('if (!accessibleProjectIdSet.has(row.project_id)) continue;');
+  });
+
+  it('widget action and notify functions must cap request bodies before parsing', () => {
+    const shared = readText('supabase/functions/_shared/widget-common.ts');
+    const summaryFn = readText('supabase/functions/widget-summary/index.ts');
+    const notifyFn = readText('supabase/functions/widget-notify/index.ts');
+    const focusActionFn = readText('supabase/functions/widget-focus-action/index.ts');
+    const blackBoxActionFn = readText('supabase/functions/widget-black-box-action/index.ts');
+
+    expect(shared).toContain('DEFAULT_WIDGET_REQUEST_BODY_MAX_BYTES');
+    expect(shared).toContain('WidgetRequestBodyTooLargeError');
+    expect(shared).toContain('export async function readWidgetRequestText');
+    expect(shared).toContain('export async function readWidgetRequestJson');
+    expect(shared).toContain("req.headers.get('content-length')");
+    expect(shared).toContain('totalBytes > maxBytes');
+
+    for (const source of [summaryFn, notifyFn, focusActionFn]) {
+      expect(source).not.toContain('await req.text()');
+      expect(source).not.toContain('await req.json()');
+      expect(source).toContain('REQUEST_BODY_TOO_LARGE');
+    }
+
+    expect(summaryFn).toContain('readWidgetRequestText(req)');
+    expect(notifyFn).toContain('readWidgetRequestText(req)');
+    expect(focusActionFn).toContain('readWidgetRequestJson<RequestBody>(req)');
+
+    expect(blackBoxActionFn).not.toContain('await req.json()');
+    expect(blackBoxActionFn).toContain('MAX_WIDGET_REQUEST_BODY_BYTES');
+    expect(blackBoxActionFn).toContain('readRequestJsonWithLimit<RequestBody>(req)');
+    expect(blackBoxActionFn).toContain('REQUEST_BODY_TOO_LARGE');
+  });
+
+  it('widget register must use the shared bounded JSON reader', () => {
+    const registerFn = readText('supabase/functions/widget-register/index.ts');
+
+    expect(registerFn).toContain('readWidgetRequestJson');
+    expect(registerFn).toContain('isWidgetRequestBodyTooLargeError');
+    expect(registerFn).not.toContain('await req.json()');
+    expect(registerFn).toContain('body = await readWidgetRequestJson<WidgetRegisterRequest>(req)');
+    expect(registerFn).toContain("code: 'REQUEST_BODY_TOO_LARGE'");
+  });
+
+  it('widget register must reject stale binding generation writes before mutating device rows', () => {
+    const registerFn = readText('supabase/functions/widget-register/index.ts');
+
+    expect(registerFn).toContain('expectedBindingGeneration');
+    expect(registerFn).toContain("code: 'STALE_BINDING_GENERATION'");
+    expect(registerFn).toContain("code: 'INVALID_BINDING_GENERATION'");
+    expect(registerFn).toContain(".eq('binding_generation',");
+    expect(registerFn).toContain('buildStaleBindingGenerationPayload(');
   });
 
   it('widget edge functions must preserve auth split, binding generation checks, and private no-store responses', () => {
@@ -347,8 +625,8 @@ describe('Widget backend foundation contract', () => {
     expect(notifyFn).toContain('if (usesStandardWebhookHeaders) {');
     expect(notifyFn).toContain('limits.notifyIpPerMinute === 0');
     expect(notifyFn).toContain("normalizeWidgetWebhookSecret(Deno.env.get('WIDGET_NOTIFY_WEBHOOK_SECRET')");
-    expect(notifyFn).toContain(".from('widget_instances')");
-    expect(notifyFn).toContain(".is('uninstalled_at', null)");
+    expect(notifyFn).toContain(".rpc<WidgetDeviceRow[]>('list_widget_notify_devices'");
+    expect(notifyFn).toContain('p_limit: WIDGET_NOTIFY_DEVICE_LIMIT');
     expect(notifyFn).toContain("reason: 'push-provider-unavailable'");
     expect(notifyFn).toContain("'internal-error'");
     expect(notifyFn).toContain("STALE_PROCESSING_RECLAIM_MS");
@@ -360,7 +638,7 @@ describe('Widget backend foundation contract', () => {
     expect(notifyFn).toContain("kind: 'retry-later'");
     expect(notifyFn).toContain("reason: 'event-in-progress'");
     expect(notifyFn).toContain("status: 'processing'");
-    expect(notifyFn).toContain('const expiresAtMs = Date.parse(row.expires_at);');
+    expect(notifyFn).toContain('.slice(0, WIDGET_NOTIFY_DEVICE_LIMIT);');
     expect(notifyFn).toContain("deliveryMode: 'dry-run'");
     expect(notifyFn).toContain("reason: 'deduped-within-window'");
     expect(notifyFn).toContain("code: 'PUSH_PROVIDER_UNAVAILABLE'");
@@ -374,7 +652,7 @@ describe('Widget backend foundation contract', () => {
     expect(notifyFn.indexOf('if (!hasConfiguredPushProvider()) {')).toBeLessThan(
       notifyFn.indexOf('const notifyUserScopeKey = await sha256Hex(`widget-notify-user:${userId}`);'),
     );
-    expect(notifyFn.indexOf('const devices = await loadActiveAndroidDevices(client, userId, nowIso);')).toBeLessThan(
+    expect(notifyFn.indexOf('const devices = await loadActiveAndroidDevices(client, userId);')).toBeLessThan(
       notifyFn.indexOf('if (!hasConfiguredPushProvider()) {'),
     );
     expect(focusActionFn).toContain("action !== 'promote-secondary'");
@@ -389,6 +667,10 @@ describe('Widget backend foundation contract', () => {
     expect(focusActionFn).toContain(".from('focus_sessions')");
     expect(focusActionFn).toContain(".is('ended_at', null)");
     expect(focusActionFn).toContain(".eq('updated_at', session.updated_at)");
+    expect(focusActionFn).toContain(".select('id,project_id,updated_at,deleted_at')");
+    expect(focusActionFn).toContain('if (taskRow.deleted_at || !taskRow.updated_at) return;');
+    expect(focusActionFn).toContain(".eq('updated_at', taskRow.updated_at)");
+    expect(focusActionFn).toContain(".is('deleted_at', null)");
     expect(focusActionFn).toContain("'ACTIVE_FOCUS_SESSION_NOT_FOUND'");
     expect(focusActionFn).toContain('withPrivateNoStoreHeaders(corsHeaders)');
     expect(focusReorderHelper).toContain('export function promoteSecondaryTaskToC2');

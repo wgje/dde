@@ -1,0 +1,124 @@
+{
+  "schemaVersion": 1,
+  "entries": [
+    {
+      "path": "supabase/migrations/20260411084529_connection_endpoint_tombstone_hardening.sql",
+      "category": "explicit-transaction",
+      "reason": "This migration owns BEGIN/COMMIT, so it cannot be nested inside the generated rollback dry-run wrapper.",
+      "rollbackStrategy": "Run on a disposable Supabase branch after exporting a data-safety package; restore from the export if validation fails.",
+      "requiresDataSafetyExport": true
+    },
+    {
+      "path": "supabase/migrations/20260427163000_reconcile_remote_migration_drift.sql",
+      "category": "explicit-transaction",
+      "reason": "This migration owns BEGIN/COMMIT while reconciling remote drift, so it must be dry-run in an isolated database.",
+      "rollbackStrategy": "Run on a cloned database after exporting a data-safety package; discard the clone or restore from export on failure.",
+      "requiresDataSafetyExport": true
+    },
+    {
+      "path": "supabase/migrations/20260427170000_security_hardening_compat.sql",
+      "category": "explicit-transaction",
+      "reason": "This migration owns BEGIN/COMMIT, so it cannot be wrapped by the generic rollback dry-run transaction.",
+      "rollbackStrategy": "Run on a disposable Supabase branch after exporting a data-safety package; restore from export if validation fails.",
+      "requiresDataSafetyExport": true
+    },
+    {
+      "path": "supabase/migrations/20260427171000_tasks_parking_meta_hot_index.sql",
+      "category": "out-of-transaction",
+      "reason": "CREATE INDEX CONCURRENTLY cannot run inside a transaction block.",
+      "rollbackStrategy": "Run on a disposable Supabase branch after exporting a data-safety package; drop the created index or restore from export if validation fails.",
+      "requiresDataSafetyExport": true
+    },
+    {
+      "path": "supabase/migrations/20260609020000_drop_entity_uuid_defaults.sql",
+      "category": "explicit-transaction",
+      "reason": "This migration owns BEGIN/COMMIT while rewriting user_preferences primary keys and removing legacy UUID defaults.",
+      "rollbackStrategy": "Run on a disposable Supabase branch after exporting user_preferences and dependent identity metadata; restore the export if collision preflight or identity verification fails.",
+      "requiresDataSafetyExport": true
+    },
+    {
+      "path": "supabase/migrations/20260714033000_attachment_scan_rescan_lifecycle_hardening.sql",
+      "category": "explicit-transaction",
+      "reason": "This migration owns BEGIN/COMMIT and deletes unresolved or duplicate derived scan rows while enforcing owner-scoped uniqueness.",
+      "rollbackStrategy": "Run on a disposable Supabase branch after exporting attachment_scans and task attachment metadata; restore the export if ownership backfill or deduplication validation fails.",
+      "requiresDataSafetyExport": true
+    },
+    {
+      "path": "supabase/migrations/20260714041000_user_owned_auxiliary_rows_hardening.sql",
+      "category": "explicit-transaction",
+      "reason": "This migration owns BEGIN/COMMIT, backfills deterministic Black Box ownership, and enforces non-null ownership on user-scoped auxiliary tables.",
+      "rollbackStrategy": "Run on a disposable Supabase branch after exporting black_box_entries and transcription_usage; resolve any reported NULL ownership rows explicitly before applying to production.",
+      "requiresDataSafetyExport": true
+    },
+    {
+      "path": "supabase/migrations/20260715017300_black_box_project_fk_index.sql",
+      "category": "out-of-transaction",
+      "reason": "CREATE INDEX CONCURRENTLY cannot run inside a transaction block.",
+      "rollbackStrategy": "Run on a disposable Supabase branch after exporting a data-safety package; verify pg_index.indisvalid and drop the created index concurrently if validation fails.",
+      "requiresDataSafetyExport": true
+    },
+    {
+      "path": "supabase/migrations/20260715018600_black_box_keyset_covering_index.sql",
+      "category": "out-of-transaction",
+      "reason": "CREATE INDEX CONCURRENTLY cannot run inside a transaction block.",
+      "rollbackStrategy": "Run on a disposable Supabase branch after exporting a data-safety package; if query-plan validation regresses, run DROP INDEX CONCURRENTLY IF EXISTS public.idx_black_box_entries_user_updated_id.",
+      "requiresDataSafetyExport": true
+    },
+    {
+      "path": "supabase/migrations/20260715018800_external_source_links_id_cursor_index.sql",
+      "category": "out-of-transaction",
+      "reason": "CREATE INDEX CONCURRENTLY cannot run inside a transaction block.",
+      "rollbackStrategy": "Run on a disposable Supabase branch after exporting a data-safety package; if query-plan validation regresses, run DROP INDEX CONCURRENTLY IF EXISTS public.external_source_links_user_id_cursor_idx.",
+      "requiresDataSafetyExport": true
+    },
+    {
+      "path": "supabase/migrations/20260715019100_cleanup_logs_attachment_cursor_index.sql",
+      "category": "out-of-transaction",
+      "reason": "CREATE INDEX CONCURRENTLY cannot run inside a transaction block.",
+      "rollbackStrategy": "Run on a disposable Supabase branch after exporting a data-safety package; if query-plan validation regresses, run DROP INDEX CONCURRENTLY IF EXISTS public.idx_cleanup_logs_attachment_cursor.",
+      "requiresDataSafetyExport": true
+    },
+    {
+      "path": "supabase/migrations/20260715019300_tasks_nonempty_attachments_scan_index.sql",
+      "category": "out-of-transaction",
+      "reason": "CREATE INDEX CONCURRENTLY cannot run inside a transaction block.",
+      "rollbackStrategy": "Run on a disposable Supabase branch after exporting a data-safety package; if query-plan validation regresses, run DROP INDEX CONCURRENTLY IF EXISTS public.idx_tasks_nonempty_attachments_id.",
+      "requiresDataSafetyExport": true
+    },
+    {
+      "path": "supabase/migrations/20260716000000_tasks_attachments_containment_gin_index.sql",
+      "category": "out-of-transaction",
+      "reason": "CREATE INDEX CONCURRENTLY cannot run inside a transaction block.",
+      "rollbackStrategy": "Run on a disposable Supabase branch after exporting a data-safety package; if JSONB containment query-plan validation regresses, run DROP INDEX CONCURRENTLY IF EXISTS public.idx_tasks_attachments_containment_gin.",
+      "requiresDataSafetyExport": true
+    },
+    {
+      "path": "supabase/migrations/20260716000400_tasks_project_created_id_index.sql",
+      "category": "out-of-transaction",
+      "reason": "CREATE INDEX CONCURRENTLY cannot run inside a transaction block.",
+      "rollbackStrategy": "Run on a disposable Supabase branch after exporting a data-safety package; if query-plan validation regresses, run CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_tasks_project_load ON public.tasks(project_id, stage NULLS LAST, \"order\") INCLUDE (id, title, content, parent_id, rank, status, x, y, updated_at, deleted_at, short_id) WHERE deleted_at IS NULL; then run DROP INDEX CONCURRENTLY IF EXISTS public.idx_tasks_project_created_id.",
+      "requiresDataSafetyExport": true
+    },
+    {
+      "path": "supabase/migrations/20260716000600_connection_tombstone_legacy_lookup_index.sql",
+      "category": "out-of-transaction",
+      "reason": "CREATE INDEX CONCURRENTLY cannot run inside a transaction block.",
+      "rollbackStrategy": "Run on a disposable Supabase branch after exporting a data-safety package; if legacy endpointless lookup query-plan validation regresses, run DROP INDEX CONCURRENTLY IF EXISTS public.idx_connection_tombstones_legacy_project_deleted.",
+      "requiresDataSafetyExport": true
+    },
+    {
+      "path": "supabase/migrations/20260716000700_projects_owner_id_active_index.sql",
+      "category": "out-of-transaction",
+      "reason": "CREATE INDEX CONCURRENTLY cannot run inside a transaction block.",
+      "rollbackStrategy": "Run on a disposable Supabase branch after exporting a data-safety package; if immutable project id keyset query-plan validation regresses, run DROP INDEX CONCURRENTLY IF EXISTS public.idx_projects_owner_id_active.",
+      "requiresDataSafetyExport": true
+    },
+    {
+      "path": "supabase/migrations/20260716001100_foreign_key_index_coverage.sql",
+      "category": "out-of-transaction",
+      "reason": "CREATE INDEX CONCURRENTLY cannot run inside a transaction block.",
+      "rollbackStrategy": "Run on a disposable Supabase branch after exporting a data-safety package; if foreign-key cascade or storage validation regresses, run DROP INDEX CONCURRENTLY IF EXISTS public.idx_task_tombstones_deleted_by; DROP INDEX CONCURRENTLY IF EXISTS public.idx_connection_tombstones_deleted_by; DROP INDEX CONCURRENTLY IF EXISTS public.idx_routine_completions_routine_id; DROP INDEX CONCURRENTLY IF EXISTS public.idx_routine_completion_events_routine_id.",
+      "requiresDataSafetyExport": true
+    }
+  ]
+}

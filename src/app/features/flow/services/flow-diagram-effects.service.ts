@@ -3,6 +3,7 @@ import { ProjectStateService } from '../../../../services/project-state.service'
 import { UiStateService } from '../../../../services/ui-state.service';
 import { PreferenceService } from '../../../../services/preference.service';
 import { FlowDiagramService } from './flow-diagram.service';
+import type { FlowRelationDisplayMode } from './flow-diagram-config.service';
 import { FlowCommandService } from './flow-command.service';
 import { LoggerService } from '../../../../services/logger.service';
 import { Task } from '../../../../models';
@@ -49,11 +50,15 @@ export class FlowDiagramEffectsService {
     this.zone.runOutsideAngular(() => {
       this.pendingRafId = requestAnimationFrame(() => {
         this.pendingRafId = null;
-        if (isDestroyed() || !this.diagram.isInitialized) return;
+        if (isDestroyed() || !this.diagram.isInitialized) {
+          this.diagramUpdatePending = false;
+          return;
+        }
         // 使用 untracked 避免在 rAF 回调中读取 signal 时建立新的依赖
         const currentTasks = untracked(() => this.projectState.tasks());
-        this.diagram.updateDiagram(currentTasks, this.diagramUpdatePending);
+        const forceUpdatePending = this.diagramUpdatePending;
         this.diagramUpdatePending = false;
+        this.diagram.updateDiagram(currentTasks, forceUpdatePending);
       });
     });
   }
@@ -67,6 +72,7 @@ export class FlowDiagramEffectsService {
       cancelAnimationFrame(this.pendingRafId);
       this.pendingRafId = null;
     }
+    this.diagramUpdatePending = false;
   }
 
   /**
@@ -79,8 +85,9 @@ export class FlowDiagramEffectsService {
     scheduleRafDiagramUpdate: (tasks: Task[], forceRefresh: boolean) => void
   ): EffectRef {
     return effect(() => {
+      const activeProjectId = this.projectState.activeProjectId();
       const tasks = this.projectState.tasks();
-      if (this.diagram.isInitialized) {
+      if (activeProjectId !== null && this.diagram.isInitialized) {
         scheduleRafDiagramUpdate(tasks, false);
       }
     }, { injector });
@@ -93,6 +100,7 @@ export class FlowDiagramEffectsService {
   // 【P2-26 修复】保存上次连接签名，只在真正变化时才触发更新
   private lastConnectionSignature = '';
   private lastExternalSourceLinkSignature = '';
+  private lastHandledRetryCommandCount = 0;
   
   createConnectionsEffect(
     injector: Injector,
@@ -197,12 +205,15 @@ export class FlowDiagramEffectsService {
     executeCenterOnNode: (taskId: string, openDetail: boolean) => void
   ): EffectRef {
     return effect(() => {
+      const isViewReady = this.flowCommand.isViewReady();
       const cmd = this.flowCommand.centerNodeCommand();
-      if (cmd) {
+      if (isViewReady && cmd) {
         untracked(() => {
           if (this.diagram.isInitialized) {
-            executeCenterOnNode(cmd.taskId, cmd.openDetail);
-            this.flowCommand.clearCenterCommand();
+            const claim = this.flowCommand.claimPendingCenterCommand();
+            if (!claim) return;
+            executeCenterOnNode(claim.payload.taskId, claim.payload.openDetail);
+            this.flowCommand.acknowledgePendingCenterCommand(claim);
           }
         });
       }
@@ -218,11 +229,30 @@ export class FlowDiagramEffectsService {
   ): EffectRef {
     return effect(() => {
       const count = this.flowCommand.retryDiagramCommand();
-      if (count > 0) {
+      if (count > this.lastHandledRetryCommandCount) {
+        this.lastHandledRetryCommandCount = count;
         untracked(() => {
           retryInitDiagram();
         });
       }
+    }, { injector });
+  }
+
+  /**
+   * 创建关系降噪显示模式 effect
+   * 将显示模式（及 focused 模式下的当前选中任务）同步给图表服务。
+   * focused 模式持续跟随 selectedTaskId 变化，使“仅显示当前任务关联”始终对准当前选中节点。
+   */
+  createRelationDisplayEffect(
+    injector: Injector,
+    relationDisplayMode: Signal<FlowRelationDisplayMode>,
+    selectedTaskId: Signal<string | null>
+  ): EffectRef {
+    return effect(() => {
+      const mode = relationDisplayMode();
+      const focusedTaskId = mode === 'focused' ? selectedTaskId() : null;
+      // 用 untracked 包裹 diagram 调用，避免经 updateDiagram 间接订阅 tasks() 而被反复触发
+      untracked(() => this.diagram.setRelationDisplayMode(mode, focusedTaskId));
     }, { injector });
   }
 }

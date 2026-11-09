@@ -30,6 +30,7 @@ export class FlowDiagramRetryService {
 
   /** Idle 初始化句柄（用于取消） */
   private idleInitHandle: number | null = null;
+  private diagramInitGeneration = 0;
 
   /**
    * 重置内部状态
@@ -38,10 +39,8 @@ export class FlowDiagramRetryService {
     this.retryCount = 0;
     this.isRetrying.set(false);
     this.hasReachedRetryLimit.set(false);
-    if (this.idleInitHandle !== null && typeof cancelIdleCallback !== 'undefined') {
-      cancelIdleCallback(this.idleInitHandle);
-      this.idleInitHandle = null;
-    }
+    this.diagramInitGeneration += 1;
+    this.cancelPendingIdleInit();
   }
 
   /**
@@ -58,7 +57,10 @@ export class FlowDiagramRetryService {
     scheduleTimer: (callback: () => void, delay: number) => void,
     isDestroyed: () => boolean
   ): void {
+    this.cancelPendingIdleInit();
+    const generation = ++this.diagramInitGeneration;
     const startInit = () => {
+      if (generation !== this.diagramInitGeneration) return;
       if (isDestroyed()) return;
       initDiagram();
       if (this.diagram.isInitialized) {
@@ -69,6 +71,7 @@ export class FlowDiagramRetryService {
     // 使用 requestIdleCallback 延迟重任务，避免阻塞 LCP
     if (typeof requestIdleCallback !== 'undefined') {
       this.idleInitHandle = requestIdleCallback(() => {
+        if (generation !== this.diagramInitGeneration) return;
         this.idleInitHandle = null;
         this.zone.run(() => startInit());
       }, { timeout: 5000 });
@@ -204,9 +207,21 @@ export class FlowDiagramRetryService {
    * 清除 idle 初始化句柄
    */
   clearIdleInitHandle(): void {
-    if (this.idleInitHandle !== null && typeof cancelIdleCallback !== 'undefined') {
-      cancelIdleCallback(this.idleInitHandle);
-      this.idleInitHandle = null;
+    this.diagramInitGeneration += 1;
+    this.cancelPendingIdleInit();
+  }
+
+  private cancelPendingIdleInit(): void {
+    const idleInitHandle = this.idleInitHandle;
+    this.idleInitHandle = null;
+    if (idleInitHandle === null || typeof cancelIdleCallback === 'undefined') {
+      return;
+    }
+
+    try {
+      cancelIdleCallback(idleInitHandle);
+    } catch {
+      // Idle cleanup must not block newer diagram initialization scheduling.
     }
   }
 }

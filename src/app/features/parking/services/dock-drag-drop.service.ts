@@ -37,8 +37,11 @@ export class DockDragDropService implements OnDestroy {
   draggingDockTaskId: string | null = null;
   touchStartY = 0;
   touchTaskId: string | null = null;
+  private touchPointerId: number | null = null;
   private dockRailDragDepth = 0;
   private dropZoneDragDepth = 0;
+  private externalDropCommitToken = 0;
+  private destroyed = false;
 
   // ── Timers ──────────────────────────────────────────────────
   private readonly longPress = new TimerHandle();
@@ -63,6 +66,9 @@ export class DockDragDropService implements OnDestroy {
 
   // ── Lifecycle ───────────────────────────────────────────────
   ngOnDestroy(): void {
+    this.destroyed = true;
+    this.externalDropCommitToken += 1;
+    this.clearTransientDragState();
     this.longPress.cancel();
     this.dropRejectReset.cancel();
     this.semicircleDragExpand.cancel();
@@ -71,7 +77,7 @@ export class DockDragDropService implements OnDestroy {
 
   // ── Dock card reorder handlers ──────────────────────────────
   onDockCardDragStart(event: DragEvent, taskId: string): void {
-    if (!this.canReorderDockCards()) return;
+    if (!this.canHandleDockReorder()) return;
     this.draggingDockTaskId = taskId;
     if (!event.dataTransfer) return;
     event.dataTransfer.effectAllowed = 'move';
@@ -80,7 +86,7 @@ export class DockDragDropService implements OnDestroy {
   }
 
   onDockCardDragOver(event: DragEvent, targetTaskId: string): void {
-    if (!this.canReorderDockCards()) return;
+    if (!this.canHandleDockReorder()) return;
     if (!this.hasDockReorderType(event.dataTransfer)) return;
     if (this.draggingDockTaskId === targetTaskId) return;
     event.preventDefault();
@@ -90,39 +96,41 @@ export class DockDragDropService implements OnDestroy {
   }
 
   onDockCardDrop(event: DragEvent, targetTaskId: string): void {
-    if (!this.canReorderDockCards()) return;
+    if (!this.canHandleDockReorder()) return;
     const sourceTaskId = this.extractDockReorderTaskId(event.dataTransfer);
     if (!sourceTaskId || sourceTaskId === targetTaskId) return;
     event.preventDefault();
-    this.engine.reorderDockEntries(sourceTaskId, targetTaskId);
+    void this.engine.reorderDockEntries(sourceTaskId, targetTaskId);
     this.draggingDockTaskId = null;
   }
 
   onDockCardDragEnd(): void {
     this.draggingDockTaskId = null;
+    this.clearTransientDragState();
   }
 
   // ── Touch / wheel handlers ──────────────────────────────────
   onCardWheel(event: WheelEvent, taskId: string): void {
-    if (!this.canReorderDockCards()) return;
+    if (!this.canHandleDockReorder()) return;
     if (!event.altKey) return;
     event.preventDefault();
     this.engine.toggleLoad(taskId, event.deltaY > 0 ? 'down' : 'up');
   }
 
   onTouchStart(event: TouchEvent, taskId: string): void {
-    if (!this.canReorderDockCards()) return;
+    if (!this.canHandleDockReorder()) return;
     this.startTouchLikeGesture(event.touches?.[0]?.clientY ?? 0, taskId);
   }
 
   onTouchMove(event: TouchEvent, _taskId?: string): void {
-    if (!this.canReorderDockCards()) return;
+    if (!this.canHandleDockReorder()) return;
     this.moveTouchLikeGesture(event.touches?.[0]?.clientY ?? 0);
   }
 
   onPointerStart(event: PointerEvent, taskId: string): void {
     if (event.pointerType !== 'touch') return;
-    if (!this.canReorderDockCards()) return;
+    if (!this.canHandleDockReorder()) return;
+    this.touchPointerId = event.pointerId;
     const sourceElement = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
     try {
       sourceElement?.setPointerCapture(event.pointerId);
@@ -134,12 +142,14 @@ export class DockDragDropService implements OnDestroy {
 
   onPointerMove(event: PointerEvent): void {
     if (event.pointerType !== 'touch') return;
-    if (!this.canReorderDockCards()) return;
+    if (this.touchPointerId !== null && event.pointerId !== this.touchPointerId) return;
+    if (!this.canHandleDockReorder()) return;
     this.moveTouchLikeGesture(event.clientY);
   }
 
   onPointerEnd(event: PointerEvent): void {
     if (event.pointerType !== 'touch') return;
+    if (this.touchPointerId !== null && event.pointerId !== this.touchPointerId) return;
     const sourceElement = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
     try {
       sourceElement?.releasePointerCapture(event.pointerId);
@@ -158,7 +168,14 @@ export class DockDragDropService implements OnDestroy {
   }
 
   private moveTouchLikeGesture(clientY: number): void {
-    if (!this.touchTaskId) return;
+    if (!this.touchTaskId) {
+      const preLongPressDeltaY = clientY - this.touchStartY;
+      if (Math.abs(preLongPressDeltaY) > 30) {
+        this.longPress.cancel();
+      }
+      return;
+    }
+
     const deltaY = clientY - this.touchStartY;
     if (Math.abs(deltaY) > 30) {
       this.engine.toggleLoad(this.touchTaskId, deltaY > 0 ? 'down' : 'up');
@@ -169,11 +186,13 @@ export class DockDragDropService implements OnDestroy {
   onTouchEnd(): void {
     this.longPress.cancel();
     this.touchTaskId = null;
+    this.touchPointerId = null;
+    this.clearTransientDragState();
   }
 
   // ── Dock rail drag handlers ─────────────────────────────────
   onDockRailDragOver(event: DragEvent): void {
-    if (!this.canAcceptExternalDrop()) return;
+    if (!this.canHandleExternalDrop()) return;
     if (this.hasDockReorderType(event.dataTransfer)) {
       event.preventDefault();
       this.dropState.set('idle');
@@ -193,7 +212,7 @@ export class DockDragDropService implements OnDestroy {
   }
 
   onDockRailDragEnter(event: DragEvent): void {
-    if (!this.canAcceptExternalDrop()) return;
+    if (!this.canHandleExternalDrop()) return;
     event.preventDefault();
     this.dockRailDragDepth += 1;
     if (this.hasDockReorderType(event.dataTransfer)) {
@@ -210,7 +229,10 @@ export class DockDragDropService implements OnDestroy {
   }
 
   onDockRailDragLeave(): void {
-    if (!this.canAcceptExternalDrop()) return;
+    if (!this.canHandleExternalDrop()) {
+      this.clearTransientDragState();
+      return;
+    }
     this.dockRailDragDepth = Math.max(0, this.dockRailDragDepth - 1);
     if (this.dockRailDragDepth > 0) return;
     if (this.dropState() !== 'reject') {
@@ -221,7 +243,7 @@ export class DockDragDropService implements OnDestroy {
 
   // ── Drop zone handlers ──────────────────────────────────────
   onDropZoneDragEnter(event: DragEvent): void {
-    if (!this.canAcceptExternalDrop()) return;
+    if (!this.canHandleExternalDrop()) return;
     event.preventDefault();
     this.dropZoneDragDepth += 1;
     if (!hasTaskDragTypes(event.dataTransfer)) {
@@ -234,7 +256,7 @@ export class DockDragDropService implements OnDestroy {
   }
 
   onDropZoneDragOver(event: DragEvent): void {
-    if (!this.canAcceptExternalDrop()) return;
+    if (!this.canHandleExternalDrop()) return;
     event.preventDefault();
     if (!hasTaskDragTypes(event.dataTransfer)) {
       if (this.dropState() === 'isOver') {
@@ -249,7 +271,10 @@ export class DockDragDropService implements OnDestroy {
   }
 
   onDropZoneDragLeave(): void {
-    if (!this.canAcceptExternalDrop()) return;
+    if (!this.canHandleExternalDrop()) {
+      this.clearTransientDragState();
+      return;
+    }
     this.dropZoneDragDepth = Math.max(0, this.dropZoneDragDepth - 1);
     if (this.dropZoneDragDepth > 0) return;
     if (this.dropState() === 'isOver') {
@@ -259,7 +284,10 @@ export class DockDragDropService implements OnDestroy {
   }
 
   onDrop(event: DragEvent, markRecentlyDocked: (taskId: string) => void): void {
-    if (!this.canAcceptExternalDrop()) return;
+    if (!this.canHandleExternalDrop()) {
+      this.clearTransientDragState();
+      return;
+    }
     this.dockRailDragDepth = 0;
     this.dropZoneDragDepth = 0;
     event.preventDefault();
@@ -280,24 +308,39 @@ export class DockDragDropService implements OnDestroy {
       return;
     }
     this.dropState.set('idle');
-    const docked = this.engine.dockTaskFromExternalDrag(candidate.taskId, candidate.sourceSection);
-    if (!docked) return;
-    markRecentlyDocked(candidate.taskId);
-    this.scheduleSemicircleAutoCollapse();
+    const commitToken = ++this.externalDropCommitToken;
+    const dockCommit = this.engine.dockTaskFromExternalDrag(candidate.taskId, candidate.sourceSection);
+    if (typeof dockCommit === 'boolean') {
+      this.handleExternalDropCommitResult(dockCommit, commitToken, candidate.taskId, markRecentlyDocked);
+      return;
+    }
+
+    void Promise.resolve(dockCommit)
+      .then(docked => {
+        this.handleExternalDropCommitResult(docked, commitToken, candidate.taskId, markRecentlyDocked);
+      })
+      .catch(() => {
+        if (!this.isActiveExternalDropCommit(commitToken)) return;
+        this.triggerDropReject();
+      });
   }
 
   // ── Semicircle expand / collapse scheduling (public) ────────
   scheduleSemicircleDragExpand(): void {
+    if (this.destroyed) return;
     if (this.semicircleExpanded()) return;
     if (this.semicircleDragExpand.active) return;
     this.semicircleDragExpand.schedule(() => {
+      if (!this.canHandleExternalDrop()) return;
+      if (this.destroyed) return;
       this.semicircleHoverExpanded.set(true);
-      this.engine.setDockExpanded(true, { persistPreference: false });
+      void this.engine.setDockExpanded(true, { persistPreference: false });
       this.scheduleSemicircleAutoCollapse();
     }, PARKING_CONFIG.DOCK_SEMICIRCLE_DRAG_EXPAND_DELAY_MS);
   }
 
   scheduleSemicircleAutoCollapse(): void {
+    if (this.destroyed) return;
     this.semicircleDragExpand.cancel();
     this.semicircleAutoCollapse.cancel();
     if (this.engine.dockExpanded()) return;
@@ -340,11 +383,19 @@ export class DockDragDropService implements OnDestroy {
   }
 
   private canDropCandidate(candidate: DockDropCandidate): boolean {
-    if (!this.canAcceptExternalDrop()) return false;
+    if (!this.canHandleExternalDrop()) return false;
     const alreadyDocked = this.engine.dockedEntries().some(entry => entry.taskId === candidate.taskId);
     if (alreadyDocked) return false;
     const task = this.taskStore.getTask(candidate.taskId);
     return Boolean(task && task.status === 'active');
+  }
+
+  private canHandleDockReorder(): boolean {
+    return !this.destroyed && this.canReorderDockCards();
+  }
+
+  private canHandleExternalDrop(): boolean {
+    return !this.destroyed && this.canAcceptExternalDrop();
   }
 
   private hasDockReorderType(dataTransfer: DataTransfer | null): boolean {
@@ -353,6 +404,7 @@ export class DockDragDropService implements OnDestroy {
   }
 
   private triggerDropReject(): void {
+    if (this.destroyed) return;
     this.dockRailDragDepth = 0;
     this.dropZoneDragDepth = 0;
     this.dropState.set('reject');
@@ -360,5 +412,33 @@ export class DockDragDropService implements OnDestroy {
     this.dropRejectReset.schedule(() => {
       this.dropState.set('idle');
     }, PARKING_CONFIG.DOCK_DROP_REJECT_RESET_MS);
+  }
+
+  private isActiveExternalDropCommit(commitToken: number): boolean {
+    return !this.destroyed && commitToken === this.externalDropCommitToken;
+  }
+
+  private handleExternalDropCommitResult(
+    docked: boolean,
+    commitToken: number,
+    taskId: string,
+    markRecentlyDocked: (taskId: string) => void,
+  ): void {
+    if (!this.isActiveExternalDropCommit(commitToken)) return;
+    if (!docked) {
+      this.triggerDropReject();
+      return;
+    }
+    markRecentlyDocked(taskId);
+    this.scheduleSemicircleAutoCollapse();
+  }
+
+  private clearTransientDragState(): void {
+    this.dockRailDragDepth = 0;
+    this.dropZoneDragDepth = 0;
+    if (this.dropState() !== 'reject') {
+      this.dropState.set('idle');
+    }
+    this.semicircleDragExpand.cancel();
   }
 }

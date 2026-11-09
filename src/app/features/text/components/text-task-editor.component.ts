@@ -1,4 +1,4 @@
-import { Component, inject, input, output, signal, computed, ChangeDetectionStrategy, ChangeDetectorRef, ElementRef, HostListener, effect, OnDestroy, viewChild } from '@angular/core';
+import { Component, Injector, inject, input, output, signal, computed, ChangeDetectionStrategy, ChangeDetectorRef, ElementRef, HostListener, effect, OnDestroy, viewChild, viewChildren } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
 import { ChangeTrackerService } from '../../../../services/change-tracker.service';
@@ -7,12 +7,24 @@ import { ProjectStateService, TaskConnectionInfo } from '../../../../services/pr
 import { UndoService, type UndoAppliedReplay } from '../../../../services/undo.service';
 import { AttachmentService } from '../../../../services/attachment.service';
 import { ToastService } from '../../../../services/toast.service';
-import { Task, Attachment } from '../../../../models';
+import { Task, Attachment, type TaskAttentionDraftItem } from '../../../../models';
 import { SafeMarkdownPipe } from '../../../shared/pipes/safe-markdown.pipe';
 import { TextTaskConnectionsComponent } from './text-task-connections.component';
-import { toggleMarkdownTodo, getTodoIndexFromClick, handleMarkdownLinkAction } from '../../../../utils/markdown';
 import { clearActiveTextSelection, hasActiveTextSelection, isInteractiveSelectionTarget } from '../../../../utils/text-selection';
 import { KnowledgeAnchorComponent } from '../../../shared/components/knowledge-anchor/knowledge-anchor.component';
+import { parseOptionalMinutes } from '../../parking/utils/dock-format';
+import {
+  formatAttachmentFileSize,
+  getAttachmentFileExtension,
+} from './text-task-editor.helpers';
+import { TextTaskEditorAttachmentController } from './text-task-editor-attachment.controller';
+import {
+  TextTaskEditorDraftPersistenceController,
+  type TextTaskEditorDraftOwner,
+} from './text-task-editor-draft-persistence.controller';
+import { TextTaskEditorFocusController } from './text-task-editor-focus.controller';
+import { TextTaskEditorPreviewController } from './text-task-editor-preview.controller';
+import { TextTaskEditorSidecarDraftController } from './text-task-editor-sidecar-draft.controller';
 
 /**
  * 任务编辑器组件（展开态）
@@ -29,347 +41,23 @@ import { KnowledgeAnchorComponent } from '../../../shared/components/knowledge-a
   standalone: true,
   imports: [CommonModule, SafeMarkdownPipe, TextTaskConnectionsComponent, KnowledgeAnchorComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
-  template: `
-    <div class="animate-collapse-open"
-         (click)="$event.stopPropagation()"
-         [ngClass]="{'mt-2 flex gap-3': !isMobile(), 'mt-1.5': isMobile()}">
-
-      <!-- 主编辑区域-->
-      <div [ngClass]="{'flex-1 min-w-0 space-y-2': !isMobile(), 'space-y-1.5': isMobile()}">
-
-        @if (isPreview()) {
-          <button
-            type="button"
-            data-testid="task-title-preview"
-            data-title-preview-trigger
-            (click)="enterEditMode('title', $event); $event.stopPropagation()"
-            class="block w-full rounded-md text-left font-medium text-retro-dark dark:text-stone-200 leading-snug transition-colors hover:bg-stone-100/70 dark:hover:bg-stone-800/60 line-clamp-2"
-            [ngClass]="{'text-sm px-1 py-0.5': !isMobile(), 'text-xs px-0.5 py-0.5': isMobile()}"
-            title="点击编辑标题">
-            {{ previewTitle() }}
-          </button>
-        } @else {
-          <input
-            #titleInput
-            data-testid="task-title-input"
-            data-title-input
-            type="text"
-            [value]="localTitle()"
-            (input)="onTitleInput(titleInput.value)"
-            (focus)="onInputFocus('title')"
-            (blur)="onInputBlur('title')"
-            (compositionstart)="onCompositionStart('title')"
-            (compositionend)="onCompositionEnd('title', titleInput.value)"
-            (mousedown)="isSelecting = true"
-            (mouseup)="isSelecting = false"
-            spellcheck="false"
-            class="w-full font-medium text-retro-dark dark:text-stone-200 border rounded-lg focus:ring-1 focus:ring-stone-400 dark:focus:ring-stone-500 focus:border-stone-400 dark:focus:border-stone-500 outline-none touch-manipulation transition-colors"
-            [ngClass]="{
-              'text-sm p-2': !isMobile(),
-              'text-xs p-1.5': isMobile(),
-              'bg-white dark:bg-stone-700 border-stone-200 dark:border-stone-600': !isPreview()
-            }"
-            placeholder="任务名称...">
-        }
-
-        <!-- 内容编辑/预览 -->
-        <div class="relative">
-          <!-- 预览/编辑切换按钮 -->
-          <div class="absolute top-1.5 right-1.5 z-10 flex gap-1">
-            <button
-              (click)="onPreviewToggleButtonClick($event)"
-              class="px-1.5 py-0.5 text-[9px] rounded transition-[background-color,color,opacity] opacity-70 hover:opacity-100"
-              [ngClass]="{
-                'bg-indigo-500 dark:bg-indigo-600 text-white': isPreview(),
-                'bg-stone-200 dark:bg-stone-600 text-stone-500 dark:text-stone-300 hover:bg-stone-300 dark:hover:bg-stone-500': !isPreview()
-              }"
-              title="切换预览/编辑">
-              {{ isPreview() ? '编辑' : '预览' }}
-            </button>
-          </div>
-
-          @if (isPreview()) {
-            <!-- Markdown 预览 - 点击切换到编辑模式，点击 checkbox 切换待办状态 -->
-            @if (hasPreviewContent()) {
-              <div
-                data-testid="task-content"
-                (click)="onPreviewClick($event)"
-                class="w-full rounded-lg border border-transparent overflow-hidden markdown-preview markdown-preview-adaptive cursor-pointer transition-colors hover:bg-stone-50/70 dark:hover:bg-stone-800/50"
-                [ngClass]="{'max-h-20 px-1 py-0.5 text-xs': !isMobile(), 'max-h-16 px-0.5 py-0.5 text-[11px]': isMobile()}"
-                [innerHTML]="localContent() | safeMarkdown"
-                title="点击编辑">
-              </div>
-            } @else {
-              <button
-                type="button"
-                data-testid="task-content-empty"
-                (click)="enterEditMode('content', $event); $event.stopPropagation()"
-                class="w-full min-h-[1.25rem] rounded-md text-left text-stone-400 dark:text-stone-500 italic transition-colors hover:bg-stone-50/70 dark:hover:bg-stone-800/50"
-                [ngClass]="{'px-1 py-0.5 text-xs': !isMobile(), 'px-0.5 py-0.5 text-[11px]': isMobile()}"
-                title="点击输入内容">
-                点击输入内容...
-              </button>
-            }
-          } @else {
-            <!-- Markdown 编辑 -->
-            <textarea
-              #contentInput
-              data-testid="task-content-editor"
-              [value]="localContent()"
-              (input)="onContentInput(contentInput.value)"
-              (focus)="onInputFocus('content')"
-              (blur)="onInputBlur('content')"
-              (compositionstart)="onCompositionStart('content')"
-              (compositionend)="onCompositionEnd('content', contentInput.value)"
-              (mousedown)="isSelecting = true"
-              (mouseup)="isSelecting = false"
-              spellcheck="false"
-              class="w-full border border-stone-200 dark:border-stone-600 rounded-lg focus:ring-1 focus:ring-stone-400 dark:focus:ring-stone-500 focus:border-stone-400 dark:focus:border-stone-500 outline-none font-mono text-stone-600 dark:text-stone-400 bg-white dark:bg-stone-700 resize-none touch-manipulation"
-              [ngClass]="{'h-24 text-xs p-2 pr-14': !isMobile(), 'h-28 text-[11px] p-2 pr-14': isMobile()}"
-              placeholder="输入 Markdown 内容..."></textarea>
-          }
-        </div>
-
-        <app-knowledge-anchor
-          [taskId]="task().id"
-          [isMobile]="isMobile()"
-          [editable]="!isPreview()"
-          [manageable]="isPreview()"
-          [compact]="isPreview()">
-        </app-knowledge-anchor>
-
-        <!-- 快速待办输入 - 仅在编辑模式下显示 -->
-        @if (!isPreview()) {
-          <div class="flex items-center gap-1 bg-retro-rust/5 dark:bg-retro-rust/10 border border-retro-rust/20 dark:border-retro-rust/30 rounded-lg overflow-hidden"
-               [ngClass]="{'p-1': !isMobile(), 'p-0.5': isMobile()}">
-            <span class="text-retro-rust flex-shrink-0"
-                  [ngClass]="{'text-xs pl-2': !isMobile(), 'text-[10px] pl-1.5': isMobile()}">☰</span>
-            <input
-              #quickTodoInput
-              type="text"
-              (keydown.enter)="addQuickTodo(quickTodoInput)"
-              (focus)="onInputFocus('todo')"
-              (blur)="onInputBlur('todo')"
-              (mousedown)="isSelecting = true"
-              (mouseup)="isSelecting = false"
-              spellcheck="false"
-              class="flex-1 bg-transparent border-none outline-none text-stone-600 dark:text-stone-400 placeholder-stone-400 dark:placeholder-stone-500"
-              [ngClass]="{'text-xs py-1.5 px-2': !isMobile(), 'text-[11px] py-1 px-1.5': isMobile()}"
-              placeholder="输入待办内容，按回车添加...">
-            <button
-              (click)="addQuickTodo(quickTodoInput)"
-              class="flex-shrink-0 bg-retro-rust/10 hover:bg-retro-rust text-retro-rust hover:text-white rounded transition-colors flex items-center justify-center"
-              [ngClass]="{'p-1.5 mr-0.5': !isMobile(), 'p-1 mr-0.5': isMobile()}"
-              title="添加待办">
-              <svg [ngClass]="{'w-3.5 h-3.5': !isMobile(), 'w-3 h-3': isMobile()}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-                <line x1="12" y1="5" x2="12" y2="19"/>
-                <line x1="5" y1="12" x2="19" y2="12"/>
-              </svg>
-            </button>
-          </div>
-        }
-
-        @if (!isPreview()) {
-          <div class="grid grid-cols-3 gap-2">
-            <input
-              type="number"
-              #expectedMinutesInput
-              min="1"
-              [value]="localExpectedMinutes()"
-              (input)="onExpectedMinutesChange(expectedMinutesInput.value)"
-              class="w-full text-[11px] px-2 py-1.5 rounded border border-stone-200 dark:border-stone-600 bg-white dark:bg-stone-700 text-stone-700 dark:text-stone-300"
-              placeholder="预计(min)">
-            <select
-              #cognitiveLoadSelect
-              [value]="localCognitiveLoad()"
-              (change)="onCognitiveLoadChange(cognitiveLoadSelect.value)"
-              class="w-full text-[11px] px-2 py-1.5 rounded border border-stone-200 dark:border-stone-600 bg-white dark:bg-stone-700 text-stone-700 dark:text-stone-300">
-              <option value="">负荷未设</option>
-              <option value="low">低负荷</option>
-              <option value="high">高负荷</option>
-            </select>
-            <input
-              type="number"
-              #waitMinutesInput
-              min="1"
-              [value]="localWaitMinutes()"
-              (input)="onWaitMinutesChange(waitMinutesInput.value)"
-              class="w-full text-[11px] px-2 py-1.5 rounded border border-stone-200 dark:border-stone-600 bg-white dark:bg-stone-700 text-stone-700 dark:text-stone-300"
-              placeholder="等待(min)">
-          </div>
-        }
-
-        <!-- 桌面端：附件管理独立显示 - 暂时隐藏 -->
-        <!-- @if (!isMobile() && userId() && projectId()) {
-          <app-attachment-manager
-            [userId]="userId()"
-            [projectId]="projectId()"
-            [taskId]="task().id"
-            [currentAttachments]="task().attachments"
-            [compact]="false"
-            (attachmentsChange)="onAttachmentsChange($event)"
-            (error)="attachmentError.emit($event)">
-          </app-attachment-manager>
-        } -->
-
-        <!-- 操作按钮 - 仅在编辑模式下显示 -->
-        @if (!isPreview()) {
-          <div class="flex flex-wrap border-t border-stone-100 dark:border-stone-700"
-               [ngClass]="{'gap-2 pt-2': !isMobile(), 'gap-1.5 pt-1.5': isMobile()}">
-            <button
-              (click)="addSibling.emit()"
-              class="flex-1 bg-retro-teal/10 hover:bg-retro-teal text-retro-teal hover:text-white border border-retro-teal/30 font-medium rounded-md flex items-center justify-center transition-colors"
-              [ngClass]="{'px-2 py-1 text-xs gap-1': !isMobile(), 'px-1.5 py-0.5 text-[10px] gap-0.5': isMobile()}"
-              title="添加同级">
-              <svg [ngClass]="{'w-3 h-3': !isMobile(), 'w-2.5 h-2.5': isMobile()}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <line x1="12" y1="5" x2="12" y2="19"/>
-                <line x1="5" y1="12" x2="19" y2="12"/>
-              </svg>
-              同级
-            </button>
-            <button
-              (click)="addChild.emit()"
-              data-testid="add-child-task-btn"
-              class="flex-1 bg-retro-rust/10 hover:bg-retro-rust text-retro-rust hover:text-white border border-retro-rust/30 font-medium rounded-md flex items-center justify-center transition-colors"
-              [ngClass]="{'px-2 py-1 text-xs gap-1': !isMobile(), 'px-1.5 py-0.5 text-[10px] gap-0.5': isMobile()}"
-              title="添加下级">
-              <svg [ngClass]="{'w-3 h-3': !isMobile(), 'w-2.5 h-2.5': isMobile()}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <polyline points="15 10 20 15 15 20"/>
-                <path d="M4 4v7a4 4 0 0 0 4 4h12"/>
-              </svg>
-              下级
-            </button>
-            <!-- 移动端：附件按钮放在同一行 - 暂时隐藏 -->
-            <!-- @if (isMobile() && userId() && projectId()) {
-              <label
-                class="flex-1 cursor-pointer text-[10px] px-1.5 py-0.5 bg-stone-50 hover:bg-stone-100 text-stone-500 hover:text-stone-700 rounded-md border border-stone-200 transition-colors flex items-center justify-center gap-0.5"
-                [class.opacity-50]="isUploading()"
-                [class.pointer-events-none]="isUploading()">
-                <svg class="w-2.5 h-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                  <path stroke-linecap="round" stroke-linejoin="round" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
-                </svg>
-                @if (isUploading()) {
-                  上传                } @else {
-                  附件
-                }
-                @if (task().attachments && task().attachments.length > 0) {
-                  <span class="text-[8px] bg-indigo-100 text-indigo-600 px-0.5 rounded">{{ task().attachments.length }}</span>
-                }
-                <input
-                  type="file"
-                  class="hidden"
-                  multiple
-                  accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.txt,.md"
-                  (change)="onMobileFileSelect($event)"
-                  [disabled]="isUploading()">
-              </label>
-            } -->
-            <button
-              (click)="parkTask.emit()"
-              class="flex-1 font-medium rounded-md flex items-center justify-center transition-colors duration-200"
-              [ngClass]="{
-                'px-2 py-1 text-xs gap-1': !isMobile(), 
-                'px-1.5 py-0.5 text-[10px] gap-0.5': isMobile(),
-                'bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300 border border-amber-300 dark:border-amber-600': task().parkingMeta?.state === 'parked',
-                'bg-amber-50 dark:bg-amber-900/20 hover:bg-amber-500 text-amber-600 dark:text-amber-400 hover:text-white border border-amber-200 dark:border-amber-700 hover:border-amber-500': task().parkingMeta?.state !== 'parked'
-              }"
-              [title]="task().parkingMeta?.state === 'parked' ? '任务已在停泊坞中' : '停泊任务，稍后处理'">
-              <svg [ngClass]="{'w-3 h-3': !isMobile(), 'w-2.5 h-2.5': isMobile()}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
-                <polyline points="17 21 17 13 7 13 7 21"/>
-              </svg>
-              {{ task().parkingMeta?.state === 'parked' ? '已停泊' : '停泊' }}
-            </button>
-            <button
-              (click)="deleteTask.emit()"
-              data-testid="delete-task-btn"
-              class="bg-stone-100 dark:bg-stone-700 hover:bg-red-500 text-stone-400 dark:text-stone-500 hover:text-white border border-stone-200 dark:border-stone-600 hover:border-red-500 font-medium rounded-md flex items-center justify-center transition-colors"
-              [ngClass]="{'px-2 py-1 text-xs': !isMobile(), 'px-1.5 py-0.5 text-[10px]': isMobile()}"
-              title="删除任务">
-              <svg [ngClass]="{'w-3 h-3': !isMobile(), 'w-2.5 h-2.5': isMobile()}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <polyline points="3 6 5 6 21 6"/>
-                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
-              </svg>
-            </button>
-          </div>
-
-          <!-- 移动端：附件列表折叠区（如果有附件）- 暂时隐藏 -->
-          <!-- @if (isMobile() && task().attachments && task().attachments.length > 0) {
-            <div class="mt-1.5">
-              <button
-                (click)="toggleAttachmentList()"
-                class="w-full flex items-center justify-between px-2 py-1 bg-stone-50 hover:bg-stone-100 rounded text-[10px] text-stone-500 transition-colors">
-                <span class="flex items-center gap-1">
-                  <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
-                  </svg>
-                  {{ task().attachments.length }} 个附件                </span>
-                <svg
-                  class="w-3 h-3 transition-transform"
-                  [class.rotate-180]="showAttachmentList()"
-                  fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                  <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7" />
-                </svg>
-              </button>
-
-              @if (showAttachmentList()) {
-                <div class="mt-1 p-1.5 bg-stone-50/50 dark:bg-stone-800/50 rounded border border-stone-100 dark:border-stone-700 space-y-1 animate-collapse-open">
-                  @for (attachment of task().attachments; track attachment.id) {
-                    <div
-                      class="group flex items-center gap-1.5 px-1.5 py-1 bg-white dark:bg-stone-700 hover:bg-stone-50 dark:hover:bg-stone-600 rounded text-[10px] text-stone-600 dark:text-stone-300 border border-stone-100 dark:border-stone-600 transition-colors"
-                      [class.cursor-pointer]="attachment.type === 'image'"
-                      (click)="attachment.type === 'image' && previewImage(attachment)">
-                      @if (attachment.type === 'image' && attachment.thumbnailUrl) {
-                        <img [src]="attachment.thumbnailUrl" [alt]="attachment.name" class="w-5 h-5 object-cover rounded">
-                      } @else {
-                        <span class="w-5 h-5 flex items-center justify-center text-[8px] text-stone-400 dark:text-stone-500 uppercase bg-stone-100 dark:bg-stone-600 rounded">{{ getFileExtension(attachment.name) }}</span>
-                      }
-                      <span class="flex-1 truncate">{{ attachment.name }}</span>
-                      <span class="text-[9px] text-stone-400 dark:text-stone-500">{{ formatFileSize(attachment.size) }}</span>
-                      <button
-                        (click)="deleteAttachment(attachment, $event)"
-                        class="text-stone-400 hover:text-red-500 transition-colors p-0.5"
-                        title="删除">
-                        <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                          <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
-                        </svg>
-                      </button>
-                    </div>
-                  }
-                </div>
-              }
-            </div>
-          } -->
-        }
-      </div>
-
-      <app-text-task-connections
-        [connections]="connections()"
-        [isMobile]="isMobile()"
-        (openTask)="openLinkedTask.emit($event)">
-      </app-text-task-connections>
-    </div>
-  `,
-  styles: [`
-    .animate-collapse-open {
-      animation: collapseOpen 0.15s ease-out;
-    }
-    @keyframes collapseOpen {
-      from { opacity: 0; transform: translateY(-4px); }
-      to { opacity: 1; transform: translateY(0); }
-    }
-  `]
+  templateUrl: './text-task-editor.component.html',
+  styleUrl: './text-task-editor.component.css',
 })
 export class TextTaskEditorComponent implements OnDestroy {
-  private readonly taskOpsAdapter = inject(TaskOperationAdapterService);
+  private readonly injector = inject(Injector);
   private readonly changeTracker = inject(ChangeTrackerService);
   private readonly uiState = inject(UiStateService);
   private readonly projectState = inject(ProjectStateService);
   private readonly undoService = inject(UndoService);
-  private readonly elementRef = inject(ElementRef);
+  private readonly elementRef = inject<ElementRef<HTMLElement>>(ElementRef);
   private readonly attachmentService = inject(AttachmentService);
   private readonly toast = inject(ToastService);
   private readonly cdr = inject(ChangeDetectorRef);
+
+  private get taskOpsAdapter(): TaskOperationAdapterService {
+    return this.injector.get(TaskOperationAdapterService);
+  }
 
   readonly task = input.required<Task>();
   readonly isMobile = input(false);
@@ -385,34 +73,92 @@ export class TextTaskEditorComponent implements OnDestroy {
   readonly attachmentError = output<string>();
   readonly openLinkedTask = output<{ taskId: string; event: Event }>();
   readonly previewModeChange = output<boolean>();
+  private readonly attachmentController = new TextTaskEditorAttachmentController({
+    task: () => this.task(),
+    userId: () => this.userId(),
+    projectId: () => this.projectId(),
+    setUploading: uploading => this.isUploading.set(uploading),
+    uploadFile: (userId, projectId, taskId, file) =>
+      this.attachmentService.uploadFile(userId, projectId, taskId, file),
+    markAsDeleted: attachment => this.attachmentService.markAsDeleted(attachment),
+    updateTaskAttachments: (taskId, attachments) =>
+      this.taskOpsAdapter.updateTaskAttachments(taskId, attachments),
+    emitAttachmentError: message => this.attachmentError.emit(message),
+    toast: this.toast,
+    openUrl: (url, target) => window.open(url, target),
+  });
 
   readonly isPreview = signal(true);
   readonly showAttachmentList = signal(false);
   readonly isUploading = signal(false);
+  private readonly previewController = new TextTaskEditorPreviewController({
+    getLocalContent: () => this.localContent(),
+    getTask: () => this.task(),
+    submitTaskContent: (taskId, value) => this.submitTaskContent(taskId, value),
+    setLocalContent: value => this.localContent.set(value),
+    enterEditMode: (_field, event) => this.enterEditMode('content', event),
+    emitOpenLinkedTask: (taskId, event) => this.openLinkedTask.emit({ taskId, event }),
+    markForCheck: () => this.cdr.markForCheck(),
+    toast: this.toast,
+  });
 
   // ========== DOM 引用 ==========
   /** 标题输入框引用 */
   private readonly titleInputRef = viewChild<ElementRef<HTMLInputElement>>('titleInput');
   /** 内容输入框引用 */
   private readonly contentInputRef = viewChild<ElementRef<HTMLTextAreaElement>>('contentInput');
+  private readonly attentionInputRefs = viewChildren<ElementRef<HTMLInputElement>>('attentionInput');
 
   // ========== Split-Brain 本地状态==========
   /** 本地标题（与 Store 解耦，仅在非聚焦时同步）*/
   protected readonly localTitle = signal('');
   /** 本地内容（与 Store 解耦，仅在非聚焦时同步）*/
   protected readonly localContent = signal('');
-  protected readonly previewTitle = computed(() => {
-    const title = this.localTitle().trim();
-    return title || 'Untitled task';
-  });
+  protected readonly previewTitle = computed(() => this.localTitle().trim() || 'Untitled task');
   protected readonly hasPreviewContent = computed(() => this.localContent().trim().length > 0);
-  protected readonly localExpectedMinutes = signal('');
-  protected readonly localWaitMinutes = signal('');
-  protected readonly localCognitiveLoad = signal<'high' | 'low' | ''>('');
+  protected readonly quickTodoSavePending = signal(false);
+  private readonly sidecarDraft = new TextTaskEditorSidecarDraftController();
+  private readonly draftPersistence = new TextTaskEditorDraftPersistenceController({
+    getTask: () => this.task(),
+    getUserId: () => this.userId(),
+    captureOwner: taskId => this.captureTextOwner(taskId),
+    isOwnerCurrent: owner => this.isTextOwnerCurrent(owner),
+    retireSidecarSaveState: () => {
+      this.sidecarDraft.plannerSaveState.set('idle');
+      this.sidecarDraft.attentionSaveState.set('idle');
+    },
+    startPlannerSave: () => this.sidecarDraft.startPlannerSave(),
+    finishPlannerSave: saved => this.sidecarDraft.finishPlannerSave(saved),
+    startAttentionSave: () => this.sidecarDraft.startAttentionSave(),
+    finishAttentionSave: (sequence, saved) => this.sidecarDraft.finishAttentionSave(sequence, saved),
+    areAttentionRowsEqual: (left, right) => this.sidecarDraft.areAttentionRowsEqual(left, right),
+    markForCheck: () => this.cdr.markForCheck(),
+  });
+  protected readonly textSaveState = this.draftPersistence.textSaveState;
+  protected readonly localExpectedMinutes = this.sidecarDraft.localExpectedMinutes;
+  protected readonly localWaitMinutes = this.sidecarDraft.localWaitMinutes;
+  protected readonly localCognitiveLoad = this.sidecarDraft.localCognitiveLoad;
+  protected readonly plannerSaveState = this.sidecarDraft.plannerSaveState;
+  protected readonly localAttentionDraft = this.sidecarDraft.localAttentionDraft;
+  protected readonly attentionDraftRows = this.sidecarDraft.attentionDraftRows;
+  protected readonly attentionSaveState = this.sidecarDraft.attentionSaveState;
+  protected readonly isAttentionRowsExpanded = this.sidecarDraft.isAttentionRowsExpanded;
+  protected readonly visibleAttentionDraftRows = this.sidecarDraft.visibleAttentionDraftRows;
+  protected readonly hiddenAttentionRowCount = this.sidecarDraft.hiddenAttentionRowCount;
+  protected readonly getFileExtension = getAttachmentFileExtension;
+  protected readonly formatFileSize = formatAttachmentFileSize;
   /** 标题输入框是否聚焦 */
   private isTitleFocused = false;
   /** 内容输入框是否聚焦 */
   private isContentFocused = false;
+  private isComponentLive = false;
+  private textOwner: TextTaskEditorDraftOwner | null = null;
+  private isRetiringTextOwner = false;
+  private unregisterProjectRetirement = () => {};
+  private readonly focusController = new TextTaskEditorFocusController({
+    elementRef: this.elementRef,
+    taskId: () => this.task().id,
+  });
   /** IME 输入状态追踪 */
   private readonly composingState: Record<'title' | 'content', boolean> = {
     title: false,
@@ -425,35 +171,21 @@ export class TextTaskEditorComponent implements OnDestroy {
   /** 标记是否正在进行文本选择操作 */
   isSelecting = false;
 
-  private focusRequestTimer: ReturnType<typeof setTimeout> | null = null;
-  private suppressNextDocumentClick = false;
-  private clearDocumentClickGuardTimer: ReturnType<typeof setTimeout> | null = null;
-  private skipNextEditorAutoSelect = false;
-
-  /** 最大附件数量*/
-  private readonly maxAttachments = 5;
-  /** 最大文件大小 10MB */
-  private readonly maxFileSize = 10 * 1024 * 1024;
-
   constructor() {
     // Split-Brain 核心逻辑：仅在输入框非聚焦时从 Store 同步到本地
     // 这样可避免用户输入时被远程更新覆盖
     try {
       effect(() => {
+        this.draftPersistence.observeUserId(this.userId());
         const task = this.task();
         if (task) {
-          // 仅当标题输入框未聚焦时才同步标题
-          if (!this.isTitleFocused) {
-            this.localTitle.set(task.title || '');
-          }
-          // 仅当内容输入框未聚焦时才同步内容
-          if (!this.isContentFocused) {
-            this.localContent.set(task.content || '');
-          }
-          // M-10 fix: 规划字段不受 content 焦点状态限制，始终同步
-          this.localExpectedMinutes.set(task.expected_minutes == null ? '' : String(task.expected_minutes));
-          this.localWaitMinutes.set(task.wait_minutes == null ? '' : String(task.wait_minutes));
-          this.localCognitiveLoad.set(task.cognitive_load ?? '');
+          this.refreshTextOwner(task.id);
+          this.syncLocalDraftFromTask(
+            task,
+            !this.isTitleFocused,
+            !this.isContentFocused,
+            this.sidecarDraft.shouldSyncAttentionFromTask(task.id),
+          );
         }
       });
 
@@ -489,11 +221,13 @@ export class TextTaskEditorComponent implements OnDestroy {
   }
 
   ngOnDestroy(): void {
-    // 【关键】组件销毁前，确保当前编辑的内容被保存
-    // 这是修复手机端点击关联块编辑后无法自动保存的核心逻辑
+    this.isComponentLive = false;
     this.persistCurrentEdits();
-    this.clearFocusRequestTimer();
-    this.clearDocumentClickGuard();
+    this.textOwner = null;
+    this.draftPersistence.retireCurrentOwner();
+    this.unregisterProjectRetirement();
+    this.focusController.clearFocusRequestTimer();
+    this.focusController.clearDocumentClickGuard();
 
     // 清理所有未完成的解锁定时器
     for (const timer of this.unlockTimers.values()) {
@@ -511,7 +245,9 @@ export class TextTaskEditorComponent implements OnDestroy {
     if (!task) return;
 
     // 从 DOM 直接读取最新值（绕过 Angular 数据绑定的延迟）
-    const titleEl = this.titleInputRef()?.nativeElement;
+    const titleEl = this.elementRef.nativeElement.querySelector(
+      '[data-testid="task-title-input"]',
+    ) as HTMLInputElement | null;
     const contentEl = this.contentInputRef()?.nativeElement;
 
     const currentTitle = titleEl?.value ?? this.localTitle();
@@ -519,10 +255,51 @@ export class TextTaskEditorComponent implements OnDestroy {
 
     // 与当前 Store 中的任务比较，只有真正有变化才保存
     if (currentTitle !== task.title) {
-      this.taskOpsAdapter.updateTaskTitle(task.id, currentTitle);
+      void this.submitTaskTitle(task.id, currentTitle);
     }
     if (currentContent !== task.content) {
-      this.taskOpsAdapter.updateTaskContent(task.id, currentContent);
+      void this.submitTaskContent(task.id, currentContent);
+    }
+    this.persistVisibleAttentionInputs();
+  }
+
+  private submitTaskTitle(taskId: string, value: string): Promise<boolean> {
+    return this.draftPersistence.submitText('title', taskId, value, () =>
+      this.taskOpsAdapter.updateTaskTitle(taskId, value),
+    );
+  }
+
+  private submitTaskContent(taskId: string, value: string): Promise<boolean> {
+    return this.draftPersistence.submitText('content', taskId, value, () =>
+      this.taskOpsAdapter.updateTaskContent(taskId, value),
+    );
+  }
+
+  private persistVisibleAttentionInputs(): void {
+    const attentionInputs = this.attentionInputRefs();
+    const inputElements = attentionInputs.length > 0
+      ? attentionInputs.map(inputRef => inputRef.nativeElement)
+      : Array.from(this.elementRef.nativeElement.querySelectorAll('[data-testid="task-attention-input"]')) as HTMLInputElement[];
+    if (inputElements.length === 0) return;
+
+    const visibleRows = this.visibleAttentionDraftRows();
+    const rows = [...this.attentionDraftRows()];
+    let hasChanged = false;
+
+    inputElements.forEach((inputEl, visibleIndex) => {
+      const rowIndex = visibleRows[visibleIndex]?.index;
+      if (rowIndex === undefined) return;
+
+      const currentText = inputEl.value;
+      const currentRow = rows[rowIndex] ?? { text: '', level: 'info', done: false };
+      if (currentText !== currentRow.text) {
+        rows[rowIndex] = { ...currentRow, text: currentText };
+        hasChanged = true;
+      }
+    });
+
+    if (hasChanged) {
+      this.setAttentionDraftRows(rows);
     }
   }
 
@@ -530,20 +307,57 @@ export class TextTaskEditorComponent implements OnDestroy {
 
   /** 锁定任务字段（防止远程更新覆盖本地编辑） */
   private lockTaskFields(taskId: string, fields: string[]): void {
-    const projectId = this.projectId() || this.projectState.activeProjectId();
+    const projectId = this.resolveProjectId();
     if (!projectId) return;
     for (const field of fields) {
-      this.changeTracker.lockTaskField(taskId, projectId, field);
+      this.changeTracker.lockTaskField(taskId, projectId, field, ChangeTrackerService.TEXT_INPUT_LOCK_TIMEOUT_MS);
     }
   }
 
   /** 解锁任务字段 */
-  private unlockTaskFields(taskId: string, fields: string[]): void {
-    const projectId = this.projectId() || this.projectState.activeProjectId();
+  private unlockTaskFields(taskId: string, fields: string[], projectId = this.resolveProjectId()): void {
     if (!projectId) return;
     for (const field of fields) {
       this.changeTracker.unlockTaskField(taskId, projectId, field);
     }
+  }
+
+  private resolveProjectId(): string | null {
+    return this.projectId() || this.projectState.activeProjectId();
+  }
+
+  private refreshTextOwner(taskId: string): void {
+    const owner = this.projectState.captureActiveProjectOwner();
+    const current = this.textOwner;
+    if (owner.projectId !== this.resolveProjectId()) {
+      this.textOwner = null;
+    } else if (!current || current.projectId !== owner.projectId
+      || current.generation !== owner.generation || current.taskId !== taskId) {
+      this.textOwner = { ...owner, taskId };
+    }
+  }
+
+  private captureTextOwner(taskId = this.task().id): TextTaskEditorDraftOwner | null {
+    const owner = this.textOwner;
+    if (!owner || owner.taskId !== taskId || this.resolveProjectId() !== owner.projectId) return null;
+    const projectCurrent = this.isRetiringTextOwner
+      ? this.projectState.activeProjectId() === owner.projectId
+      : this.projectState.isActiveProjectOwnerCurrent(owner);
+    return projectCurrent ? owner : null;
+  }
+
+  private isTextOwnerCurrent(owner: TextTaskEditorDraftOwner): boolean {
+    return this.captureTextOwner(owner.taskId) === owner;
+  }
+
+  private scheduleUnlock(field: string, unlock: () => void): void {
+    // 显式 undefined 判断：timer handle 为 0 时也要清理，否则 stale 解锁回调会在
+    // 用户聚焦编辑期间提前解锁字段，让远程同步覆盖正在输入的内容
+    const existingTimer = this.unlockTimers.get(field);
+    if (existingTimer !== undefined) clearTimeout(existingTimer);
+    this.unlockTimers.set(field, setTimeout(() => {
+      unlock(); this.unlockTimers.delete(field);
+    }, 10000));
   }
 
   /**
@@ -553,18 +367,13 @@ export class TextTaskEditorComponent implements OnDestroy {
    */
   @HostListener('document:click', ['$event'])
   onDocumentClick(event: MouseEvent) {
-    if (this.suppressNextDocumentClick) {
-      this.skipNextEditorAutoSelect = true;
-      setTimeout(() => {
-        this.skipNextEditorAutoSelect = false;
-      }, 0);
-      this.clearDocumentClickGuard();
+    if (this.focusController.consumeSuppressedDocumentClick()) {
       return;
     }
 
     const isInteractiveTarget = isInteractiveSelectionTarget(event.target);
-    const clickedInside = this.isEventInsideEditor(event);
-    const clickedInTaskCard = this.isEventInsideCurrentTaskCard(event);
+    const clickedInside = this.focusController.isEventInsideEditor(event);
+    const clickedInTaskCard = this.focusController.isEventInsideCurrentTaskCard(event);
 
     // 拖拽选择过程中不打断浏览器原生选区行为。
     if (this.isSelecting) return;
@@ -595,12 +404,21 @@ export class TextTaskEditorComponent implements OnDestroy {
   }
 
   ngOnInit() {
+    this.isComponentLive = true;
+    this.draftPersistence.observeUserId(this.userId());
+    this.refreshTextOwner(this.task().id);
+    this.unregisterProjectRetirement = this.projectState.registerBeforeActiveProjectChange(previousProjectId => {
+      if (!this.textOwner || this.textOwner.projectId !== previousProjectId) return;
+      this.isRetiringTextOwner = true;
+      try { this.persistCurrentEdits(); }
+      finally {
+        this.isRetiringTextOwner = false;
+        this.textOwner = null;
+        this.draftPersistence.retireCurrentOwner();
+      }
+    });
     this.isPreview.set(this.initialPreview());
-    this.localTitle.set(this.task().title || '');
-    this.localContent.set(this.task().content || '');
-    this.localExpectedMinutes.set(this.task().expected_minutes == null ? '' : String(this.task().expected_minutes));
-    this.localWaitMinutes.set(this.task().wait_minutes == null ? '' : String(this.task().wait_minutes));
-    this.localCognitiveLoad.set(this.task().cognitive_load ?? '');
+    this.syncLocalDraftFromTask(this.task(), true, true, true);
   }
 
   togglePreview() {
@@ -608,18 +426,18 @@ export class TextTaskEditorComponent implements OnDestroy {
     this.isPreview.set(newValue);
     this.previewModeChange.emit(newValue);
     if (newValue) {
-      this.clearFocusRequestTimer();
+      this.focusController.clearFocusRequestTimer();
     }
   }
 
   enterEditMode(field: 'title' | 'content', triggerEvent?: Event) {
     if (this.isPreview()) {
-      this.armOutsideClickGuard(triggerEvent);
+      this.focusController.armOutsideClickGuard(triggerEvent);
       this.isPreview.set(false);
       this.previewModeChange.emit(false);
     }
 
-    this.focusEditorField(field);
+    this.focusController.focusEditorField(field);
   }
 
   onPreviewToggleButtonClick(event: Event) {
@@ -638,11 +456,9 @@ export class TextTaskEditorComponent implements OnDestroy {
     if (!this.isPreview()) {
       this.isPreview.set(true);
       this.previewModeChange.emit(true);
-      this.clearFocusRequestTimer();
+      this.focusController.clearFocusRequestTimer();
     }
   }
-
-
 
   /**
    * 输入框聚焦处理（Split-Brain 模式核心）   * 1. 标记全局编辑状态   * 2. 锁定对应字段，防止远程更新覆盖
@@ -653,9 +469,9 @@ export class TextTaskEditorComponent implements OnDestroy {
 
     if (field === 'title') {
       this.isTitleFocused = true;
-      // 清除可能存在的解锁定时器
+      // 清除可能存在的解锁定时器（显式 undefined 判断：handle 0 也要清理）
       const existingTimer = this.unlockTimers.get('title');
-      if (existingTimer) {
+      if (existingTimer !== undefined) {
         clearTimeout(existingTimer);
         this.unlockTimers.delete('title');
       }
@@ -663,7 +479,7 @@ export class TextTaskEditorComponent implements OnDestroy {
     } else if (field === 'content') {
       this.isContentFocused = true;
       const existingTimer = this.unlockTimers.get('content');
-      if (existingTimer) {
+      if (existingTimer !== undefined) {
         clearTimeout(existingTimer);
         this.unlockTimers.delete('content');
       }
@@ -685,34 +501,34 @@ export class TextTaskEditorComponent implements OnDestroy {
     }, 100);
 
     if (field === 'title') {
+      const currentTask = this.task();
+      const unlockProjectId = this.resolveProjectId();
       // 从 DOM 读取最新值（确保 IME 输入完成后的最终值）
       const titleEl = this.titleInputRef()?.nativeElement;
       const currentTitle = titleEl?.value ?? this.localTitle();
       this.localTitle.set(currentTitle);
 
       // 提交本地内容到 Store
-      this.taskOpsAdapter.updateTaskTitle(this.task().id, currentTitle);
+      void this.submitTaskTitle(currentTask.id, currentTitle);
 
-      const timer = setTimeout(() => {
+      this.scheduleUnlock('title', () => {
         this.isTitleFocused = false;
-        this.unlockTaskFields(this.task().id, ['title']);
-        this.unlockTimers.delete('title');
-      }, 10000);
-      this.unlockTimers.set('title', timer);
+        this.unlockTaskFields(currentTask.id, ['title'], unlockProjectId);
+      });
     } else if (field === 'content') {
+      const currentTask = this.task();
+      const unlockProjectId = this.resolveProjectId();
       // 从 DOM 读取最新值
       const contentEl = this.contentInputRef()?.nativeElement;
       const currentContent = contentEl?.value ?? this.localContent();
       this.localContent.set(currentContent);
 
-      this.taskOpsAdapter.updateTaskContent(this.task().id, currentContent);
+      void this.submitTaskContent(currentTask.id, currentContent);
 
-      const timer = setTimeout(() => {
+      this.scheduleUnlock('content', () => {
         this.isContentFocused = false;
-        this.unlockTaskFields(this.task().id, ['content']);
-        this.unlockTimers.delete('content');
-      }, 10000);
-      this.unlockTimers.set('content', timer);
+        this.unlockTaskFields(currentTask.id, ['content'], unlockProjectId);
+      });
     }
   }
 
@@ -722,7 +538,7 @@ export class TextTaskEditorComponent implements OnDestroy {
    */
   onTitleInput(value: string) {
     this.localTitle.set(value);
-    this.taskOpsAdapter.updateTaskTitle(this.task().id, value);
+    void this.submitTaskTitle(this.task().id, value);
   }
 
   /**
@@ -731,7 +547,7 @@ export class TextTaskEditorComponent implements OnDestroy {
    */
   onContentInput(value: string) {
     this.localContent.set(value);
-    this.taskOpsAdapter.updateTaskContent(this.task().id, value);
+    void this.submitTaskContent(this.task().id, value);
   }
 
   // ========== IME Composition 处理 ==========
@@ -752,10 +568,10 @@ export class TextTaskEditorComponent implements OnDestroy {
     this.composingState[field] = false;
     if (field === 'title') {
       this.localTitle.set(value);
-      this.taskOpsAdapter.updateTaskTitle(this.task().id, value);
+      void this.submitTaskTitle(this.task().id, value);
     } else if (field === 'content') {
       this.localContent.set(value);
-      this.taskOpsAdapter.updateTaskContent(this.task().id, value);
+      void this.submitTaskContent(this.task().id, value);
     }
   }
 
@@ -766,69 +582,151 @@ export class TextTaskEditorComponent implements OnDestroy {
     return this.composingState.title || this.composingState.content;
   }
 
-  onExpectedMinutesChange(value: string): void {
-    this.localExpectedMinutes.set(value);
-    this.taskOpsAdapter.updateTaskExpectedMinutes(this.task().id, this.parseOptionalMinutes(value));
+  async onExpectedMinutesChange(value: string): Promise<boolean> {
+    const taskId = this.task().id;
+    const draftValue = this.sidecarDraft.setExpectedMinutes(value);
+    return this.draftPersistence.submitPlanner('expectedMinutes', taskId, draftValue,
+      () => this.taskOpsAdapter.updateTaskExpectedMinutes(taskId, parseOptionalMinutes(value)),
+    );
   }
 
-  onWaitMinutesChange(value: string): void {
-    this.localWaitMinutes.set(value);
-    this.taskOpsAdapter.updateTaskWaitMinutes(this.task().id, this.parseOptionalMinutes(value));
+  async onWaitMinutesChange(value: string): Promise<boolean> {
+    const taskId = this.task().id;
+    const draftValue = this.sidecarDraft.setWaitMinutes(value);
+    return this.draftPersistence.submitPlanner('waitMinutes', taskId, draftValue,
+      () => this.taskOpsAdapter.updateTaskWaitMinutes(taskId, parseOptionalMinutes(value)),
+    );
   }
 
-  onCognitiveLoadChange(value: string): void {
-    const normalized = value === 'high' || value === 'low' ? value : null;
-    this.localCognitiveLoad.set((normalized ?? '') as 'high' | 'low' | '');
-    this.taskOpsAdapter.updateTaskCognitiveLoad(this.task().id, normalized);
+  async onCognitiveLoadChange(value: string): Promise<boolean> {
+    const taskId = this.task().id;
+    const { draftValue, persistedValue } = this.sidecarDraft.setCognitiveLoad(value);
+    return this.draftPersistence.submitPlanner('cognitiveLoad', taskId, draftValue,
+      () => this.taskOpsAdapter.updateTaskCognitiveLoad(taskId, persistedValue),
+    );
+  }
+
+  onAttentionInput(value: string): void {
+    this.setAttentionDraftRows(this.sidecarDraft.setAttentionRowsFromText(value, this.task().attentionMeta));
+  }
+
+  onAttentionRowInput(index: number, value: string): void {
+    this.setAttentionDraftRows(this.sidecarDraft.setAttentionRowText(index, value));
+  }
+
+  addAttentionRow(): void {
+    this.sidecarDraft.addAttentionRowLocal();
+  }
+
+  toggleAttentionRowsExpanded(): void {
+    this.sidecarDraft.toggleAttentionRowsExpanded();
+  }
+
+  removeAttentionRow(index: number): void {
+    this.setAttentionDraftRows(this.sidecarDraft.removeAttentionRow(index));
+  }
+
+  private setAttentionDraftRows(rows: TaskAttentionDraftItem[]): void {
+    this.sidecarDraft.setAttentionRows(rows);
+    void this.persistAttentionDraftRows(rows);
+  }
+
+  private syncLocalDraftFromTask(task: Task, syncTitle: boolean, syncContent: boolean, syncAttention: boolean): void {
+    const persistedDraft = this.draftPersistence.readDraft(task.id);
+    if (syncTitle) {
+      const title = persistedDraft?.title ?? task.title ?? '';
+      this.draftPersistence.syncTextField('title', task.id, title, next => this.localTitle.set(next));
+    }
+    if (syncContent) {
+      const content = persistedDraft?.content ?? task.content ?? '';
+      this.draftPersistence.syncTextField('content', task.id, content, next => this.localContent.set(next));
+    }
+    this.draftPersistence.settleTextFailures(task);
+    if (!this.draftPersistence.shouldKeepSidecarDraft(task.id)) {
+      this.sidecarDraft.syncFromTask({ task, persistedDraft, syncAttention });
+    }
+  }
+
+  private persistAttentionDraftRows(rows: TaskAttentionDraftItem[]): Promise<boolean> {
+    const currentTask = this.task();
+    this.sidecarDraft.markAttentionCommitted(currentTask.id);
+    return this.draftPersistence.submitAttention(
+      currentTask.id, rows,
+      () => this.taskOpsAdapter.updateTaskAttentionItems(currentTask.id, rows),
+    );
+  }
+
+  onAttentionFocus(): void {
+    this.sidecarDraft.markAttentionFocused();
+    this.uiState.markEditing();
+    const existingTimer = this.unlockTimers.get('attentionMeta');
+    if (existingTimer !== undefined) {
+      clearTimeout(existingTimer);
+      this.unlockTimers.delete('attentionMeta');
+    }
+    this.lockTaskFields(this.task().id, ['attentionMeta']);
+  }
+
+  onAttentionBlur(): void {
+    const currentTask = this.task();
+    this.sidecarDraft.markAttentionBlurred(currentTask.id);
+    const unlockProjectId = this.resolveProjectId();
+    this.persistVisibleAttentionInputs();
+    this.trimEmptyAttentionDraftRowsLocal();
+    this.scheduleUnlock('attentionMeta', () => {
+      this.unlockTaskFields(currentTask.id, ['attentionMeta'], unlockProjectId);
+    });
+  }
+
+  private trimEmptyAttentionDraftRowsLocal(): void {
+    const trimmedRows = this.sidecarDraft.trimEmptyAttentionRows();
+    if (trimmedRows) {
+      void this.persistAttentionDraftRows(trimmedRows);
+    }
   }
 
   /**
    * Markdown 预览区域点击处理
    * 点击待办 checkbox 时切换完成状态；点击其他区域进入编辑模式
    */
-  onPreviewClick(event: MouseEvent) {
-    if (this.handlePreviewLinkClick(event)) {
-      return;
-    }
+  async onPreviewClick(event: MouseEvent): Promise<void> {
+    await this.previewController.onPreviewClick(event);
+  }
 
-    event.stopPropagation();
-    const todoIndex = getTodoIndexFromClick(event);
-    if (todoIndex !== null) {
-      // 点击了待办 checkbox，切换状态而非进入编辑模式
-      const currentContent = this.localContent() || this.task().content || '';
-      const newContent = toggleMarkdownTodo(currentContent, todoIndex);
-      this.localContent.set(newContent);
-      this.taskOpsAdapter.updateTaskContent(this.task().id, newContent);
-      // 强制标记组件需要重新检测，确保 OnPush 模式下 UI 刷新
-      this.cdr.markForCheck();
-    } else {
-      this.enterEditMode('content', event);
+  async addQuickTodo(inputElement: HTMLInputElement): Promise<boolean> {
+    if (this.quickTodoSavePending()) return false;
+
+    const submittedValue = inputElement.value;
+    const text = submittedValue.trim();
+    if (!text) return false;
+
+    const taskId = this.task().id;
+    this.quickTodoSavePending.set(true);
+    try {
+      const saved = await this.taskOpsAdapter.addTodoItem(taskId, text);
+      if (!saved) return false;
+
+      if (
+        this.isComponentLive &&
+        this.task().id === taskId &&
+        inputElement.value === submittedValue
+      ) {
+        inputElement.value = '';
+        inputElement.focus();
+      }
+      return true;
+    } catch {
+      return false;
+    } finally {
+      this.quickTodoSavePending.set(false);
     }
   }
 
-  private handlePreviewLinkClick(event: MouseEvent): boolean {
-    const linkTarget = handleMarkdownLinkAction(event, this.toast);
-    if (!linkTarget) {
-      return linkTarget === false;
+  async onAttachmentsChange(attachments: Attachment[]): Promise<void> {
+    const persisted = await this.taskOpsAdapter.updateTaskAttachments(this.task().id, attachments);
+    if (!persisted) {
+      this.attachmentError.emit('附件本地保存失败，请释放浏览器存储空间后重试');
     }
-
-    if (linkTarget.kind === 'task' && linkTarget.taskId) {
-      this.openLinkedTask.emit({ taskId: linkTarget.taskId, event });
-    }
-    return true;
-  }
-
-  addQuickTodo(inputElement: HTMLInputElement) {
-    const text = inputElement.value.trim();
-    if (!text) return;
-
-    this.taskOpsAdapter.addTodoItem(this.task().id, text);
-    inputElement.value = '';
-    inputElement.focus();
-  }
-
-  onAttachmentsChange(attachments: Attachment[]) {
-    this.taskOpsAdapter.updateTaskAttachments(this.task().id, attachments);
   }
 
   // ========== 移动端附件管理方法 ==========
@@ -837,210 +735,17 @@ export class TextTaskEditorComponent implements OnDestroy {
     this.showAttachmentList.update(v => !v);
   }
 
-  getFileExtension(filename: string): string {
-    const ext = filename.split('.').pop() || '';
-    return ext.length > 4 ? ext.substring(0, 4) : ext;
-  }
-
-  formatFileSize(bytes: number | undefined): string {
-    if (!bytes) return '';
-    if (bytes < 1024) return `${bytes}B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
-  }
-
   async onMobileFileSelect(event: Event) {
     const input = event.target as HTMLInputElement;
-    const files = input.files;
-    if (!files || files.length === 0 || !this.userId() || !this.projectId()) return;
-
-    const currentCount = this.task().attachments?.length || 0;
-    const remaining = this.maxAttachments - currentCount;
-
-    if (remaining <= 0) {
-      this.toast.warning('附件数量已达上限', '每个任务最多 ' + this.maxAttachments + ' 个附件');
-      input.value = '';
-      return;
-    }
-
-    const filesToUpload = Array.from(files).slice(0, remaining);
-
-    // 检查文件大小
-    for (const file of filesToUpload) {
-      if (file.size > this.maxFileSize) {
-        this.toast.warning('文件过大', `${file.name} 超过 10MB 限制`);
-        input.value = '';
-        return;
-      }
-    }
-
-    this.isUploading.set(true);
-
-    try {
-      const newAttachments: Attachment[] = [];
-
-      for (const file of filesToUpload) {
-        const result = await this.attachmentService.uploadFile(
-          this.userId()!,
-          this.projectId()!,
-          this.task().id,
-          file
-        );
-        if (result.success && result.attachment) {
-          newAttachments.push(result.attachment);
-        } else if (result.error) {
-          this.attachmentError.emit(result.error);
-        }
-      }
-
-      if (newAttachments.length > 0) {
-        const updatedAttachments = [...(this.task().attachments || []), ...newAttachments];
-        this.taskOpsAdapter.updateTaskAttachments(this.task().id, updatedAttachments);
-        this.toast.success('上传成功', `${newAttachments.length} 个文件已上传`);
-      }
-    } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : '上传失败';
-      this.attachmentError.emit(errorMsg);
-      this.toast.error('上传失败', errorMsg);
-    } finally {
-      this.isUploading.set(false);
-      input.value = '';
-    }
+    await this.attachmentController.onMobileFileSelect(input);
   }
 
   async deleteAttachment(attachment: Attachment, event: Event) {
-    event.stopPropagation();
-
-    if (!this.userId() || !this.projectId()) return;
-
-    try {
-      const deletedAttachment = this.attachmentService.markAsDeleted(attachment);
-
-      const updatedAttachments = (this.task().attachments || []).map(a =>
-        a.id === attachment.id ? deletedAttachment : a
-      );
-      this.taskOpsAdapter.updateTaskAttachments(this.task().id, updatedAttachments);
-      this.toast.success('删除成功', attachment.name + ' 已删除');
-    } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : '删除失败';
-      this.attachmentError.emit(errorMsg);
-      this.toast.error('删除失败', errorMsg);
-    }
+    await this.attachmentController.deleteAttachment(attachment, event);
   }
 
   previewImage(attachment: Attachment) {
-    if (attachment.url) {
-      window.open(attachment.url, '_blank');
-    }
+    this.attachmentController.previewImage(attachment);
   }
 
-  private parseOptionalMinutes(value: string): number | null {
-    const trimmed = value.trim();
-    if (!trimmed) return null;
-    const parsed = Number(trimmed);
-    if (!Number.isFinite(parsed) || parsed <= 0) return null;
-    return Math.floor(parsed);
-  }
-
-  private focusEditorField(field: 'title' | 'content'): void {
-    this.clearFocusRequestTimer();
-    this.focusRequestTimer = setTimeout(() => {
-      const input = this.resolveEditorFieldElement(field);
-
-      input?.focus();
-      if (this.skipNextEditorAutoSelect) {
-        this.skipNextEditorAutoSelect = false;
-      } else {
-        input?.select?.();
-      }
-      this.focusRequestTimer = null;
-    }, 0);
-  }
-
-  private resolveEditorFieldElement(field: 'title' | 'content'): HTMLInputElement | HTMLTextAreaElement | null {
-    const selector = field === 'title'
-      ? '[data-testid="task-title-input"]'
-      : '[data-testid="task-content-editor"]';
-
-    const host = this.elementRef.nativeElement as HTMLElement | null;
-    if (!host) {
-      return null;
-    }
-
-    return host.querySelector<HTMLInputElement | HTMLTextAreaElement>(selector);
-  }
-
-  private armOutsideClickGuard(triggerEvent?: Event): void {
-    if (!triggerEvent) {
-      return;
-    }
-
-    this.suppressNextDocumentClick = true;
-    if (this.clearDocumentClickGuardTimer) {
-      clearTimeout(this.clearDocumentClickGuardTimer);
-    }
-
-    this.clearDocumentClickGuardTimer = setTimeout(() => {
-      this.clearDocumentClickGuard();
-    }, 0);
-  }
-
-  private isEventInsideEditor(event: Event): boolean {
-    const host = this.elementRef.nativeElement as HTMLElement | null;
-    if (!host) {
-      return false;
-    }
-
-    if (this.eventPathContains(event, node => node === host)) {
-      return true;
-    }
-
-    const target = event.target;
-    return target instanceof Node ? host.contains(target) : false;
-  }
-
-  private isEventInsideCurrentTaskCard(event: Event): boolean {
-    const currentTaskId = this.task().id;
-
-    if (this.eventPathContains(event, node => {
-      return node instanceof HTMLElement && node.getAttribute('data-task-id') === currentTaskId;
-    })) {
-      return true;
-    }
-
-    const target = event.target;
-    if (!(target instanceof HTMLElement)) {
-      return false;
-    }
-
-    return !!target.closest(`[data-task-id="${currentTaskId}"]`);
-  }
-
-  private eventPathContains(event: Event, predicate: (node: EventTarget) => boolean): boolean {
-    const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
-    return path.some(predicate);
-  }
-
-  private clearDocumentClickGuard(): void {
-    this.suppressNextDocumentClick = false;
-    if (!this.clearDocumentClickGuardTimer) {
-      return;
-    }
-
-    clearTimeout(this.clearDocumentClickGuardTimer);
-    this.clearDocumentClickGuardTimer = null;
-  }
-
-  private clearFocusRequestTimer(): void {
-    if (!this.focusRequestTimer) {
-      return;
-    }
-
-    clearTimeout(this.focusRequestTimer);
-    this.focusRequestTimer = null;
-  }
 }
-
-
-
-

@@ -1,5 +1,6 @@
 export type ExternalSourceRole = 'context' | 'spec' | 'reference' | 'evidence' | 'next-action';
 export type ExternalSourceType = 'siyuan-block';
+export type PendingExternalSourceLinkSyncState = 'pending_sync' | 'retry_scheduled' | 'dead_letter';
 
 export interface ExternalSourceLink {
   id: string;
@@ -77,6 +78,9 @@ export interface SiyuanPreviewResult {
  */
 export interface PendingExternalSourceLink {
   link: ExternalSourceLink;
+  operationId: string;
+  localCommittedAt: number;
+  syncState: PendingExternalSourceLinkSyncState;
   retryCount: number;
   lastTriedAt?: string;
   lastErrorCode?: string;

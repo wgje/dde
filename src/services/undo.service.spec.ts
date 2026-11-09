@@ -13,6 +13,7 @@ import { Project, Task } from '../models';
 import { UiStateService } from './ui-state.service';
 import { UNDO_CONFIG } from '../config';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { registerUndoBasicSpecs } from './undo-basic.spec-helpers';
 
 describe('UndoService', () => {
   let service: UndoService;
@@ -49,6 +50,24 @@ describe('UndoService', () => {
     connections: [],
     ...overrides
   });
+
+  const recordTaskUpdateAction = (
+    project: Project,
+    taskId: string,
+    title: string,
+  ): void => {
+    const beforeSnapshot = service.createProjectSnapshot(project);
+    const afterSnapshot = service.createProjectSnapshot({
+      ...project,
+      tasks: [createTask({ id: taskId, title })]
+    });
+
+    service.recordAction({
+      type: 'task-update',
+      projectId: project.id,
+      data: { before: beforeSnapshot, after: afterSnapshot }
+    });
+  };
 
   const createServiceInstance = (): UndoService => {
     const mockLogger = {
@@ -95,63 +114,10 @@ describe('UndoService', () => {
     vi.useRealTimers();
   });
 
-  describe('基本撤销功能', () => {
-    it('初始状态应该没有可撤销的操作', () => {
-      expect(service.canUndo()).toBe(false);
-      expect(service.undoCount()).toBe(0);
-    });
-
-    it('记录操作后应该有可撤销的操作', () => {
-      const project = createTestProject();
-      const beforeSnapshot = service.createProjectSnapshot(project);
-      
-      const afterProject: Project = {
-        ...project,
-        tasks: [
-          ...project.tasks,
-          createTask({ id: 'task-2', title: '新任务', order: 2, rank: 2000, x: 200, displayId: '2' })
-        ]
-      };
-      const afterSnapshot = service.createProjectSnapshot(afterProject);
-      
-      service.recordAction({
-        type: 'task-update',
-        projectId: project.id,
-        data: { before: beforeSnapshot, after: afterSnapshot }
-      });
-      
-      expect(service.canUndo()).toBe(true);
-      expect(service.undoCount()).toBe(1);
-    });
-
-    it('撤销后应该返回正确的快照', () => {
-      const project = createTestProject();
-      const beforeSnapshot = service.createProjectSnapshot(project);
-      
-      const afterProject: Project = {
-        ...project,
-        tasks: [
-          ...project.tasks,
-          createTask({ id: 'task-2', title: '新任务', order: 2, rank: 2000, x: 200, displayId: '2' })
-        ]
-      };
-      const afterSnapshot = service.createProjectSnapshot(afterProject);
-      
-      service.recordAction({
-        type: 'task-update',
-        projectId: project.id,
-        data: { before: beforeSnapshot, after: afterSnapshot }
-      });
-      
-      const result = service.undo();
-      
-      expect(result).not.toBeNull();
-      expect(result).not.toBe('version-mismatch');
-      if (result && typeof result === 'object' && 'data' in result) {
-        expect(result.data.before.tasks?.length).toBe(1);
-        expect(result.data.after.tasks?.length).toBe(2);
-      }
-    });
+  registerUndoBasicSpecs({
+    service: () => service,
+    createTask,
+    createTestProject,
   });
 
   describe('连接操作撤销', () => {
@@ -454,18 +420,7 @@ describe('UndoService', () => {
       // 记录超过桌面端上限的操作（上限取自配置 DESKTOP_HISTORY_LIMIT）
       // 使用不同的 projectId 避免合并逻辑
       for (let i = 0; i < DESKTOP_HISTORY_LIMIT + 15; i++) {
-        const project = createTestProject({ id: `project-${i}` });
-        const beforeSnapshot = service.createProjectSnapshot(project);
-        const afterSnapshot = service.createProjectSnapshot({
-          ...project,
-          tasks: [createTask({ id: `task-${i}`, title: `任务${i}` })]
-        });
-        
-        service.recordAction({
-          type: 'task-update',
-          projectId: project.id,
-          data: { before: beforeSnapshot, after: afterSnapshot }
-        });
+        recordTaskUpdateAction(createTestProject({ id: `project-${i}` }), `task-${i}`, `任务${i}`);
       }
       
       // 应该触发截断
@@ -478,18 +433,7 @@ describe('UndoService', () => {
 
     it('持续超限时不应重复弹出桌面端截断提示', () => {
       for (let i = 0; i < DESKTOP_HISTORY_LIMIT + 30; i++) {
-        const project = createTestProject({ id: `desktop-project-${i}` });
-        const beforeSnapshot = service.createProjectSnapshot(project);
-        const afterSnapshot = service.createProjectSnapshot({
-          ...project,
-          tasks: [createTask({ id: `desktop-task-${i}`, title: `任务${i}` })]
-        });
-
-        service.recordAction({
-          type: 'task-update',
-          projectId: project.id,
-          data: { before: beforeSnapshot, after: afterSnapshot }
-        });
+        recordTaskUpdateAction(createTestProject({ id: `desktop-project-${i}` }), `desktop-task-${i}`, `任务${i}`);
       }
 
       expect(mockToastService.info).toHaveBeenCalledTimes(1);
@@ -654,18 +598,7 @@ describe('UndoService', () => {
       // 记录超过移动端上限的操作
       const MOBILE_LIMIT = UNDO_CONFIG.MOBILE_HISTORY_SIZE;
       for (let i = 0; i < MOBILE_LIMIT + 10; i++) {
-        const project = createTestProject({ id: `mobile-project-${i}` });
-        const beforeSnapshot = service.createProjectSnapshot(project);
-        const afterSnapshot = service.createProjectSnapshot({
-          ...project,
-          tasks: [createTask({ id: `mobile-task-${i}`, title: `任务${i}` })]
-        });
-        
-        service.recordAction({
-          type: 'task-update',
-          projectId: project.id,
-          data: { before: beforeSnapshot, after: afterSnapshot }
-        });
+        recordTaskUpdateAction(createTestProject({ id: `mobile-project-${i}` }), `mobile-task-${i}`, `任务${i}`);
       }
       
       // 截断计数应更新
@@ -679,18 +612,7 @@ describe('UndoService', () => {
     it('重做栈同样遵循桌面端上限', () => {
       // 构造超过上限的撤销记录
       for (let i = 0; i < DESKTOP_HISTORY_LIMIT + 8; i++) {
-        const project = createTestProject({ id: `redo-project-${i}` });
-        const beforeSnapshot = service.createProjectSnapshot(project);
-        const afterSnapshot = service.createProjectSnapshot({
-          ...project,
-          tasks: [createTask({ id: `redo-task-${i}`, title: `任务${i}` })]
-        });
-
-        service.recordAction({
-          type: 'task-update',
-          projectId: project.id,
-          data: { before: beforeSnapshot, after: afterSnapshot }
-        });
+        recordTaskUpdateAction(createTestProject({ id: `redo-project-${i}` }), `redo-task-${i}`, `任务${i}`);
       }
 
       // 全部撤销以填充重做栈
@@ -709,18 +631,7 @@ describe('UndoService', () => {
       // 触发截断 - 使用不同的 projectId 避免合并逻辑
       // 需要超过 DESKTOP_HISTORY_LIMIT 才能触发截断
       for (let i = 0; i < DESKTOP_HISTORY_LIMIT + 10; i++) {
-        const project = createTestProject({ id: `project-${i}` });
-        const beforeSnapshot = service.createProjectSnapshot(project);
-        const afterSnapshot = service.createProjectSnapshot({
-          ...project,
-          tasks: [createTask({ id: `task-${i}`, title: `任务${i}` })]
-        });
-        
-        service.recordAction({
-          type: 'task-update',
-          projectId: project.id,
-          data: { before: beforeSnapshot, after: afterSnapshot }
-        });
+        recordTaskUpdateAction(createTestProject({ id: `project-${i}` }), `task-${i}`, `任务${i}`);
       }
       
       expect(service.truncatedCount()).toBeGreaterThan(0);

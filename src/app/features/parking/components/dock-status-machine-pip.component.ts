@@ -1,7 +1,8 @@
 import { ChangeDetectionStrategy, Component, HostListener, computed, inject, output, signal } from '@angular/core';
 import { NgClass } from '@angular/common';
 import { DockEngineService } from '../../../../services/dock-engine.service';
-import { isStatusMachineEntryExpired, type StatusMachineEntry } from '../../../../models/parking-dock';
+import { FocusDockLeaderService } from '../../../../services/focus-dock-leader.service';
+import { isStatusMachineEntryExpired, type DockEntry, type StatusMachineEntry } from '../../../../models/parking-dock';
 
 type PipAlertTone = 'danger' | 'warning' | 'info' | 'calm';
 type PipLayoutMode = 'regular' | 'compact' | 'micro';
@@ -56,6 +57,7 @@ interface PipTaskRow {
 })
 export class DockStatusMachinePipComponent {
   private readonly engine = inject(DockEngineService);
+  private readonly focusLeader = inject(FocusDockLeaderService);
 
   readonly returnRequested = output<void>();
   readonly closeRequested = output<void>();
@@ -132,94 +134,126 @@ export class DockStatusMachinePipComponent {
   readonly primaryAlert = computed<PipAlert>(() => {
     const expired = this.expiredEntries()[0];
     if (expired) {
-      return {
-        id: `expired-${expired.taskId}`,
-        kind: 'wait-finished',
-        tone: 'danger',
-        badge: '等待结束',
-        headline: `${expired.title} 已到时`,
-        meta: '优先切回处理，避免主线遗忘。',
-        action: { label: '切回任务' },
-        taskId: expired.taskId,
-      };
+      return this.createWaitFinishedAlert(expired, `${expired.title} 已到时`, '优先切回处理，避免主线遗忘。');
     }
 
     const fragmentCountdown = this.engine.fragmentEntryCountdown();
     if (fragmentCountdown !== null) {
-      return {
-        id: 'fragment-countdown',
-        kind: 'fragment-countdown',
-        tone: 'warning',
-        badge: '碎片倒计时',
-        headline: `${fragmentCountdown}s 后进入碎片时间`,
-        meta: '当前检测到短暂空档，建议回到主窗口确认。',
-        action: { label: '回主窗口' },
-      };
+      return this.createFragmentCountdownAlert(fragmentCountdown);
     }
 
     if (this.blankPeriodActive()) {
-      return {
-        id: 'blank-period',
-        kind: 'blank-period',
-        tone: 'warning',
-        badge: '留白期',
-        headline: '当前窗口过短，不建议插入新任务',
-        meta: this.engine.pendingDecision()?.reason ?? '先保持空档，避免切碎主线节奏。',
-        action: { label: '回主窗口' },
-      };
+      return this.createBlankPeriodAlert();
     }
 
     if (this.engine.isBurnoutActive()) {
-      return {
-        id: 'burnout',
-        kind: 'burnout',
-        tone: 'danger',
-        badge: '倦怠',
-        headline: '负荷已过高，建议先收束主线',
-        meta: '优先处理当前专注任务，不再扩散注意力。',
-        action: { label: '回主窗口' },
-      };
+      return this.createBurnoutAlert();
     }
 
     if (this.engine.restReminderActive()) {
-      return {
-        id: 'rest-reminder',
-        kind: 'rest-reminder',
-        tone: 'calm',
-        badge: '休息提醒',
-        headline: this.restReminderHeadline(),
-        meta: '确认后会关闭本轮提醒。',
-        action: { label: '已知悉' },
-      };
+      return this.createRestReminderAlert();
     }
 
     const focusEntry = this.currentFocusEntry();
     if (focusEntry) {
-      return {
-        id: `focus-${focusEntry.taskId}`,
-        kind: 'focus',
-        tone: 'info',
-        badge: '当前主线',
-        headline: focusEntry.title,
-        meta: this.currentFocusMeta(),
-        action: { label: '回主窗口' },
-      };
+      return this.createFocusAlert(focusEntry);
     }
 
     const waiting = this.waitingEntries()[0];
     if (waiting) {
-      return {
-        id: `waiting-${waiting.taskId}`,
-        kind: 'waiting',
-        tone: 'calm',
-        badge: '等待中',
-        headline: waiting.title,
-        meta: this.secondaryAlertMeta(waiting),
-        action: { label: '切回任务' },
-        taskId: waiting.taskId,
-      };
+      return this.createWaitingAlert(waiting);
     }
 
+    return this.createIdleAlert();
+  });
+
+  private createWaitFinishedAlert(entry: StatusMachineEntry, headline: string, meta: string): PipAlert {
+    return {
+      id: `expired-${entry.taskId}`,
+      kind: 'wait-finished',
+      tone: 'danger',
+      badge: '等待结束',
+      headline,
+      meta,
+      action: { label: '切回任务' },
+      taskId: entry.taskId,
+    };
+  }
+
+  private createFragmentCountdownAlert(fragmentCountdown: number): PipAlert {
+    return {
+      id: 'fragment-countdown',
+      kind: 'fragment-countdown',
+      tone: 'warning',
+      badge: '碎片倒计时',
+      headline: `${fragmentCountdown}s 后进入碎片时间`,
+      meta: '当前检测到短暂空档，建议回到主窗口确认。',
+      action: { label: '回主窗口' },
+    };
+  }
+
+  private createBlankPeriodAlert(): PipAlert {
+    return {
+      id: 'blank-period',
+      kind: 'blank-period',
+      tone: 'warning',
+      badge: '留白期',
+      headline: '当前窗口过短，不建议插入新任务',
+      meta: this.engine.pendingDecision()?.reason ?? '先保持空档，避免切碎主线节奏。',
+      action: { label: '回主窗口' },
+    };
+  }
+
+  private createBurnoutAlert(): PipAlert {
+    return {
+      id: 'burnout',
+      kind: 'burnout',
+      tone: 'danger',
+      badge: '倦怠',
+      headline: '负荷已过高，建议先收束主线',
+      meta: '优先处理当前专注任务，不再扩散注意力。',
+      action: { label: '回主窗口' },
+    };
+  }
+
+  private createRestReminderAlert(): PipAlert {
+    return {
+      id: 'rest-reminder',
+      kind: 'rest-reminder',
+      tone: 'calm',
+      badge: '休息提醒',
+      headline: this.restReminderHeadline(),
+      meta: '确认后会关闭本轮提醒。',
+      action: { label: '已知悉' },
+    };
+  }
+
+  private createFocusAlert(focusEntry: DockEntry): PipAlert {
+    return {
+      id: `focus-${focusEntry.taskId}`,
+      kind: 'focus',
+      tone: 'info',
+      badge: '当前主线',
+      headline: focusEntry.title,
+      meta: this.currentFocusMeta(),
+      action: { label: '回主窗口' },
+    };
+  }
+
+  private createWaitingAlert(waiting: StatusMachineEntry): PipAlert {
+    return {
+      id: `waiting-${waiting.taskId}`,
+      kind: 'waiting',
+      tone: 'calm',
+      badge: '等待中',
+      headline: waiting.title,
+      meta: this.secondaryAlertMeta(waiting),
+      action: { label: '切回任务' },
+      taskId: waiting.taskId,
+    };
+  }
+
+  private createIdleAlert(): PipAlert {
     return {
       id: 'idle',
       kind: 'focus',
@@ -229,7 +263,7 @@ export class DockStatusMachinePipComponent {
       meta: '可保留悬浮窗观察下一次状态变化。',
       action: { label: '回主窗口' },
     };
-  });
+  }
   readonly secondaryAlerts = computed<PipAlert[]>(() => {
     const primary = this.primaryAlert();
     const alerts: PipAlert[] = [];
@@ -331,12 +365,17 @@ export class DockStatusMachinePipComponent {
       case 'wait-finished':
       case 'waiting':
       case 'stalled':
+        if (this.focusLeader.isReadOnlyFollower()) {
+          this.returnToMain();
+          return;
+        }
         if (alert.taskId) {
           this.engine.switchToTask(alert.taskId);
         }
         this.returnToMain();
         return;
       case 'rest-reminder':
+        if (this.focusLeader.isReadOnlyFollower()) return;
         this.engine.fragmentRest.dismissRestReminder();
         return;
       default:
@@ -353,14 +392,19 @@ export class DockStatusMachinePipComponent {
   }
 
   exitFocusMode(): void {
+    if (this.focusLeader.isReadOnlyFollower()) {
+      this.closeRequested.emit();
+      return;
+    }
     if (this.engine.focusMode()) {
-      this.engine.toggleFocusMode();
+      void this.engine.toggleFocusMode();
     }
     this.closeRequested.emit();
   }
 
   toggleMute(): void {
-    this.engine.toggleMuteWaitTone();
+    if (this.focusLeader.isReadOnlyFollower()) return;
+    void this.engine.toggleMuteWaitTone();
   }
 
   badgeClasses(tone: PipAlertTone): string {

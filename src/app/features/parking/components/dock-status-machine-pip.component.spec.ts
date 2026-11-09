@@ -3,6 +3,7 @@ import { computed, signal } from '@angular/core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { DockStatusMachinePipComponent } from './dock-status-machine-pip.component';
 import { DockEngineService } from '../../../../services/dock-engine.service';
+import { FocusDockLeaderService } from '../../../../services/focus-dock-leader.service';
 import {
   StatusMachineEntry,
   DockEntry,
@@ -16,6 +17,7 @@ describe('DockStatusMachinePipComponent', () => {
 
   const focusMode = signal(true);
   const muted = signal(false);
+  const readOnlyFollower = signal(false);
   const statusEntries = signal<StatusMachineEntry[]>([]);
   const focusingEntry = signal<DockEntry | null>(null);
   const pendingDecision = signal<DockPendingDecision | null>(null);
@@ -51,11 +53,15 @@ describe('DockStatusMachinePipComponent', () => {
       dismissRestReminder: vi.fn(),
     },
   };
+  const mockFocusLeader = {
+    isReadOnlyFollower: readOnlyFollower,
+  };
 
   beforeEach(async () => {
     vi.clearAllMocks();
     focusMode.set(true);
     muted.set(false);
+    readOnlyFollower.set(false);
     pendingDecision.set(null);
     pendingDecisionEntries.set([]);
     fragmentEntryCountdown.set(null);
@@ -83,7 +89,10 @@ describe('DockStatusMachinePipComponent', () => {
 
     await TestBed.configureTestingModule({
       imports: [DockStatusMachinePipComponent],
-      providers: [{ provide: DockEngineService, useValue: mockEngine }],
+      providers: [
+        { provide: DockEngineService, useValue: mockEngine },
+        { provide: FocusDockLeaderService, useValue: mockFocusLeader },
+      ],
     }).compileComponents();
 
     fixture = TestBed.createComponent(DockStatusMachinePipComponent);
@@ -154,6 +163,15 @@ describe('DockStatusMachinePipComponent', () => {
     expect(fixture.nativeElement.querySelector('header')).toBeNull();
     expect(fixture.nativeElement.textContent).not.toContain('Status PiP');
     expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-pip-summary"]')?.getAttribute('data-summary-mode')).toBe('regular');
+  });
+
+  it('should prioritize burnout over rest reminders when both are active', () => {
+    isBurnoutActive.set(true);
+    restReminderActive.set(true);
+    fixture.detectChanges();
+
+    expect(component.primaryAlert().kind).toBe('burnout');
+    expect(component.primaryAlert().headline).toContain('负荷已过高');
   });
 
   it('should render current focus and all secondary alerts in one task list without folding', () => {
@@ -276,6 +294,40 @@ describe('DockStatusMachinePipComponent', () => {
 
     expect(mockEngine.fragmentRest.dismissRestReminder).toHaveBeenCalledTimes(1);
     expect(returnSpy).not.toHaveBeenCalled();
+  });
+
+  it('read-only followers cannot mutate task, reminder, mute, or Focus state in PiP', () => {
+    const returnSpy = vi.fn();
+    const closeSpy = vi.fn();
+    component.returnRequested.subscribe(returnSpy);
+    component.closeRequested.subscribe(closeSpy);
+    readOnlyFollower.set(true);
+    statusEntries.set([
+      {
+        taskId: 'B',
+        title: 'Expired B',
+        uiStatus: 'waiting_done',
+        label: '等待结束',
+        waitRemainingSeconds: 0,
+        waitTotalSeconds: 300,
+      },
+    ]);
+    restReminderActive.set(true);
+    fixture.detectChanges();
+
+    fixture.nativeElement.querySelector('[data-testid="dock-v3-pip-primary-action-wait-finished"]')?.click();
+    statusEntries.set([]);
+    fixture.detectChanges();
+    fixture.nativeElement.querySelector('[data-testid="dock-v3-pip-primary-action-rest-reminder"]')?.click();
+    fixture.nativeElement.querySelector('[data-testid="dock-v3-pip-mute"]')?.click();
+    fixture.nativeElement.querySelector('[data-testid="dock-v3-pip-exit-focus"]')?.click();
+
+    expect(mockEngine.switchToTask).not.toHaveBeenCalled();
+    expect(mockEngine.fragmentRest.dismissRestReminder).not.toHaveBeenCalled();
+    expect(mockEngine.toggleMuteWaitTone).not.toHaveBeenCalled();
+    expect(mockEngine.toggleFocusMode).not.toHaveBeenCalled();
+    expect(returnSpy).toHaveBeenCalledTimes(1);
+    expect(closeSpy).toHaveBeenCalledTimes(1);
   });
 
   it('should collapse summary tokens into a single-line overflow summary in micro layout', () => {

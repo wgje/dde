@@ -1,11 +1,14 @@
 import { signal } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { AuthService } from '../../../../services/auth.service';
 import { LoggerService } from '../../../../services/logger.service';
-import type { ExternalSourceLink } from '../../../core/external-sources/external-source.model';
+import type { ExternalSourceLink, SiyuanPreviewResult } from '../../../core/external-sources/external-source.model';
 import { ExternalSourceLinkService } from '../../../core/external-sources/external-source-link.service';
 import { SiyuanPreviewService } from '../../../core/external-sources/siyuan/siyuan-preview.service';
 import { KnowledgeAnchorPopoverComponent } from './knowledge-anchor-popover.component';
+
+type PreviewMock = ReturnType<typeof vi.fn<SiyuanPreviewService['preview']>>;
 
 describe('KnowledgeAnchorPopoverComponent', () => {
   const link: ExternalSourceLink = {
@@ -24,11 +27,15 @@ describe('KnowledgeAnchorPopoverComponent', () => {
   let fixture: ComponentFixture<KnowledgeAnchorPopoverComponent>;
   let openLink: ReturnType<typeof vi.fn>;
   let updateMetadata: ReturnType<typeof vi.fn>;
-  let preview: ReturnType<typeof vi.fn>;
+  let preview: PreviewMock;
+  let currentAuthFence: string;
+  let warnLog: ReturnType<typeof vi.fn>;
 
   beforeEach(async () => {
     openLink = vi.fn();
     updateMetadata = vi.fn().mockResolvedValue(undefined);
+    currentAuthFence = 'owner-a';
+    warnLog = vi.fn();
     preview = vi.fn().mockResolvedValue({
       status: 'ready',
       origin: 'network',
@@ -60,7 +67,8 @@ describe('KnowledgeAnchorPopoverComponent', () => {
             updateMetadata,
           },
         },
-        { provide: LoggerService, useValue: { category: () => ({ warn: vi.fn() }) } },
+        { provide: AuthService, useValue: { captureAuthIdentityFence: () => currentAuthFence } },
+        { provide: LoggerService, useValue: { category: () => ({ warn: warnLog }) } },
       ],
     }).compileComponents();
 
@@ -184,5 +192,147 @@ describe('KnowledgeAnchorPopoverComponent', () => {
     await staleFixture.whenStable();
 
     expect(updateMetadata).not.toHaveBeenCalled();
+  });
+
+  it('ignores a stale preview result when the link input changes before load resolves', async () => {
+    updateMetadata.mockClear();
+    const nextLink: ExternalSourceLink = {
+      ...link,
+      id: 'link-2',
+      targetId: '20260426123456-next999',
+      uri: 'siyuan://blocks/20260426123456-next999',
+      label: '思源 next999',
+    };
+    let resolveFirst!: (value: Awaited<ReturnType<typeof preview>>) => void;
+    preview.mockImplementationOnce(() => new Promise(resolve => {
+      resolveFirst = resolve;
+    }));
+
+    const raceFixture = TestBed.createComponent(KnowledgeAnchorPopoverComponent);
+    const linkInput = signal(link);
+    Object.assign(raceFixture.componentInstance as unknown as Record<string, unknown>, {
+      link: linkInput,
+    });
+    raceFixture.detectChanges();
+
+    linkInput.set(nextLink);
+    preview.mockResolvedValueOnce({
+      status: 'ready',
+      origin: 'network',
+      preview: {
+        linkId: nextLink.id,
+        blockId: nextLink.targetId,
+        title: '新块标题',
+        hpath: '/新知识/新块标题',
+        excerpt: 'new preview',
+        fetchedAt: '2026-05-28T12:36:00.000Z',
+        fetchStatus: 'ready',
+        truncated: false,
+      },
+    });
+    await raceFixture.componentInstance.load(false);
+
+    resolveFirst({
+      status: 'ready',
+      origin: 'network',
+      preview: {
+        linkId: link.id,
+        blockId: link.targetId,
+        title: '旧块标题',
+        hpath: '/旧知识/旧块标题',
+        excerpt: 'stale preview',
+        fetchedAt: '2026-05-28T12:34:00.000Z',
+        fetchStatus: 'ready',
+        truncated: false,
+      },
+    });
+    await raceFixture.whenStable();
+
+    expect(raceFixture.componentInstance.result().preview?.title).toBe('新块标题');
+    expect(updateMetadata).toHaveBeenCalledWith(nextLink.id, {
+      label: '新块标题',
+      hpath: '/新知识/新块标题',
+    });
+    expect(updateMetadata).not.toHaveBeenCalledWith(link.id, expect.anything());
+  });
+
+  it('cancels only its superseded request and cancels the current request on destroy', async () => {
+    updateMetadata.mockClear();
+    let resolveFirst!: (value: SiyuanPreviewResult) => void;
+    let resolveSecond!: (value: SiyuanPreviewResult) => void;
+    const cancelFirst = vi.fn();
+    const cancelSecond = vi.fn();
+    const first = Object.assign(new Promise<SiyuanPreviewResult>(resolve => { resolveFirst = resolve; }), {
+      cancel: cancelFirst,
+    });
+    const second = Object.assign(new Promise<SiyuanPreviewResult>(resolve => { resolveSecond = resolve; }), {
+      cancel: cancelSecond,
+    });
+    preview.mockReturnValueOnce(first).mockReturnValueOnce(second);
+
+    const component = fixture.componentInstance;
+    const firstLoad = component.load(false);
+    const secondLoad = component.load(true);
+
+    expect(cancelFirst).toHaveBeenCalledOnce();
+    expect(cancelSecond).not.toHaveBeenCalled();
+
+    fixture.destroy();
+    expect(cancelSecond).toHaveBeenCalledOnce();
+    resolveFirst({ status: 'loading' });
+    resolveSecond({ status: 'loading' });
+    await Promise.all([firstLoad, secondLoad]);
+
+    expect(component.result().status).toBe('loading');
+    expect(updateMetadata).not.toHaveBeenCalled();
+  });
+
+  it('ignores a late fulfilled preview after owner reset', async () => {
+    let resolvePreview!: (value: SiyuanPreviewResult) => void;
+    const pending = new Promise<SiyuanPreviewResult>(resolve => { resolvePreview = resolve; });
+    preview.mockReturnValueOnce(pending);
+    updateMetadata.mockClear();
+    const component = fixture.componentInstance;
+    component.result.set({ status: 'loading' });
+
+    const load = component.load(false);
+    currentAuthFence = 'owner-b';
+    resolvePreview({
+      status: 'ready',
+      origin: 'network',
+      preview: {
+        linkId: link.id,
+        blockId: link.targetId,
+        title: 'stale owner title',
+        hpath: '/stale-owner',
+        excerpt: 'stale owner content',
+        fetchedAt: '2026-05-28T12:40:00.000Z',
+        fetchStatus: 'ready',
+        truncated: false,
+      },
+    });
+    await load;
+
+    expect(component.result()).toEqual({ status: 'loading' });
+    expect(updateMetadata).not.toHaveBeenCalled();
+  });
+
+  it('consumes a rejected preview after owner reset without publishing an error', async () => {
+    let rejectPreview!: (error: unknown) => void;
+    const pending = new Promise<SiyuanPreviewResult>((_resolve, reject) => { rejectPreview = reject; });
+    preview.mockReturnValueOnce(pending);
+    updateMetadata.mockClear();
+    warnLog.mockClear();
+    const component = fixture.componentInstance;
+    component.result.set({ status: 'loading' });
+
+    const load = component.load(false);
+    currentAuthFence = 'owner-b';
+    rejectPreview(new Error('stale owner rejection'));
+    await load;
+
+    expect(component.result()).toEqual({ status: 'loading' });
+    expect(updateMetadata).not.toHaveBeenCalled();
+    expect(warnLog).not.toHaveBeenCalled();
   });
 });

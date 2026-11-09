@@ -1,126 +1,36 @@
-/**
- * ActionQueueService 单元测试（Vitest + Injector 隔离模式）
- * 
- * 注意：该服务使用 effect()，需要注入上下文，因此使用 runInInjectionContext。
- * 
- * 测试覆盖：
- * 1. 基本入队/出队操作
- * 2. 断网时操作队列化
- * 3. 网络恢复后自动重试
- * 4. 重试失败后的回滚/死信队列
- * 5. 业务错误 vs 网络错误的区分
- * 6. 指数退避重试策略
- * 7. 队列持久化和恢复
- * 8. 死信队列的 TTL 清理
- */
+/** ActionQueueService 单元测试（Vitest + Injector 隔离模式）。 */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { DestroyRef, Injector, runInInjectionContext, signal } from '@angular/core';
+import { Injector, runInInjectionContext, signal } from '@angular/core';
 import { ActionQueueService, EnqueueParams } from './action-queue.service';
-import { ActionQueueStorageService, LOCAL_QUEUE_CONFIG } from './action-queue-storage.service';
-import { Task, Project } from '../models';
-import { AuthService } from './auth.service';
-import { LoggerService } from './logger.service';
-import { ToastService } from './toast.service';
-import { SentryAlertService } from './sentry-alert.service';
-import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
-import { NetworkAwarenessService } from './network-awareness.service';
-import { QueueBackupService } from './queue-backup.service';
-import { RetryQueueService } from '../app/core/services/sync/retry-queue.service';
-import { WriteGuardService } from './write-guard.service';
-import { SyncWriterLeaseService } from './sync-writer-lease.service';
-import { createMockDestroyRef, mockSentryLazyLoaderService } from '../test-setup.mocks';
+import type { PreferencePayload, QueuedAction } from './action-queue.types';
+import { createMockDestroyRef } from '../test-setup.mocks';
+import { mockSentryLazyLoaderService } from '../test-setup.mocks';
 import { resetBrowserNetworkSuspensionTrackingForTests } from '../utils/browser-network-suspension';
-
-// 模拟 LoggerService
-const mockLoggerCategory = {
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
-  debug: vi.fn(),
-};
-
-const mockLoggerService = {
-  category: vi.fn(() => mockLoggerCategory),
-};
-
-// 模拟 ToastService
-const mockToastService = {
-  success: vi.fn(),
-  error: vi.fn(),
-  warning: vi.fn(),
-  info: vi.fn(),
-};
-
-// 模拟 SentryAlertService
-const mockSentryAlertService = {
-  captureException: vi.fn(),
-  captureMessage: vi.fn(),
-  setContext: vi.fn(),
-  updateSyncContext: vi.fn(),
-};
-
-const mockNetworkAwarenessService = {
-  setStoragePressure: vi.fn(),
-};
-
-const mockQueueBackupService = {
-  backupQueue: vi.fn().mockResolvedValue(true),
-  restoreQueue: vi.fn().mockResolvedValue(null),
-};
-
-// 模拟 RetryQueueService（P2-15 跨队列去重）
-const mockRetryQueueService = {
-  hasEntity: vi.fn().mockReturnValue(false),
-  removeByEntity: vi.fn().mockReturnValue(false),
-  getItems: vi.fn().mockReturnValue([]),
-  add: vi.fn(),
-  clear: vi.fn(),
-};
-
-const mockWriteGuardService = {
-  assertWritable: vi.fn(() => true),
-};
-
-const mockLeaseRelease = vi.fn(async () => undefined);
-const mockSyncWriterLeaseService = {
-  isFeatureEnabled: vi.fn(() => false),
-  requestLease: vi.fn(async () => ({
-    tabId: 'tab-action',
-    lockName: 'nanoflow-sync:test:test-user:__global__',
-    mode: 'memory-only' as const,
-    release: mockLeaseRelease,
-  })),
-};
-
-function createMockTask(overrides: Partial<Task> = {}): Task {
-  return {
-    id: crypto.randomUUID(),
-    title: 'Test Task',
-    content: '',
-    stage: 1,
-    parentId: null,
-    order: 0,
-    rank: 500,
-    status: 'active',
-    x: 0, y: 0,
-    createdDate: new Date().toISOString(),
-    displayId: '1',
-    ...overrides,
-  };
-}
-
-function createMockProject(overrides: Partial<Project> = {}): Project {
-  return {
-    id: crypto.randomUUID(),
-    name: 'Test Project',
-    description: '',
-    createdDate: new Date().toISOString(),
-    tasks: [],
-    connections: [],
-    ...overrides,
-  };
-}
-
+import { AuthService } from './auth.service';
+import { UserSessionService } from './user-session.service';
+import { registerActionQueueBasicOperationSpecs } from './action-queue-basic-operations.spec-helpers';
+import { registerActionQueueDependentPauseSpecs } from './action-queue-dependent-pause.spec-helpers';
+import { installWindowEventBridge } from './action-queue-dom-event-bridge.spec-helpers';
+import { registerActionQueueOutboxStateSpecs } from './action-queue-outbox-state.spec-helpers';
+import { registerActionQueueProcessingNetworkRetrySpecs } from './action-queue-processing-network-retry.spec-helpers';
+import { registerActionQueueProcessingRetrySpecs } from './action-queue-processing-retry.spec-helpers';
+import { registerActionQueuePersistenceSpecs } from './action-queue-persistence.spec-helpers';
+import {
+  createActionQueueServiceTestInjector,
+  createMockProject,
+  createMockTask,
+  installMockQueueBackupStrictUpdate,
+  markActionQueueCurrentOwnerStorageLoadedForTests,
+  mockLoggerCategory,
+  mockLeaseRelease,
+  mockQueueBackupService,
+  mockQueueBackupState,
+  mockSentryAlertService,
+  mockSyncWriterLeaseService,
+  mockToastService,
+  registerActionQueueStorageAdmissionSpecs,
+  resetActionQueueServiceMocks,
+} from './action-queue-service-test-harness.spec-helpers';
 describe('ActionQueueService', () => {
   let service: ActionQueueService;
   let currentUserIdSignal = signal<string | null>('test-user');
@@ -128,78 +38,6 @@ describe('ActionQueueService', () => {
   let consoleErrorSpy: ReturnType<typeof vi.spyOn> | undefined;
   let destroyRefCleanup: (() => void) | undefined;
   let restoreWindowEvents: (() => void) | undefined;
-
-  function installWindowEventBridge(): () => void {
-    const originalAddEventListener = window.addEventListener;
-    const originalRemoveEventListener = window.removeEventListener;
-    const originalDispatchEvent = window.dispatchEvent;
-    const listeners = new Map<string, Set<EventListenerOrEventListenerObject>>();
-
-    Object.defineProperty(window, 'addEventListener', {
-      configurable: true,
-      writable: true,
-      value: (type: string, listener: EventListenerOrEventListenerObject | null) => {
-        if (!listener) {
-          return;
-        }
-        const bucket = listeners.get(type) ?? new Set<EventListenerOrEventListenerObject>();
-        bucket.add(listener);
-        listeners.set(type, bucket);
-      },
-    });
-
-    Object.defineProperty(window, 'removeEventListener', {
-      configurable: true,
-      writable: true,
-      value: (type: string, listener: EventListenerOrEventListenerObject | null) => {
-        if (!listener) {
-          return;
-        }
-        listeners.get(type)?.delete(listener);
-      },
-    });
-
-    Object.defineProperty(window, 'dispatchEvent', {
-      configurable: true,
-      writable: true,
-      value: (event: Event) => {
-        const bucket = listeners.get(event.type);
-        if (!bucket) {
-          return true;
-        }
-
-        for (const listener of bucket) {
-          if (typeof listener === 'function') {
-            listener.call(window, event);
-            continue;
-          }
-
-          listener.handleEvent(event);
-        }
-
-        return true;
-      },
-    });
-
-    return () => {
-      Object.defineProperty(window, 'addEventListener', {
-        configurable: true,
-        writable: true,
-        value: originalAddEventListener,
-      });
-      Object.defineProperty(window, 'removeEventListener', {
-        configurable: true,
-        writable: true,
-        value: originalRemoveEventListener,
-      });
-      Object.defineProperty(window, 'dispatchEvent', {
-        configurable: true,
-        writable: true,
-        value: originalDispatchEvent,
-      });
-    };
-  }
-
   // 辅助函数：模拟网络状态（不触发事件）
   function setNetworkStatus(online: boolean) {
     Object.defineProperty(navigator, 'onLine', {
@@ -218,7 +56,7 @@ describe('ActionQueueService', () => {
       writable: true,
       configurable: true,
     });
-    
+
     if (online) {
       window.dispatchEvent(new Event('online'));
     } else {
@@ -262,17 +100,35 @@ describe('ActionQueueService', () => {
     };
   }
 
-  beforeEach(() => {
+  function createTestAttachmentReplayAction(): EnqueueParams {
+    return {
+      type: 'create',
+      entityType: 'attachment',
+      entityId: 'attachment-1',
+      payload: {
+        attachment: {
+          id: 'attachment-1',
+          type: 'document',
+          name: 'attachment.txt',
+          url: 'nanoflow-local-attachment://attachment-1',
+          createdAt: '2026-06-15T01:00:00.000Z',
+        },
+        blobKey: 'attachment-1',
+        fileName: 'attachment.txt',
+        mimeType: 'text/plain',
+        projectId: 'project-1',
+        taskId: 'task-1',
+        userId: 'test-user',
+        sourceUserId: 'test-user',
+      },
+    };
+  }
+  beforeEach(async () => {
     resetBrowserNetworkSuspensionTrackingForTests();
-
     // 重置 localStorage
     localStorage.clear();
     vi.clearAllMocks();
-    mockWriteGuardService.assertWritable.mockReturnValue(true);
-    mockSyncWriterLeaseService.isFeatureEnabled.mockReturnValue(false);
-    mockSyncWriterLeaseService.requestLease.mockClear();
-    mockLeaseRelease.mockClear();
-
+    resetActionQueueServiceMocks();
     // 测试默认静默：避免业务错误分支写入 stderr。
     consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -288,31 +144,37 @@ describe('ActionQueueService', () => {
     currentUserIdSignal = signal<string | null>('test-user');
 
     restoreWindowEvents = installWindowEventBridge();
-    
+
     const { destroyRef, destroy } = createMockDestroyRef();
     destroyRefCleanup = destroy;
 
-    const injector = Injector.create({
-      providers: [
-        ActionQueueService,
-        ActionQueueStorageService,
-        { provide: LoggerService, useValue: mockLoggerService },
-        { provide: ToastService, useValue: mockToastService },
-        { provide: SentryAlertService, useValue: mockSentryAlertService },
-        { provide: SentryLazyLoaderService, useValue: mockSentryLazyLoaderService },
-        { provide: NetworkAwarenessService, useValue: mockNetworkAwarenessService },
-        { provide: QueueBackupService, useValue: mockQueueBackupService },
-        { provide: RetryQueueService, useValue: mockRetryQueueService },
-        { provide: WriteGuardService, useValue: mockWriteGuardService },
-        { provide: SyncWriterLeaseService, useValue: mockSyncWriterLeaseService },
-        { provide: AuthService, useValue: { currentUserId: currentUserIdSignal } },
-        { provide: DestroyRef, useValue: destroyRef },
-      ],
-    });
+    const baseInjector = createActionQueueServiceTestInjector(
+      currentUserIdSignal,
+      destroyRef,
+    );
+    const injector = Injector.create({ parent: baseInjector, providers: [
+      ActionQueueService,
+      { provide: AuthService, useValue: {
+        currentUserId: currentUserIdSignal,
+        captureAuthIdentityFence: () => `auth:${currentUserIdSignal()}`,
+      } },
+      { provide: UserSessionService, useValue: {
+        getCurrentSessionGeneration: () => 0,
+        isSessionContextCurrent: (generation: number, owner: string) =>
+          generation === 0 && owner === currentUserIdSignal(),
+      } },
+    ] });
 
     runInInjectionContext(injector, () => {
       service = injector.get(ActionQueueService);
     });
+    await service.reloadFromStorageForCurrentOwner();
+    const clearCurrentView = service.clearCurrentView.bind(service);
+    vi.spyOn(service, 'clearCurrentView').mockImplementation(() => {
+      clearCurrentView();
+      markActionQueueCurrentOwnerStorageLoadedForTests(service);
+    });
+    vi.clearAllMocks();
   });
 
   afterEach(() => {
@@ -326,648 +188,178 @@ describe('ActionQueueService', () => {
     consoleErrorSpy?.mockRestore();
   });
 
-  // ==================== 基本队列操作 ====================
-  
-  describe('基本队列操作', () => {
-    it('应该能够入队一个操作', () => {
-      setNetworkStatus(false); // 防止自动处理
-      const actionId = service.enqueue(createTestProjectAction());
-      
-      expect(actionId).toBeDefined();
+  registerActionQueueBasicOperationSpecs({
+    service: () => service,
+    setNetworkStatus,
+    createTestProjectAction,
+    createMockProject,
+    mockToastService,
+  });
+  registerActionQueueStorageAdmissionSpecs(() => service, owner => currentUserIdSignal.set(owner));
+
+  describe('Sentry context 边界', () => {
+    it('enqueue breadcrumb 和告警日志都失败时仍保留已入队 action', () => {
+      const breadcrumbError = new Error('breadcrumb failed');
+      setNetworkStatus(false);
+      mockSentryLazyLoaderService.addBreadcrumb.mockImplementationOnce(() => {
+        throw breadcrumbError;
+      });
+      mockLoggerCategory.warn.mockImplementationOnce(() => {
+        throw new Error('logger unavailable');
+      });
+
+      let actionId = '';
+      expect(() => {
+        actionId = service.enqueue(createTestProjectAction());
+      }).not.toThrow();
+
+      expect(actionId).not.toBe('');
       expect(service.queueSize()).toBe(1);
       expect(service.hasPendingActions()).toBe(true);
+      expect(mockSentryLazyLoaderService.addBreadcrumb).toHaveBeenCalled();
+      expect(mockLoggerCategory.warn).toHaveBeenCalledWith(
+        'ActionQueue enqueue breadcrumb failed',
+        breadcrumbError,
+      );
     });
-    
-    it('应该能够出队一个操作', () => {
+
+    it('clearQueue 应隔离 Sentry context 更新异常并保留队列状态变更', () => {
+      const sentryContextError = new Error('sentry context failed');
       setNetworkStatus(false);
-      const actionId = service.enqueue(createTestProjectAction());
-      
-      service.dequeue(actionId);
-      
+      service.enqueue(createTestProjectAction());
+      mockSentryAlertService.updateSyncContext.mockImplementationOnce(() => {
+        throw sentryContextError;
+      });
+
+      expect(() => service.clearQueue()).not.toThrow();
+
       expect(service.queueSize()).toBe(0);
       expect(service.hasPendingActions()).toBe(false);
+      expect(mockSentryAlertService.updateSyncContext).toHaveBeenCalled();
     });
-    
-    it('达到软上限后应继续接收写入（避免离线丢写）', () => {
+  });
+
+  describe('discardActions 边界', () => {
+    it('discardActions 在队列持久化抛错时应回滚内存视图并返回 0', () => {
+      const persistError = new Error('queue persistence failed');
       setNetworkStatus(false);
-      // 入队 150 个操作
-      for (let i = 0; i < 150; i++) {
-        service.enqueue({
-          type: 'update',
-          entityType: 'task',
-          entityId: `task-${i}`,
-          payload: { task: createMockTask({ id: `task-${i}` }), projectId: 'proj-1' },
-        });
-      }
-      
-      // 软上限后仍然继续入队
-      expect(service.queueSize()).toBe(150);
-      expect(mockToastService.warning).toHaveBeenCalled();
-    });
-    
-    it('应该能够清空队列', () => {
-      setNetworkStatus(false);
-      service.enqueue(createTestProjectAction());
-      service.enqueue(createTestProjectAction());
-      
-      service.clearQueue();
-      
-      expect(service.queueSize()).toBe(0);
-    });
-
-          it('项目冲突收口应只失效对应 project mutation 视图，不影响全局队列视图', () => {
-            setNetworkStatus(false);
-            const beforeQueueGeneration = service.getCurrentQueueViewGeneration();
-            const beforeProjectGeneration = service.getProjectMutationViewGeneration('proj-stale', 'test-user');
-
-            const nextProjectGeneration = service.invalidateProjectMutationView('proj-stale', 'test-user');
-
-            expect(nextProjectGeneration).toBe(beforeProjectGeneration + 1);
-            expect(service.getProjectMutationViewGeneration('proj-stale', 'test-user')).toBe(nextProjectGeneration);
-            expect(service.getCurrentQueueViewGeneration()).toBe(beforeQueueGeneration);
-          });
-
-    it('切账号时清空当前视图不应覆盖已持久化的队列和死信', () => {
-      setNetworkStatus(false);
-      service.enqueue(createTestProjectAction());
-      const queuedAction = service.pendingActions()[0];
-      service.moveToDeadLetter(queuedAction, 'test dead letter');
-
-      const queueStorageKey = 'nanoflow.action-queue.test-user';
-      const deadLetterStorageKey = 'nanoflow.dead-letter-queue.test-user';
-
-      expect(localStorage.getItem(queueStorageKey)).toBe('[]');
-      expect(localStorage.getItem(deadLetterStorageKey)).toContain('test dead letter');
-
-      service.clearCurrentView();
-
-      expect(service.queueSize()).toBe(0);
-      expect(service.deadLetterSize()).toBe(0);
-      expect(localStorage.getItem(queueStorageKey)).toBe('[]');
-      expect(localStorage.getItem(deadLetterStorageKey)).toContain('test dead letter');
-    });
-
-    it('project update 合并时应保留 sourceUserId 并以最后一次 taskIdsToDelete 为准', () => {
-      setNetworkStatus(false);
-      const projectId = 'proj-merge-delete-intent';
-
       service.enqueue({
-        type: 'update',
-        entityType: 'project',
-        entityId: projectId,
-        payload: {
-          project: createMockProject({ id: projectId, name: 'Before Merge' }),
-          sourceUserId: 'owner-a',
-          taskIdsToDelete: ['task-delete-a'],
-        },
+        ...createTestProjectAction(),
+        entityId: 'discard-rollback-target',
+      });
+      service.enqueue({
+        ...createTestProjectAction(),
+        entityId: 'discard-rollback-keep',
+      });
+      const beforeIds = service.pendingActions().map(action => action.entityId);
+      vi.spyOn(service.storage, 'saveQueueToStorage').mockImplementationOnce(() => {
+        throw persistError;
       });
 
-      service.enqueue({
-        type: 'update',
-        entityType: 'project',
-        entityId: projectId,
-        payload: {
-          project: createMockProject({ id: projectId, name: 'After Merge' }),
-          taskIdsToDelete: ['task-delete-b'],
-        },
-      });
+      let discarded = -1;
+      expect(() => {
+        discarded = service.discardActions(action => action.entityId === 'discard-rollback-target');
+      }).not.toThrow();
 
+      expect(discarded).toBe(0);
+      expect(service.queueSize()).toBe(2);
+      expect(service.pendingActions().map(action => action.entityId)).toEqual(beforeIds);
+      expect(mockLoggerCategory.warn).toHaveBeenCalledWith(
+        'ActionQueue discardActions 持久化失败，已回滚内存队列',
+        expect.objectContaining({ error: persistError, discardedCount: 1 }),
+      );
+    });
+  });
+
+  describe('reloadFromStorageForCurrentOwner 边界', () => {
+    it('主队列加载抛错时应继续尝试加载死信队列并保留已清空视图', async () => {
+      const loadError = new Error('queue load failed');
+      setNetworkStatus(false);
+      service.enqueue(createTestProjectAction());
+      const stageSpy = vi.spyOn(service.storage, 'stageCurrentOwnerStorage')
+        .mockRejectedValueOnce(loadError);
+
+      await expect(service.reloadFromStorageForCurrentOwner()).resolves.toBeUndefined();
+
+      expect(stageSpy).toHaveBeenCalledOnce();
       expect(service.queueSize()).toBe(1);
-      expect(service.pendingActions()[0]).toEqual(
-        expect.objectContaining({
-          payload: expect.objectContaining({
-            sourceUserId: 'owner-a',
-            project: expect.objectContaining({ id: projectId, name: 'After Merge' }),
-            taskIdsToDelete: ['task-delete-b'],
-          }),
-        }),
+      expect(service.hasPendingActions()).toBe(true);
+      expect((service as unknown as {
+        getProjectPendingWriteState?: (projectId: string, ownerUserId: string) => string;
+      }).getProjectPendingWriteState?.('project-load-failed', 'test-user')).toBe('unknown');
+      expect(mockLoggerCategory.warn).toHaveBeenCalledWith(
+        'ActionQueue owner storage staging failed',
+        expect.objectContaining({ phase: 'staging', error: loadError }),
       );
     });
 
-    it('foreign-owner project handoff 应复用同一 project 的合并语义', async () => {
-      const projectId = 'proj-foreign-owner-merge';
+    it('只有 owner 队列权威加载完成后空视图才可判定为 clear', async () => {
+      const storage = service.storage as unknown as {
+        loadQueueFromStorage: () => Promise<'ready' | 'failed' | 'stale'>;
+      };
+      vi.spyOn(storage, 'loadQueueFromStorage').mockResolvedValueOnce('ready');
+      const readPendingState = () => (service as unknown as {
+        getProjectPendingWriteState?: (projectId: string, ownerUserId: string) => string;
+      }).getProjectPendingWriteState?.('project-empty', 'test-user');
 
-      await service.enqueueDurablyForOwner('owner-b', {
-        type: 'update',
-        entityType: 'project',
-        entityId: projectId,
-        payload: {
-          project: createMockProject({ id: projectId, name: 'Before Foreign Merge' }),
-          sourceUserId: 'owner-b',
-          taskIdsToDelete: ['task-delete-a'],
-        },
-      });
+      service.reloadFromStorageForCurrentOwner();
 
-      await service.enqueueDurablyForOwner('owner-b', {
-        type: 'update',
-        entityType: 'project',
-        entityId: projectId,
-        payload: {
-          project: createMockProject({ id: projectId, name: 'After Foreign Merge' }),
-          sourceUserId: 'owner-b',
-          taskIdsToDelete: ['task-delete-b'],
-        },
-      });
+      expect(readPendingState()).toBe('unknown');
+      await vi.waitFor(() => expect(readPendingState()).toBe('clear'));
+    });
+  });
 
-      const ownerQueue = await service.storage.loadQueueSnapshotForOwner('owner-b');
+  describe('自动处理异常隔离', () => {
+    it('在线 enqueue 自动处理失败不应产生未处理 rejection', async () => {
+      const processError = new Error('auto process failed');
+      const unhandledRejection = vi.fn();
+      const processQueueSpy = vi
+        .spyOn(service, 'processQueue')
+        .mockRejectedValueOnce(processError);
+      window.addEventListener('unhandledrejection', unhandledRejection);
 
-      expect(ownerQueue).toHaveLength(1);
-      expect(ownerQueue[0]).toEqual(
-        expect.objectContaining({
-          entityType: 'project',
-          entityId: projectId,
-          payload: expect.objectContaining({
-            sourceUserId: 'owner-b',
-            project: expect.objectContaining({ id: projectId, name: 'After Foreign Merge' }),
-            taskIdsToDelete: ['task-delete-b'],
-          }),
-        }),
+      setNetworkStatus(true);
+      service.enqueue(createTestProjectAction());
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(processQueueSpy).toHaveBeenCalledTimes(1);
+      expect(unhandledRejection).not.toHaveBeenCalled();
+      expect(mockLoggerCategory.warn).toHaveBeenCalledWith(
+        'ActionQueue 自动处理失败',
+        processError,
       );
+
+      window.removeEventListener('unhandledrejection', unhandledRejection);
     });
   });
 
   // ==================== 处理器注册和执行 ====================
-  
-  describe('处理器注册和执行', () => {
-    it('processQueue 在 sync writer lease 开启时应持有 lease 后再处理并最终释放', async () => {
-      const processor = vi.fn().mockResolvedValue(true);
-      mockSyncWriterLeaseService.isFeatureEnabled.mockReturnValue(true);
-      service.registerProcessor('project:update', processor);
-      setNetworkStatus(false);
-      service.enqueue(createTestProjectAction());
 
-      setNetworkStatus(true);
-      const result = await service.processQueue();
+  const processingRetrySpecContext = {
+    service: () => service,
+    setNetworkStatus,
+    triggerNetworkEvent,
+    setVisibilityState,
+    createTestProjectAction,
+    createTestTaskAction,
+    setCurrentUserId: (userId: string | null) => currentUserIdSignal.set(userId),
+    mockSyncWriterLeaseService,
+    mockLoggerDebug: mockLoggerCategory.debug,
+    mockLoggerWarn: mockLoggerCategory.warn,
+    mockToastWarning: mockToastService.warning,
+    mockLeaseRelease,
+    mockSentryAddBreadcrumb: mockSentryLazyLoaderService.addBreadcrumb,
+  };
 
-      expect(result.processed).toBe(1);
-      expect(mockSyncWriterLeaseService.requestLease).toHaveBeenCalledWith(expect.objectContaining({
-        userId: 'test-user',
-        projectId: '__global__',
-      }));
-      expect(processor).toHaveBeenCalledTimes(1);
-      expect(mockLeaseRelease).toHaveBeenCalledTimes(1);
-    });
+  registerActionQueueProcessingRetrySpecs(processingRetrySpecContext);
+  registerActionQueueProcessingNetworkRetrySpecs(processingRetrySpecContext);
 
-    it('应该能够注册处理器并执行', async () => {
-      const processor = vi.fn().mockResolvedValue(true);
-      service.registerProcessor('project:update', processor);
-      
-      // 先离线防止自动处理
-      setNetworkStatus(false);
-      
-      service.enqueue(createTestProjectAction());
-      
-      // 再上线并手动处理
-      setNetworkStatus(true);
-      await service.processQueue();
-      
-      expect(processor).toHaveBeenCalledTimes(1);
-    });
-    
-    it('处理成功后应该从队列移除操作', async () => {
-      const processor = vi.fn().mockResolvedValue(true);
-      service.registerProcessor('project:update', processor);
-      
-      // 先离线
-      setNetworkStatus(false);
-      service.enqueue(createTestProjectAction());
-      expect(service.queueSize()).toBe(1);
-      
-      // 再上线并处理
-      setNetworkStatus(true);
-      const result = await service.processQueue();
-      
-      expect(result.processed).toBe(1);
-      expect(result.failed).toBe(0);
-      expect(service.queueSize()).toBe(0);
-    });
-    
-    it('无处理器的操作应该保留在队列中', async () => {
-      // 先离线
-      setNetworkStatus(false);
-      
-      service.enqueue(createTestProjectAction());
-      
-      // 不注册任何处理器，上线并处理
-      setNetworkStatus(true);
-      const result = await service.processQueue();
-      
-      expect(result.processed).toBe(0);
-      expect(result.failed).toBe(1);
-      expect(service.queueSize()).toBe(1); // 仍在队列中
-    });
-
-    it('切账号后旧处理循环失败结果应进入旧 owner 死信而不是污染新 owner', async () => {
-      let rejectProcessing = null as ((reason?: unknown) => void) | null;
-      const processor = vi.fn().mockImplementation(
-        () => new Promise<boolean>((_resolve, reject) => {
-          rejectProcessing = reject;
-        })
-      );
-      service.registerProcessor('project:update', processor);
-
-      setNetworkStatus(false);
-      const actionId = service.enqueue(createTestProjectAction());
-      service.pendingActions.update(queue => queue.map(action =>
-        action.id === actionId
-          ? { ...action, retryCount: LOCAL_QUEUE_CONFIG.MAX_RETRIES }
-          : action
-      ));
-      service.storage.saveQueueToStorage();
-
-      setNetworkStatus(true);
-      const processingPromise = service.processQueue();
-      await vi.waitFor(() => {
-        expect(processor).toHaveBeenCalledTimes(1);
-      });
-
-      currentUserIdSignal.set('other-user');
-      service.clearCurrentView();
-
-      rejectProcessing?.(new Error('network timeout'));
-      await processingPromise;
-
-      expect(service.deadLetterSize()).toBe(0);
-      expect(localStorage.getItem('nanoflow.action-queue.test-user')).not.toContain(actionId);
-      expect(localStorage.getItem('nanoflow.dead-letter-queue.test-user')).toContain(actionId);
-      expect(localStorage.getItem('nanoflow.dead-letter-queue.other-user')).toBeNull();
-    });
-
-    it('切账号后旧处理循环成功结果应从旧 owner 的持久化队列中移除', async () => {
-      let resolveProcessing = null as ((value: boolean) => void) | null;
-      const processor = vi.fn().mockImplementation(
-        () => new Promise<boolean>(resolve => {
-          resolveProcessing = resolve;
-        })
-      );
-      service.registerProcessor('project:update', processor);
-
-      setNetworkStatus(false);
-      const actionId = service.enqueue(createTestProjectAction());
-      expect(localStorage.getItem('nanoflow.action-queue.test-user')).toContain(actionId);
-
-      setNetworkStatus(true);
-      const processingPromise = service.processQueue();
-      await vi.waitFor(() => {
-        expect(processor).toHaveBeenCalledTimes(1);
-      });
-
-      currentUserIdSignal.set('other-user');
-      service.clearCurrentView();
-
-      resolveProcessing?.(true);
-      await processingPromise;
-
-      expect(localStorage.getItem('nanoflow.action-queue.test-user')).not.toContain(actionId);
-      expect(localStorage.getItem('nanoflow.action-queue.other-user')).toBeNull();
-    });
-
-    it('切账号后旧处理循环返回 false 时也应推进旧 owner 的失败收口', async () => {
-      let resolveProcessing = null as ((value: boolean) => void) | null;
-      const processor = vi.fn().mockImplementation(
-        () => new Promise<boolean>(resolve => {
-          resolveProcessing = resolve;
-        })
-      );
-      service.registerProcessor('project:update', processor);
-
-      setNetworkStatus(false);
-      const actionId = service.enqueue(createTestProjectAction());
-      setNetworkStatus(true);
-
-      const processingPromise = service.processQueue();
-      await vi.waitFor(() => {
-        expect(processor).toHaveBeenCalledTimes(1);
-      });
-
-      currentUserIdSignal.set('other-user');
-      service.clearCurrentView();
-
-      resolveProcessing?.(false);
-      await processingPromise;
-
-      const persistedOldQueue = localStorage.getItem('nanoflow.action-queue.test-user') ?? '';
-      expect(persistedOldQueue).toContain(actionId);
-      expect(persistedOldQueue).toContain('"retryCount":1');
-      expect(localStorage.getItem('nanoflow.dead-letter-queue.other-user')).toBeNull();
-    });
-
-    it('full wipe 开始后旧处理循环成功结果不应把旧 owner 队列写回本地', async () => {
-      let resolveProcessing = null as ((value: boolean) => void) | null;
-      const processor = vi.fn().mockImplementation(
-        () => new Promise<boolean>(resolve => {
-          resolveProcessing = resolve;
-        })
-      );
-      service.registerProcessor('project:update', processor);
-
-      setNetworkStatus(false);
-      const actionId = service.enqueue(createTestProjectAction());
-      expect(localStorage.getItem('nanoflow.action-queue.test-user')).toContain(actionId);
-
-      setNetworkStatus(true);
-      const processingPromise = service.processQueue();
-      await vi.waitFor(() => {
-        expect(processor).toHaveBeenCalledTimes(1);
-      });
-
-      currentUserIdSignal.set(null);
-      service.clearCurrentView();
-      service.clearQueue();
-      localStorage.removeItem('nanoflow.action-queue.test-user');
-      localStorage.removeItem('nanoflow.dead-letter-queue.test-user');
-
-      resolveProcessing?.(true);
-      await processingPromise;
-
-      expect(localStorage.getItem('nanoflow.action-queue.test-user')).toBeNull();
-      expect(localStorage.getItem('nanoflow.dead-letter-queue.test-user')).toBeNull();
-    });
-
-    it('full wipe 开始后旧处理循环失败结果不应把旧 owner 死信写回本地', async () => {
-      let rejectProcessing = null as ((reason?: unknown) => void) | null;
-      const processor = vi.fn().mockImplementation(
-        () => new Promise<boolean>((_resolve, reject) => {
-          rejectProcessing = reject;
-        })
-      );
-      service.registerProcessor('project:update', processor);
-
-      setNetworkStatus(false);
-      const actionId = service.enqueue(createTestProjectAction());
-      service.pendingActions.update(queue => queue.map(action =>
-        action.id === actionId
-          ? { ...action, retryCount: LOCAL_QUEUE_CONFIG.MAX_RETRIES }
-          : action
-      ));
-      service.storage.saveQueueToStorage();
-
-      setNetworkStatus(true);
-      const processingPromise = service.processQueue();
-      await vi.waitFor(() => {
-        expect(processor).toHaveBeenCalledTimes(1);
-      });
-
-      currentUserIdSignal.set(null);
-      service.clearCurrentView();
-      service.clearQueue();
-      localStorage.removeItem('nanoflow.action-queue.test-user');
-      localStorage.removeItem('nanoflow.dead-letter-queue.test-user');
-
-      rejectProcessing?.(new Error('network timeout'));
-      await processingPromise;
-
-      expect(localStorage.getItem('nanoflow.action-queue.test-user')).toBeNull();
-      expect(localStorage.getItem('nanoflow.dead-letter-queue.test-user')).toBeNull();
-    });
-
-    it('切账号后旧循环 finally 不应覆盖新 owner 的 processing 状态', async () => {
-      let resolveFirst = null as ((value: boolean) => void) | null;
-      let resolveSecond = null as ((value: boolean) => void) | null;
-      const onStart = vi.fn();
-      const onEnd = vi.fn();
-      const processor = vi.fn()
-        .mockImplementationOnce(() => new Promise<boolean>(resolve => {
-          resolveFirst = resolve;
-        }))
-        .mockImplementationOnce(() => new Promise<boolean>(resolve => {
-          resolveSecond = resolve;
-        }));
-      service.registerProcessor('project:update', processor);
-      service.setQueueProcessCallbacks(onStart, onEnd);
-
-      setNetworkStatus(false);
-      service.enqueue(createTestProjectAction());
-      setNetworkStatus(true);
-
-      const firstProcessing = service.processQueue();
-      await vi.waitFor(() => {
-        expect(processor).toHaveBeenCalledTimes(1);
-      });
-      expect(onStart).toHaveBeenCalledTimes(1);
-
-      currentUserIdSignal.set('other-user');
-      service.clearCurrentView();
-      expect(service.isProcessing()).toBe(false);
-      expect(onEnd).toHaveBeenCalledTimes(1);
-
-      setNetworkStatus(false);
-      service.enqueue(createTestProjectAction());
-      setNetworkStatus(true);
-
-      const secondProcessing = service.processQueue();
-      await vi.waitFor(() => {
-        expect(processor).toHaveBeenCalledTimes(2);
-      });
-      expect(service.isProcessing()).toBe(true);
-      expect(onStart).toHaveBeenCalledTimes(2);
-
-      resolveFirst?.(true);
-      await firstProcessing;
-      expect(service.isProcessing()).toBe(true);
-      expect(onEnd).toHaveBeenCalledTimes(1);
-
-      resolveSecond?.(true);
-      await secondProcessing;
-      expect(service.isProcessing()).toBe(false);
-      expect(onEnd).toHaveBeenCalledTimes(2);
-    });
-  });
-
-  // ==================== 离线/在线状态处理 ====================
-  
-  describe('离线/在线状态处理', () => {
-    it('离线时处理队列应该直接返回空结果', async () => {
-      const processor = vi.fn().mockResolvedValue(true);
-      service.registerProcessor('project:update', processor);
-      
-      // 模拟离线
-      setNetworkStatus(false);
-      
-      service.enqueue(createTestProjectAction());
-      
-      const result = await service.processQueue();
-      
-      // 离线时不应该处理任何操作
-      expect(result.processed).toBe(0);
-      expect(processor).not.toHaveBeenCalled();
-    });
-    
-    it('网络恢复时应该自动处理队列', async () => {
-      let resolveProcessed: (() => void) | null = null;
-      const processedPromise = new Promise<void>((resolve) => {
-        resolveProcessed = resolve;
-      });
-      const processor = vi.fn().mockImplementation(async () => {
-        resolveProcessed?.();
-        return true;
-      });
-      service.registerProcessor('project:update', processor);
-      
-      // 先离线
-      setNetworkStatus(false);
-      
-      service.enqueue(createTestProjectAction());
-      
-      // 恢复在线 - 使用事件触发自动处理
-      triggerNetworkEvent(true);
-      
-      // 等待自动处理真正触发，避免并发矩阵下 100ms 轮询窗口抖动
-      await Promise.race([
-        processedPromise,
-        new Promise<never>((_, reject) => {
-          setTimeout(() => reject(new Error('网络恢复后未触发自动处理')), 1000);
-        }),
-      ]);
-
-      expect(processor).toHaveBeenCalledTimes(1);
-      expect(service.queueSize()).toBe(0);
-    });
-
-    it('hidden 状态下 online 不应消费队列，并应在重新可见后恢复处理', async () => {
-      vi.useFakeTimers();
-      const processor = vi.fn().mockResolvedValue(true);
-      service.registerProcessor('project:update', processor);
-
-      setNetworkStatus(false);
-      service.enqueue(createTestProjectAction());
-
-      setVisibilityState('hidden');
-      triggerNetworkEvent(true);
-      await Promise.resolve();
-
-      expect(processor).not.toHaveBeenCalled();
-      expect(service.queueSize()).toBe(1);
-
-      setVisibilityState('visible');
-      document.dispatchEvent(new Event('visibilitychange'));
-      await vi.runAllTimersAsync();
-
-      expect(processor).toHaveBeenCalledTimes(1);
-      expect(service.queueSize()).toBe(0);
-    });
-  });
-
-  // ==================== 重试机制 ====================
-  
-  describe('重试机制', () => {
-    it('网络错误应该保留在队列中等待重试', async () => {
-      const processor = vi.fn().mockRejectedValue(new Error('Network timeout'));
-      service.registerProcessor('project:update', processor);
-      
-      setNetworkStatus(false);
-      service.enqueue(createTestProjectAction());
-      
-      setNetworkStatus(true);
-      await service.processQueue();
-      
-      // 网络错误后任务应该还在队列中（等待重试）
-      expect(service.queueSize()).toBe(1);
-      expect(processor).toHaveBeenCalledTimes(1);
-    });
-
-    it('压扁后的 browser-suspended 错误不应消耗 retry budget 或进入死信', async () => {
-      const processor = vi.fn().mockRejectedValue(new Error('SYNC_OFFLINE | 浏览器恢复连接中，请稍后重试'));
-      service.registerProcessor('project:update', processor);
-
-      setNetworkStatus(false);
-      const actionId = service.enqueue(createTestProjectAction());
-      service.pendingActions.update(queue => queue.map(action =>
-        action.id === actionId
-          ? { ...action, retryCount: LOCAL_QUEUE_CONFIG.MAX_RETRIES }
-          : action
-      ));
-
-      setNetworkStatus(true);
-      await service.processQueue();
-
-      expect(service.hasDeadLetters()).toBe(false);
-      expect(service.queueSize()).toBe(1);
-      expect(service.pendingActions()[0]?.retryCount).toBe(LOCAL_QUEUE_CONFIG.MAX_RETRIES);
-    });
-
-    it('partialRetryHandoff defer result 不应消耗 retry budget 或进入死信', async () => {
-      const processor = vi.fn().mockResolvedValue(service.deferRetry({
-        code: 'SYNC_RETRY_HANDOFF_PENDING',
-        message: 'project batch sync partially delegated; some failures did not enter retry queue',
-        details: {
-          reason: 'partial-retry-handoff',
-          retryAfterMs: 432,
-        },
-      }));
-      service.registerProcessor('project:update', processor);
-
-      setNetworkStatus(false);
-      const actionId = service.enqueue(createTestProjectAction());
-      service.pendingActions.update(queue => queue.map(action =>
-        action.id === actionId
-          ? { ...action, retryCount: LOCAL_QUEUE_CONFIG.MAX_RETRIES }
-          : action
-      ));
-
-      setNetworkStatus(true);
-      await service.processQueue();
-
-      expect(service.hasDeadLetters()).toBe(false);
-      expect(service.queueSize()).toBe(1);
-      expect(service.pendingActions()[0]?.retryCount).toBe(LOCAL_QUEUE_CONFIG.MAX_RETRIES);
-    });
-
-    it('failed processor result 应保留真实错误原因而不是 Operation returned false', async () => {
-      const processor = vi.fn().mockResolvedValue(service.failRetry({
-        code: 'SYNC_PROJECT_WRITE_FAILED',
-        message: 'permission denied',
-        details: {
-          reason: 'project-sync-failed',
-          projectId: 'project-classified-failure',
-        },
-      }));
-      service.registerProcessor('project:update', processor);
-
-      setNetworkStatus(false);
-      service.enqueue(createTestProjectAction());
-
-      setNetworkStatus(true);
-      await service.processQueue();
-
-      expect(service.queueSize()).toBe(0);
-      expect(service.hasDeadLetters()).toBe(true);
-      expect(service.deadLetterQueue()[0]?.reason).toContain('permission denied');
-      expect(service.deadLetterQueue()[0]?.reason).not.toContain('Operation returned false');
-    });
-    
-    it('重试成功后应该从队列移除', async () => {
-      // 使用 fake timers 加速重试延迟测试
-      vi.useFakeTimers();
-      
-      let callCount = 0;
-      const processor = vi.fn().mockImplementation(async () => {
-        callCount++;
-        if (callCount < 2) {
-          throw new Error('Network timeout');
-        }
-        return true;
-      });
-      
-      service.registerProcessor('task:update', processor);
-      
-      setNetworkStatus(false);
-      service.enqueue(createTestTaskAction());
-      
-      // 第一次处理（失败）
-      setNetworkStatus(true);
-      await service.processQueue();
-      expect(service.queueSize()).toBe(1);
-      
-      // 快进重试延迟时间后再次处理（成功）
-      await vi.advanceTimersByTimeAsync(1100);
-      await service.processQueue();
-      
-      expect(callCount).toBe(2);
-      expect(service.queueSize()).toBe(0);
-      
-      vi.useRealTimers();
-    });
+  registerActionQueueDependentPauseSpecs({
+    service: () => service,
+    setNetworkStatus,
+    createMockTask,
+    createMockProject,
   });
 
   // ==================== 业务错误 vs 网络错误 ====================
@@ -1028,7 +420,7 @@ describe('ActionQueueService', () => {
       expect(deadLetters.length).toBe(1);
       
       // 重试操作会自动触发 processQueue，等待处理完成
-      service.retryDeadLetter(deadLetters[0].action.id);
+      await service.retryDeadLetter(deadLetters[0].action.id);
       
       // 等待自动处理完成（使用短超时提高测试速度）
       await vi.waitFor(() => {
@@ -1082,41 +474,32 @@ describe('ActionQueueService', () => {
     });
   });
 
-  // ==================== 持久化 ====================
-  
-  describe('队列持久化', () => {
-    it('应该将队列持久化到 localStorage', () => {
-      setNetworkStatus(false);
-      service.enqueue(createTestProjectAction());
-      
-      const saved = localStorage.getItem('nanoflow.action-queue.test-user');
-      expect(saved).toBeTruthy();
-      
-      const parsed = JSON.parse(saved!);
-      expect(parsed).toHaveLength(1);
-    });
-    
-    it('应该持久化死信队列', async () => {
-      const processor = vi.fn().mockRejectedValue(new Error('invalid input'));
-      service.registerProcessor('task:create', processor);
-      
-      setNetworkStatus(false);
-      service.enqueue({
-        type: 'create',
-        entityType: 'task',
-        entityId: `task-${Date.now()}`,
-        payload: { task: createMockTask({ id: 'task-1' }), projectId: 'proj-1' },
-      });
-      
-      setNetworkStatus(true);
-      await service.processQueue();
-      
-      const savedDeadLetter = localStorage.getItem('nanoflow.dead-letter-queue.test-user');
-      expect(savedDeadLetter).toBeTruthy();
-      
-      const parsed = JSON.parse(savedDeadLetter!);
-      expect(parsed).toHaveLength(1);
-    });
+  registerActionQueuePersistenceSpecs({
+    service: () => service,
+    setNetworkStatus,
+    createTestProjectAction,
+    createTestTaskAction,
+    createMockTask,
+    mockQueueBackupService,
+    getMockQueueBackupPersistedQueue: () => mockQueueBackupState.persistedQueue,
+    setMockQueueBackupPersistedQueue: queue => {
+      mockQueueBackupState.persistedQueue = queue;
+    },
+    setMockQueueBackupRecordFound: recordFound => {
+      mockQueueBackupState.recordFound = recordFound;
+    },
+  });
+
+  registerActionQueueOutboxStateSpecs({
+    service: () => {
+      service.reloadFromStorageForCurrentOwner = () => (
+        service.storage.loadQueueFromStorage().then(() => undefined)
+      );
+      return service;
+    },
+    setNetworkStatus,
+    createTestTaskAction,
+    createMockTask,
   });
 
   // ==================== 失败通知回调 ====================
@@ -1204,12 +587,149 @@ describe('ActionQueueService', () => {
       expect(actions).toHaveLength(1);
       expect(actions.every(a => a.entityId === 'task-1')).toBe(true);
     });
+
+    it('应该将 connection 待处理操作纳入项目待同步查询', () => {
+      setNetworkStatus(false);
+      service.enqueue({
+        type: 'update',
+        entityType: 'connection',
+        entityId: 'connection-project-pending',
+        payload: {
+          connection: { id: 'connection-project-pending', source: 'task-a', target: 'task-b' },
+          projectId: 'project-pending',
+        },
+      });
+
+      expect(service.getPendingActionsForProject('project-pending').map(action => action.entityId))
+        .toEqual(['connection-project-pending']);
+    });
+
+    it('连续 preference:update 应字段级合并，避免后续偏好覆盖前一字段', async () => {
+      setNetworkStatus(false);
+
+      const firstId = await service.enqueueDurably({
+        type: 'update',
+        entityType: 'preference',
+        entityId: 'test-user',
+        payload: {
+          userId: 'test-user',
+          sourceUserId: 'test-user',
+          preferences: { theme: 'default' },
+        },
+      });
+      const secondId = await service.enqueueDurably({
+        type: 'update',
+        entityType: 'preference',
+        entityId: 'test-user',
+        payload: {
+          userId: 'test-user',
+          sourceUserId: 'test-user',
+          preferences: { localBackupEnabled: true },
+        },
+      });
+
+      expect(secondId).toBe(firstId);
+      expect(service.pendingActions()).toHaveLength(1);
+      expect((service.pendingActions()[0].payload as PreferencePayload).preferences).toEqual({
+        theme: 'default',
+        localBackupEnabled: true,
+      });
+    });
+  });
+
+  describe('attachment replay exact settlement', () => {
+    it.each([
+      ['current result', false],
+      ['stale result', true],
+    ])('bypasses generic syncing and action-ID dequeue for a %s', async (_label, makeStale) => {
+      const markSyncing = vi.spyOn(service.storage, 'markActionSyncState');
+      const strictUpdate = installMockQueueBackupStrictUpdate();
+      service.registerProcessor('attachment:create', async action => {
+        const settled = await service.settleAttachmentReplayActionForOwner(
+          'test-user',
+          {
+            mode: 'remove-attachment-create',
+            actionId: action.id,
+            operationId: action.operationId,
+            entityType: 'attachment',
+            type: 'create',
+            entityId: action.entityId,
+            payload: action.payload,
+            signal: new AbortController().signal,
+            isCurrent: () => true,
+          },
+        );
+        expect(settled).toEqual({ status: 'committed' });
+        if (makeStale) service.clearCurrentView();
+        return true;
+      });
+      setNetworkStatus(false);
+      service.enqueue(createTestAttachmentReplayAction());
+      mockQueueBackupState.persistedQueue = [...service.pendingActions()];
+      mockQueueBackupState.recordFound = true;
+
+      setNetworkStatus(true);
+      await service.processQueue();
+
+      expect(markSyncing).not.toHaveBeenCalled();
+      expect(strictUpdate).toHaveBeenCalledOnce();
+      expect(mockQueueBackupService.updateQueue).not.toHaveBeenCalled();
+      expect(service.queueSize()).toBe(0);
+    });
   });
 
   // ==================== 并发处理保护 ====================
   
   describe('并发处理保护', () => {
+    it('persists syncing before RPC and preserves a preference update enqueued during replay', async () => {
+      const strictUpdate = installMockQueueBackupStrictUpdate();
+      const leaseController = new AbortController();
+      mockSyncWriterLeaseService.isFeatureEnabled.mockReturnValue(true);
+      mockSyncWriterLeaseService.requestLease.mockImplementation(async () => ({
+        tabId: 'tab-preference-replay',
+        lockName: 'nanoflow-sync:test:test-user:__global__',
+        mode: 'idb-lease' as const,
+        signal: leaseController.signal,
+        release: mockLeaseRelease,
+      }));
+      setNetworkStatus(false);
+      const actionId = await service.enqueueDurably({
+        operationId: '10000000-0000-4000-8000-000000000101',
+        type: 'update', entityType: 'preference', entityId: 'test-user',
+        payload: { sourceUserId: 'test-user', userId: 'test-user', preferences: { theme: 'default' } },
+      });
+      mockSyncWriterLeaseService.requestLease.mockClear();
+      mockQueueBackupService.backupQueue.mockResolvedValueOnce(false);
+      service.registerProcessor('preference:update', async action => {
+        expect(mockQueueBackupState.persistedQueue.find(current => current.id === actionId)?.syncState)
+          .toBe('syncing');
+        setNetworkStatus(false);
+        await service.enqueueDurably({
+          operationId: '10000000-0000-4000-8000-000000000102',
+          type: 'update', entityType: 'preference', entityId: 'test-user',
+          payload: { sourceUserId: 'test-user', userId: 'test-user', preferences: { theme: 'ocean' } },
+        });
+        setNetworkStatus(true);
+        return true;
+      });
+
+      setNetworkStatus(true);
+      await service.processQueue();
+
+      expect(strictUpdate).toHaveBeenCalled();
+      expect(mockSyncWriterLeaseService.requestLease).toHaveBeenCalledOnce();
+      expect(service.pendingActions()).toEqual([
+        expect.objectContaining({
+          operationId: '10000000-0000-4000-8000-000000000102',
+          payload: expect.objectContaining({ preferences: { theme: 'ocean' } }),
+        }),
+      ]);
+    });
+
     it('正在处理时不应该重复处理', async () => {
+      await vi.waitFor(() => {
+        expect(service.getCurrentOwnerStorageLoadState()).toBe('loaded');
+      });
       vi.useFakeTimers();
 
       const processor = vi.fn().mockImplementation(async () => {
@@ -1227,133 +747,43 @@ describe('ActionQueueService', () => {
       const promise1 = service.processQueue();
       const promise2 = service.processQueue();
 
+      await vi.waitFor(() => {
+        expect(processor).toHaveBeenCalledTimes(1);
+      });
       await vi.advanceTimersByTimeAsync(100);
       
       await Promise.all([promise1, promise2]);
       
       expect(processor).toHaveBeenCalledTimes(1);
     });
-  });
 
-  // ==================== 依赖操作暂停测试 ====================
+    it('处理进行中新增 action 时应在当前批次结束后自动续跑', async () => {
+      vi.useFakeTimers();
 
-  describe('依赖操作暂停 (pauseDependentActions)', () => {
-    /**
-     * 测试场景：当 Create 操作失败时，同一实体的后续操作应被暂停
-     * 
-     * 规则：
-     * - Create 失败后，同一 entityId 的 Update/Delete 操作应被标记
-     * - 应发送 Sentry 警告
-     * - 关键操作被阻塞时应显示 Toast
-     */
+      const processor = vi.fn().mockImplementation(async () => {
+        if (processor.mock.calls.length === 1) {
+          service.enqueue(createTestProjectAction());
+        }
+        await new Promise(r => setTimeout(r, 100));
+        return true;
+      });
 
-    it('Create 失败后应暂停同一实体的 Update 操作', async () => {
-      // 注意：由于智能合并逻辑（场景3：create + update → 合并为 create）
-      // 同一 entityId 的 create 和 update 会被合并成一个操作
-      // 因此本测试验证：create 失败后处理器被正确调用
-      const createProcessor = vi.fn().mockRejectedValue(new Error('Create failed'));
-      
-      service.registerProcessor('task:create', createProcessor);
-      
+      service.registerProcessor('project:update', processor);
+
       setNetworkStatus(false);
-      
-      // 入队 create 操作
-      service.enqueue({
-        type: 'create',
-        entityType: 'task',
-        entityId: 'task-1',
-        payload: { task: createMockTask({ id: 'task-1', title: 'New Task' }), projectId: 'proj-1' },
-      });
-      
-      // 入队同一实体的 update 操作（会被智能合并到 create 中）
-      service.enqueue({
-        type: 'update',
-        entityType: 'task',
-        entityId: 'task-1',
-        payload: { task: createMockTask({ id: 'task-1', title: 'Updated Task' }), projectId: 'proj-1' },
-      });
-      
-      // 由于智能合并，同一实体的多个操作会合并为一个
-      expect(service.pendingActions().length).toBe(1);
-      
-      setNetworkStatus(true);
-      
-      // 处理队列 - create 会失败
-      await service.processQueue();
-      
-      // create 处理器应被调用
-      expect(createProcessor).toHaveBeenCalled();
-      
-      // 合并后只有一个操作，没有需要暂停的依赖操作
-      // 验证处理器被正确调用即可
-    });
+      service.enqueue(createTestProjectAction());
 
-    it('Create 失败不应影响其他实体的操作', async () => {
-      const createProcessor = vi.fn().mockRejectedValue(new Error('Create failed'));
-      const updateProcessor = vi.fn().mockResolvedValue(true);
-      
-      service.registerProcessor('task:create', createProcessor);
-      service.registerProcessor('task:update', updateProcessor);
-      
-      setNetworkStatus(false);
-      
-      // 入队 task-1 的 create（会失败）
-      service.enqueue({
-        type: 'create',
-        entityType: 'task',
-        entityId: 'task-1',
-        payload: { task: createMockTask({ id: 'task-1', title: 'Task 1' }), projectId: 'proj-1' },
-      });
-      
-      // 入队 task-2 的 update（应该正常处理）
-      service.enqueue({
-        type: 'update',
-        entityType: 'task',
-        entityId: 'task-2',
-        payload: { task: createMockTask({ id: 'task-2', title: 'Task 2 Updated' }), projectId: 'proj-1' },
-      });
-      
       setNetworkStatus(true);
-      
-      await service.processQueue();
-      
-      // task-2 的 update 应该被处理
-      expect(updateProcessor).toHaveBeenCalledWith(
-        expect.objectContaining({ entityId: 'task-2' })
-      );
-    });
 
-    it('不同实体类型的操作互不影响', async () => {
-      const taskCreateProcessor = vi.fn().mockRejectedValue(new Error('Create failed'));
-      const projectUpdateProcessor = vi.fn().mockResolvedValue(true);
-      
-      service.registerProcessor('task:create', taskCreateProcessor);
-      service.registerProcessor('project:update', projectUpdateProcessor);
-      
-      setNetworkStatus(false);
-      
-      // 入队 task 的 create（会失败）
-      service.enqueue({
-        type: 'create',
-        entityType: 'task',
-        entityId: 'task-1',
-        payload: { task: createMockTask({ id: 'task-1', title: 'Task 1' }), projectId: 'proj-1' },
-      });
-      
-      // 入队 project 的 update（应该正常处理）
-      service.enqueue({
-        type: 'update',
-        entityType: 'project',
-        entityId: 'proj-1',
-        payload: { project: createMockProject({ id: 'proj-1', name: 'Updated' }) },
-      });
-      
-      setNetworkStatus(true);
-      
-      await service.processQueue();
-      
-      // project update 应该被处理
-      expect(projectUpdateProcessor).toHaveBeenCalled();
+      const processing = service.processQueue();
+
+      await vi.advanceTimersByTimeAsync(100);
+      await vi.advanceTimersByTimeAsync(100);
+      await processing;
+
+      expect(processor).toHaveBeenCalledTimes(2);
+      expect(service.queueSize()).toBe(0);
     });
   });
+
 });

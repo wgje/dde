@@ -17,11 +17,28 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { execSync } = require('node:child_process');
 const crypto = require('node:crypto');
+const {
+  canonicalNgswHash, readNgswPost, sameArtifactIdentity,
+} = require('../lib/artifact-stats-evidence.cjs');
 
 const REPO_ROOT = path.resolve(__dirname, '../..');
 const TMP = path.join(REPO_ROOT, '.tmp');
 const A = path.join(TMP, 'build-a');
 const B = path.join(TMP, 'build-b');
+const REQUIRED_ARTIFACTS = [
+  'ngsw.json',
+  'index.html',
+  'launch.html',
+  'version.json',
+  'artifact-manifest.json',
+];
+const DETERMINISTIC_BUILD_ENV = {
+  ...process.env,
+  // Angular enables the persistent disk cache for local builds by default.
+  // The deterministic guard compares CI deploy artifacts, so both child builds
+  // must use CI cache semantics even when the guard is run on a developer box.
+  CI: 'true',
+};
 
 function sha256(file) {
   return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
@@ -62,14 +79,14 @@ function stableObjectHash(value) {
     .digest('hex');
 }
 
-function normalizeArtifactManifest(manifest, dir) {
+function normalizeArtifactManifest(manifest, dir, ngsw) {
   const normalized = structuredClone(manifest);
   const files = normalized.files && typeof normalized.files === 'object'
     ? normalized.files
     : {};
 
   if (files['/ngsw.json'] && fs.existsSync(path.join(dir, 'ngsw.json'))) {
-    files['/ngsw.json'].sha256 = stableObjectHash(normalizeNgswManifest(readJson(path.join(dir, 'ngsw.json'))));
+    files['/ngsw.json'].sha256 = canonicalNgswHash(ngsw);
   }
 
   if (files['/version.json'] && fs.existsSync(path.join(dir, 'version.json'))) {
@@ -77,7 +94,13 @@ function normalizeArtifactManifest(manifest, dir) {
   }
 
   if (normalized.ngswHash && fs.existsSync(path.join(dir, 'ngsw.json'))) {
-    normalized.ngswHash = stableObjectHash(normalizeNgswManifest(readJson(path.join(dir, 'ngsw.json'))));
+    normalized.ngswHash = canonicalNgswHash(ngsw);
+  }
+
+  if (normalized.metrics && typeof normalized.metrics === 'object') {
+    const manifestBase = structuredClone(normalized);
+    delete manifestBase.metrics.manifestDigest;
+    normalized.metrics.manifestDigest = stableObjectHash(manifestBase);
   }
 
   return stableJson(normalized);
@@ -95,6 +118,15 @@ function findHashedAssets(dir) {
   return result.sort();
 }
 
+function findMissingEvidence(dir, side) {
+  const missing = REQUIRED_ARTIFACTS.filter((artifact) => {
+    const artifactPath = path.join(dir, artifact);
+    return !fs.existsSync(artifactPath) || !fs.statSync(artifactPath).isFile();
+  });
+  if (findHashedAssets(dir).length === 0) missing.push('hashed-assets');
+  return missing.map((artifact) => ({ side, artifact }));
+}
+
 function buildManifest(dir) {
   const files = findHashedAssets(dir);
   return files.map((name) => `${sha256(path.join(dir, name))}  ${name}`).join('\n');
@@ -102,26 +134,82 @@ function buildManifest(dir) {
 
 function run(cmd) {
   console.log('$ ' + cmd);
-  execSync(cmd, { cwd: REPO_ROOT, stdio: 'inherit', env: process.env });
+  execSync(cmd, { cwd: REPO_ROOT, stdio: 'inherit', env: DETERMINISTIC_BUILD_ENV });
 }
 
-function copyDist(dest) {
-  fs.rmSync(dest, { recursive: true, force: true });
-  fs.mkdirSync(dest, { recursive: true });
+function copyDist(dest, side) {
   const src = path.join(REPO_ROOT, 'dist', 'browser');
-  // 简单递归复制
-  function rec(s, d) {
-    fs.mkdirSync(d, { recursive: true });
-    for (const e of fs.readdirSync(s, { withFileTypes: true })) {
-      const sp = path.join(s, e.name);
-      const dp = path.join(d, e.name);
-      if (e.isDirectory()) rec(sp, dp);
-      else fs.copyFileSync(sp, dp);
-    }
+  function reject(reason) {
+    const error = new Error();
+    error.snapshotCopyReason = reason;
+    throw error;
   }
-  rec(src, dest);
+  function rec(source, destination, root = false) {
+    const initial = fs.lstatSync(source);
+    if (initial.isSymbolicLink()) reject(root ? 'source-root-invalid' : 'source-entry-invalid');
+    if (initial.isDirectory()) {
+      fs.mkdirSync(destination, { recursive: true });
+      for (const name of fs.readdirSync(source).sort()) {
+        rec(path.join(source, name), path.join(destination, name));
+      }
+      const final = fs.lstatSync(source);
+      if (final.isSymbolicLink() || !final.isDirectory() || !sameArtifactIdentity(initial, final)) reject('source-drift');
+      return;
+    }
+    if (root || !initial.isFile()) reject(root ? 'source-root-invalid' : 'source-entry-invalid');
+    let sourceFd;
+    let destinationFd;
+    let primaryError;
+    try {
+      sourceFd = fs.openSync(source, 'r');
+      const opened = fs.fstatSync(sourceFd);
+      if (!opened.isFile() || !sameArtifactIdentity(initial, opened)) reject('source-drift');
+      destinationFd = fs.openSync(destination, 'wx', initial.mode & 0o777);
+      const destinationInitial = fs.fstatSync(destinationFd);
+      if (!destinationInitial.isFile() || destinationInitial.size !== 0) reject('destination-invalid');
+      const buffer = Buffer.allocUnsafe(Math.max(1, Math.min(64 * 1024, opened.size)));
+      let copied = 0;
+      while (copied < opened.size) {
+        const read = fs.readSync(sourceFd, buffer, 0, Math.min(buffer.length, opened.size - copied), null);
+        if (read <= 0) reject('source-read-short');
+        let written = 0;
+        while (written < read) {
+          const count = fs.writeSync(destinationFd, buffer, written, read - written, null);
+          if (count <= 0) reject('destination-write-short');
+          written += count;
+        }
+        copied += read;
+      }
+      fs.fsyncSync(destinationFd);
+      const sourceFinal = fs.fstatSync(sourceFd);
+      const sourcePathFinal = fs.lstatSync(source);
+      if (!sourceFinal.isFile() || !sourcePathFinal.isFile() || sourcePathFinal.isSymbolicLink()
+        || !sameArtifactIdentity(initial, sourceFinal) || !sameArtifactIdentity(initial, sourcePathFinal)
+        || sourceFinal.size !== opened.size || sourcePathFinal.size !== opened.size) reject('source-drift');
+      const destinationFinal = fs.fstatSync(destinationFd);
+      if (!destinationFinal.isFile() || copied !== opened.size || destinationFinal.size !== copied) {
+        reject('destination-size-invalid');
+      }
+    } catch (error) {
+      primaryError = error;
+    }
+    let closeFailed = false;
+    for (const descriptor of [destinationFd, sourceFd]) {
+      if (descriptor === undefined) continue;
+      try { fs.closeSync(descriptor); } catch { closeFailed = true; }
+    }
+    if (primaryError) throw primaryError;
+    if (closeFailed) reject('descriptor-close-failed');
+  }
+  try {
+    fs.rmSync(dest, { recursive: true, force: true });
+    rec(src, dest, true);
+  } catch (error) {
+    const reason = error && error.snapshotCopyReason ? error.snapshotCopyReason : 'snapshot-io-failed';
+    console.error(`✗ Deterministic build evidence unavailable: side=${side} scope=snapshot-copy reason=${reason}`);
+    process.exit(1);
+  }
 }
-
 function extractModulepreload(html) {
   const matches = [...html.matchAll(/<link[^>]+rel=["']?modulepreload["']?[^>]*href=["']?([^"'\s>]+)["']?/g)];
   return matches.map((m) => m[1]).sort();
@@ -130,12 +218,33 @@ function extractModulepreload(html) {
 console.log('==== Build A ====');
 fs.rmSync(path.join(REPO_ROOT, 'dist'), { recursive: true, force: true });
 run('npm run build:stats');
-copyDist(A);
+copyDist(A, 'A');
 
 console.log('==== Build B ====');
 fs.rmSync(path.join(REPO_ROOT, 'dist'), { recursive: true, force: true });
 run('npm run build:stats');
-copyDist(B);
+copyDist(B, 'B');
+
+const missingEvidence = [
+  ...findMissingEvidence(A, 'A'),
+  ...findMissingEvidence(B, 'B'),
+];
+if (missingEvidence.length > 0) {
+  for (const { side, artifact } of missingEvidence) {
+    console.error(`✗ Deterministic build evidence missing: side=${side} artifact=${artifact}`);
+  }
+  process.exit(1);
+}
+
+let ngswValueA;
+let ngswValueB;
+try {
+  ngswValueA = readNgswPost(fs, A);
+  ngswValueB = readNgswPost(fs, B);
+} catch {
+  console.error('✗ Deterministic build evidence unavailable: scope=ngsw-post-validation');
+  process.exit(1);
+}
 
 // 比对 hashed asset manifest
 const manA = buildManifest(A);
@@ -156,8 +265,8 @@ if (manA !== manB) {
 const ngswA = path.join(A, 'ngsw.json');
 const ngswB = path.join(B, 'ngsw.json');
 if (fs.existsSync(ngswA) && fs.existsSync(ngswB)) {
-  const stableA = JSON.stringify(normalizeNgswManifest(readJson(ngswA)), null, 2);
-  const stableB = JSON.stringify(normalizeNgswManifest(readJson(ngswB)), null, 2);
+  const stableA = JSON.stringify(normalizeNgswManifest(ngswValueA), null, 2);
+  const stableB = JSON.stringify(normalizeNgswManifest(ngswValueB), null, 2);
   if (stableA !== stableB) {
     fs.writeFileSync(path.join(TMP, 'deterministic-ngsw.diff'), `--- A ---\n${stableA}\n\n--- B ---\n${stableB}\n`);
     console.error('✗ ngsw.json stable content differs between builds');
@@ -182,7 +291,6 @@ function compareModulepreload(fileName) {
     console.log(`✓ ${fileName} modulepreload list identical (${mpA.length} entries)`);
   }
 }
-
 compareModulepreload('index.html');
 // launch.html modulepreload is part of the static deploy artifact contract.
 compareModulepreload('launch.html');
@@ -205,8 +313,8 @@ if (fs.existsSync(versionA) && fs.existsSync(versionB)) {
 const artifactA = path.join(A, 'artifact-manifest.json');
 const artifactB = path.join(B, 'artifact-manifest.json');
 if (fs.existsSync(artifactA) && fs.existsSync(artifactB)) {
-  const stableA = JSON.stringify(normalizeArtifactManifest(readJson(artifactA), A), null, 2);
-  const stableB = JSON.stringify(normalizeArtifactManifest(readJson(artifactB), B), null, 2);
+  const stableA = JSON.stringify(normalizeArtifactManifest(readJson(artifactA), A, ngswValueA), null, 2);
+  const stableB = JSON.stringify(normalizeArtifactManifest(readJson(artifactB), B, ngswValueB), null, 2);
   if (stableA !== stableB) {
     fs.writeFileSync(path.join(TMP, 'deterministic-artifact-manifest.diff'), `--- A ---\n${stableA}\n\n--- B ---\n${stableB}\n`);
     console.error('✗ artifact-manifest.json stable content differs between builds');

@@ -26,24 +26,7 @@
 
 import { Injectable, signal, computed } from '@angular/core';
 import { Project, Task, Connection } from '../../../models';
-
-/**
- * 判断两个实体在同步意义上是否"完全相同"。
- *
- * 权威字段：`updatedAt`（LWW 单调时间戳）+ `deletedAt`（软删除/恢复标记）。
- * 任何业务字段变更都必须伴随 `updatedAt` 更新，这是 Hard Rule；否则云端也无法
- * 通过增量同步 `updated_at > last_sync_time` 感知变化。因此在 Store 层用这两个
- * 字段作为判等权威是充分的。
- *
- * 【2026-04-16 T1-1 PR-B】替代历史 `isTaskEqual` 14 字段枚举清单。
- */
-function isSameRevision(
-  a: { updatedAt?: string; deletedAt?: string | null } | undefined,
-  b: { updatedAt?: string; deletedAt?: string | null } | undefined,
-): boolean {
-  if (!a || !b) return false;
-  return a.updatedAt === b.updatedAt && a.deletedAt === b.deletedAt;
-}
+import { assertUniqueEntityIds, cloneSetIndex, detachEntityFromPreviousProject, isSameRevision, type ConnectionStoreStateSnapshot, type ProjectStoreStateSnapshot, type TaskStoreStateSnapshot } from './store-data-safety.helpers';
 
 /**
  * 任务状态 Store
@@ -71,6 +54,22 @@ export class TaskStore {
    * 实际 Task 对象通过 tasksMap.get(id) 获取，不产生数据冗余
    */
   readonly parkedTaskIds = signal<Set<string>>(new Set(), { equal: () => false });
+
+  captureState(): TaskStoreStateSnapshot {
+    return {
+      tasksMap: new Map(this.tasksMap()),
+      tasksByProject: cloneSetIndex(this.tasksByProject()),
+      taskProjectMap: new Map(this.taskProjectMap()),
+      parkedTaskIds: new Set(this.parkedTaskIds()),
+    };
+  }
+
+  restoreState(snapshot: TaskStoreStateSnapshot): void {
+    this.tasksMap.set(new Map(snapshot.tasksMap));
+    this.tasksByProject.set(cloneSetIndex(snapshot.tasksByProject));
+    this.taskProjectMap.set(new Map(snapshot.taskProjectMap));
+    this.parkedTaskIds.set(new Set(snapshot.parkedTaskIds));
+  }
 
   /**
    * 停泊任务列表（派生）——按 parkedAt 降序排列
@@ -122,14 +121,12 @@ export class TaskStore {
   /** 设置任务（单个）- 原地修改，O(1)，含脏检查 */
   setTask(task: Task, projectId: string): void {
     const existing = this.tasksMap().get(task.id);
-    // 脏检查：数据未变化时跳过 signal 通知
-    if (existing && isSameRevision(existing, task)) return;
     const previousProjectId = this.taskProjectMap().get(task.id);
+    // 脏检查：数据未变化时跳过 signal 通知
+    if (existing && previousProjectId === projectId && isSameRevision(existing, task)) return;
     this.tasksMap.update(map => { map.set(task.id, task); return map; });
     this.tasksByProject.update(map => {
-      if (previousProjectId && previousProjectId !== projectId) {
-        map.get(previousProjectId)?.delete(task.id);
-      }
+      detachEntityFromPreviousProject(map, task.id, previousProjectId, projectId);
       if (!map.has(projectId)) map.set(projectId, new Set());
       map.get(projectId)!.add(task.id);
       return map;
@@ -145,39 +142,55 @@ export class TaskStore {
 
   /** 批量设置任务（替换指定项目的全部任务） */
   setTasks(tasks: Task[], projectId: string): void {
-    // 【P2-02 修复】先清除该项目的旧任务，再添加新任务，与 bulkSetTasks 语义明确区分
+    const previousIds = new Set(this.tasksByProject().get(projectId) ?? []);
+    const incomingIds = new Set(tasks.map(task => task.id));
+    const previousProjectByTaskId = new Map(
+      tasks.map(task => [task.id, this.taskProjectMap().get(task.id)]),
+    );
+    const ownershipSnapshot = new Map(this.taskProjectMap());
+
     this.tasksMap.update(map => {
-      // 移除该项目的旧任务
-      const oldIds = this.tasksByProject().get(projectId);
-      if (oldIds) {
-        for (const id of oldIds) {
-          map.delete(id);
-          // 清理停泊索引
-          this.parkedTaskIds().delete(id);
-          this.taskProjectMap().delete(id);
-        }
+      for (const id of previousIds) {
+        if (!incomingIds.has(id) && ownershipSnapshot.get(id) === projectId) map.delete(id);
       }
-      // 添加新任务
-      tasks.forEach(t => {
-        map.set(t.id, t);
-        this.taskProjectMap().set(t.id, projectId);
-      });
+      tasks.forEach(task => map.set(task.id, task));
       return map;
     });
     this.tasksByProject.update(map => {
-      map.set(projectId, new Set(tasks.map(t => t.id)));
+      for (const task of tasks) {
+        detachEntityFromPreviousProject(map, task.id, previousProjectByTaskId.get(task.id), projectId);
+      }
+      map.set(projectId, incomingIds);
       return map;
     });
-    this.taskProjectMap.update(m => m);
-    // 重建停泊索引
-    for (const t of tasks) this.updateParkedIndex(t);
-    this.parkedTaskIds.update(s => s);
+    this.taskProjectMap.update(map => {
+      for (const id of previousIds) {
+        if (!incomingIds.has(id) && map.get(id) === projectId) map.delete(id);
+      }
+      for (const task of tasks) map.set(task.id, projectId);
+      return map;
+    });
+    this.parkedTaskIds.update(ids => {
+      for (const id of previousIds) {
+        if (ownershipSnapshot.get(id) === projectId) ids.delete(id);
+      }
+      for (const task of tasks) {
+        if (task.parkingMeta) ids.add(task.id);
+        else ids.delete(task.id);
+      }
+      return ids;
+    });
   }
 
   /** 删除任务 - O(1) */
   removeTask(id: string, projectId: string): void {
+    const ownerProjectId = this.taskProjectMap().get(id) ?? projectId;
     this.tasksMap.update(map => { map.delete(id); return map; });
-    this.tasksByProject.update(map => { map.get(projectId)?.delete(id); return map; });
+    this.tasksByProject.update(map => {
+      map.get(ownerProjectId)?.delete(id);
+      if (ownerProjectId !== projectId) map.get(projectId)?.delete(id);
+      return map;
+    });
     this.taskProjectMap.update(map => { map.delete(id); return map; });
     // 移除停泊索引
     if (this.parkedTaskIds().has(id)) {
@@ -188,24 +201,36 @@ export class TaskStore {
   /** 批量更新任务 - 含脏检查（仅在有变化时触发 signal 更新） */
   bulkSetTasks(tasks: Task[], projectId: string): void {
     const map = this.tasksMap();
-    let hasChange = false;
+    const previousProjectByTaskId = new Map(
+      tasks.map(task => [task.id, this.taskProjectMap().get(task.id)]),
+    );
+    let hasEntityChange = false;
+    let hasOwnershipChange = false;
     for (const t of tasks) {
       const existing = map.get(t.id);
       if (!existing || !isSameRevision(existing, t)) {
         map.set(t.id, t);
+        hasEntityChange = true;
+      }
+      if (previousProjectByTaskId.get(t.id) !== projectId) {
         this.taskProjectMap().set(t.id, projectId);
-        hasChange = true;
+        hasOwnershipChange = true;
       }
     }
     // 仅在有实际变化时才触发 signal 通知，避免级联风暴
-    if (hasChange) {
+    if (hasEntityChange) {
       this.tasksMap.update(m => m);
-      this.taskProjectMap.update(m => m);
       // 维护停泊索引
       for (const t of tasks) this.updateParkedIndex(t);
       this.parkedTaskIds.update(s => s);
     }
+    if (hasOwnershipChange) {
+      this.taskProjectMap.update(m => m);
+    }
     this.tasksByProject.update(indexMap => {
+      for (const task of tasks) {
+        detachEntityFromPreviousProject(indexMap, task.id, previousProjectByTaskId.get(task.id), projectId);
+      }
       const existing = indexMap.get(projectId) ?? new Set<string>();
       const prevSize = existing.size;
       for (const t of tasks) existing.add(t.id);
@@ -219,10 +244,14 @@ export class TaskStore {
 
   /** 批量删除任务 */
   bulkRemoveTasks(taskIds: string[], projectId: string): void {
+    const ownerProjectByTaskId = new Map(taskIds.map(id => [id, this.taskProjectMap().get(id) ?? projectId]));
     this.tasksMap.update(map => { for (const id of taskIds) map.delete(id); return map; });
     this.tasksByProject.update(map => {
-      const existing = map.get(projectId);
-      if (existing) for (const id of taskIds) existing.delete(id);
+      for (const id of taskIds) {
+        const ownerProjectId = ownerProjectByTaskId.get(id) ?? projectId;
+        map.get(ownerProjectId)?.delete(id);
+        if (ownerProjectId !== projectId) map.get(projectId)?.delete(id);
+      }
       return map;
     });
     this.taskProjectMap.update(map => {
@@ -237,26 +266,92 @@ export class TaskStore {
   }
 
   /** 批量设置多个项目的任务（用于 setProjects 场景） */
-  setTasksForMultipleProjects(entries: { tasks: Task[]; projectId: string }[]): void {
+  setTasksForMultipleProjects(entries: { tasks: Task[]; projectId: string }[]): void { assertUniqueEntityIds(entries, entry => entry.tasks, 'task');
+    const previousIdsByProject = new Map(
+      entries.map(({ projectId }) => [
+        projectId,
+        new Set(this.tasksByProject().get(projectId) ?? []),
+      ]),
+    );
+    const incomingProjectByTaskId = new Map<string, string>();
+    for (const { tasks, projectId } of entries) {
+      for (const task of tasks) incomingProjectByTaskId.set(task.id, projectId);
+    }
+    const previousProjectByIncomingTaskId = new Map(
+      Array.from(incomingProjectByTaskId.keys(), taskId => [taskId, this.taskProjectMap().get(taskId)]),
+    );
+
+    this.replaceTaskEntitiesForMultipleProjects(entries, previousIdsByProject, incomingProjectByTaskId);
+    this.replaceTaskOwnershipForMultipleProjects(previousIdsByProject, incomingProjectByTaskId);
+    this.replaceTaskProjectIndexes(entries, incomingProjectByTaskId, previousProjectByIncomingTaskId);
+    this.replaceParkedTaskIndex(entries, previousIdsByProject);
+  }
+
+  private replaceTaskEntitiesForMultipleProjects(
+    entries: { tasks: Task[]; projectId: string }[],
+    previousIdsByProject: Map<string, Set<string>>,
+    incomingProjectByTaskId: Map<string, string>,
+  ): void {
     this.tasksMap.update(map => {
-      for (const { tasks, projectId } of entries) {
+      for (const previousIds of previousIdsByProject.values()) {
+        for (const id of previousIds) {
+          if (!incomingProjectByTaskId.has(id)) map.delete(id);
+        }
+      }
+      for (const { tasks } of entries) {
         for (const t of tasks) {
           map.set(t.id, t);
-          this.taskProjectMap().set(t.id, projectId);
         }
       }
       return map;
     });
+  }
+
+  private replaceTaskOwnershipForMultipleProjects(
+    previousIdsByProject: Map<string, Set<string>>,
+    incomingProjectByTaskId: Map<string, string>,
+  ): void {
+    this.taskProjectMap.update(map => {
+      for (const previousIds of previousIdsByProject.values()) {
+        for (const id of previousIds) {
+          if (!incomingProjectByTaskId.has(id)) map.delete(id);
+        }
+      }
+      for (const [taskId, projectId] of incomingProjectByTaskId) map.set(taskId, projectId);
+      return map;
+    });
+  }
+
+  private replaceTaskProjectIndexes(
+    entries: { tasks: Task[]; projectId: string }[],
+    incomingProjectByTaskId: Map<string, string>,
+    previousProjectByIncomingTaskId: Map<string, string | undefined>,
+  ): void {
     this.tasksByProject.update(map => {
+      for (const [taskId, projectId] of incomingProjectByTaskId) {
+        detachEntityFromPreviousProject(map, taskId, previousProjectByIncomingTaskId.get(taskId), projectId);
+      }
       for (const { tasks, projectId } of entries) map.set(projectId, new Set(tasks.map(t => t.id)));
       return map;
     });
-    this.taskProjectMap.update(m => m);
-    // 维护停泊索引——批量加载时同步更新 parkedTaskIds
-    for (const { tasks } of entries) {
-      for (const t of tasks) this.updateParkedIndex(t);
-    }
-    this.parkedTaskIds.update(s => s);
+  }
+
+  private replaceParkedTaskIndex(
+    entries: { tasks: Task[]; projectId: string }[],
+    previousIdsByProject: Map<string, Set<string>>,
+  ): void {
+    this.parkedTaskIds.update(ids => {
+      for (const previousIds of previousIdsByProject.values()) {
+        for (const id of previousIds) ids.delete(id);
+      }
+      for (const { tasks } of entries) {
+        for (const task of tasks) {
+          if (task.parkingMeta) ids.add(task.id);
+          else ids.delete(task.id);
+        }
+      }
+      return ids;
+    });
   }
 
   /** 清除项目的所有任务 */
@@ -274,6 +369,13 @@ export class TaskStore {
       for (const id of taskIds) s.delete(id);
       return s;
     });
+  }
+
+  /** 清除不在权威项目集合中的任务及全部二级索引 */
+  clearProjectsExcept(projectIds: ReadonlySet<string>): void {
+    for (const projectId of Array.from(this.tasksByProject().keys())) {
+      if (!projectIds.has(projectId)) this.clearProject(projectId);
+    }
   }
   
   /**
@@ -318,6 +420,10 @@ export class ProjectStore {
    * 当前活动项目 ID
    */
   readonly activeProjectId = signal<string | null>(null);
+
+  captureState(): ProjectStoreStateSnapshot { return { projectsMap: new Map(this.projectsMap()), activeProjectId: this.activeProjectId() }; }
+
+  restoreState(snapshot: ProjectStoreStateSnapshot): void { this.projectsMap.set(new Map(snapshot.projectsMap)); this.activeProjectId.set(snapshot.activeProjectId); }
   
   /**
    * 当前活动项目
@@ -406,6 +512,23 @@ export class ConnectionStore {
   /** 按项目索引的连接 */
   private readonly connectionsByProject = signal<Map<string, Set<string>>>(new Map(), { equal: () => false });
 
+  /** 连接所属项目反向索引 */
+  private readonly connectionProjectMap = signal<Map<string, string>>(new Map(), { equal: () => false });
+
+  captureState(): ConnectionStoreStateSnapshot {
+    return {
+      connectionsMap: new Map(this.connectionsMap()),
+      connectionsByProject: cloneSetIndex(this.connectionsByProject()),
+      connectionProjectMap: new Map(this.connectionProjectMap()),
+    };
+  }
+
+  restoreState(snapshot: ConnectionStoreStateSnapshot): void {
+    this.connectionsMap.set(new Map(snapshot.connectionsMap));
+    this.connectionsByProject.set(cloneSetIndex(snapshot.connectionsByProject));
+    this.connectionProjectMap.set(new Map(snapshot.connectionProjectMap));
+  }
+
   /** 连接列表 */
   readonly connections = computed(() => Array.from(this.connectionsMap().values()));
   
@@ -414,6 +537,11 @@ export class ConnectionStore {
    */
   getConnection(id: string): Connection | undefined {
     return this.connectionsMap().get(id);
+  }
+
+  /** O(1) 获取连接所属项目 ID */
+  getConnectionProjectId(connectionId: string): string | null {
+    return this.connectionProjectMap().get(connectionId) ?? null;
   }
   
   /**
@@ -432,45 +560,91 @@ export class ConnectionStore {
   /** 设置连接 - 原地修改，O(1)，含脏检查 */
   setConnection(connection: Connection, projectId: string): void {
     const existing = this.connectionsMap().get(connection.id);
-    if (existing && isSameRevision(existing, connection)) return;
+    const previousProjectId = this.connectionProjectMap().get(connection.id);
+    if (existing && previousProjectId === projectId && isSameRevision(existing, connection)) return;
     this.connectionsMap.update(map => { map.set(connection.id, connection); return map; });
     this.connectionsByProject.update(map => {
+      detachEntityFromPreviousProject(map, connection.id, previousProjectId, projectId);
       if (!map.has(projectId)) map.set(projectId, new Set());
       map.get(projectId)!.add(connection.id);
       return map;
     });
+    this.connectionProjectMap.update(map => { map.set(connection.id, projectId); return map; });
   }
 
   /** 批量设置连接 */
   setConnections(connections: Connection[], projectId: string): void {
-    this.connectionsMap.update(map => { connections.forEach(c => map.set(c.id, c)); return map; });
+    const previousIds = new Set(this.connectionsByProject().get(projectId) ?? []);
+    const incomingIds = new Set(connections.map(connection => connection.id));
+    const previousProjectByConnectionId = new Map(
+      connections.map(connection => [connection.id, this.connectionProjectMap().get(connection.id)]),
+    );
+    const ownershipSnapshot = new Map(this.connectionProjectMap());
+
+    this.connectionsMap.update(map => {
+      for (const id of previousIds) {
+        if (!incomingIds.has(id) && ownershipSnapshot.get(id) === projectId) map.delete(id);
+      }
+      connections.forEach(connection => map.set(connection.id, connection));
+      return map;
+    });
     this.connectionsByProject.update(map => {
-      map.set(projectId, new Set(connections.map(c => c.id)));
+      for (const connection of connections) {
+        detachEntityFromPreviousProject(map, connection.id, previousProjectByConnectionId.get(connection.id), projectId);
+      }
+      map.set(projectId, incomingIds);
+      return map;
+    });
+    this.connectionProjectMap.update(map => {
+      for (const id of previousIds) {
+        if (!incomingIds.has(id) && map.get(id) === projectId) map.delete(id);
+      }
+      for (const connection of connections) map.set(connection.id, projectId);
       return map;
     });
   }
 
   /** 删除连接 */
   removeConnection(id: string, projectId: string): void {
+    const ownerProjectId = this.connectionProjectMap().get(id) ?? projectId;
     this.connectionsMap.update(map => { map.delete(id); return map; });
-    this.connectionsByProject.update(map => { map.get(projectId)?.delete(id); return map; });
+    this.connectionsByProject.update(map => {
+      map.get(ownerProjectId)?.delete(id);
+      if (ownerProjectId !== projectId) map.get(projectId)?.delete(id);
+      return map;
+    });
+    this.connectionProjectMap.update(map => { map.delete(id); return map; });
   }
 
   /** 批量更新连接 - 含脏检查 */
   bulkSetConnections(connections: Connection[], projectId: string): void {
     const map = this.connectionsMap();
-    let hasChange = false;
+    const previousProjectByConnectionId = new Map(
+      connections.map(connection => [connection.id, this.connectionProjectMap().get(connection.id)]),
+    );
+    let hasEntityChange = false;
+    let hasOwnershipChange = false;
     for (const c of connections) {
       const existing = map.get(c.id);
       if (!existing || !isSameRevision(existing, c)) {
         map.set(c.id, c);
-        hasChange = true;
+        hasEntityChange = true;
+      }
+      if (previousProjectByConnectionId.get(c.id) !== projectId) {
+        this.connectionProjectMap().set(c.id, projectId);
+        hasOwnershipChange = true;
       }
     }
-    if (hasChange) {
+    if (hasEntityChange) {
       this.connectionsMap.update(m => m);
     }
+    if (hasOwnershipChange) {
+      this.connectionProjectMap.update(map => map);
+    }
     this.connectionsByProject.update(indexMap => {
+      for (const connection of connections) {
+        detachEntityFromPreviousProject(indexMap, connection.id, previousProjectByConnectionId.get(connection.id), projectId);
+      }
       const existing = indexMap.get(projectId) ?? new Set<string>();
       const prevSize = existing.size;
       for (const c of connections) existing.add(c.id);
@@ -483,22 +657,113 @@ export class ConnectionStore {
 
   /** 批量删除连接 */
   bulkRemoveConnections(connectionIds: string[], projectId: string): void {
+    const ownerProjectByConnectionId = new Map(connectionIds.map(id => [id, this.connectionProjectMap().get(id) ?? projectId]));
     this.connectionsMap.update(map => { for (const id of connectionIds) map.delete(id); return map; });
     this.connectionsByProject.update(map => {
-      const existing = map.get(projectId);
-      if (existing) for (const id of connectionIds) existing.delete(id);
+      for (const id of connectionIds) {
+        const ownerProjectId = ownerProjectByConnectionId.get(id) ?? projectId;
+        map.get(ownerProjectId)?.delete(id);
+        if (ownerProjectId !== projectId) map.get(projectId)?.delete(id);
+      }
+      return map;
+    });
+    this.connectionProjectMap.update(map => {
+      for (const id of connectionIds) map.delete(id);
       return map;
     });
   }
 
   /** 批量设置多个项目的连接（用于 setProjects 场景） */
-  setConnectionsForMultipleProjects(entries: { connections: Connection[]; projectId: string }[]): void {
+  setConnectionsForMultipleProjects(entries: { connections: Connection[]; projectId: string }[]): void { assertUniqueEntityIds(entries, entry => entry.connections, 'connection');
+    const previousIdsByProject = new Map(
+      entries.map(({ projectId }) => [
+        projectId,
+        new Set(this.connectionsByProject().get(projectId) ?? []),
+      ]),
+    );
+    const incomingProjectByConnectionId = new Map<string, string>();
+    for (const { connections, projectId } of entries) {
+      for (const connection of connections) incomingProjectByConnectionId.set(connection.id, projectId);
+    }
+    const incomingConnectionIds = new Set(incomingProjectByConnectionId.keys());
+    const previousProjectByIncomingConnectionId = new Map(
+      Array.from(incomingConnectionIds, connectionId => [
+        connectionId,
+        this.connectionProjectMap().get(connectionId),
+      ]),
+    );
+    const ownershipSnapshot = new Map(this.connectionProjectMap());
+
+    this.replaceConnectionEntitiesForMultipleProjects(
+      entries,
+      previousIdsByProject,
+      incomingConnectionIds,
+      ownershipSnapshot,
+    );
+    this.replaceConnectionProjectIndexes(
+      entries,
+      incomingProjectByConnectionId,
+      previousProjectByIncomingConnectionId,
+    );
+    this.replaceConnectionOwnershipForMultipleProjects(
+      previousIdsByProject,
+      incomingConnectionIds,
+      incomingProjectByConnectionId,
+    );
+  }
+
+  private replaceConnectionEntitiesForMultipleProjects(
+    entries: { connections: Connection[]; projectId: string }[],
+    previousIdsByProject: Map<string, Set<string>>,
+    incomingConnectionIds: Set<string>,
+    ownershipSnapshot: Map<string, string>,
+  ): void {
     this.connectionsMap.update(map => {
+      for (const [projectId, previousIds] of previousIdsByProject) {
+        for (const id of previousIds) {
+          if (
+            !incomingConnectionIds.has(id)
+            && (ownershipSnapshot.get(id) ?? projectId) === projectId
+          ) {
+            map.delete(id);
+          }
+        }
+      }
       for (const { connections } of entries) for (const c of connections) map.set(c.id, c);
       return map;
     });
+  }
+
+  private replaceConnectionProjectIndexes(
+    entries: { connections: Connection[]; projectId: string }[],
+    incomingProjectByConnectionId: Map<string, string>,
+    previousProjectByIncomingConnectionId: Map<string, string | undefined>,
+  ): void {
     this.connectionsByProject.update(map => {
+      for (const [connectionId, projectId] of incomingProjectByConnectionId) {
+        detachEntityFromPreviousProject(map, connectionId, previousProjectByIncomingConnectionId.get(connectionId), projectId);
+      }
       for (const { connections, projectId } of entries) map.set(projectId, new Set(connections.map(c => c.id)));
+      return map;
+    });
+  }
+
+  private replaceConnectionOwnershipForMultipleProjects(
+    previousIdsByProject: Map<string, Set<string>>,
+    incomingConnectionIds: Set<string>,
+    incomingProjectByConnectionId: Map<string, string>,
+  ): void {
+    this.connectionProjectMap.update(map => {
+      for (const [projectId, previousIds] of previousIdsByProject) {
+        for (const id of previousIds) {
+          if (!incomingConnectionIds.has(id) && (map.get(id) ?? projectId) === projectId) {
+            map.delete(id);
+          }
+        }
+      }
+      for (const [connectionId, projectId] of incomingProjectByConnectionId) {
+        map.set(connectionId, projectId);
+      }
       return map;
     });
   }
@@ -509,6 +774,17 @@ export class ConnectionStore {
     if (!ids) return;
     this.connectionsMap.update(map => { ids.forEach(id => map.delete(id)); return map; });
     this.connectionsByProject.update(map => { map.delete(projectId); return map; });
+    this.connectionProjectMap.update(map => {
+      for (const id of ids) map.delete(id);
+      return map;
+    });
+  }
+
+  /** 清除不在权威项目集合中的连接及项目索引 */
+  clearProjectsExcept(projectIds: ReadonlySet<string>): void {
+    for (const projectId of Array.from(this.connectionsByProject().keys())) {
+      if (!projectIds.has(projectId)) this.clearProject(projectId);
+    }
   }
   
   /**
@@ -517,5 +793,6 @@ export class ConnectionStore {
   clear(): void {
     this.connectionsMap.set(new Map());
     this.connectionsByProject.set(new Map());
+    this.connectionProjectMap.set(new Map());
   }
 }

@@ -30,7 +30,7 @@
 --    保留 existing 值；UI/文本字段继续 LWW（与 0512 对称）；
 -- 4. `sync_delete_tasks` 接受可选 `base_updated_at_map: {task_id: timestamp}`：
 --    服务端对每个 task 取 existing.updated_at，凡 `existing > base + 1s` 的
---    task_id 从删除集合中剔除，写入 result.`skipped_ids`；客户端据此重排队
+--    task_id 从删除集合中剔除，写入 result.`skipped_ids`；客户端据此拉取合并
 --    （走 pull+merge 路径），不阻塞其余任务的删除；
 -- 5. 给 connections 表挂 `trg_prevent_connection_resurrection`（复用 0511 的
 --    `public.prevent_soft_deleted_row_resurrection()`），作为防止 deleted_at
@@ -298,6 +298,8 @@ DECLARE
   v_existing_exists BOOLEAN := FALSE;
   v_existing_updated TIMESTAMPTZ;
   v_existing_project UUID;
+  v_existing_content TEXT;
+  v_existing_date DATE;
   v_existing_is_read BOOLEAN;
   v_existing_is_completed BOOLEAN;
   v_existing_is_archived BOOLEAN;
@@ -355,6 +357,8 @@ BEGIN
       b.user_id,
       b.updated_at,
       b.project_id,
+      b.content,
+      b.date,
       b.is_read,
       b.is_completed,
       b.is_archived,
@@ -367,6 +371,8 @@ BEGIN
       v_existing_owner,
       v_existing_updated,
       v_existing_project,
+      v_existing_content,
+      v_existing_date,
       v_existing_is_read,
       v_existing_is_completed,
       v_existing_is_archived,
@@ -437,9 +443,9 @@ BEGIN
     v_entry->'focus_meta'
   )
   ON CONFLICT (id) DO UPDATE
-    -- 文本/日期字段：LWW；content 已有 prevent_black_box_content_loss 触发器额外保护
-    SET content = EXCLUDED.content,
-        date = EXCLUDED.date,
+    -- 陈旧 payload 不得覆盖 newer remote 内容；触发器仍兜底防空内容覆盖。
+    SET content = CASE WHEN v_is_stale THEN v_existing_content ELSE EXCLUDED.content END,
+        date = CASE WHEN v_is_stale THEN v_existing_date ELSE EXCLUDED.date END,
         -- 状态机字段：陈旧 payload 不得洗白
         project_id = CASE WHEN v_is_stale THEN v_existing_project ELSE EXCLUDED.project_id END,
         is_read = CASE WHEN v_is_stale THEN v_existing_is_read ELSE EXCLUDED.is_read END,
@@ -668,6 +674,7 @@ DECLARE
   v_kept UUID[] := ARRAY[]::UUID[];
   v_skipped UUID[] := ARRAY[]::UUID[];
   v_skew_grace CONSTANT INTERVAL := INTERVAL '1 second';
+  v_missing_base_map BOOLEAN := v_base_map IS NULL OR jsonb_typeof(v_base_map) <> 'object';
 BEGIN
   SELECT COALESCE(array_agg(task_id::UUID), ARRAY[]::UUID[])
     INTO v_task_ids
@@ -723,34 +730,39 @@ BEGIN
     RETURN jsonb_build_object('status', 'unauthorized', 'reason', 'project_not_owned');
   END IF;
 
-  -- 当 payload 携带 base_updated_at_map 时，对每个 task 做 stale 判定，剔除"已被远端更新"的 task
-  IF v_base_map IS NOT NULL AND jsonb_typeof(v_base_map) = 'object' THEN
-    FOREACH v_task_id IN ARRAY v_task_ids
-    LOOP
-      SELECT t.updated_at
-        INTO v_existing_updated
-        FROM public.tasks t
-        WHERE t.id = v_task_id
-          AND t.project_id = v_project_id
-        FOR UPDATE;
+  -- 每个 delete 都必须有 task 级 updated_at 基线；缺失时跳过，避免无保护删除覆盖远端更新。
+  FOREACH v_task_id IN ARRAY v_task_ids
+  LOOP
+    SELECT t.updated_at
+      INTO v_existing_updated
+      FROM public.tasks t
+      WHERE t.id = v_task_id
+        AND t.project_id = v_project_id
+      FOR UPDATE;
 
-      v_base_str := v_base_map->>(v_task_id::TEXT);
-      v_base_ts := NULLIF(v_base_str, '')::TIMESTAMPTZ;
+    IF v_missing_base_map THEN
+      v_skipped := array_append(v_skipped, v_task_id);
+      CONTINUE;
+    END IF;
 
-      IF v_existing_updated IS NOT NULL
-        AND v_base_ts IS NOT NULL
+    v_base_str := v_base_map->>(v_task_id::TEXT);
+    v_base_ts := NULLIF(v_base_str, '')::TIMESTAMPTZ;
+
+    IF v_base_ts IS NULL
+      OR (
+        v_existing_updated IS NOT NULL
         AND v_existing_updated > v_base_ts + v_skew_grace
-      THEN
-        -- 远端已被改 stage / 重激活 / 改 updated_at；不能用本地陈旧 delete 覆盖
-        v_skipped := array_append(v_skipped, v_task_id);
-      ELSE
-        v_kept := array_append(v_kept, v_task_id);
-      END IF;
-    END LOOP;
-    v_task_ids := v_kept;
-  END IF;
+      )
+    THEN
+      -- 远端已被改 stage / 重激活 / 改 updated_at，或客户端缺少基线；不能删除
+      v_skipped := array_append(v_skipped, v_task_id);
+    ELSE
+      v_kept := array_append(v_kept, v_task_id);
+    END IF;
+  END LOOP;
+  v_task_ids := v_kept;
 
-  -- 全部被剔除：返回 applied + skipped_ids，客户端据此重排队（不阻塞其他 task）
+  -- 全部被剔除：返回 applied + skipped_ids，客户端据此拉取合并（不阻塞其他 task）
   IF array_length(v_task_ids, 1) IS NULL THEN
     v_result := jsonb_build_object(
       'status', 'applied',

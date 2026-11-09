@@ -56,6 +56,20 @@ describe('startup launch contract', () => {
     expect(urls).not.toContain('https://*.supabase.co/rpc/v1/*');
   });
 
+  it('ngsw-config should keep navigationPreload disabled so a cold gateway cannot surface phantom 504s', () => {
+    // 逻辑链：hash 路由 SPA（/#/projects/:id/text）的整页加载/刷新会触发导航请求。
+    // 当 navigationPreload=true 时，浏览器会在 SW 命中缓存壳之前并行向源站发起预加载请求。
+    // 由于 navigationUrls 为 "/**"，ngsw 始终从缓存返回 index.html，预加载请求纯属冗余；
+    // 一旦源站冷启动/网关超时返回 504，浏览器就会把它记到当前文档 URL 上，
+    // 在控制台留下 “Failed to load resource: 504 (Gateway Timeout)” 的幽灵错误（页面其实已从缓存正常加载）。
+    // 关闭 navigationPreload 可从根本上消除这条冗余源站请求，杜绝该幽灵 504。
+    const ngswConfigPath = path.join(process.cwd(), 'ngsw-config.json');
+    const ngswConfig = JSON.parse(fs.readFileSync(ngswConfigPath, 'utf8'));
+
+    expect(ngswConfig.navigationPreload).not.toBe(true);
+    expect(ngswConfig.navigationUrls).toContain('/**');
+  });
+
   it('manifest start_url should point to root startup path instead of launch.html', () => {
     const manifestPath = path.join(process.cwd(), 'public', 'manifest.webmanifest');
     const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
@@ -213,6 +227,26 @@ describe('startup launch contract', () => {
     expect(mainSource).toContain('event.preventDefault();');
     expect(mainSource).toContain('BrowserNetworkSuspendedError');
     expect(mainSource).toContain('network IO suspended');
+  });
+
+  it('captures and scrubs auth callbacks before full-href telemetry or bootstrap', () => {
+    const mainSource = fs.readFileSync(path.join(process.cwd(), 'main.ts'), 'utf8');
+    const authoritySource = fs.readFileSync(
+      path.join(process.cwd(), 'public', 'assets', 'auth-canonical-storage-bootstrap-v1.js'),
+      'utf8',
+    );
+    const captureIndex = mainSource.indexOf('captureAndScrubAuthCallback()');
+    const hrefLogIndex = mainSource.indexOf("log('当前 URL: ' + window.location.href)");
+    const bootstrapIndex = mainSource.indexOf('startApplication();');
+
+    expect(captureIndex).toBeGreaterThan(-1);
+    expect(captureIndex).toBeLessThan(hrefLogIndex);
+    expect(captureIndex).toBeLessThan(bootstrapIndex);
+    expect(mainSource).toContain('authCallbackTelemetryBlocked');
+    expect(mainSource).toContain("window.location.hash.startsWith('#/auth/callback')");
+    expect(authoritySource).toContain("'/#/auth/callback'");
+    expect(authoritySource).toContain('Object.freeze');
+    expect(authoritySource).toContain('history.replaceState');
   });
 
   it('legacy sw-composed compatibility entry should keep the retirement shim but not the old desktop runtime', () => {

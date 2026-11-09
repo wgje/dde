@@ -3,16 +3,19 @@ import {
   Component,
   ElementRef,
   HostListener,
+  Input,
+  AfterViewInit,
+  OnChanges,
   OnDestroy,
+  SimpleChanges,
   computed,
   effect,
   inject,
   signal,
   untracked,
 } from '@angular/core';
-import { FormsModule } from '@angular/forms';
 import { PARKING_CONFIG } from '../../../../config/parking.config';
-import { DockEntry, DockLane, CognitiveLoad, RecommendationGroupType } from '../../../../models/parking-dock';
+import { DockEntry, DockLane, RecommendationGroupType } from '../../../../models/parking-dock';
 import { DockEngineService } from '../../../../services/dock-engine.service';
 import { ProjectStore } from '../../../core/state/stores';
 import {
@@ -30,26 +33,36 @@ interface RadarProjectMeta {
   color: string | null;
 }
 
+const RADAR_COMPACT_COMBO_VISIBLE_LIMIT = 3;
+const RADAR_COMPACT_BACKUP_VISIBLE_LIMIT = 2;
+const RADAR_VIEW_TRANSITION_MS = 240;
+
 @Component({
   selector: 'app-dock-radar-zone',
   standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [FormsModule],
+  imports: [],
   styleUrl: './dock-radar-zone.component.scss',
   templateUrl: './dock-radar-zone.component.html',
 })
-export class DockRadarZoneComponent implements OnDestroy {
+export class DockRadarZoneComponent implements AfterViewInit, OnChanges, OnDestroy {
   private readonly engine = inject(DockEngineService);
   private readonly projectStore = inject(ProjectStore);
   private readonly hostElement = inject<ElementRef<HTMLElement>>(ElementRef);
+  @Input() isMobile = false;
+  @Input() canMutate = true;
+  @Input() interactive = true;
+  @Input() activeView: 'text' | 'flow' = 'text';
 
   readonly comboRadius = PARKING_CONFIG.RADAR_STRONG_RADIUS;
   readonly backupRadius = PARKING_CONFIG.RADAR_WEAK_RADIUS;
+  readonly comboLayoutRadius = computed(() => this.viewMode() === 'panorama' ? this.comboRadius * 1.28 : this.comboRadius);
+  readonly backupLayoutRadius = computed(() => this.viewMode() === 'panorama' ? this.backupRadius * 1.18 : this.backupRadius);
   readonly comboOpacity = PARKING_CONFIG.RADAR_STRONG_OPACITY;
   readonly backupOpacity = PARKING_CONFIG.RADAR_WEAK_OPACITY;
   readonly floatDuration = `${PARKING_CONFIG.RADAR_FLOAT_DURATION_S}s`;
   readonly backupFloatDuration = `${PARKING_CONFIG.RADAR_FLOAT_DURATION_S + 0.8}s`;
-  readonly createFormWidth = PARKING_CONFIG.RADAR_CREATE_FORM_WIDTH;
+  readonly viewTransition = `${RADAR_VIEW_TRANSITION_MS}ms`;
   readonly enableRadarFloat = PARKING_CONFIG.FOCUS_ENABLE_RADAR_FLOAT;
   readonly comboVisibleLimit = PARKING_CONFIG.RADAR_COMBO_VISIBLE_LIMIT;
   readonly backupVisibleLimit = PARKING_CONFIG.RADAR_BACKUP_VISIBLE_LIMIT;
@@ -123,6 +136,20 @@ export class DockRadarZoneComponent implements OnDestroy {
       });
     });
   });
+  private readonly previewValidityEffect = effect(() => {
+    if (!this.previewTaskId() || this.previewEntry()) return;
+    untracked(() => this.closeTaskPreview());
+  });
+  private readonly focusExitResetEffect = effect(() => {
+    if (this.engine.focusMode()) return;
+    untracked(() => {
+      this.viewMode.set('compact');
+      this.showComboOverflowPanel.set(false);
+      this.showBackupOverflowPanel.set(false);
+      if (this.mobileTaskDrawerOpen()) this.closeMobileTaskDrawer();
+      this.closeTaskPreview(false);
+    });
+  });
   private readonly overlayAvoidEffect = effect(() => {
     this.engine.focusMode();
     this.engine.focusTransition();
@@ -131,23 +158,48 @@ export class DockRadarZoneComponent implements OnDestroy {
     this.scheduleOverlayAvoidRectRefresh();
   });
 
-  private longPressTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly promotionCleanupEffect = effect(() => {
+    const lockedTaskId = this.promotionLockTaskId();
+    if (!lockedTaskId) return;
+    if (this.isRadarTaskVisible(lockedTaskId)) return;
+    untracked(() => {
+      this.clearPromotionTimer();
+      this.magnetSlidingIds.update(prev => {
+        if (!prev.has(lockedTaskId)) return prev;
+        const next = new Set(prev);
+        next.delete(lockedTaskId);
+        return next;
+      });
+      if (this.promotionLockTaskId() === lockedTaskId) {
+        this.promotionLockTaskId.set(null);
+      }
+    });
+  });
+
   private readonly hoverExitTimers = new Map<string, ReturnType<typeof setTimeout>>();
   // M-11 fix: focus float 使用独立 timer map，避免与 hover 交叉取消
   private readonly focusExitTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  private touchActiveTaskId: string | null = null;
-  private touchStartY = 0;
-  private touchLongPressed = false;
-
-  readonly createFormLane = signal<DockLane | null>(null);
   readonly showComboOverflowPanel = signal(false);
   readonly showBackupOverflowPanel = signal(false);
-  createFormX = 0;
-  createFormY = 0;
-  createTitle = '';
-  createLoad: CognitiveLoad = 'low';
-  createExpected: number | string = '';
-  createWait: number | string = '';
+  readonly viewMode = signal<'compact' | 'panorama'>('compact');
+  readonly previewTaskId = signal<string | null>(null);
+  readonly previewSource = signal<'radar-node' | 'overflow-stack' | 'mobile-rail' | 'task-drawer'>('radar-node');
+  readonly mobileTaskDrawerOpen = signal(false);
+  readonly announcement = signal('');
+  private previewTriggerElement: HTMLElement | null = null;
+  private mobileDrawerTriggerElement: HTMLElement | null = null;
+  private mobileDrawerFocusRaf: number | null = null;
+  private mobileDrawerOriginalParent: Node | null = null;
+  private mobileDrawerOriginalNextSibling: Node | null = null;
+  private mobileBackdropOriginalParent: Node | null = null;
+  private mobileBackdropOriginalNextSibling: Node | null = null;
+  private previousBodyOverflow: string | null = null;
+  private mobileRailOriginalParent: Node | null = null;
+  private mobileRailOriginalNextSibling: Node | null = null;
+  private mobileRailPortalRaf: number | null = null;
+  private radarControlsOriginalParent: Node | null = null;
+  private radarControlsOriginalNextSibling: Node | null = null;
+  private radarControlsPortalRaf: number | null = null;
   readonly groupOrder: RecommendationGroupType[] = [
     'homologous-advancement',
     'cognitive-downgrade',
@@ -182,39 +234,54 @@ export class DockRadarZoneComponent implements OnDestroy {
 
   readonly comboEntries = computed(() => this.engine.comboSelectEntries());
   readonly backupEntries = computed(() => this.engine.backupEntries());
+  readonly orderedComboEntries = computed(() => this.orderActionableEntries(this.comboEntries()));
+  readonly orderedBackupEntries = computed(() => this.orderActionableEntries(this.backupEntries()));
+  readonly comboVisibleCount = computed(() => this.viewMode() === 'compact'
+    ? RADAR_COMPACT_COMBO_VISIBLE_LIMIT
+    : this.comboVisibleLimit);
+  readonly backupVisibleCount = computed(() => this.viewMode() === 'compact'
+    ? RADAR_COMPACT_BACKUP_VISIBLE_LIMIT
+    : this.backupVisibleLimit);
+  readonly visibleComboEntries = computed(() => this.orderedComboEntries().slice(0, this.comboVisibleCount()));
+  readonly visibleBackupEntries = computed(() => this.orderedBackupEntries().slice(0, this.backupVisibleCount()));
+  readonly mobileCandidateEntries = computed(() => this.orderedComboEntries().slice(0, RADAR_COMPACT_COMBO_VISIBLE_LIMIT));
+  readonly mobileVisibleTaskCount = computed(() => this.mobileCandidateEntries().length);
   readonly comboOverflowEntries = computed(() =>
-    this.comboEntries().slice(this.comboVisibleLimit),
+    this.orderedComboEntries().slice(this.comboVisibleCount()),
   );
   readonly backupOverflowEntries = computed(() =>
-    this.backupEntries().slice(this.backupVisibleLimit),
+    this.orderedBackupEntries().slice(this.backupVisibleCount()),
   );
   readonly comboOverflowCount = computed(() => this.comboOverflowEntries().length);
   readonly backupOverflowCount = computed(() => this.backupOverflowEntries().length);
+  readonly previewEntry = computed(() => {
+    const taskId = this.previewTaskId();
+    if (!taskId) return null;
+    return this.comboEntries().find(entry => entry.taskId === taskId)
+      ?? this.backupEntries().find(entry => entry.taskId === taskId)
+      ?? null;
+  });
 
   readonly comboItems = computed(() =>
     this.layoutRadarEntries(
-      this.comboEntries().slice(0, this.comboVisibleLimit),
+      this.visibleComboEntries(),
       'combo-select',
-      this.comboRadius,
-      this.comboRadius * 0.84,
+      this.comboLayoutRadius(),
+      this.comboLayoutRadius() * 0.84,
     ),
   );
 
   readonly backupItems = computed(() =>
     this.layoutRadarEntries(
-      this.backupEntries().slice(0, this.backupVisibleLimit),
+      this.visibleBackupEntries(),
       'backup',
-      this.backupRadius,
-      this.backupRadius * 0.92,
+      this.backupLayoutRadius(),
+      this.backupLayoutRadius() * 0.92,
     ),
   );
 
   ngOnDestroy(): void {
-    if (this.longPressTimer) {
-      clearTimeout(this.longPressTimer);
-      this.longPressTimer = null;
-    }
-    if (this.promotionTimer) {
+    if (this.promotionTimer !== null) {
       clearTimeout(this.promotionTimer);
       this.promotionTimer = null;
     }
@@ -238,6 +305,45 @@ export class DockRadarZoneComponent implements OnDestroy {
       cancelAnimationFrame(this.overlayAvoidRefreshRaf);
       this.overlayAvoidRefreshRaf = null;
     }
+    this.cancelMobileDrawerFocusRaf();
+    this.restoreMobileDrawerFromBody();
+    this.cancelMobileRailPortalRaf();
+    this.restoreMobileRailFromBody();
+    this.cancelRadarControlsPortalRaf();
+    this.restoreRadarControlsFromBody();
+  }
+
+  ngAfterViewInit(): void {
+    if (this.isMobile) this.scheduleMobileRailPortal();
+    else this.scheduleRadarControlsPortal();
+  }
+
+  ngOnChanges(changes: SimpleChanges): void {
+    if (changes['interactive'] && !this.interactive) {
+      this.showComboOverflowPanel.set(false);
+      this.showBackupOverflowPanel.set(false);
+      if (this.mobileTaskDrawerOpen()) this.closeMobileTaskDrawer();
+      this.closeTaskPreview(false);
+    }
+    if (changes['isMobile']) {
+      if (this.isMobile) {
+        this.cancelRadarControlsPortalRaf();
+        this.restoreRadarControlsFromBody();
+        this.scheduleMobileRailPortal();
+      }
+      else {
+        if (this.mobileTaskDrawerOpen()) this.closeMobileTaskDrawer();
+        this.cancelMobileRailPortalRaf();
+        this.restoreMobileRailFromBody();
+        this.scheduleRadarControlsPortal();
+      }
+    }
+    if (!this.isMobile || this.activeView !== 'flow') return;
+    this.viewMode.set('compact');
+    this.showComboOverflowPanel.set(false);
+    this.showBackupOverflowPanel.set(false);
+    if (this.mobileTaskDrawerOpen()) this.closeMobileTaskDrawer();
+    this.announcement.set('Flow 视图已打开，候选任务轨道仍可使用。');
   }
 
   @HostListener('window:resize')
@@ -303,6 +409,7 @@ export class DockRadarZoneComponent implements OnDestroy {
 
   onRadarItemFocus(taskId: string): void {
     this.clearHoverExitTimer(taskId);
+    this.clearFocusExitTimer(taskId);
     this.focusFloatIds.update(prev => {
       if (prev.has(taskId)) return prev;
       const next = new Set(prev);
@@ -315,74 +422,151 @@ export class DockRadarZoneComponent implements OnDestroy {
     this.scheduleFocusFloatRemoval(taskId);
   }
 
-  onWheel(event: WheelEvent, taskId: string): void {
-    if (!this.canInteract()) return;
-    if (event.altKey) {
-      event.preventDefault();
-      this.engine.toggleLoad(taskId, event.deltaY > 0 ? 'down' : 'up');
-      return;
-    }
-    if (this.groupSwitchEnabled()) {
-      event.preventDefault();
-      this.cycleGroup(event.deltaY > 0 ? 1 : -1);
-    }
-  }
-
-  onTouchStart(event: TouchEvent, taskId: string): void {
-    if (!this.canInteract()) return;
-    this.touchStartY = event.touches?.[0]?.clientY ?? 0;
-    this.touchActiveTaskId = taskId;
-    this.touchLongPressed = false;
-    if (this.longPressTimer) clearTimeout(this.longPressTimer);
-    this.longPressTimer = setTimeout(() => {
-      this.touchLongPressed = true;
-    }, PARKING_CONFIG.RADAR_PROMOTION_DELAY_MS);
-  }
-
-  onTouchMove(event: TouchEvent, taskId: string): void {
-    if (!this.canInteract()) return;
-    const deltaY = (event.touches?.[0]?.clientY ?? 0) - this.touchStartY;
-    if (this.groupSwitchEnabled() && !this.touchLongPressed && Math.abs(deltaY) > PARKING_CONFIG.RADAR_SWIPE_THRESHOLD_PX) {
-      this.cycleGroup(deltaY > 0 ? 1 : -1);
-      this.touchStartY = event.touches?.[0]?.clientY ?? 0;
-      return;
-    }
-
-    if (!this.touchLongPressed || this.touchActiveTaskId !== taskId) return;
-    if (Math.abs(deltaY) < PARKING_CONFIG.RADAR_SWIPE_MIN_PX) return;
-    this.engine.toggleLoad(taskId, deltaY > 0 ? 'down' : 'up');
-    this.touchStartY = event.touches?.[0]?.clientY ?? 0;
-  }
-
-  onTouchEnd(): void {
-    if (this.longPressTimer) {
-      clearTimeout(this.longPressTimer);
-      this.longPressTimer = null;
-    }
-    this.touchLongPressed = false;
-    this.touchActiveTaskId = null;
-  }
-
-  onRadarItemKeydown(event: KeyboardEvent, taskId: string): void {
-    if (!this.canInteract()) return;
-    if (event.key !== 'Enter' && event.key !== ' ') return;
-    event.preventDefault();
-    this.promoteToConsole(taskId);
-  }
-
   onRadarItemClick(event: MouseEvent, taskId: string): void {
     event.stopPropagation();
-    this.promoteToConsole(taskId);
+    this.openTaskPreview(taskId, 'radar-node', event.currentTarget as HTMLElement);
   }
 
   onOverflowEntryClick(event: MouseEvent, taskId: string): void {
     event.stopPropagation();
+    const lane = this.comboOverflowEntries().some(entry => entry.taskId === taskId) ? 'combo' : 'backup';
+    const trigger = this.hostElement.nativeElement.querySelector<HTMLElement>(
+      `[data-testid="dock-v3-radar-${lane}-overflow-trigger"]`,
+    );
+    this.openTaskPreview(taskId, 'overflow-stack', trigger);
+  }
+
+  setViewMode(mode: 'compact' | 'panorama'): void {
+    if (!this.canPresent()) return;
+    this.viewMode.set(mode);
+    this.showComboOverflowPanel.set(false);
+    this.showBackupOverflowPanel.set(false);
+    this.closeTaskPreview(false);
+  }
+
+  selectGroup(group: RecommendationGroupType): void {
+    if (!this.groupSwitchEnabled()) return;
+    const index = this.groupOrder.indexOf(group);
+    if (index >= 0) this.activeGroupIndex.set(index);
+  }
+
+  openTaskPreview(
+    taskId: string,
+    source: 'radar-node' | 'overflow-stack' | 'mobile-rail' | 'task-drawer' = 'radar-node',
+    trigger: HTMLElement | null = null,
+  ): void {
+    if (!this.canPresent() || !this.isRadarTaskVisible(taskId)) return;
+    this.previewTaskId.set(taskId);
+    this.previewSource.set(source);
+    this.previewTriggerElement = trigger ?? null;
+    this.showComboOverflowPanel.set(false);
+    this.showBackupOverflowPanel.set(false);
+    if (this.isMobile) {
+      const wasClosed = !this.mobileTaskDrawerOpen();
+      this.mobileDrawerTriggerElement ??= trigger ?? null;
+      this.mobileTaskDrawerOpen.set(true);
+      if (wasClosed) {
+        this.scheduleMobileDrawerFocus();
+      }
+    }
+  }
+
+  confirmPreviewPromotion(): void {
+    const taskId = this.previewTaskId();
+    if (!taskId || !this.canInteract() || this.promotionLockTaskId() !== null) return;
+    if (this.isMobile && this.mobileTaskDrawerOpen()) {
+      this.closeMobileTaskDrawer();
+    } else {
+      this.closeTaskPreview(false);
+    }
     this.promoteToConsole(taskId);
   }
 
-  onRadarItemDoubleClick(event: MouseEvent, lane: DockLane): void {
-    event.stopPropagation();
-    this.openCreateForm(lane, event);
+  togglePreviewLoad(): void {
+    const entry = this.previewEntry();
+    if (!entry || !this.canInteract()) return;
+    this.engine.toggleLoad(entry.taskId, entry.load === 'low' ? 'up' : 'down');
+  }
+
+  commitPreviewMinutes(kind: 'expected' | 'wait', event: Event): void {
+    const entry = this.previewEntry();
+    if (!(event.target instanceof HTMLInputElement)) return;
+    const value = event.target.value;
+    const minutes = value.trim() ? Number(value) : null;
+    if (!entry || !this.canInteract() || (minutes !== null && (!Number.isFinite(minutes) || minutes < 0))) return;
+    const safeMinutes = minutes === null ? null : Math.floor(minutes);
+    const save = kind === 'expected'
+      ? this.engine.setExpectedTime(entry.taskId, safeMinutes)
+      : this.engine.setWaitTime(entry.taskId, safeMinutes);
+    void save.then(saved => {
+      this.announcement.set(saved ? '规划时间已更新' : '规划时间未保存，请重试');
+    });
+  }
+
+  openMobileTaskDrawer(event: MouseEvent): void {
+    if (!this.canPresent()) return;
+    this.mobileDrawerTriggerElement = event.currentTarget as HTMLElement;
+    this.mobileTaskDrawerOpen.set(true);
+    this.scheduleMobileDrawerFocus();
+  }
+
+  closeMobileTaskDrawer(): void {
+    this.cancelMobileDrawerFocusRaf();
+    this.restoreMobileDrawerFromBody();
+    const restoreTarget = this.mobileDrawerTriggerElement ?? this.previewTriggerElement;
+    this.mobileTaskDrawerOpen.set(false);
+    this.closeTaskPreview(false);
+    if (restoreTarget?.isConnected) restoreTarget.focus();
+    this.mobileDrawerTriggerElement = null;
+  }
+
+  onMobileDrawerKeydown(event: KeyboardEvent): void {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      if (this.previewTaskId()) this.closeTaskPreview(false);
+      else this.closeMobileTaskDrawer();
+      return;
+    }
+    if (event.key !== 'Tab') return;
+    const controls = Array.from(document.querySelectorAll<HTMLElement>(
+      '[data-testid="dock-v3-mobile-task-drawer"] button:not([disabled]), [data-testid="dock-v3-mobile-task-drawer"] [tabindex="0"]',
+    )).filter(control => control.getClientRects().length > 0);
+    if (controls.length === 0) return;
+    const first = controls[0]!;
+    const last = controls[controls.length - 1]!;
+    const active = document.activeElement;
+    if (event.shiftKey && active === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && active === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
+  @HostListener('document:keydown.escape', ['$event'])
+  onDocumentEscape(event: KeyboardEvent): void {
+    if (this.mobileTaskDrawerOpen()) return;
+    if (this.previewTaskId()) {
+      event.preventDefault();
+      event.stopPropagation();
+      this.closeTaskPreview();
+      return;
+    }
+    if (this.showComboOverflowPanel()) this.showComboOverflowPanel.set(false);
+    if (this.showBackupOverflowPanel()) this.showBackupOverflowPanel.set(false);
+  }
+
+  closeTaskPreview(restoreFocus = true): void {
+    const taskId = this.previewTaskId();
+    this.previewTaskId.set(null);
+    if (restoreFocus && !this.isMobile && this.previewTriggerElement?.isConnected) {
+      this.previewTriggerElement.focus();
+    } else if (!restoreFocus && this.isMobile && this.mobileTaskDrawerOpen() && taskId) {
+      queueMicrotask(() => this.focusMobileTaskRow(taskId));
+    }
+    this.previewTriggerElement = null;
   }
 
   onComboOverflowTriggerClick(event: MouseEvent): void {
@@ -430,12 +614,21 @@ export class DockRadarZoneComponent implements OnDestroy {
       next.add(taskId);
       return next;
     });
-    if (this.promotionTimer) {
-      clearTimeout(this.promotionTimer);
-      this.promotionTimer = null;
-    }
+    this.clearPromotionTimer();
     this.promotionTimer = setTimeout(() => {
       this.promotionTimer = null;
+      if (!this.isRadarTaskVisible(taskId)) {
+        this.magnetSlidingIds.update(prev => {
+          if (!prev.has(taskId)) return prev;
+          const next = new Set(prev);
+          next.delete(taskId);
+          return next;
+        });
+        if (this.promotionLockTaskId() === taskId) {
+          this.promotionLockTaskId.set(null);
+        }
+        return;
+      }
       this.magnetSlidingIds.update(prev => {
         const next = new Set(prev);
         next.delete(taskId);
@@ -447,46 +640,11 @@ export class DockRadarZoneComponent implements OnDestroy {
       } else {
         this.engine.setMainTask(taskId);
       }
+      this.announcement.set(this.engine.focusMode() ? '已移入当前 Focus 的候选任务' : '已设为主任务');
       if (this.promotionLockTaskId() === taskId) {
         this.promotionLockTaskId.set(null);
       }
     }, PARKING_CONFIG.CONSOLE_MAGNET_PULL_MS);
-  }
-
-  openCreateForm(lane: DockLane, _event: MouseEvent): void {
-    if (!this.canInteract()) return;
-    this.showComboOverflowPanel.set(false);
-    this.showBackupOverflowPanel.set(false);
-    this.createFormLane.set(lane);
-    this.createFormX = 0;
-    this.createFormY = lane === 'combo-select'
-      ? -(this.comboRadius - 24)
-      : -(this.backupRadius - 24);
-    this.createTitle = '';
-    this.createLoad = 'low';
-    this.createExpected = '';
-    this.createWait = '';
-  }
-
-  closeCreateForm(): void {
-    this.createFormLane.set(null);
-  }
-
-  submitCreate(): void {
-    if (!this.canInteract()) return;
-    const lane = this.createFormLane();
-    if (!lane) return;
-    const title = this.createTitle.trim();
-    if (!title) return;
-
-    const expectedMinutes = this.parseOptionalNumber(this.createExpected);
-    const waitMinutes = this.parseOptionalNumber(this.createWait);
-
-    this.engine.createInDock(title, lane, this.createLoad, {
-      expectedMinutes,
-      waitMinutes,
-    });
-    this.closeCreateForm();
   }
 
   formatTime(minutes: number): string {
@@ -519,27 +677,183 @@ export class DockRadarZoneComponent implements OnDestroy {
     return this.hashProjectColor(entry.sourceProjectId);
   }
 
-  private cycleGroup(step: 1 | -1): void {
-    if (!this.groupSwitchEnabled()) return;
-    this.activeGroupIndex.update(prev => {
-      const total = this.groupOrder.length;
-      return (prev + step + total) % total;
-    });
+  resolveStatusLabel(status: DockEntry['status']): string {
+    switch (status) {
+      case 'wait_finished': return '等待结束';
+      case 'stalled': return '停滞';
+      case 'pending_start': return '可行动';
+      case 'suspended_waiting': return '等待中';
+      case 'focusing': return '专注中';
+      case 'completed': return '已完成';
+      default: return '待处理';
+    }
+  }
+
+  resolvePreviewReason(entry: DockEntry): string {
+    if (entry.status === 'wait_finished') return '等待窗口已结束，先确认下一步再移入前台。';
+    if (entry.status === 'stalled') return '任务处于停滞状态，先检查上下文再决定是否继续。';
+    if (entry.status === 'suspended_waiting') return '任务仍在等待外部条件，可先检查等待时间。';
+    const group = this.pendingEntryGroupByTaskId().get(entry.taskId);
+    if (group === 'homologous-advancement') return '与当前工作同源，适合保持推进方向。';
+    if (group === 'cognitive-downgrade') return '低负荷候选，适合作为恢复阶段的后续任务。';
+    if (group === 'asynchronous-boot') return '任务可在等待其他工作时并行启动。';
+    return entry.lane === 'backup' ? '这是待命任务，检查后可明确移入前台。' : '这是当前可行动候选，检查后再决定是否移入前台。';
+  }
+
+  private orderActionableEntries(entries: DockEntry[]): DockEntry[] {
+    const priority: Record<DockEntry['status'], number> = {
+      wait_finished: 0,
+      stalled: 1,
+      pending_start: 2,
+      suspended_waiting: 3,
+      focusing: 4,
+      completed: 5,
+    };
+    return entries
+      .map((entry, index) => ({ entry, index }))
+      .sort((a, b) => priority[a.entry.status] - priority[b.entry.status] || a.index - b.index)
+      .map(item => item.entry);
+  }
+
+  private canPresent(): boolean {
+    return this.interactive && !this.engine.isFocusTransitionBlocking();
   }
 
   private canInteract(): boolean {
-    // 雷达区属于专注控制台 UI，scrim（背景虚化）遮挡的是 app 主体内容，
-    // 不应阻止专注控制台内部的交互。仅在 focus 进入/退出过渡动画期间禁用。
-    return !this.engine.isFocusTransitionBlocking();
+    return this.canMutate && this.canPresent();
   }
 
-  private parseOptionalNumber(raw: string | number | null | undefined): number | null {
-    if (raw === null || raw === undefined) return null;
-    const value = typeof raw === 'string' ? raw.trim() : String(raw).trim();
-    if (!value) return null;
-    const parsed = Number(value);
-    if (!Number.isFinite(parsed) || parsed <= 0) return null;
-    return Math.floor(parsed);
+  private focusMobileDrawerCloseButton(): void {
+    document.querySelector<HTMLElement>('[data-testid="dock-v3-mobile-task-drawer-close"]')
+      ?.focus();
+  }
+
+  private scheduleMobileDrawerFocus(): void {
+    this.cancelMobileDrawerFocusRaf();
+    this.mobileDrawerFocusRaf = requestAnimationFrame(() => {
+      this.mobileDrawerFocusRaf = null;
+      this.portalMobileDrawerToBody();
+      this.focusMobileDrawerCloseButton();
+    });
+  }
+
+  private cancelMobileDrawerFocusRaf(): void {
+    if (this.mobileDrawerFocusRaf === null) return;
+    cancelAnimationFrame(this.mobileDrawerFocusRaf);
+    this.mobileDrawerFocusRaf = null;
+  }
+
+  private portalMobileDrawerToBody(): void {
+    if (typeof document === 'undefined') return;
+    const drawer = this.hostElement.nativeElement.querySelector<HTMLElement>('[data-testid="dock-v3-mobile-task-drawer"]');
+    const backdrop = this.hostElement.nativeElement.querySelector<HTMLElement>('[data-testid="dock-v3-mobile-drawer-backdrop"]');
+    if (drawer && drawer.parentElement !== document.body) {
+      this.mobileDrawerOriginalParent = drawer.parentNode;
+      this.mobileDrawerOriginalNextSibling = drawer.nextSibling;
+      document.body.appendChild(drawer);
+    }
+    if (backdrop && backdrop.parentElement !== document.body) {
+      this.mobileBackdropOriginalParent = backdrop.parentNode;
+      this.mobileBackdropOriginalNextSibling = backdrop.nextSibling;
+      document.body.appendChild(backdrop);
+    }
+    this.previousBodyOverflow ??= document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+  }
+
+  private restoreMobileDrawerFromBody(): void {
+    if (typeof document === 'undefined') return;
+    const drawer = document.querySelector<HTMLElement>('[data-testid="dock-v3-mobile-task-drawer"]');
+    const backdrop = document.querySelector<HTMLElement>('[data-testid="dock-v3-mobile-drawer-backdrop"]');
+    if (drawer && this.mobileDrawerOriginalParent) {
+      this.mobileDrawerOriginalParent.insertBefore(drawer, this.mobileDrawerOriginalNextSibling);
+    }
+    if (backdrop && this.mobileBackdropOriginalParent) {
+      this.mobileBackdropOriginalParent.insertBefore(backdrop, this.mobileBackdropOriginalNextSibling);
+    }
+    if (this.previousBodyOverflow !== null) {
+      document.body.style.overflow = this.previousBodyOverflow;
+      this.previousBodyOverflow = null;
+    }
+    this.mobileDrawerOriginalParent = null;
+    this.mobileDrawerOriginalNextSibling = null;
+    this.mobileBackdropOriginalParent = null;
+    this.mobileBackdropOriginalNextSibling = null;
+  }
+
+  private scheduleMobileRailPortal(): void {
+    if (typeof document === 'undefined' || this.mobileRailPortalRaf !== null) return;
+    this.mobileRailPortalRaf = requestAnimationFrame(() => {
+      this.mobileRailPortalRaf = null;
+      const rail = this.hostElement.nativeElement.querySelector<HTMLElement>('[data-testid="dock-v3-mobile-candidate-rail"]');
+      if (!rail || rail.parentElement === document.body) return;
+      this.mobileRailOriginalParent = rail.parentNode;
+      this.mobileRailOriginalNextSibling = rail.nextSibling;
+      document.body.appendChild(rail);
+    });
+  }
+
+  private cancelMobileRailPortalRaf(): void {
+    if (this.mobileRailPortalRaf === null) return;
+    cancelAnimationFrame(this.mobileRailPortalRaf);
+    this.mobileRailPortalRaf = null;
+  }
+
+  private restoreMobileRailFromBody(): void {
+    const rail = document.querySelector<HTMLElement>('[data-testid="dock-v3-mobile-candidate-rail"]');
+    if (rail && this.mobileRailOriginalParent) {
+      this.mobileRailOriginalParent.insertBefore(rail, this.mobileRailOriginalNextSibling);
+    }
+    this.mobileRailOriginalParent = null;
+    this.mobileRailOriginalNextSibling = null;
+  }
+
+  private scheduleRadarControlsPortal(): void {
+    if (typeof document === 'undefined' || this.radarControlsPortalRaf !== null) return;
+    this.radarControlsPortalRaf = requestAnimationFrame(() => {
+      this.radarControlsPortalRaf = null;
+      const controls = this.hostElement.nativeElement.querySelector<HTMLElement>(
+        '[data-testid="dock-v3-radar-edge-controls"]',
+      );
+      if (!controls || controls.parentElement === document.body) return;
+      this.radarControlsOriginalParent = controls.parentNode;
+      this.radarControlsOriginalNextSibling = controls.nextSibling;
+      document.body.appendChild(controls);
+    });
+  }
+
+  private cancelRadarControlsPortalRaf(): void {
+    if (this.radarControlsPortalRaf === null) return;
+    cancelAnimationFrame(this.radarControlsPortalRaf);
+    this.radarControlsPortalRaf = null;
+  }
+
+  private restoreRadarControlsFromBody(): void {
+    if (typeof document === 'undefined') return;
+    const controls = document.querySelector<HTMLElement>('[data-testid="dock-v3-radar-edge-controls"]');
+    if (controls && this.radarControlsOriginalParent) {
+      this.radarControlsOriginalParent.insertBefore(controls, this.radarControlsOriginalNextSibling);
+    }
+    this.radarControlsOriginalParent = null;
+    this.radarControlsOriginalNextSibling = null;
+  }
+
+  private focusMobileTaskRow(taskId: string): void {
+    const encodedId = CSS.escape(taskId);
+    this.hostElement.nativeElement
+      .querySelector<HTMLElement>(`[data-testid="dock-v3-mobile-task-drawer"] [data-task-id="${encodedId}"]`)
+      ?.focus();
+  }
+
+  private clearPromotionTimer(): void {
+    if (this.promotionTimer === null) return;
+    clearTimeout(this.promotionTimer);
+    this.promotionTimer = null;
+  }
+
+  private isRadarTaskVisible(taskId: string): boolean {
+    return this.comboEntries().some(item => item.taskId === taskId)
+      || this.backupEntries().some(item => item.taskId === taskId);
   }
 
   private layoutRadarEntries(
@@ -589,16 +903,14 @@ export class DockRadarZoneComponent implements OnDestroy {
   }
 
   private clearHoverExitTimer(taskId: string): void {
-    const timer = this.hoverExitTimers.get(taskId);
-    if (!timer) return;
-    clearTimeout(timer);
+    if (!this.hoverExitTimers.has(taskId)) return;
+    clearTimeout(this.hoverExitTimers.get(taskId)!);
     this.hoverExitTimers.delete(taskId);
   }
 
   private clearFocusExitTimer(taskId: string): void {
-    const timer = this.focusExitTimers.get(taskId);
-    if (!timer) return;
-    clearTimeout(timer);
+    if (!this.focusExitTimers.has(taskId)) return;
+    clearTimeout(this.focusExitTimers.get(taskId)!);
     this.focusExitTimers.delete(taskId);
   }
 
@@ -617,16 +929,14 @@ export class DockRadarZoneComponent implements OnDestroy {
   }
 
   private clearEnteringTimer(taskId: string): void {
-    const timer = this.enteringTimers.get(taskId);
-    if (!timer) return;
-    clearTimeout(timer);
+    if (!this.enteringTimers.has(taskId)) return;
+    clearTimeout(this.enteringTimers.get(taskId)!);
     this.enteringTimers.delete(taskId);
   }
 
   private clearRadarReturnTimer(taskId: string): void {
-    const timer = this.radarReturnTimers.get(taskId);
-    if (!timer) return;
-    clearTimeout(timer);
+    if (!this.radarReturnTimers.has(taskId)) return;
+    clearTimeout(this.radarReturnTimers.get(taskId)!);
     this.radarReturnTimers.delete(taskId);
   }
 
@@ -648,10 +958,21 @@ export class DockRadarZoneComponent implements OnDestroy {
     }
 
     const hostRect = this.hostElement.nativeElement.getBoundingClientRect();
+    const viewportCenterX = typeof window === 'undefined' ? 0 : window.innerWidth / 2;
+    const viewportCenterY = typeof window === 'undefined' ? 0 : window.innerHeight / 2;
+    this.hostElement.nativeElement.style.setProperty(
+      '--radar-host-offset-x',
+      `${hostRect.left + (hostRect.width / 2) - viewportCenterX}px`,
+    );
+    this.hostElement.nativeElement.style.setProperty(
+      '--radar-host-offset-y',
+      `${hostRect.top + (hostRect.height / 2) - viewportCenterY}px`,
+    );
     const originX = hostRect.left;
     const originY = hostRect.top;
     const selectors = [
       '[data-testid="dock-v3-status-machine-container"]',
+      '[data-testid="dock-v3-radar-edge-controls"]',
       '[data-testid="dock-v3-focus-exit-btn"]',
       '[data-testid="dock-v3-hud-settings"]',
       '[data-testid="dock-v3-backup-fab"]',

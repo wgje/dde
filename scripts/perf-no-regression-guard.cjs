@@ -15,11 +15,15 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.join(__dirname, '..');
-const BASELINE_PATH = path.join(ROOT, 'perf-baseline', 'no-regression-baseline.json');
+const BASELINE_PATH = process.env.PERF_BASELINE_METRICS_PATH
+  ? path.resolve(process.env.PERF_BASELINE_METRICS_PATH)
+  : path.join(ROOT, 'perf-baseline', 'no-regression-baseline.json');
 const CURRENT_PATH = process.env.PERF_CURRENT_METRICS_PATH
   ? path.resolve(process.env.PERF_CURRENT_METRICS_PATH)
   : path.join(ROOT, 'test-results', 'perf', 'current-metrics.json');
-const STATS_PATH = path.join(ROOT, 'dist', 'stats.json');
+const STATS_PATH = process.env.PERF_STATS_PATH
+  ? path.resolve(process.env.PERF_STATS_PATH)
+  : path.join(ROOT, 'dist', 'stats.json');
 const REGRESSION_BUDGET_RATIO = Number(process.env.PERF_REGRESSION_BUDGET_RATIO || 0.05);
 
 function fail(message) {
@@ -27,9 +31,18 @@ function fail(message) {
   process.exit(1);
 }
 
+function missingCurrentMessage(filePath) {
+  return [
+    `missing current: ${filePath}`,
+    'Generate real runtime metrics first: npm run test:e2e:perf',
+    'Required env: E2E_PERF_EMAIL and E2E_PERF_PASSWORD (optional E2E_PERF_PROJECT_ID).',
+    'If credentials are intentionally unavailable, skip perf:guard:no-regression in the caller; do not fabricate current-metrics.json.',
+  ].join('\n[perf-no-regression-guard] ');
+}
+
 function readJson(filePath, label) {
   if (!fs.existsSync(filePath)) {
-    fail(`missing ${label}: ${filePath}`);
+    fail(label === 'current' ? missingCurrentMessage(filePath) : `missing ${label}: ${filePath}`);
   }
   try {
     return JSON.parse(fs.readFileSync(filePath, 'utf8'));

@@ -1,8 +1,8 @@
-import { Component, ChangeDetectionStrategy, input, output, computed, inject } from '@angular/core';
+import { Component, ChangeDetectionStrategy, input, output, computed } from '@angular/core';
 import { CommonModule } from '@angular/common';
 
 import type { LinkActionMenu } from '../../../../models/flow-view-state';
-import { UiStateService } from '../../../../services/ui-state.service';
+import { resolveFlowLinkActionMenuPosition } from './flow-link-overlay-position.helpers';
 
 /**
  * 移动端连接线操作菜单组件
@@ -92,8 +92,6 @@ import { UiStateService } from '../../../../services/ui-state.service';
   `
 })
 export class FlowLinkActionMenuComponent {
-  private readonly uiState = inject(UiStateService);
-  
   readonly menu = input<LinkActionMenu | null>(null);
 
   readonly edit = output<void>();
@@ -101,24 +99,7 @@ export class FlowLinkActionMenuComponent {
   readonly deleteLink = output<void>();
   readonly cancel = output<void>();
   
-  // 计算限制在视口内的位置
-  readonly clampedX = computed(() => {
-    const m = this.menu();
-    if (!m) return 0;
-    const menuWidth = 200; // 估算宽度
-    const padding = 16;
-    const viewportWidth = typeof window !== 'undefined' ? window.innerWidth : 400;
-    const rawX = m.x - menuWidth / 2; // 居中对齐
-    return Math.max(padding, Math.min(rawX, viewportWidth - menuWidth - padding));
-  });
-  
-  readonly clampedY = computed(() => {
-    const m = this.menu();
-    if (!m) return 0;
-    const menuHeight = 100; // 估算高度
-    const padding = 16;
-    const viewportHeight = typeof window !== 'undefined' ? window.innerHeight : 600;
-    const rawY = m.y - menuHeight - 10; // 显示在点击位置上方
-    return Math.max(padding, Math.min(rawY, viewportHeight - menuHeight - padding));
-  });
+  private readonly position = computed(() => resolveFlowLinkActionMenuPosition(this.menu()));
+  readonly clampedX = computed(() => this.position().x);
+  readonly clampedY = computed(() => this.position().y);
 }

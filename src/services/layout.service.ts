@@ -1,9 +1,13 @@
 import { Injectable, inject } from '@angular/core';
-import { Task, Project, Connection } from '../models';
+import { Task, Project } from '../models';
 import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
 import { LAYOUT_CONFIG, LETTERS } from '../config';
 import { hasIncompleteMarkdownTodo } from '../utils/markdown-todo';
+import {
+  fixOrphanedTasks as fixOrphanedTasksIntegrity,
+  validateAndFixTree as validateAndFixTreeIntegrity,
+} from './layout-integrity.helpers';
 
 /** 布局算法配置 */
 const ALGORITHM_CONFIG = {
@@ -78,213 +82,256 @@ export class LayoutService {
     }
     
     const tasks = project.tasks.map(t => ({ ...t }));
+    const isVisibleTask = this.isVisibleLayoutTask;
+    const byId = this.createTaskMap(tasks);
 
-    // displayId/树结构相关计算应以“可见任务”为准：
-    // - deletedAt（回收站）任务不应占用编号
-    // - archived（归档）任务在主视图中也不应占用编号
-    const isVisibleTask = (t: Task) => !t.deletedAt && t.status !== 'archived';
-    
-    const byId = new Map<string, Task>();
-    tasks.forEach(t => byId.set(t.id, t));
-
-    // 为没有 shortId 的任务生成短 ID
-    tasks.forEach(t => {
-      if (!t.shortId) {
-        t.shortId = this.generateShortId(tasks);
-      }
-    });
-
-    tasks.forEach(t => {
-      if (t.rank === undefined || t.rank === null) {
-        const base = t.stage ? this.stageBase(t.stage) : LAYOUT_CONFIG.RANK_ROOT_BASE;
-        t.rank = base + (t.order || 0) * LAYOUT_CONFIG.RANK_STEP;
-      }
-      t.hasIncompleteTask = this.detectIncomplete(t.content);
-    });
-
-    tasks.forEach(t => {
-      if (t.parentId) {
-        const parent = byId.get(t.parentId);
-        if (parent && parent.stage !== null) {
-          if (t.stage === null || t.stage <= parent.stage) {
-            t.stage = parent.stage + 1;
-          }
-          if (t.rank <= parent.rank) {
-            t.rank = parent.rank + LAYOUT_CONFIG.RANK_STEP;
-          }
-        }
-      }
-    });
+    this.initializeRebalanceTasks(tasks, byId);
 
     this.repairMissingStageOne(tasks, byId, isVisibleTask);
+    this.normalizeStageOrdersAndPositions(tasks);
+    this.normalizeUnassignedTasks(tasks);
 
-    const grouped = new Map<number, Task[]>();
-    tasks.forEach(t => {
-      if (t.stage !== null) {
-        if (!grouped.has(t.stage)) grouped.set(t.stage, []);
-        grouped.get(t.stage)!.push(t);
+    this.refreshTaskMap(byId, tasks);
+    const allRoots = this.getVisibleAssignedRoots(tasks);
+    const stage1Roots = allRoots.filter(t => t.stage === 1);
+
+    this.assignRootDisplayIds(allRoots, stage1Roots);
+    this.assignChildDisplayIds(tasks, byId, allRoots);
+    this.normalizeMissingDisplayIds(tasks);
+    this.cascadeRanks(tasks, byId, stage1Roots);
+    this.renumberAssignedOrders(tasks);
+
+    return { ...project, tasks };
+  }
+
+  private isVisibleLayoutTask(task: Task): boolean {
+    return !task.deletedAt && task.status !== 'archived';
+  }
+
+  private createTaskMap(tasks: Task[]): Map<string, Task> {
+    const byId = new Map<string, Task>();
+    tasks.forEach(task => byId.set(task.id, task));
+    return byId;
+  }
+
+  private refreshTaskMap(byId: Map<string, Task>, tasks: Task[]): void {
+    byId.clear();
+    tasks.forEach(task => byId.set(task.id, task));
+  }
+
+  private initializeRebalanceTasks(tasks: Task[], byId: Map<string, Task>): void {
+    tasks.forEach(task => {
+      if (!task.shortId) {
+        task.shortId = this.generateShortId(tasks);
       }
+    });
+
+    tasks.forEach(task => this.initializeTaskRankAndFlags(task));
+    tasks.forEach(task => this.normalizeChildTaskAgainstParent(task, byId));
+  }
+
+  private initializeTaskRankAndFlags(task: Task): void {
+    if (task.rank === undefined || task.rank === null) {
+      const base = task.stage ? this.stageBase(task.stage) : LAYOUT_CONFIG.RANK_ROOT_BASE;
+      task.rank = base + (task.order || 0) * LAYOUT_CONFIG.RANK_STEP;
+    }
+    task.hasIncompleteTask = this.detectIncomplete(task.content);
+  }
+
+  private normalizeChildTaskAgainstParent(task: Task, byId: Map<string, Task>): void {
+    if (!task.parentId) return;
+
+    const parent = byId.get(task.parentId);
+    if (!parent || parent.stage === null) return;
+
+    if (task.stage === null || task.stage <= parent.stage) {
+      task.stage = parent.stage + 1;
+    }
+    if (task.rank <= parent.rank) {
+      task.rank = parent.rank + LAYOUT_CONFIG.RANK_STEP;
+    }
+  }
+
+  private normalizeStageOrdersAndPositions(tasks: Task[]): void {
+    const grouped = new Map<number, Task[]>();
+    tasks.forEach(task => {
+      if (task.stage === null) return;
+      if (!grouped.has(task.stage)) grouped.set(task.stage, []);
+      grouped.get(task.stage)!.push(task);
     });
 
     grouped.forEach((list, stage) => {
       list.sort((a, b) => a.rank - b.rank || a.order - b.order);
-      list.forEach((t, idx) => {
-        t.order = idx + 1;
-        if (t.x === undefined || t.y === undefined) {
+      list.forEach((task, idx) => {
+        task.order = idx + 1;
+        if (task.x === undefined || task.y === undefined) {
           const pos = this.gridPosition(stage, idx);
-          t.x = pos.x;
-          t.y = pos.y;
+          task.x = pos.x;
+          task.y = pos.y;
         }
       });
     });
+  }
 
-    const unassigned = tasks.filter(t => t.stage === null).sort((a, b) => a.rank - b.rank || a.order - b.order);
-    unassigned.forEach((t, idx) => {
-      t.order = idx + 1;
-      t.displayId = '?';
+  private normalizeUnassignedTasks(tasks: Task[]): void {
+    const unassigned = tasks.filter(task => task.stage === null).sort((a, b) => a.rank - b.rank || a.order - b.order);
+    unassigned.forEach((task, idx) => {
+      task.order = idx + 1;
+      task.displayId = '?';
     });
+  }
 
-    tasks.forEach(t => byId.set(t.id, t));
-
-    // 🔴 修复：收集所有阶段的根任务（没有 parentId 的已分配任务）
-    // 按阶段分组，确保每个阶段的根任务都能被遍历到
-    const allRoots = tasks
-      .filter(t => t.stage !== null && !t.parentId && isVisibleTask(t))
+  private getVisibleAssignedRoots(tasks: Task[]): Task[] {
+    return tasks
+      .filter(task => task.stage !== null && !task.parentId && this.isVisibleLayoutTask(task))
       .sort((a, b) => (a.stage ?? 0) - (b.stage ?? 0) || a.rank - b.rank);
-    
-    // 为 stage 1 的根任务分配主编号
-    const stage1Roots = allRoots.filter(t => t.stage === 1);
-    stage1Roots.forEach((t, idx) => {
-      t.displayId = `${idx + 1}`;
-    });
-    
-    // 为其他阶段的根任务（孤儿任务）分配特殊编号
-    // 这些任务没有父节点但不在 stage 1，可能是被分配到中间阶段的浮动树根
-    const orphanRoots = allRoots.filter(t => t.stage !== 1);
-    orphanRoots.forEach((t, idx) => {
-      // 使用 "O" 前缀表示孤儿任务（Orphan）
-      t.displayId = `O${idx + 1}`;
+  }
+
+  private assignRootDisplayIds(allRoots: Task[], stage1Roots: Task[]): void {
+    stage1Roots.forEach((task, idx) => {
+      task.displayId = `${idx + 1}`;
     });
 
-    const children = new Map<string, Task[]>();
-    tasks.forEach(t => {
-      if (t.parentId && isVisibleTask(t)) {
-        if (!children.has(t.parentId)) children.set(t.parentId, []);
-        children.get(t.parentId)!.push(t);
-      }
-    });
-
-    // 使用迭代算法分配 displayId（替代递归）
-    const assignChildrenIterative = (rootId: string) => {
-      const stack: { parentId: string; depth: number }[] = [{ parentId: rootId, depth: 0 }];
-      let iterations = 0;
-      const maxIterations = calculateMaxIterations(tasks.length);
-      
-      while (stack.length > 0 && iterations < maxIterations) {
-        iterations++;
-        const { parentId, depth } = stack.pop()!;
-        
-        if (depth > ALGORITHM_CONFIG.MAX_TREE_DEPTH) {
-          this.logger.warn('树深度超过限制，可能存在数据问题', { parentId, depth });
-          continue;
-        }
-        
-        const parent = byId.get(parentId);
-        if (!parent) continue;
-        
-        const childList = (children.get(parentId) || []).sort((a, b) => a.rank - b.rank);
-        
-        childList.forEach((child, idx) => {
-          // 强制子任务 stage = parent.stage + 1
-          // 修复原逻辑只处理 child.stage <= parent.stage 的情况，
-          // 现在无论子任务在什么阶段，都强制修正为正确的阶段
-          if (parent.stage !== null && child.stage !== parent.stage + 1) {
-            child.stage = parent.stage + 1;
-          }
-          const letter = LETTERS[idx % LETTERS.length];
-          child.displayId = `${parent.displayId},${letter}`;
-          
-          // 将子节点加入栈中继续处理
-          stack.push({ parentId: child.id, depth: depth + 1 });
-        });
-      }
-      
-      if (iterations >= maxIterations) {
-        this.logger.error('displayId 分配迭代次数超限，可能存在循环依赖');
-        this.notifyIterationLimit('displayId 分配');
-      }
-    };
-
-    // 🔴 遍历所有根任务（包括所有阶段的孤儿任务）
-    allRoots.forEach(t => assignChildrenIterative(t.id));
-
-    tasks.forEach(t => {
-      if (!t.displayId) t.displayId = '?';
-      if (t.stage === null) {
-        // 🔴 浮动任务树：保留待分配区的父子关系
-        // 不再强制清除 parentId，待分配区可以构建完整的任务树
-        t.displayId = '?';
-      }
-    });
-
-    const childrenMap = new Map<string, Task[]>();
-    tasks.forEach(t => {
-      if (t.parentId && isVisibleTask(t)) {
-        if (!childrenMap.has(t.parentId)) childrenMap.set(t.parentId, []);
-        childrenMap.get(t.parentId)!.push(t);
-      }
-    });
-
-    // 使用迭代算法级联更新 rank（替代递归）
-    const cascadeIterative = (rootId: string) => {
-      // 使用队列进行广度优先遍历
-      const queue: { nodeId: string; floor: number; depth: number }[] = [];
-      const rootTask = byId.get(rootId);
-      if (!rootTask) return;
-      
-      queue.push({ nodeId: rootId, floor: rootTask.rank, depth: 0 });
-      let iterations = 0;
-      const maxIterations = calculateMaxIterations(tasks.length);
-      
-      while (queue.length > 0 && iterations < maxIterations) {
-        iterations++;
-        const { nodeId, floor: parentFloor, depth } = queue.shift()!;
-        
-        if (depth > ALGORITHM_CONFIG.MAX_TREE_DEPTH) {
-          this.logger.warn('级联更新深度超过限制', { nodeId, depth });
-          continue;
-        }
-        
-        const kids = (childrenMap.get(nodeId) || []).sort((a, b) => a.rank - b.rank);
-        let currentFloor = parentFloor;
-        
-        kids.forEach(child => {
-          if (child.rank <= currentFloor) {
-            child.rank = currentFloor + LAYOUT_CONFIG.RANK_STEP;
-          }
-          currentFloor = child.rank;
-          queue.push({ nodeId: child.id, floor: child.rank, depth: depth + 1 });
-        });
-      }
-      
-      if (iterations >= maxIterations) {
-        this.logger.error('级联更新迭代次数超限');
-        this.notifyIterationLimit('级联更新');
-      }
-    };
-
-    stage1Roots.forEach(root => cascadeIterative(root.id));
-
-    tasks
-      .filter(t => t.stage !== null)
-      .sort((a, b) => a.stage! - b.stage! || a.rank - b.rank)
-      .forEach((t, idx, arr) => {
-        const sameStage = arr.filter(s => s.stage === t.stage);
-        const position = sameStage.findIndex(s => s.id === t.id);
-        t.order = position + 1;
+    allRoots
+      .filter(task => task.stage !== 1)
+      .forEach((task, idx) => {
+        task.displayId = `O${idx + 1}`;
       });
+  }
 
-    return { ...project, tasks };
+  private assignChildDisplayIds(tasks: Task[], byId: Map<string, Task>, allRoots: Task[]): void {
+    const children = this.createVisibleChildrenMap(tasks);
+    allRoots.forEach(root => this.assignChildrenIterative(root.id, tasks.length, byId, children));
+  }
+
+  private createVisibleChildrenMap(tasks: Task[]): Map<string, Task[]> {
+    const children = new Map<string, Task[]>();
+    tasks.forEach(task => {
+      if (!task.parentId || !this.isVisibleLayoutTask(task)) return;
+      if (!children.has(task.parentId)) children.set(task.parentId, []);
+      children.get(task.parentId)!.push(task);
+    });
+    return children;
+  }
+
+  private assignChildrenIterative(
+    rootId: string,
+    taskCount: number,
+    byId: Map<string, Task>,
+    children: Map<string, Task[]>,
+  ): void {
+    const stack: { parentId: string; depth: number }[] = [{ parentId: rootId, depth: 0 }];
+    let iterations = 0;
+    const maxIterations = calculateMaxIterations(taskCount);
+
+    while (stack.length > 0 && iterations < maxIterations) {
+      iterations++;
+      const { parentId, depth } = stack.pop()!;
+      this.assignChildrenForParent(parentId, depth, byId, children, stack);
+    }
+
+    if (iterations >= maxIterations) {
+      this.logger.error('displayId 分配迭代次数超限，可能存在循环依赖');
+      this.notifyIterationLimit('displayId 分配');
+    }
+  }
+
+  private assignChildrenForParent(
+    parentId: string,
+    depth: number,
+    byId: Map<string, Task>,
+    children: Map<string, Task[]>,
+    stack: { parentId: string; depth: number }[],
+  ): void {
+    if (depth > ALGORITHM_CONFIG.MAX_TREE_DEPTH) {
+      this.logger.warn('树深度超过限制，可能存在数据问题', { parentId, depth });
+      return;
+    }
+
+    const parent = byId.get(parentId);
+    if (!parent) return;
+
+    const childList = (children.get(parentId) || []).sort((a, b) => a.rank - b.rank);
+    childList.forEach((child, idx) => {
+      if (parent.stage !== null && child.stage !== parent.stage + 1) {
+        child.stage = parent.stage + 1;
+      }
+      const letter = LETTERS[idx % LETTERS.length];
+      child.displayId = `${parent.displayId},${letter}`;
+      stack.push({ parentId: child.id, depth: depth + 1 });
+    });
+  }
+
+  private normalizeMissingDisplayIds(tasks: Task[]): void {
+    tasks.forEach(task => {
+      if (!task.displayId) task.displayId = '?';
+      if (task.stage === null) task.displayId = '?';
+    });
+  }
+
+  private cascadeRanks(tasks: Task[], byId: Map<string, Task>, stage1Roots: Task[]): void {
+    const childrenMap = this.createVisibleChildrenMap(tasks);
+    stage1Roots.forEach(root => this.cascadeRanksIterative(root.id, tasks.length, byId, childrenMap));
+  }
+
+  private cascadeRanksIterative(
+    rootId: string,
+    taskCount: number,
+    byId: Map<string, Task>,
+    childrenMap: Map<string, Task[]>,
+  ): void {
+    const queue: { nodeId: string; floor: number; depth: number }[] = [];
+    const rootTask = byId.get(rootId);
+    if (!rootTask) return;
+
+    queue.push({ nodeId: rootId, floor: rootTask.rank, depth: 0 });
+    let iterations = 0;
+    const maxIterations = calculateMaxIterations(taskCount);
+
+    while (queue.length > 0 && iterations < maxIterations) {
+      iterations++;
+      const { nodeId, floor: parentFloor, depth } = queue.shift()!;
+      this.cascadeRanksForNode(nodeId, parentFloor, depth, childrenMap, queue);
+    }
+
+    if (iterations >= maxIterations) {
+      this.logger.error('级联更新迭代次数超限');
+      this.notifyIterationLimit('级联更新');
+    }
+  }
+
+  private cascadeRanksForNode(
+    nodeId: string,
+    parentFloor: number,
+    depth: number,
+    childrenMap: Map<string, Task[]>,
+    queue: { nodeId: string; floor: number; depth: number }[],
+  ): void {
+    if (depth > ALGORITHM_CONFIG.MAX_TREE_DEPTH) {
+      this.logger.warn('级联更新深度超过限制', { nodeId, depth });
+      return;
+    }
+
+    const kids = (childrenMap.get(nodeId) || []).sort((a, b) => a.rank - b.rank);
+    let currentFloor = parentFloor;
+    kids.forEach(child => {
+      if (child.rank <= currentFloor) {
+        child.rank = currentFloor + LAYOUT_CONFIG.RANK_STEP;
+      }
+      currentFloor = child.rank;
+      queue.push({ nodeId: child.id, floor: child.rank, depth: depth + 1 });
+    });
+  }
+
+  private renumberAssignedOrders(tasks: Task[]): void {
+    tasks
+      .filter(task => task.stage !== null)
+      .sort((a, b) => a.stage! - b.stage! || a.rank - b.rank)
+      .forEach((task, _idx, arr) => {
+        const sameStage = arr.filter(candidate => candidate.stage === task.stage);
+        const position = sameStage.findIndex(candidate => candidate.id === task.id);
+        task.order = position + 1;
+      });
   }
 
   /** 阶段 1 整层缺席时，将最早的可见阶段补回根层，避免后续阶段全部变成 O 系孤儿链。 */
@@ -407,36 +454,12 @@ export class LayoutService {
     );
 
     // 如果有父节点，优先考虑父节点的位置
-    if (parentId) {
-      const parent = existingTasks.find(t => t.id === parentId);
-      if (parent && parent.x !== undefined && parent.y !== undefined) {
-        // 按同父的已有子节点数计算偏移量，避免使用阶段总任务数导致位置过远
-        const siblingCount = existingTasks.filter(
-          t => t.parentId === parentId && !t.deletedAt && t.status !== 'archived'
-        ).length;
-        return {
-          x: parent.x + LAYOUT_CONFIG.STAGE_SPACING,
-          y: parent.y + (siblingCount * LAYOUT_CONFIG.ROW_SPACING)
-        };
-      }
-    }
+    const childPosition = this.getChildSmartPosition(parentId, existingTasks);
+    if (childPosition) return childPosition;
 
     // 如果该阶段已有节点，找到最后一个节点的位置
-    if (sameStageTasks.length > 0) {
-      // 按 y 坐标排序，找到最下方的节点
-      const sortedTasks = sameStageTasks
-        .filter(t => t.x !== undefined && t.y !== undefined)
-        .sort((a, b) => (a.y || 0) - (b.y || 0));
-      
-      if (sortedTasks.length > 0) {
-        const lastTask = sortedTasks[sortedTasks.length - 1];
-        // 在最后一个节点下方创建
-        return {
-          x: lastTask.x || this.gridPosition(stage, index).x,
-          y: (lastTask.y || 0) + LAYOUT_CONFIG.ROW_SPACING
-        };
-      }
-    }
+    const stageTailPosition = this.getStageTailSmartPosition(stage, index, sameStageTasks);
+    if (stageTailPosition) return stageTailPosition;
 
     // 如果该阶段没有节点，查找相邻阶段的节点位置作为参考
     const prevStageTasks = existingTasks.filter(
@@ -455,6 +478,40 @@ export class LayoutService {
 
     // 兜底：使用固定网格位置
     return this.gridPosition(stage, index);
+  }
+
+  private getChildSmartPosition(parentId: string | null | undefined, existingTasks: Task[]): { x: number; y: number } | null {
+    if (!parentId) return null;
+
+    const parent = existingTasks.find(t => t.id === parentId);
+    if (!parent || parent.x === undefined || parent.y === undefined) return null;
+
+    const siblingCount = existingTasks.filter(
+      t => t.parentId === parentId && !t.deletedAt && t.status !== 'archived'
+    ).length;
+
+    return {
+      x: parent.x + LAYOUT_CONFIG.STAGE_SPACING,
+      y: parent.y + (siblingCount * LAYOUT_CONFIG.ROW_SPACING)
+    };
+  }
+
+  private getStageTailSmartPosition(
+    stage: number,
+    index: number,
+    sameStageTasks: Task[],
+  ): { x: number; y: number } | null {
+    const sortedTasks = sameStageTasks
+      .filter(t => t.x !== undefined && t.y !== undefined)
+      .sort((a, b) => (a.y || 0) - (b.y || 0));
+
+    if (sortedTasks.length === 0) return null;
+
+    const lastTask = sortedTasks[sortedTasks.length - 1];
+    return {
+      x: lastTask.x || this.gridPosition(stage, index).x,
+      y: (lastTask.y || 0) + LAYOUT_CONFIG.ROW_SPACING
+    };
   }
 
   /**
@@ -684,24 +741,7 @@ export class LayoutService {
    * 检查并修复 parentId 指向不存在任务的情况
    */
   fixOrphanedTasks(tasks: Task[]): { tasks: Task[]; fixed: number } {
-    const taskIds = new Set(tasks.map(t => t.id));
-    let fixedCount = 0;
-    
-    const fixedTasks = tasks.map(t => {
-      if (t.parentId && !taskIds.has(t.parentId)) {
-        this.logger.warn('Found orphaned task, resetting parent', { taskId: t.id, invalidParentId: t.parentId });
-        fixedCount++;
-        return {
-          ...t,
-          parentId: null,
-          stage: t.stage ?? 1,
-          displayId: '?'
-        };
-      }
-      return t;
-    });
-    
-    return { tasks: fixedTasks, fixed: fixedCount };
+    return fixOrphanedTasksIntegrity(tasks, (message, context) => this.logger.warn(message, context));
   }
 
   /**
@@ -709,144 +749,9 @@ export class LayoutService {
    * 包括循环检测、孤儿修复、rank 验证
    */
   validateAndFixTree(project: Project): { project: Project; issues: string[] } {
-    const issues: string[] = [];
-    let tasks = [...project.tasks];
-    
-    // 1. 修复孤儿节点
-    const orphanResult = this.fixOrphanedTasks(tasks);
-    tasks = orphanResult.tasks;
-    if (orphanResult.fixed > 0) {
-      issues.push(`修复了 ${orphanResult.fixed} 个孤儿任务`);
-    }
-    
-    // 2. 检测并修复循环依赖
-    const cycleResult = this.detectAndFixCycles(tasks);
-    tasks = cycleResult.tasks;
-    if (cycleResult.fixed > 0) {
-      issues.push(`修复了 ${cycleResult.fixed} 个循环依赖`);
-    }
-    
-    // 3. 验证并修复 rank 值
-    const rankResult = this.validateRanks(tasks);
-    tasks = rankResult.tasks;
-    if (rankResult.fixed > 0) {
-      issues.push(`修复了 ${rankResult.fixed} 个无效 rank 值`);
-    }
-    
-    // 4. 验证连接的有效性
-    const connections = this.validateConnections(project.connections, tasks);
-    if (connections.removed > 0) {
-      issues.push(`移除了 ${connections.removed} 个无效连接`);
-    }
-    
-    return {
-      project: {
-        ...project,
-        tasks,
-        connections: connections.valid
-      },
-      issues
-    };
-  }
-
-  /**
-   * 检测并修复循环依赖
-   */
-  /**
-   * 【P1-22 修复】检测并修复循环引用 — 使用迭代算法替代递归，符合项目规范
-   * 对每个任务沿 parentId 链向上遍历，如果回到自身则存在环，断开 parentId
-   */
-  private detectAndFixCycles(tasks: Task[]): { tasks: Task[]; fixed: number } {
-    const result = tasks.map(t => ({ ...t }));
-    const resultMap = new Map(result.map(t => [t.id, t] as const));
-    let fixedCount = 0;
-
-    // 全局已确认无环的节点集合
-    const confirmed = new Set<string>();
-    
-    for (const task of result) {
-      if (!task.parentId || confirmed.has(task.id)) continue;
-      
-      // 迭代沿 parentId 链向上走，检测环
-      const path = new Set<string>();
-      let current: string | null = task.id;
-      let foundCycle = false;
-      
-      while (current) {
-        if (confirmed.has(current)) break; // 已确认无环
-        if (path.has(current)) {
-          foundCycle = true;
-          break;
-        }
-        path.add(current);
-        const t = resultMap.get(current);
-        current = t?.parentId ?? null;
-      }
-      
-      if (foundCycle) {
-        this.logger.warn('Detected cycle, breaking at', { taskId: task.id, parentId: task.parentId });
-        task.parentId = null;
-        task.stage = 1;
-        task.displayId = '?';
-        fixedCount++;
-      } else {
-        // 路径上所有节点都已确认无环
-        path.forEach(id => {
-          confirmed.add(id);
-        });
-      }
-    }
-    
-    return { tasks: result, fixed: fixedCount };
-  }
-
-  /**
-   * 验证并修复 rank 值
-   */
-  private validateRanks(tasks: Task[]): { tasks: Task[]; fixed: number } {
-    const result = tasks.map(t => ({ ...t }));
-    let fixedCount = 0;
-    
-    for (const task of result) {
-      // 检查 NaN 或 Infinity
-      if (!Number.isFinite(task.rank)) {
-        const base = task.stage ? this.stageBase(task.stage) : LAYOUT_CONFIG.RANK_ROOT_BASE;
-        task.rank = base + (task.order || 0) * LAYOUT_CONFIG.RANK_STEP;
-        fixedCount++;
-        this.logger.warn('Fixed invalid rank', { taskId: task.id, newRank: task.rank });
-      }
-      
-      // 检查 rank 是否在合理范围内
-      if (task.rank < 0 || task.rank > 1000000000) {
-        const base = task.stage ? this.stageBase(task.stage) : LAYOUT_CONFIG.RANK_ROOT_BASE;
-        task.rank = base + (task.order || 0) * LAYOUT_CONFIG.RANK_STEP;
-        fixedCount++;
-      }
-    }
-    
-    return { tasks: result, fixed: fixedCount };
-  }
-
-  /**
-   * 验证连接的有效性
-   */
-  private validateConnections(
-    connections: Connection[], 
-    tasks: Task[]
-  ): { valid: Connection[]; removed: number } {
-    const taskIds = new Set(tasks.map(t => t.id));
-    const valid: Connection[] = [];
-    let removed = 0;
-    
-    for (const conn of connections) {
-      // 检查两端存在且非自引用
-      if (taskIds.has(conn.source) && taskIds.has(conn.target) && conn.source !== conn.target) {
-        valid.push(conn);
-      } else {
-        removed++;
-      }
-    }
-    
-    return { valid, removed };
+    return validateAndFixTreeIntegrity(project, {
+      stageBase: stage => this.stageBase(stage),
+      warn: (message, context) => this.logger.warn(message, context),
+    });
   }
 }

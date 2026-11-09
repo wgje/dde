@@ -58,4 +58,14 @@ describe('增量同步默认配置契约 (Incremental Sync Contract)', () => {
     expect(taskDetailFields).toContain('deleted_at');
     expect(taskFullFields).toContain('deleted_at');
   });
+
+  it('任务查询字段必须包含 attention_meta，避免僚机注意事项在增量同步中丢失', () => {
+    const taskListFields = FIELD_SELECT_CONFIG.TASK_LIST_FIELDS.split(',');
+    const taskDetailFields = FIELD_SELECT_CONFIG.TASK_DETAIL_FIELDS.split(',');
+    const taskFullFields = FIELD_SELECT_CONFIG.TASK_FULL_FIELDS.split(',');
+
+    expect(taskListFields).toContain('attention_meta');
+    expect(taskDetailFields).toContain('attention_meta');
+    expect(taskFullFields).toContain('attention_meta');
+  });
 });

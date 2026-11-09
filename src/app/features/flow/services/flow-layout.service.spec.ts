@@ -2,14 +2,18 @@ import { Injector } from '@angular/core';
 import * as go from 'gojs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-  AutoLayoutLinkData,
-  AutoLayoutNodeData,
   computeFamilyBlockAutoLayout,
   FlowLayoutService,
 } from './flow-layout.service';
 import { LoggerService } from '../../../../services/logger.service';
 import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
 import { LAYOUT_CONFIG } from '../../../../config';
+import {
+  createLayoutLink,
+  createLayoutNode,
+  toPositionMap,
+} from './flow-layout.service.spec-helpers';
+import { registerFlowLayoutRelationSpacingSpecs } from './flow-layout-relation-spacing.spec-helpers';
 
 const mockLoggerCategory = {
   info: vi.fn(),
@@ -17,28 +21,6 @@ const mockLoggerCategory = {
   error: vi.fn(),
   debug: vi.fn(),
 };
-
-function createLayoutNode(overrides: Partial<AutoLayoutNodeData> & Pick<AutoLayoutNodeData, 'key'>): AutoLayoutNodeData {
-  return {
-    key: overrides.key,
-    stage: Object.prototype.hasOwnProperty.call(overrides, 'stage')
-      ? (overrides.stage ?? null)
-      : 1,
-    rank: overrides.rank ?? 0,
-  };
-}
-
-function createLayoutLink(overrides: AutoLayoutLinkData): AutoLayoutLinkData {
-  return {
-    from: overrides.from,
-    to: overrides.to,
-    isCrossTree: overrides.isCrossTree ?? false,
-  };
-}
-
-function toPositionMap(positions: readonly { key: string; x: number; y: number }[]) {
-  return new Map(positions.map(position => [position.key, position]));
-}
 
 describe('computeFamilyBlockAutoLayout', () => {
   it('keeps nodes of the same stage in the same column', () => {
@@ -176,32 +158,6 @@ describe('computeFamilyBlockAutoLayout', () => {
     expect(relationHeavyMap.get('floating-1')?.x).toBe(relationHeavyMap.get('floating-2')?.x);
   });
 
-  it('reorders sibling subtrees toward their unassigned relation neighborhoods', () => {
-    const positions = computeFamilyBlockAutoLayout(
-      [
-        createLayoutNode({ key: 'root-main', stage: 1, rank: 100 }),
-        createLayoutNode({ key: 'child-a', stage: 2, rank: 110 }),
-        createLayoutNode({ key: 'grand-a', stage: 3, rank: 120 }),
-        createLayoutNode({ key: 'child-b', stage: 2, rank: 210 }),
-        createLayoutNode({ key: 'grand-b', stage: 3, rank: 220 }),
-        createLayoutNode({ key: 'floating-early', stage: null, rank: 50 }),
-        createLayoutNode({ key: 'floating-late', stage: null, rank: 400 }),
-      ],
-      [
-        createLayoutLink({ from: 'root-main', to: 'child-a' }),
-        createLayoutLink({ from: 'child-a', to: 'grand-a' }),
-        createLayoutLink({ from: 'root-main', to: 'child-b' }),
-        createLayoutLink({ from: 'child-b', to: 'grand-b' }),
-        createLayoutLink({ from: 'grand-a', to: 'floating-late', isCrossTree: true }),
-        createLayoutLink({ from: 'grand-b', to: 'floating-early', isCrossTree: true }),
-      ],
-    );
-
-    const positionMap = toPositionMap(positions);
-    expect(positionMap.get('child-b')?.y ?? Number.MAX_SAFE_INTEGER)
-      .toBeLessThan(positionMap.get('child-a')?.y ?? -1);
-  });
-
   it('ignores cross-tree links when grouping families', () => {
     const positions = computeFamilyBlockAutoLayout(
       [
@@ -218,223 +174,6 @@ describe('computeFamilyBlockAutoLayout', () => {
     const positionMap = toPositionMap(positions);
     expect(positionMap.get('root-2')?.y ?? -1).toBeGreaterThan(positionMap.get('root-1')?.y ?? Number.MAX_SAFE_INTEGER);
     expect(positionMap.get('child-2')?.y).toBe(positionMap.get('root-2')?.y);
-  });
-
-  it('reorders sibling subtrees toward their external relation neighborhoods', () => {
-    const positions = computeFamilyBlockAutoLayout(
-      [
-        createLayoutNode({ key: 'target-early', stage: 1, rank: 50 }),
-        createLayoutNode({ key: 'root-main', stage: 1, rank: 100 }),
-        createLayoutNode({ key: 'child-a', stage: 2, rank: 110 }),
-        createLayoutNode({ key: 'grand-a', stage: 3, rank: 120 }),
-        createLayoutNode({ key: 'child-b', stage: 2, rank: 210 }),
-        createLayoutNode({ key: 'grand-b', stage: 3, rank: 220 }),
-        createLayoutNode({ key: 'target-late', stage: 4, rank: 400 }),
-      ],
-      [
-        createLayoutLink({ from: 'root-main', to: 'child-a' }),
-        createLayoutLink({ from: 'child-a', to: 'grand-a' }),
-        createLayoutLink({ from: 'root-main', to: 'child-b' }),
-        createLayoutLink({ from: 'child-b', to: 'grand-b' }),
-        createLayoutLink({ from: 'grand-a', to: 'target-late', isCrossTree: true }),
-        createLayoutLink({ from: 'grand-b', to: 'target-early', isCrossTree: true }),
-      ],
-    );
-
-    const positionMap = toPositionMap(positions);
-    expect(positionMap.get('child-b')?.y ?? Number.MAX_SAFE_INTEGER)
-      .toBeLessThan(positionMap.get('child-a')?.y ?? -1);
-  });
-
-  it('keeps stage-major neighborhood ordering even when rank spans are production-sized', () => {
-    const positions = computeFamilyBlockAutoLayout(
-      [
-        createLayoutNode({ key: 'target-stage1-late', stage: 1, rank: 250_000 }),
-        createLayoutNode({ key: 'root-main', stage: 1, rank: 100 }),
-        createLayoutNode({ key: 'child-a', stage: 2, rank: 110 }),
-        createLayoutNode({ key: 'grand-a', stage: 3, rank: 120 }),
-        createLayoutNode({ key: 'child-b', stage: 2, rank: 210 }),
-        createLayoutNode({ key: 'grand-b', stage: 3, rank: 220 }),
-        createLayoutNode({ key: 'target-stage2-early', stage: 2, rank: 10_000 }),
-      ],
-      [
-        createLayoutLink({ from: 'root-main', to: 'child-a' }),
-        createLayoutLink({ from: 'child-a', to: 'grand-a' }),
-        createLayoutLink({ from: 'root-main', to: 'child-b' }),
-        createLayoutLink({ from: 'child-b', to: 'grand-b' }),
-        createLayoutLink({ from: 'grand-a', to: 'target-stage2-early', isCrossTree: true }),
-        createLayoutLink({ from: 'grand-b', to: 'target-stage1-late', isCrossTree: true }),
-      ],
-    );
-
-    const positionMap = toPositionMap(positions);
-    expect(positionMap.get('child-b')?.y ?? Number.MAX_SAFE_INTEGER)
-      .toBeLessThan(positionMap.get('child-a')?.y ?? -1);
-  });
-
-  it('keeps natural sibling order when only one subtree has an external relation neighborhood', () => {
-    const positions = computeFamilyBlockAutoLayout(
-      [
-        createLayoutNode({ key: 'root-main', stage: 1, rank: 100 }),
-        createLayoutNode({ key: 'child-a', stage: 2, rank: 110 }),
-        createLayoutNode({ key: 'grand-a', stage: 3, rank: 120 }),
-        createLayoutNode({ key: 'child-b', stage: 2, rank: 210 }),
-        createLayoutNode({ key: 'grand-b', stage: 3, rank: 220 }),
-        createLayoutNode({ key: 'target-late', stage: 4, rank: 400 }),
-      ],
-      [
-        createLayoutLink({ from: 'root-main', to: 'child-a' }),
-        createLayoutLink({ from: 'child-a', to: 'grand-a' }),
-        createLayoutLink({ from: 'root-main', to: 'child-b' }),
-        createLayoutLink({ from: 'child-b', to: 'grand-b' }),
-        createLayoutLink({ from: 'grand-b', to: 'target-late', isCrossTree: true }),
-      ],
-    );
-
-    const positionMap = toPositionMap(positions);
-    expect(positionMap.get('child-a')?.y ?? Number.MAX_SAFE_INTEGER)
-      .toBeLessThan(positionMap.get('child-b')?.y ?? -1);
-  });
-
-  it('keeps natural sibling order when siblings point to the same external neighborhood', () => {
-    const positions = computeFamilyBlockAutoLayout(
-      [
-        createLayoutNode({ key: 'root-main', stage: 1, rank: 100 }),
-        createLayoutNode({ key: 'child-a', stage: 2, rank: 110 }),
-        createLayoutNode({ key: 'grand-a', stage: 3, rank: 120 }),
-        createLayoutNode({ key: 'child-b', stage: 2, rank: 210 }),
-        createLayoutNode({ key: 'grand-b', stage: 3, rank: 220 }),
-        createLayoutNode({ key: 'target-shared', stage: 4, rank: 400 }),
-      ],
-      [
-        createLayoutLink({ from: 'root-main', to: 'child-a' }),
-        createLayoutLink({ from: 'child-a', to: 'grand-a' }),
-        createLayoutLink({ from: 'root-main', to: 'child-b' }),
-        createLayoutLink({ from: 'child-b', to: 'grand-b' }),
-        createLayoutLink({ from: 'grand-a', to: 'target-shared', isCrossTree: true }),
-        createLayoutLink({ from: 'grand-b', to: 'target-shared', isCrossTree: true }),
-        createLayoutLink({ from: 'child-b', to: 'target-shared', isCrossTree: true }),
-      ],
-    );
-
-    const positionMap = toPositionMap(positions);
-    expect(positionMap.get('child-a')?.y ?? Number.MAX_SAFE_INTEGER)
-      .toBeLessThan(positionMap.get('child-b')?.y ?? -1);
-  });
-
-  it('ignores same-family cross-tree links when reordering sibling subtrees', () => {
-    const positions = computeFamilyBlockAutoLayout(
-      [
-        createLayoutNode({ key: 'root-main', stage: 1, rank: 100 }),
-        createLayoutNode({ key: 'child-a', stage: 2, rank: 110 }),
-        createLayoutNode({ key: 'grand-a', stage: 3, rank: 120 }),
-        createLayoutNode({ key: 'child-b', stage: 2, rank: 210 }),
-        createLayoutNode({ key: 'grand-b', stage: 3, rank: 220 }),
-      ],
-      [
-        createLayoutLink({ from: 'root-main', to: 'child-a' }),
-        createLayoutLink({ from: 'child-a', to: 'grand-a' }),
-        createLayoutLink({ from: 'root-main', to: 'child-b' }),
-        createLayoutLink({ from: 'child-b', to: 'grand-b' }),
-        createLayoutLink({ from: 'grand-a', to: 'grand-b', isCrossTree: true }),
-      ],
-    );
-
-    const positionMap = toPositionMap(positions);
-    expect(positionMap.get('child-a')?.y ?? Number.MAX_SAFE_INTEGER)
-      .toBeLessThan(positionMap.get('child-b')?.y ?? -1);
-  });
-
-  it('adds extra sibling spacing when adjacent subtrees both carry relation load', () => {
-    const nodes = [
-      createLayoutNode({ key: 'root-main', stage: 1, rank: 100 }),
-      createLayoutNode({ key: 'child-left', stage: 2, rank: 110 }),
-      createLayoutNode({ key: 'grand-left', stage: 3, rank: 120 }),
-      createLayoutNode({ key: 'child-right', stage: 2, rank: 210 }),
-      createLayoutNode({ key: 'grand-right', stage: 3, rank: 220 }),
-      createLayoutNode({ key: 'target-left', stage: 4, rank: 320 }),
-      createLayoutNode({ key: 'target-right', stage: 4, rank: 360 }),
-    ];
-    const baseLinks = [
-      createLayoutLink({ from: 'root-main', to: 'child-left' }),
-      createLayoutLink({ from: 'child-left', to: 'grand-left' }),
-      createLayoutLink({ from: 'root-main', to: 'child-right' }),
-      createLayoutLink({ from: 'child-right', to: 'grand-right' }),
-    ];
-
-    const compactPositions = computeFamilyBlockAutoLayout(nodes, baseLinks);
-    const relationHeavyPositions = computeFamilyBlockAutoLayout(nodes, [
-      ...baseLinks,
-      createLayoutLink({ from: 'grand-left', to: 'target-left', isCrossTree: true }),
-      createLayoutLink({ from: 'grand-right', to: 'target-right', isCrossTree: true }),
-    ]);
-
-    const compactMap = toPositionMap(compactPositions);
-    const relationHeavyMap = toPositionMap(relationHeavyPositions);
-    const compactGap = (compactMap.get('child-right')?.y ?? 0) - (compactMap.get('child-left')?.y ?? 0);
-    const relationHeavyGap = (relationHeavyMap.get('child-right')?.y ?? 0)
-      - (relationHeavyMap.get('child-left')?.y ?? 0);
-
-    expect(relationHeavyGap).toBeGreaterThan(compactGap);
-  });
-
-  it('still widens sibling spacing when only one subtree carries heavy relation load', () => {
-    const nodes = [
-      createLayoutNode({ key: 'root-main', stage: 1, rank: 100 }),
-      createLayoutNode({ key: 'child-left', stage: 2, rank: 110 }),
-      createLayoutNode({ key: 'grand-left', stage: 3, rank: 120 }),
-      createLayoutNode({ key: 'child-right', stage: 2, rank: 210 }),
-      createLayoutNode({ key: 'grand-right', stage: 3, rank: 220 }),
-      createLayoutNode({ key: 'target-left', stage: 4, rank: 320 }),
-    ];
-    const baseLinks = [
-      createLayoutLink({ from: 'root-main', to: 'child-left' }),
-      createLayoutLink({ from: 'child-left', to: 'grand-left' }),
-      createLayoutLink({ from: 'root-main', to: 'child-right' }),
-      createLayoutLink({ from: 'child-right', to: 'grand-right' }),
-    ];
-
-    const compactPositions = computeFamilyBlockAutoLayout(nodes, baseLinks);
-    const relationHeavyPositions = computeFamilyBlockAutoLayout(nodes, [
-      ...baseLinks,
-      createLayoutLink({ from: 'grand-left', to: 'target-left', isCrossTree: true }),
-    ]);
-
-    const compactMap = toPositionMap(compactPositions);
-    const relationHeavyMap = toPositionMap(relationHeavyPositions);
-    const compactGap = (compactMap.get('child-right')?.y ?? 0) - (compactMap.get('child-left')?.y ?? 0);
-    const relationHeavyGap = (relationHeavyMap.get('child-right')?.y ?? 0)
-      - (relationHeavyMap.get('child-left')?.y ?? 0);
-
-    expect(relationHeavyGap).toBeGreaterThan(compactGap);
-  });
-
-  it('adds extra sibling spacing when a subtree has multiple parent candidates', () => {
-    const nodes = [
-      createLayoutNode({ key: 'root-main', stage: 1, rank: 100 }),
-      createLayoutNode({ key: 'child-left', stage: 2, rank: 110 }),
-      createLayoutNode({ key: 'child-right', stage: 2, rank: 210 }),
-      createLayoutNode({ key: 'shared-grandchild', stage: 3, rank: 320 }),
-    ];
-    const baseLinks = [
-      createLayoutLink({ from: 'root-main', to: 'child-left' }),
-      createLayoutLink({ from: 'root-main', to: 'child-right' }),
-      createLayoutLink({ from: 'child-right', to: 'shared-grandchild' }),
-    ];
-
-    const compactPositions = computeFamilyBlockAutoLayout(nodes, baseLinks);
-    const multiParentPositions = computeFamilyBlockAutoLayout(nodes, [
-      ...baseLinks,
-      createLayoutLink({ from: 'child-left', to: 'shared-grandchild' }),
-    ]);
-
-    const compactMap = toPositionMap(compactPositions);
-    const multiParentMap = toPositionMap(multiParentPositions);
-    const compactGap = (compactMap.get('child-right')?.y ?? 0) - (compactMap.get('child-left')?.y ?? 0);
-    const multiParentGap = (multiParentMap.get('child-right')?.y ?? 0)
-      - (multiParentMap.get('child-left')?.y ?? 0);
-
-    expect(multiParentGap).toBeGreaterThan(compactGap);
   });
 
   it('keeps a single-chain tree compact instead of reserving a tall empty block', () => {
@@ -459,176 +198,23 @@ describe('computeFamilyBlockAutoLayout', () => {
       .toBeLessThan(LAYOUT_CONFIG.ROW_SPACING * 1.5);
   });
 
-  it('adds controlled extra spacing when cross-tree link labels need breathing room', () => {
-    const nodes = [
-      createLayoutNode({ key: 'root-1', stage: 1, rank: 100 }),
-      createLayoutNode({ key: 'child-1', stage: 2, rank: 110 }),
-      createLayoutNode({ key: 'root-2', stage: 1, rank: 200 }),
-      createLayoutNode({ key: 'child-2', stage: 2, rank: 210 }),
-    ];
-    const baseLinks = [
-      createLayoutLink({ from: 'root-1', to: 'child-1' }),
-      createLayoutLink({ from: 'root-2', to: 'child-2' }),
-    ];
-
-    const compactPositions = computeFamilyBlockAutoLayout(nodes, baseLinks);
-    const crossTreePositions = computeFamilyBlockAutoLayout(nodes, [
-      ...baseLinks,
-      createLayoutLink({ from: 'child-1', to: 'child-2', isCrossTree: true }),
-    ]);
-
-    const compactMap = toPositionMap(compactPositions);
-    const crossTreeMap = toPositionMap(crossTreePositions);
-
-    expect(crossTreeMap.get('root-2')?.y ?? -1)
-      .toBeGreaterThan(compactMap.get('root-2')?.y ?? Number.MAX_SAFE_INTEGER);
-    expect((crossTreeMap.get('root-2')?.y ?? Number.MAX_SAFE_INTEGER) - (compactMap.get('root-2')?.y ?? 0))
-      .toBeLessThan(LAYOUT_CONFIG.ROW_SPACING);
-  });
-
-  it('caps extra gap under MAX_EXTRA_GAP_ROWS even with many cross-tree links and dense families', () => {
-    // 构造大型复杂场景：密集家族 + 多条跨树链接
-    const nodes = [
-      createLayoutNode({ key: 'root-1', stage: 1, rank: 100 }),
-      ...Array.from({ length: 6 }, (_, i) =>
-        createLayoutNode({ key: `child-1-${i}`, stage: 2, rank: 110 + i }),
-      ),
-      createLayoutNode({ key: 'root-2', stage: 1, rank: 200 }),
-      ...Array.from({ length: 4 }, (_, i) =>
-        createLayoutNode({ key: `child-2-${i}`, stage: 2, rank: 210 + i }),
-      ),
-    ];
-    const links = [
-      ...Array.from({ length: 6 }, (_, i) =>
-        createLayoutLink({ from: 'root-1', to: `child-1-${i}` }),
-      ),
-      ...Array.from({ length: 4 }, (_, i) =>
-        createLayoutLink({ from: 'root-2', to: `child-2-${i}` }),
-      ),
-      // 多条跨树链接
-      createLayoutLink({ from: 'child-1-0', to: 'child-2-0', isCrossTree: true }),
-      createLayoutLink({ from: 'child-1-2', to: 'child-2-1', isCrossTree: true }),
-      createLayoutLink({ from: 'child-1-4', to: 'child-2-3', isCrossTree: true }),
-    ];
-
-    const positions = computeFamilyBlockAutoLayout(nodes, links);
-    const positionMap = toPositionMap(positions);
-
-    const family1Keys = ['root-1', ...Array.from({ length: 6 }, (_, i) => `child-1-${i}`)];
-    const family2Keys = ['root-2', ...Array.from({ length: 4 }, (_, i) => `child-2-${i}`)];
-    const family1MaxY = Math.max(...family1Keys.map(key => positionMap.get(key)?.y ?? -Infinity));
-    const family2MinY = Math.min(...family2Keys.map(key => positionMap.get(key)?.y ?? Infinity));
-
-    // 家族之间的边界间距 = 家族 2 最上方节点 - 家族 1 最下方节点
-    // 应被 (1 + MAX_EXTRA_GAP_ROWS) * ROW_SPACING 严格约束
-    const maxAllowedGap = (1 + LAYOUT_CONFIG.AUTO_LAYOUT_MAX_EXTRA_GAP_ROWS) * LAYOUT_CONFIG.ROW_SPACING;
-    expect(family2MinY - family1MaxY).toBeLessThanOrEqual(maxAllowedGap + 1); // +1 浮点容差
-    expect(family2MinY - family1MaxY).toBeGreaterThan(0); // 家族之间必须有正间距
-  });
-
-  it('globally minimizes cross-tree span via 2-opt beyond greedy nearest-neighbor', () => {
-    // 构造 4 个家族 A/B/C/D（按 rank 升序），跨树链接模式：
-    //   A <-> C （强亲和）
-    //   B <-> D （强亲和）
-    //   A 与 B/D 无跨树链接
-    // 贪心从 A 出发会选 C（最强），然后 C 附近的下一个是 ... 再回到 B 或 D，
-    // 2-opt 能将顺序重排为 A-C-B-D 或 A-B-D-C 之一，使 A<->C 与 B<->D 都相邻。
-    //
-    // 不变式：family A 仍为首家族（锚点），且两条跨树对的家族索引距离之和
-    // 应 <= 贪心结果中的对应和。
-    const makeFamily = (rootRank: number, prefix: string) => [
-      createLayoutNode({ key: `${prefix}-root`, stage: 1, rank: rootRank }),
-      createLayoutNode({ key: `${prefix}-child`, stage: 2, rank: rootRank + 10 }),
-    ];
-    const nodes = [
-      ...makeFamily(100, 'A'),
-      ...makeFamily(200, 'B'),
-      ...makeFamily(300, 'C'),
-      ...makeFamily(400, 'D'),
-    ];
-    const links: AutoLayoutLinkData[] = [
-      createLayoutLink({ from: 'A-root', to: 'A-child' }),
-      createLayoutLink({ from: 'B-root', to: 'B-child' }),
-      createLayoutLink({ from: 'C-root', to: 'C-child' }),
-      createLayoutLink({ from: 'D-root', to: 'D-child' }),
-      // A<->C 强亲和
-      createLayoutLink({ from: 'A-child', to: 'C-child', isCrossTree: true }),
-      createLayoutLink({ from: 'A-child', to: 'C-root', isCrossTree: true }),
-      // B<->D 强亲和
-      createLayoutLink({ from: 'B-child', to: 'D-child', isCrossTree: true }),
-      createLayoutLink({ from: 'B-child', to: 'D-root', isCrossTree: true }),
-    ];
-
-    const positions = computeFamilyBlockAutoLayout(nodes, links);
-    const positionMap = toPositionMap(positions);
-
-    const ySortedFamilyOrder = (['A', 'B', 'C', 'D'] as const)
-      .map(prefix => ({ prefix, y: positionMap.get(`${prefix}-root`)?.y ?? 0 }))
-      .sort((a, b) => a.y - b.y)
-      .map(entry => entry.prefix);
-
-    // 锚点：A 永远在首位
-    expect(ySortedFamilyOrder[0]).toBe('A');
-
-    // 计算 A-C 与 B-D 在排列中的索引距离和。
-    const indexOf = (prefix: 'A' | 'B' | 'C' | 'D') => ySortedFamilyOrder.indexOf(prefix);
-    const crossTreeSpan = Math.abs(indexOf('A') - indexOf('C')) + Math.abs(indexOf('B') - indexOf('D'));
-
-    // 2-opt 应保证 A-C 与 B-D 的索引距离和 <= 3（例如 A-C-D-B 为 2+1=3，
-    // A-C-B-D 为 2+1=3，A-B-D-C 为 3+1=4 被排除）。
-    // 未经 2-opt 的贪心 A-C 之后可能选 B 或 D，最差能得到 A-C-D-B=3 或 A-C-B-D=3；
-    // 本断言覆盖 2-opt 结果不会比贪心更差，且不会出现 A-B-C-D=2+2=4 这种按 rank 静态排列。
-    expect(crossTreeSpan).toBeLessThanOrEqual(3);
-  });
-
-  it('widens stage boundary when multiple merge points funnel into the same child', () => {
-    // 基准场景：stage2 有 3 个独立子节点，无合流
-    const baseNodes = [
-      createLayoutNode({ key: 'root-1', stage: 1, rank: 100 }),
-      createLayoutNode({ key: 'root-2', stage: 1, rank: 200 }),
-      createLayoutNode({ key: 'child-a', stage: 2, rank: 110 }),
-      createLayoutNode({ key: 'child-b', stage: 2, rank: 120 }),
-    ];
-    const baseLinks: AutoLayoutLinkData[] = [
-      createLayoutLink({ from: 'root-1', to: 'child-a' }),
-      createLayoutLink({ from: 'root-2', to: 'child-b' }),
-    ];
-
-    // 多父扇入场景：child-a 与 child-b 同时被 root-1 与 root-2 认领（2 条合流）
-    const mergeLinks: AutoLayoutLinkData[] = [
-      createLayoutLink({ from: 'root-1', to: 'child-a' }),
-      createLayoutLink({ from: 'root-2', to: 'child-a' }),
-      createLayoutLink({ from: 'root-1', to: 'child-b' }),
-      createLayoutLink({ from: 'root-2', to: 'child-b' }),
-    ];
-
-    const baseMap = toPositionMap(computeFamilyBlockAutoLayout(baseNodes, baseLinks));
-    const mergeMap = toPositionMap(computeFamilyBlockAutoLayout(baseNodes, mergeLinks));
-
-    const baseGap = (baseMap.get('child-a')?.x ?? 0) - (baseMap.get('root-1')?.x ?? 0);
-    const mergeGap = (mergeMap.get('child-a')?.x ?? 0) - (mergeMap.get('root-1')?.x ?? 0);
-
-    // 多父合流应拓宽阶段边界 X 间距
-    expect(mergeGap).toBeGreaterThan(baseGap);
-    // 但不得突破 maxStageExtraFactor 上限
-    const maxExpectedGap = LAYOUT_CONFIG.STAGE_SPACING
-      * (1 + LAYOUT_CONFIG.AUTO_LAYOUT_MAX_STAGE_EXTRA_FACTOR);
-    expect(mergeGap).toBeLessThanOrEqual(maxExpectedGap + 0.5);
-  });
+  registerFlowLayoutRelationSpacingSpecs();
 });
 
 describe('FlowLayoutService', () => {
   let service: FlowLayoutService;
   let updateTaskPosition: ReturnType<typeof vi.fn>;
+  let updateTaskPositionsDurably: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     updateTaskPosition = vi.fn();
+    updateTaskPositionsDurably = vi.fn().mockResolvedValue(true);
 
     const injector = Injector.create({
       providers: [
         { provide: FlowLayoutService, useClass: FlowLayoutService },
         { provide: LoggerService, useValue: { category: () => mockLoggerCategory } },
-        { provide: TaskOperationAdapterService, useValue: { updateTaskPosition } },
+        { provide: TaskOperationAdapterService, useValue: { updateTaskPosition, updateTaskPositionsDurably } },
       ],
     });
 
@@ -663,10 +249,13 @@ describe('FlowLayoutService', () => {
     service.setDiagram(diagram);
     service.applyAutoLayout();
 
-    expect(updateTaskPosition).toHaveBeenCalledTimes(3);
+    expect(updateTaskPosition).not.toHaveBeenCalled();
+    expect(updateTaskPositionsDurably).toHaveBeenCalledTimes(1);
 
-    const persistedPositions = new Map(
-      updateTaskPosition.mock.calls.map(([key, x, y]) => [key, { x, y }]),
+    const persistedPositions = new Map<string, { x: number; y: number }>(
+      updateTaskPositionsDurably.mock.calls[0][0].map(({ taskId, x, y }: { taskId: string; x: number; y: number }) =>
+        [taskId, { x, y }] as const
+      ),
     );
 
     expect(persistedPositions.get('root-1')).toMatchObject({ x: 0, y: 0 });
@@ -682,9 +271,13 @@ describe('FlowLayoutService', () => {
         location: { x: n.x, y: n.y, isReal: () => true } as go.Point,
       })) as unknown as go.Node[];
       return {
+        startTransaction: vi.fn(),
+        commitTransaction: vi.fn(),
         nodes: {
           each: (cb: (node: go.Node) => void) => goNodes.forEach(node => cb(node)),
         },
+        findNodeForKey: (key: string) =>
+          goNodes.find(node => (node.data as { key?: string }).key === key) ?? null,
       } as unknown as go.Diagram;
     }
 
@@ -693,6 +286,7 @@ describe('FlowLayoutService', () => {
     });
 
     afterEach(() => {
+      vi.restoreAllMocks();
       vi.useRealTimers();
     });
 
@@ -709,6 +303,7 @@ describe('FlowLayoutService', () => {
 
       // 既不写旧 diagram 的坐标，也不在 generation 已递进时误写新 diagram。
       expect(updateTaskPosition).not.toHaveBeenCalled();
+      expect(updateTaskPositionsDurably).not.toHaveBeenCalled();
     });
 
     it('setDiagram(null) 释放 diagram 时丢弃 in-flight 防抖保存', () => {
@@ -720,6 +315,7 @@ describe('FlowLayoutService', () => {
       vi.advanceTimersByTime(500);
 
       expect(updateTaskPosition).not.toHaveBeenCalled();
+      expect(updateTaskPositionsDurably).not.toHaveBeenCalled();
     });
 
     it('requestLayoutGeneration 显式递进代际并丢弃 in-flight 保存', () => {
@@ -733,6 +329,88 @@ describe('FlowLayoutService', () => {
       expect(next).toBeGreaterThan(before);
       vi.advanceTimersByTime(500);
       expect(updateTaskPosition).not.toHaveBeenCalled();
+      expect(updateTaskPositionsDurably).not.toHaveBeenCalled();
+    });
+
+    it('setDiagram 切换 diagram 时应清理 handle 为 0 的 in-flight 保存', () => {
+      const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+      const oldDiagram = makeDiagram([{ key: 'a', x: 1, y: 1 }]);
+      const newDiagram = makeDiagram([{ key: 'b', x: 2, y: 2 }]);
+      const internal = service as unknown as {
+        positionSaveTimer: ReturnType<typeof setTimeout> | null;
+      };
+      service.setDiagram(oldDiagram);
+      internal.positionSaveTimer = 0 as unknown as ReturnType<typeof setTimeout>;
+
+      service.setDiagram(newDiagram);
+
+      expect(clearTimeoutSpy).toHaveBeenCalledWith(0);
+      expect(internal.positionSaveTimer).toBeNull();
+    });
+
+    it('scheduleSaveAllPositions 重排时应取消 handle 为 0 的旧保存 timer', () => {
+      const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+      const diagram = makeDiagram([{ key: 'a', x: 1, y: 1 }]);
+      const internal = service as unknown as {
+        positionSaveTimer: ReturnType<typeof setTimeout> | null;
+      };
+      service.setDiagram(diagram);
+      internal.positionSaveTimer = 0 as unknown as ReturnType<typeof setTimeout>;
+
+      service.scheduleSaveAllPositions();
+
+      expect(clearTimeoutSpy).toHaveBeenCalledWith(0);
+      expect(internal.positionSaveTimer).not.toBe(0);
+    });
+
+    it('已有 handle 为 0 的 retry timer 时不应重复安排位置重试', () => {
+      const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+      const internal = service as unknown as {
+        positionRetryTimer: ReturnType<typeof setTimeout> | null;
+        pendingPositionRetry: Array<{ taskId: string; x: number; y: number }> | null;
+        pendingPositionRetryGeneration: number | null;
+        pendingPositionRetrySequence: number | null;
+        schedulePositionRetry: () => void;
+      };
+      internal.positionRetryTimer = 0 as unknown as ReturnType<typeof setTimeout>;
+      internal.pendingPositionRetry = [{ taskId: 'a', x: 1, y: 1 }];
+      internal.pendingPositionRetryGeneration = service.getLayoutGeneration();
+      internal.pendingPositionRetrySequence = 1;
+
+      internal.schedulePositionRetry();
+
+      expect(setTimeoutSpy).not.toHaveBeenCalled();
+      expect(internal.positionRetryTimer).toBe(0);
+    });
+
+    it('clearPositionRetry 应清理 handle 为 0 的 retry timer', () => {
+      const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+      const internal = service as unknown as {
+        positionRetryTimer: ReturnType<typeof setTimeout> | null;
+        pendingPositionRetry: Array<{ taskId: string; x: number; y: number }> | null;
+        clearPositionRetry: () => void;
+      };
+      internal.positionRetryTimer = 0 as unknown as ReturnType<typeof setTimeout>;
+      internal.pendingPositionRetry = [{ taskId: 'a', x: 1, y: 1 }];
+
+      internal.clearPositionRetry();
+
+      expect(clearTimeoutSpy).toHaveBeenCalledWith(0);
+      expect(internal.positionRetryTimer).toBeNull();
+      expect(internal.pendingPositionRetry).toBeNull();
+    });
+
+    it('dispose 应清理 handle 为 0 的位置保存 timer', () => {
+      const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+      const internal = service as unknown as {
+        positionSaveTimer: ReturnType<typeof setTimeout> | null;
+      };
+      internal.positionSaveTimer = 0 as unknown as ReturnType<typeof setTimeout>;
+
+      service.dispose();
+
+      expect(clearTimeoutSpy).toHaveBeenCalledWith(0);
+      expect(internal.positionSaveTimer).toBeNull();
     });
 
     it('未递进 generation 且 diagram 仍存在时正常写回坐标', () => {
@@ -742,7 +420,53 @@ describe('FlowLayoutService', () => {
 
       vi.advanceTimersByTime(500);
 
-      expect(updateTaskPosition).toHaveBeenCalledWith('a', 5, 6);
+      expect(updateTaskPosition).not.toHaveBeenCalled();
+      expect(updateTaskPositionsDurably).toHaveBeenCalledWith([{ taskId: 'a', x: 5, y: 6 }]);
+    });
+
+    it('节点位置持久化失败后应自动重试上次坐标，避免弱网瞬断丢失拖拽位置', async () => {
+      updateTaskPositionsDurably.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+      const diagram = makeDiagram([{ key: 'a', x: 5, y: 6 }]);
+      service.setDiagram(diagram);
+
+      service.saveAllNodePositions();
+      await Promise.resolve();
+      vi.advanceTimersByTime(1000);
+      await Promise.resolve();
+
+      expect(updateTaskPositionsDurably).toHaveBeenNthCalledWith(1, [{ taskId: 'a', x: 5, y: 6 }]);
+      expect(updateTaskPositionsDurably).toHaveBeenNthCalledWith(2, [{ taskId: 'a', x: 5, y: 6 }]);
+    });
+
+    it('旧坐标保存晚成功时不应清掉同代际内更新坐标的待重试批次', async () => {
+      const firstSave = {
+        resolve: null as ((saved: boolean) => void) | null,
+      };
+      updateTaskPositionsDurably
+        .mockImplementationOnce(() => new Promise<boolean>(resolve => {
+          firstSave.resolve = resolve;
+        }))
+        .mockResolvedValueOnce(false)
+        .mockResolvedValueOnce(true);
+
+      const diagram = makeDiagram([{ key: 'a', x: 1, y: 1 }]);
+      service.setDiagram(diagram);
+      service.saveAllNodePositions();
+
+      service.setNodePosition('a', 9, 9);
+      service.saveAllNodePositions();
+      await Promise.resolve();
+
+      const finishFirstSave = firstSave.resolve;
+      expect(finishFirstSave).toBeTypeOf('function');
+      finishFirstSave?.(true);
+      await Promise.resolve();
+      vi.advanceTimersByTime(1000);
+      await Promise.resolve();
+
+      expect(updateTaskPositionsDurably).toHaveBeenNthCalledWith(1, [{ taskId: 'a', x: 1, y: 1 }]);
+      expect(updateTaskPositionsDurably).toHaveBeenNthCalledWith(2, [{ taskId: 'a', x: 9, y: 9 }]);
+      expect(updateTaskPositionsDurably).toHaveBeenNthCalledWith(3, [{ taskId: 'a', x: 9, y: 9 }]);
     });
   });
 });

@@ -70,6 +70,18 @@ export interface StrategicReviewResult {
   readonly warnings: readonly string[];
 }
 
+interface StrategicReviewPrepared {
+  readonly visibleTasks: readonly Task[];
+  readonly taskById: ReadonlyMap<string, Task>;
+  readonly childrenOf: ReadonlyMap<string, readonly string[]>;
+  readonly rootIds: readonly string[];
+  readonly crossLinks: readonly Connection[];
+  readonly mainTaskId: string | null;
+  readonly maxTreeDepth: number;
+  readonly maxDepth: number;
+  readonly redactPII: boolean;
+}
+
 // ============================================================
 // 主入口
 // ============================================================
@@ -78,6 +90,30 @@ export function buildStrategicReviewMarkdown(
   project: Project,
   options: StrategicReviewOptions = {},
 ): StrategicReviewResult {
+  const prepared = prepareStrategicReview(project, options);
+  const ctx: RenderCtx = {
+    redactPII: prepared.redactPII,
+    taskById: prepared.taskById,
+    childrenOf: prepared.childrenOf,
+    maxDepth: prepared.maxDepth,
+  };
+  const markdown = renderMarkdown({
+    project,
+    visibleTasks: prepared.visibleTasks,
+    rootIds: prepared.rootIds,
+    mainTaskId: prepared.mainTaskId,
+    crossLinks: prepared.crossLinks,
+    ctx,
+  });
+
+  return {
+    markdown,
+    stats: buildStats(prepared),
+    warnings: buildWarnings(prepared),
+  };
+}
+
+function prepareStrategicReview(project: Project, options: StrategicReviewOptions): StrategicReviewPrepared {
   const includeCompleted = options.includeCompleted ?? true;
   const redactPII = options.redactPII ?? false;
   const maxDepth = options.maxDepth ?? STRATEGIC_MAX_DEPTH;
@@ -98,17 +134,23 @@ export function buildStrategicReviewMarkdown(
   const mainTaskId = pickMainTask(rootIds, taskById, descendantCount, linkDegree);
   const maxTreeDepth = computeMaxDepth(rootIds, childrenOf, maxDepth);
 
-  const ctx: RenderCtx = { redactPII, taskById, childrenOf, maxDepth };
-  const markdown = renderMarkdown({
-    project,
+  return {
     visibleTasks,
+    taskById,
+    childrenOf,
     rootIds,
-    mainTaskId,
     crossLinks,
-    ctx,
-  });
+    mainTaskId,
+    maxTreeDepth,
+    maxDepth,
+    redactPII,
+  };
+}
 
+function buildWarnings(prepared: StrategicReviewPrepared): string[] {
   const warnings: string[] = [];
+  const { visibleTasks, maxTreeDepth, maxDepth } = prepared;
+
   if (visibleTasks.length > STRATEGIC_LARGE_NODE_THRESHOLD) {
     warnings.push(
       `节点数 ${visibleTasks.length} 超过 ${STRATEGIC_LARGE_NODE_THRESHOLD}，AI 输入较长，必要时可按子树分批审阅`,
@@ -118,20 +160,20 @@ export function buildStrategicReviewMarkdown(
     warnings.push(`任务树深度达到上限 ${maxDepth}，已截断；如非预期请检查数据`);
   }
 
-  const mainTitle = mainTaskId
-    ? (taskById.get(mainTaskId)?.title || '(未命名主任务)')
+  return warnings;
+}
+
+function buildStats(prepared: StrategicReviewPrepared): StrategicReviewResult['stats'] {
+  const mainTitle = prepared.mainTaskId
+    ? (prepared.taskById.get(prepared.mainTaskId)?.title || '(未命名主任务)')
     : '(无主任务)';
 
   return {
-    markdown,
-    stats: {
-      totalTasks: visibleTasks.length,
-      totalConnections: crossLinks.length,
-      mainTaskTitle: mainTitle,
-      roots: rootIds.length,
-      maxTreeDepth,
-    },
-    warnings,
+    totalTasks: prepared.visibleTasks.length,
+    totalConnections: prepared.crossLinks.length,
+    mainTaskTitle: mainTitle,
+    roots: prepared.rootIds.length,
+    maxTreeDepth: prepared.maxTreeDepth,
   };
 }
 

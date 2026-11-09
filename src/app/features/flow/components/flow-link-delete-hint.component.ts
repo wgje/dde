@@ -2,6 +2,7 @@ import { Component, ChangeDetectionStrategy, input, output, computed } from '@an
 import { CommonModule } from '@angular/common';
 
 import type { LinkDeleteHint } from '../../../../models/flow-view-state';
+import { resolveFlowLinkDeleteHintPosition } from './flow-link-overlay-position.helpers';
 
 /**
  * 移动端连接线删除提示组件
@@ -44,24 +45,7 @@ export class FlowLinkDeleteHintComponent {
   readonly confirm = output<void>();
   readonly cancel = output<void>();
   
-  // 计算限制在视口内的位置
-  readonly clampedX = computed(() => {
-    const h = this.hint();
-    if (!h) return 0;
-    const hintWidth = 180; // 估算宽度
-    const padding = 16;
-    const viewportWidth = typeof window !== 'undefined' ? window.innerWidth : 400;
-    const rawX = h.x - 60;
-    return Math.max(padding, Math.min(rawX, viewportWidth - hintWidth - padding));
-  });
-  
-  readonly clampedY = computed(() => {
-    const h = this.hint();
-    if (!h) return 0;
-    const hintHeight = 50; // 估算高度
-    const padding = 16;
-    const viewportHeight = typeof window !== 'undefined' ? window.innerHeight : 600;
-    const rawY = h.y - 50;
-    return Math.max(padding, Math.min(rawY, viewportHeight - hintHeight - padding));
-  });
+  private readonly position = computed(() => resolveFlowLinkDeleteHintPosition(this.hint()));
+  readonly clampedX = computed(() => this.position().x);
+  readonly clampedY = computed(() => this.position().y);
 }

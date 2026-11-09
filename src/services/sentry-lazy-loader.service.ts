@@ -1,10 +1,11 @@
-import { Injectable, signal, computed } from '@angular/core';
+import { DestroyRef, Inject, Injectable, Optional, computed, signal } from '@angular/core';
 import { environment } from '../environments/environment';
 import { IDLE_SCHEDULE_CONFIG } from '../config/timeout.config';
 import {
   getRemainingBrowserNetworkResumeDelayMs,
   isBrowserNetworkSuspendedWindow,
 } from '../utils/browser-network-suspension';
+import * as sentryTelemetry from './sentry-lazy-loader-telemetry.helpers';
 
 /**
  * Sentry 客户端类型定义
@@ -24,6 +25,10 @@ interface SentryModule {
   addBreadcrumb: typeof import('@sentry/angular').addBreadcrumb;
   setMeasurement: typeof import('@sentry/angular').setMeasurement;
 }
+
+type SentryInitOptions = Parameters<SentryModule['init']>[0];
+type SentryBeforeSendEvent = Parameters<NonNullable<SentryInitOptions['beforeSend']>>[0];
+type SentryBreadcrumb = Parameters<NonNullable<SentryInitOptions['beforeBreadcrumb']>>[0];
 
 /**
  * 消息上报配置
@@ -92,12 +97,6 @@ export class SentryLazyLoaderService {
     /^https:\/\/(?:[a-z0-9-]+\.)?nanoflow\.app/,
   ];
 
-  private static readonly REDACTED_VALUE = '[REDACTED]';
-  /** 限制递归清洗深度，避免异常对象循环/超深结构拖慢错误上报路径。 */
-  private static readonly MAX_TELEMETRY_REDACTION_DEPTH = 6;
-  private static readonly SENSITIVE_TELEMETRY_STRING_KEY_PATTERN =
-    '(?:access[_-]?token|refresh[_-]?token|id[_-]?token|token[_-]?hash|auth[_-]?token|api[_-]?key|apikey|code|password|passcode|secret|email)';
-
   private readonly sentryDsn = environment.SENTRY_DSN?.trim() ?? '';
   private readonly isConfiguredFlag = this.sentryDsn.length > 0;
 
@@ -119,11 +118,13 @@ export class SentryLazyLoaderService {
   /** 初始化 Promise（防止重复初始化） */
   private initPromise: Promise<void> | null = null;
   private pendingFlushTimer: ReturnType<typeof setTimeout> | null = null;
+  private pendingFlushResumeListener: EventListener | null = null;
   private pendingFlushListenersBound = false;
   private hasLoggedMissingDsn = false;
 
-  constructor() {
+  constructor(@Optional() @Inject(DestroyRef) destroyRef: DestroyRef | null = null) {
     this.bindPendingFlushResumeListeners();
+    destroyRef?.onDestroy(() => this.cleanupPendingFlushResume());
   }
 
   isConfigured(): boolean {
@@ -135,7 +136,7 @@ export class SentryLazyLoaderService {
       return;
     }
 
-    const tryFlush = () => {
+    const tryFlush: EventListener = () => {
       if (document.visibilityState === 'visible') {
         this.schedulePendingFlush();
       }
@@ -143,12 +144,33 @@ export class SentryLazyLoaderService {
 
     document.addEventListener('visibilitychange', tryFlush);
     window.addEventListener('online', tryFlush);
-    window.addEventListener('pageshow', tryFlush as EventListener);
+    window.addEventListener('pageshow', tryFlush);
+    this.pendingFlushResumeListener = tryFlush;
     this.pendingFlushListenersBound = true;
   }
 
+  private cleanupPendingFlushResume(): void {
+    if (this.pendingFlushTimer !== null) {
+      clearTimeout(this.pendingFlushTimer);
+      this.pendingFlushTimer = null;
+    }
+
+    const listener = this.pendingFlushResumeListener;
+    if (!listener || typeof window === 'undefined' || typeof document === 'undefined') {
+      this.pendingFlushListenersBound = false;
+      this.pendingFlushResumeListener = null;
+      return;
+    }
+
+    document.removeEventListener('visibilitychange', listener);
+    window.removeEventListener('online', listener);
+    window.removeEventListener('pageshow', listener);
+    this.pendingFlushResumeListener = null;
+    this.pendingFlushListenersBound = false;
+  }
+
   private schedulePendingFlush(): void {
-    if (this.pendingFlushTimer || this.pendingEvents.length === 0 || !this.sentryModule()) {
+    if (this.pendingFlushTimer !== null || this.pendingEvents.length === 0 || !this.sentryModule()) {
       return;
     }
 
@@ -238,95 +260,79 @@ export class SentryLazyLoaderService {
     if (this.sentryModule()) {
       return;
     }
-    
-    this.isInitializing = true;
-    
-    try {
-      // 动态导入 Sentry SDK
-      const Sentry = await import('@sentry/angular');
-      
-      // 使用与 main.ts 相同的配置（但不阻塞首屏）
-      Sentry.init({
-        dsn: this.sentryDsn,
-        // 版本标识：用于 Sentry release 追踪和 source map 关联
-        release: this.buildRelease(),
-        integrations: [
-          // 轻量级性能追踪
-          Sentry.browserTracingIntegration(),
-          // 错误发生时录制 Session Replay，辅助复现
-          Sentry.replayIntegration({
-            // 仅在错误发生前后录制，不录制整个会话
-            maskAllText: true,
-            blockAllMedia: true,
-          }),
-        ],
-        // 只允许来自我们域名的请求被追踪（迁移期：同时包含旧 Vercel 与新 Cloudflare）
-        tracePropagationTargets: [...SentryLazyLoaderService.TRACE_PROPAGATION_TARGETS],
-        // 性能采样率：5% 低采样率收集关键路径数据，不影响首屏性能
-        tracesSampleRate: environment.production ? 0.05 : 0,
-        // Session Replay：仅在错误发生时录制（100%），日常不录制（0%）
-        replaysSessionSampleRate: 0,
-        replaysOnErrorSampleRate: 1.0,
-        // 环境标识：优先读取显式注入的 sentryEnvironment（preview/production/development）
-        environment: this.resolveSentryEnvironment(),
-        sendDefaultPii: false,
-        // 【P3-09 优化】过滤浏览器噪音错误（使用正则精确匹配避免误吞）
-        ignoreErrors: [
-          /^ResizeObserver loop/,
-          /^Failed to fetch$/,          // 精确匹配网络错误，不匹配含更多上下文的消息
-          /^NetworkError$/,
-          /^Load failed$/,
-          /^duplicate key value violates unique constraint/,
-          /^The operation was aborted/,  // AbortController 取消
-          /^The user aborted a request/, // 用户取消
-        ],
-        // 【P3-15 修复】过滤 URL 中的 PKCE hash fragment 与敏感 query，防止认证数据泄露到 Sentry
-        beforeSend(event) {
-          if (event.request?.url) {
-            event.request.url = SentryLazyLoaderService.sanitizeUrlForTelemetry(event.request.url);
-          }
-          if (event.message) {
-            event.message = SentryLazyLoaderService.sanitizeTelemetryString(event.message);
-          }
-          for (const exception of event.exception?.values ?? []) {
-            if (exception.value) {
-              exception.value = SentryLazyLoaderService.sanitizeTelemetryString(exception.value);
-            }
-          }
-          event.user = SentryLazyLoaderService.sanitizeSentryEventUser(event.user) as typeof event.user;
-          event.extra = SentryLazyLoaderService.redactTelemetryRecord(event.extra);
-          event.contexts = SentryLazyLoaderService.redactTelemetryRecord(event.contexts) as typeof event.contexts;
-          return event;
-        },
-        beforeBreadcrumb(breadcrumb) {
-          if (breadcrumb.message) {
-            breadcrumb.message = SentryLazyLoaderService.sanitizeTelemetryString(breadcrumb.message);
-          }
-          if (breadcrumb.category === 'navigation' && breadcrumb.data) {
-            for (const key of ['from', 'to']) {
-              if (typeof breadcrumb.data[key] === 'string') {
-                breadcrumb.data[key] = SentryLazyLoaderService.sanitizeUrlForTelemetry(breadcrumb.data[key] as string);
-              }
-            }
-          }
-          if (breadcrumb.data) {
-            breadcrumb.data = SentryLazyLoaderService.redactTelemetryRecord(breadcrumb.data) as typeof breadcrumb.data;
-          }
-          return breadcrumb;
-        },
-      });
-      
-      this.sentryModule.set(Sentry as SentryModule);
-      
-      // 发送队列中的待处理事件
-      this.flushPendingEvents();
 
+    this.isInitializing = true;
+
+    try {
+      const Sentry = await import('@sentry/angular');
+      Sentry.init(this.buildSentryInitOptions(Sentry));
+      this.sentryModule.set(Sentry as SentryModule);
+      this.flushPendingEvents();
       this.logDiagnostic('[SentryLazyLoader] Sentry 初始化完成');
     } catch (error) {
       console.error('[SentryLazyLoader] Sentry 初始化失败:', error);
     } finally {
       this.isInitializing = false;
     }
+  }
+
+  private buildSentryInitOptions(Sentry: SentryModule): SentryInitOptions {
+    return {
+      dsn: this.sentryDsn,
+      release: this.buildRelease(),
+      integrations: this.buildSentryIntegrations(Sentry),
+      tracePropagationTargets: [...SentryLazyLoaderService.TRACE_PROPAGATION_TARGETS],
+      tracesSampleRate: environment.production ? 0.05 : 0,
+      replaysSessionSampleRate: 0,
+      replaysOnErrorSampleRate: 1.0,
+      environment: this.resolveSentryEnvironment(),
+      sendDefaultPii: false,
+      ignoreErrors: this.buildIgnoredSentryErrors(),
+      beforeSend: event => SentryLazyLoaderService.sanitizeBeforeSendEvent(event),
+      beforeBreadcrumb: breadcrumb => SentryLazyLoaderService.sanitizeBreadcrumb(breadcrumb),
+    };
+  }
+
+  private buildSentryIntegrations(Sentry: SentryModule): SentryInitOptions['integrations'] {
+    return [
+      Sentry.browserTracingIntegration(),
+      Sentry.replayIntegration({
+        maskAllText: true,
+        blockAllMedia: true,
+      }),
+    ];
+  }
+
+  private buildIgnoredSentryErrors(): NonNullable<SentryInitOptions['ignoreErrors']> {
+    return [
+      /^ResizeObserver loop/,
+      /^Failed to fetch$/,
+      /^NetworkError$/,
+      /^Load failed$/,
+      /^duplicate key value violates unique constraint/,
+      /^The operation was aborted/,
+      /^The user aborted a request/,
+    ];
+  }
+
+  private static sanitizeBeforeSendEvent(event: SentryBeforeSendEvent): SentryBeforeSendEvent | null {
+    return sentryTelemetry.sanitizeBeforeSendEvent(
+      event as sentryTelemetry.SentryBeforeSendEventLike,
+    ) as SentryBeforeSendEvent | null;
+  }
+
+  private static sanitizeEventExceptions(event: SentryBeforeSendEvent): void {
+    sentryTelemetry.sanitizeEventExceptions(event as sentryTelemetry.SentryBeforeSendEventLike);
+  }
+
+  private static sanitizeBreadcrumb(breadcrumb: SentryBreadcrumb): SentryBreadcrumb {
+    return sentryTelemetry.sanitizeBreadcrumb(
+      breadcrumb as sentryTelemetry.SentryBreadcrumbLike,
+    ) as SentryBreadcrumb;
+  }
+
+  private static sanitizeNavigationBreadcrumbData(breadcrumb: SentryBreadcrumb): void {
+    sentryTelemetry.sanitizeNavigationBreadcrumbData(breadcrumb as sentryTelemetry.SentryBreadcrumbLike);
   }
 
   /**
@@ -515,7 +521,7 @@ export class SentryLazyLoaderService {
    */
   setUser(user: { id: string; email?: string } | null): void {
     // 始终缓存脱敏后的用户标识，确保 Sentry 初始化后可以应用且不上传邮箱等 PII
-    const sanitizedUser = SentryLazyLoaderService.sanitizeSentryUser(user);
+    const sanitizedUser = sentryTelemetry.sanitizeSentryUser(user);
     this.pendingUser = sanitizedUser;
     const sentry = this.sentryModule();
     if (sentry) {
@@ -627,101 +633,24 @@ export class SentryLazyLoaderService {
     console.info(message);
   }
 
-  private static isSensitiveTelemetryKey(key: string): boolean {
-    const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, '');
-    return normalized.includes('token')
-      || normalized.includes('secret')
-      || normalized.includes('password')
-      || normalized.includes('passcode')
-      || normalized.includes('apikey')
-      || normalized === 'authorization'
-      || normalized.includes('email')
-      || normalized === 'code';
-  }
-
   private static sanitizeUrlForTelemetry(rawUrl: string): string {
-    try {
-      const base = typeof window !== 'undefined' ? window.location.origin : 'https://placeholder.invalid';
-      const url = new URL(rawUrl, base);
-      for (const key of [...url.searchParams.keys()]) {
-        if (SentryLazyLoaderService.isSensitiveTelemetryKey(key)) {
-          url.searchParams.set(key, SentryLazyLoaderService.REDACTED_VALUE);
-        }
-      }
-      url.hash = '';
-      return url.toString();
-    } catch {
-      return rawUrl.replace(/[?#].*$/, '');
-    }
+    return sentryTelemetry.sanitizeUrlForTelemetry(rawUrl);
   }
 
   private static sanitizeTelemetryString(value: string): string {
-    let sanitized = value.replace(/https?:\/\/[^\s"'<>]+/g, url =>
-      SentryLazyLoaderService.sanitizeUrlForTelemetry(url)
-    );
-    const sensitiveName = SentryLazyLoaderService.SENSITIVE_TELEMETRY_STRING_KEY_PATTERN;
-    sanitized = sanitized.replace(
-      new RegExp(`\\b(${sensitiveName})=([^&\\s'",}]+)`, 'gi'),
-      '$1=[REDACTED]'
-    );
-    sanitized = sanitized.replace(
-      new RegExp(`(["']?\\b${sensitiveName}["']?\\s*:\\s*["']?)([^"',}\\s]+)(["']?)`, 'gi'),
-      '$1[REDACTED]$3'
-    );
-    sanitized = sanitized.replace(
-      /\b(authorization\s*[:=]\s*)(bearer|token)\s+[^\s"',}]+/gi,
-      '$1$2 [REDACTED]'
-    );
-    sanitized = sanitized.replace(
-      /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g,
-      '[REDACTED_JWT]'
-    );
-    return sanitized.replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[REDACTED_EMAIL]');
+    return sentryTelemetry.sanitizeTelemetryString(value);
+  }
+
+  private static shouldDropNonActionableSentryEvent(event: sentryTelemetry.SentryBeforeSendEventLike): boolean {
+    return sentryTelemetry.shouldDropNonActionableSentryEvent(event);
   }
 
   private static redactTelemetryRecord<T extends Record<string, unknown> | undefined>(record: T): T {
-    if (!record) {
-      return record;
-    }
-    return SentryLazyLoaderService.redactTelemetryValue(record) as T;
-  }
-
-  private static redactTelemetryValue(value: unknown, depth = 0): unknown {
-    if (depth > SentryLazyLoaderService.MAX_TELEMETRY_REDACTION_DEPTH) {
-      return SentryLazyLoaderService.REDACTED_VALUE;
-    }
-    if (Array.isArray(value)) {
-      return value.map(item => SentryLazyLoaderService.redactTelemetryValue(item, depth + 1));
-    }
-    if (typeof value === 'string') {
-      return SentryLazyLoaderService.sanitizeTelemetryString(value);
-    }
-    if (!value || typeof value !== 'object') {
-      return value;
-    }
-
-    const redacted: Record<string, unknown> = {};
-    for (const [key, nestedValue] of Object.entries(value as Record<string, unknown>)) {
-      if (SentryLazyLoaderService.isSensitiveTelemetryKey(key)) {
-        redacted[key] = SentryLazyLoaderService.REDACTED_VALUE;
-        continue;
-      }
-      redacted[key] = SentryLazyLoaderService.redactTelemetryValue(nestedValue, depth + 1);
-    }
-    return redacted;
-  }
-
-  private static sanitizeSentryUser(user: { id: string; email?: string } | null): { id: string } | null {
-    return user ? { id: user.id } : null;
+    return sentryTelemetry.redactTelemetryRecord(record);
   }
 
   private static sanitizeSentryEventUser(user: unknown): unknown {
-    if (!user || typeof user !== 'object') {
-      return user;
-    }
-    const { email: _email, ip_address: _ipAddress, username: _username, ...safeUser } =
-      user as Record<string, unknown>;
-    return SentryLazyLoaderService.redactTelemetryRecord(safeUser);
+    return sentryTelemetry.sanitizeSentryEventUser(user);
   }
 
   private isVerboseConsoleEnabled(): boolean {
@@ -746,15 +675,50 @@ export class SentryLazyLoaderService {
     if (explicitRelease) {
       return `nanoflow@${explicitRelease}`;
     }
-    try {
-      const currentScript = document.currentScript as HTMLScriptElement | null;
-      const entryUrl = new URL(currentScript?.src ?? window.location.href, window.location.href);
-      // 提取文件名中的 hash 部分作为构建指纹
-      const pathHash = entryUrl.pathname.replace(/^.*\//, '').replace(/\.\w+$/, '');
-      return `nanoflow@${pathHash}`;
-    } catch {
-      return 'nanoflow@unknown';
+
+    const runtimeFingerprint = this.resolveRuntimeScriptFingerprint();
+    if (runtimeFingerprint) {
+      return `nanoflow@${runtimeFingerprint}`;
     }
+
+    const deploymentEpoch = (environment as { deploymentEpoch?: number | string }).deploymentEpoch;
+    if (deploymentEpoch) {
+      return `nanoflow@epoch-${deploymentEpoch}`;
+    }
+
+    return 'nanoflow@unknown';
+  }
+
+  private resolveRuntimeScriptFingerprint(): string | null {
+    if (typeof document === 'undefined') {
+      return null;
+    }
+
+    const currentScriptSrc = (document.currentScript as HTMLScriptElement | null)?.src;
+    const scriptSources = [
+      currentScriptSrc,
+      ...Array.from(document.scripts).map(script => script.src),
+    ].filter((src): src is string => typeof src === 'string' && src.length > 0);
+
+    const fingerprints = scriptSources
+      .map(src => SentryLazyLoaderService.extractScriptFingerprint(src))
+      .filter((fingerprint): fingerprint is string => fingerprint !== null);
+
+    return fingerprints.find(fingerprint => /^main[-.]/i.test(fingerprint)) ?? fingerprints[0] ?? null;
+  }
+
+  private static extractScriptFingerprint(scriptUrl: string): string | null {
+    let scriptPath = '';
+    try {
+      const base = typeof window !== 'undefined' ? window.location.href : 'https://placeholder.invalid';
+      scriptPath = new URL(scriptUrl, base).pathname;
+    } catch {
+      scriptPath = '';
+    }
+
+    const fileName = scriptPath.split('/').pop() ?? '';
+    const fingerprint = fileName.replace(/\.(?:mjs|js)$/i, '');
+    return fingerprint.length > 0 ? fingerprint : null;
   }
 
   /**

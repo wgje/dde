@@ -8,9 +8,17 @@ import { UserSessionService } from '../../../../services/user-session.service';
 import { UndoService } from '../../../../services/undo.service';
 import { ChangeTrackerService } from '../../../../services/change-tracker.service';
 import { LoggerService } from '../../../../services/logger.service';
+import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
+import { SimpleReminderService } from '../../../../services/simple-reminder.service';
 import { FlowTaskOperationsService } from '../services/flow-task-operations.service';
 import { disablePollutionGuard, enablePollutionGuard } from '../../../../test-setup.mocks';
 import { Task } from '../../../../models';
+import { KnowledgeAnchorComponent } from '../../../shared/components/knowledge-anchor/knowledge-anchor.component';
+import { KnowledgeAnchorStubComponent } from '../../../../tests/stubs/knowledge-anchor.stub';
+import { registerFlowTaskDetailDrawerHeightSpecs } from './flow-task-detail-drawer-height.spec-helpers';
+import { registerFlowTaskDetailInputSpecs } from './flow-task-detail-input.spec-helpers';
+import { registerFlowTaskDetailEditModeSpecs } from './flow-task-detail-edit-mode.spec-helpers';
+import { registerFlowTaskDetailSameTaskUpdateSpecs } from './flow-task-detail-same-task-update.spec-helpers';
 
 describe('FlowTaskDetailComponent - Task Switching Fix', () => {
   let component: FlowTaskDetailComponent;
@@ -21,6 +29,8 @@ describe('FlowTaskDetailComponent - Task Switching Fix', () => {
   let mockUndoService: any;
   let mockChangeTracker: any;
   let mockFlowTaskOps: any;
+  let mockTaskOpsAdapter: any;
+  let mockReminderService: any;
   const defaultRequestAnimationFrame: typeof globalThis.requestAnimationFrame =
     typeof globalThis.requestAnimationFrame === 'function'
       ? globalThis.requestAnimationFrame.bind(globalThis)
@@ -92,6 +102,12 @@ describe('FlowTaskDetailComponent - Task Switching Fix', () => {
         const proj = mockProjectState.activeProject();
         return proj?.tasks.find((t: any) => t.id === taskId) ?? null;
       }),
+      tasks: vi.fn(() => {
+        const tasks = mockProjectState.activeProject()?.tasks ?? [];
+        const inputTask = component?.task?.();
+        return tasks.length || !inputTask ? tasks : [inputTask];
+      }),
+      getTaskConnections: vi.fn(() => ({ outgoing: [], incoming: [] })),
     };
 
     mockUserSession = {
@@ -109,7 +125,18 @@ describe('FlowTaskDetailComponent - Task Switching Fix', () => {
     (mockChangeTracker as any).constructor = { TEXT_INPUT_LOCK_TIMEOUT_MS: 3600000 };
 
     mockFlowTaskOps = {
-      parkTask: vi.fn(),
+      parkTask: vi.fn().mockResolvedValue(true),
+      addQuickTodo: vi.fn().mockResolvedValue(true),
+    };
+    mockTaskOpsAdapter = {
+      updateTaskExpectedMinutes: vi.fn().mockResolvedValue(true),
+      updateTaskWaitMinutes: vi.fn().mockResolvedValue(true),
+      updateTaskCognitiveLoad: vi.fn().mockResolvedValue(true),
+      updateTaskContent: vi.fn().mockResolvedValue(true),
+    };
+    mockReminderService = {
+      setReminder: vi.fn().mockResolvedValue(true),
+      cancelReminder: vi.fn().mockResolvedValue(true),
     };
 
     const mockLoggerService = {
@@ -132,8 +159,13 @@ describe('FlowTaskDetailComponent - Task Switching Fix', () => {
         { provide: UndoService, useValue: mockUndoService },
         { provide: ChangeTrackerService, useValue: mockChangeTracker },
         { provide: FlowTaskOperationsService, useValue: mockFlowTaskOps },
+        { provide: TaskOperationAdapterService, useValue: mockTaskOpsAdapter },
+        { provide: SimpleReminderService, useValue: mockReminderService },
         { provide: LoggerService, useValue: mockLoggerService },
       ],
+    }).overrideComponent(FlowTaskDetailComponent, {
+      remove: { imports: [KnowledgeAnchorComponent] },
+      add: { imports: [KnowledgeAnchorStubComponent] },
     });
 
     mockProjectState.activeProject.set({
@@ -189,6 +221,352 @@ describe('FlowTaskDetailComponent - Task Switching Fix', () => {
       // 验证状态已更新
       expect(component['localTitle']()).toBe('Task B');
       expect(component['localContent']()).toBe('Content B');
+    });
+
+    it('应该暴露当前任务的僚机摘要', () => {
+      const task = {
+        ...createMockTask('task-a', 'Task A', '- [ ] 确认接口字段'),
+        priority: 'high' as const,
+        wait_minutes: 30,
+        cognitive_load: 'high' as const,
+        tags: ['需联调'],
+      };
+      mockProjectState.getTaskConnections.mockReturnValue({
+        outgoing: [{ targetId: 'task-b' }],
+        incoming: [{ sourceId: 'task-c' }],
+      });
+
+      (component as any)['task'] = signal(task);
+      fixture.detectChanges();
+
+      expect(component.sidecarSummary().badges.map(badge => badge.label)).toEqual([
+        '风险1',
+        '等待30m',
+        '高负荷',
+        '需联调',
+      ]);
+      const summary = fixture.nativeElement.querySelector('[data-testid="flow-task-sidecar-summary"]') as HTMLElement | null;
+      expect(summary?.textContent).toContain('风险1');
+      expect(summary?.textContent).toContain('等待30m');
+      expect(summary?.textContent).not.toContain('关联2');
+      expect(summary?.textContent).not.toContain('等待：30 分钟');
+      expect(summary?.getAttribute('title')).toBeNull();
+      const badge = summary?.querySelector('span[tabindex="0"]') as HTMLElement | null;
+      expect(badge?.getAttribute('title')).toBeNull();
+    });
+
+    it('小于 1 分钟的规划输入不应落库为 0 分钟', async () => {
+      const adapter = (component as any).taskOpsAdapter as {
+        updateTaskExpectedMinutes: (taskId: string, minutes: number | null) => Promise<boolean>;
+        updateTaskWaitMinutes: (taskId: string, minutes: number | null) => Promise<boolean>;
+      };
+      const updateExpectedSpy = vi.spyOn(adapter, 'updateTaskExpectedMinutes').mockResolvedValue(true);
+      const updateWaitSpy = vi.spyOn(adapter, 'updateTaskWaitMinutes').mockResolvedValue(true);
+      (component as any)['task'] = signal(createMockTask('task-a', 'Task A', 'Content A'));
+      fixture.detectChanges();
+      await component.onExpectedMinutesChange('task-a', '0.5');
+      await component.onWaitMinutesChange('task-a', '0.5');
+      expect(updateExpectedSpy).toHaveBeenCalledWith('task-a', null);
+      expect(updateWaitSpy).toHaveBeenCalledWith('task-a', null);
+    });
+
+    it('规划字段本地持久化失败时应暴露失败状态', async () => {
+      mockTaskOpsAdapter.updateTaskWaitMinutes.mockResolvedValueOnce(false);
+      const task = createMockTask('task-a', 'Task A', 'Content A');
+      (component as any)['task'] = signal(task);
+      component.isEditMode.set(true);
+      fixture.detectChanges();
+
+      const saved = await component.onWaitMinutesChange('task-a', '20');
+      fixture.detectChanges();
+
+      expect(saved).toBe(false);
+      expect(mockTaskOpsAdapter.updateTaskWaitMinutes).toHaveBeenCalledWith('task-a', 20);
+      expect(component.plannerSaveState()).toBe('failed');
+      expect(fixture.nativeElement.textContent).toContain('规划字段本地保存失败');
+    });
+
+    it('任务切换时应清理规划字段本地保存失败状态', async () => {
+      mockTaskOpsAdapter.updateTaskExpectedMinutes.mockResolvedValueOnce(false);
+      const taskSignal = signal(createMockTask('task-a', 'Task A', 'Content A'));
+      (component as any)['task'] = taskSignal;
+      component.isEditMode.set(true);
+      fixture.detectChanges();
+
+      await component.onExpectedMinutesChange('task-a', '25');
+      expect(component.plannerSaveState()).toBe('failed');
+
+      taskSignal.set(createMockTask('task-b', 'Task B', 'Content B'));
+      fixture.detectChanges();
+
+      expect(component.plannerSaveState()).toBe('idle');
+    });
+
+    it('任务切换后应忽略旧任务 planner 保存的晚到结果', async () => {
+      let resolveSave!: (saved: boolean) => void;
+      mockTaskOpsAdapter.updateTaskExpectedMinutes.mockImplementationOnce(
+        () => new Promise<boolean>(resolve => {
+          resolveSave = resolve;
+        }),
+      );
+      const taskSignal = signal(createMockTask('task-a', 'Task A', 'Content A'));
+      (component as any)['task'] = taskSignal;
+      component.isEditMode.set(true);
+      fixture.detectChanges();
+
+      const saving = component.onExpectedMinutesChange('task-a', '25');
+      expect(component.plannerSaveState()).toBe('saving');
+
+      taskSignal.set(createMockTask('task-b', 'Task B', 'Content B'));
+      fixture.detectChanges();
+      expect(component.plannerSaveState()).toBe('idle');
+
+      resolveSave(false);
+      await expect(saving).resolves.toBe(false);
+
+      expect(component.plannerSaveState()).toBe('idle');
+    });
+
+    it('planner 保存状态应只由同一任务的最新请求结算', async () => {
+      let resolveFirst!: (saved: boolean) => void;
+      let resolveSecond!: (saved: boolean) => void;
+      mockTaskOpsAdapter.updateTaskExpectedMinutes
+        .mockImplementationOnce(() => new Promise<boolean>(resolve => {
+          resolveFirst = resolve;
+        }))
+        .mockImplementationOnce(() => new Promise<boolean>(resolve => {
+          resolveSecond = resolve;
+        }));
+      const task = createMockTask('task-a', 'Task A', 'Content A');
+      (component as any)['task'] = signal(task);
+      component.isEditMode.set(true);
+      fixture.detectChanges();
+
+      const firstSave = component.onExpectedMinutesChange('task-a', '20');
+      const secondSave = component.onExpectedMinutesChange('task-a', '30');
+      expect(component.plannerSaveState()).toBe('saving');
+
+      resolveFirst(true);
+      await expect(firstSave).resolves.toBe(true);
+      expect(component.plannerSaveState()).toBe('saving');
+
+      resolveSecond(false);
+      await expect(secondSave).resolves.toBe(false);
+      expect(component.plannerSaveState()).toBe('failed');
+    });
+
+    it('planner 保存 rejection 应收口为 false 并标记失败', async () => {
+      mockTaskOpsAdapter.updateTaskWaitMinutes.mockRejectedValueOnce(new Error('persist failed'));
+      const task = createMockTask('task-a', 'Task A', 'Content A');
+      (component as any)['task'] = signal(task);
+      component.isEditMode.set(true);
+      fixture.detectChanges();
+
+      await expect(component.onWaitMinutesChange('task-a', '15')).resolves.toBe(false);
+
+      expect(component.plannerSaveState()).toBe('failed');
+    });
+
+    it('组件销毁后不应由 planner 保存晚到结果改写状态', async () => {
+      let resolveSave!: (saved: boolean) => void;
+      mockTaskOpsAdapter.updateTaskExpectedMinutes.mockImplementationOnce(
+        () => new Promise<boolean>(resolve => {
+          resolveSave = resolve;
+        }),
+      );
+      const task = createMockTask('task-a', 'Task A', 'Content A');
+      (component as any)['task'] = signal(task);
+      component.isEditMode.set(true);
+      fixture.detectChanges();
+
+      const saving = component.onExpectedMinutesChange('task-a', '25');
+      expect(component.plannerSaveState()).toBe('saving');
+
+      component.ngOnDestroy();
+      expect(component.plannerSaveState()).toBe('idle');
+      resolveSave(false);
+      await expect(saving).resolves.toBe(false);
+
+      expect(component.plannerSaveState()).toBe('idle');
+    });
+
+    it('应该使用主题化浮层预览僚机徽标内容', () => {
+      const trigger = document.createElement('span');
+      Object.defineProperty(trigger, 'getBoundingClientRect', {
+        value: () => ({ left: 100, right: 148, top: 120, height: 18, width: 48, bottom: 138, x: 100, y: 120, toJSON: () => ({}) }),
+      });
+
+      component.showSidecarBadgePreview(
+        { currentTarget: trigger } as unknown as Event,
+        { id: 'attention-1', label: '注意1', tone: 'attention', tooltipText: 'Token 过期需刷新' },
+      );
+
+      const preview = document.body.querySelector('[data-testid="flow-task-sidecar-badge-preview"]') as HTMLElement | null;
+      expect(preview).not.toBeNull();
+      expect(preview?.textContent).toContain('注意1');
+      expect(preview?.textContent).toContain('Token 过期需刷新');
+      expect(preview?.style.position).toBe('fixed');
+      expect(preview?.style.zIndex).toBe('90');
+      expect(preview?.style.pointerEvents).toBe('none');
+
+      component.hideSidecarBadgePreview();
+      expect(document.body.querySelector('[data-testid="flow-task-sidecar-badge-preview"]')).toBeNull();
+    });
+
+    it('应该在僚机草稿变化时发射 attentionChange', () => {
+      const task = {
+        ...createMockTask('task-a', 'Task A', 'Content A'),
+        attentionMeta: {
+          items: [
+            {
+              id: 'attention-1',
+              text: 'Token 过期需刷新',
+              level: 'warning' as const,
+              done: false,
+              createdAt: '2026-06-05T00:00:00.000Z',
+              updatedAt: '2026-06-05T00:00:00.000Z',
+            },
+          ],
+          updatedAt: '2026-06-05T00:00:00.000Z',
+        },
+      };
+      (component as any)['task'] = signal(task);
+      fixture.detectChanges();
+
+      let emitted: any = null;
+      component.attentionChange.subscribe((event) => {
+        emitted = event;
+      });
+
+      component.onLocalAttentionDraftChange('Token 过期需刷新\n接口字段未冻结');
+
+      expect(emitted).toEqual({
+        taskId: 'task-a',
+        items: [
+          {
+            id: 'attention-1',
+            text: 'Token 过期需刷新',
+            level: 'warning',
+            done: false,
+            createdAt: '2026-06-05T00:00:00.000Z',
+          },
+          {
+            id: undefined,
+            text: '接口字段未冻结',
+            level: 'info',
+            done: false,
+            createdAt: undefined,
+          },
+        ],
+      });
+
+      component.addAttentionDraftRow();
+      component.onAttentionDraftRowChange(2, '上线前再检查权限');
+
+      expect(emitted.items.map((item: { text: string }) => item.text)).toEqual([
+        'Token 过期需刷新',
+        '接口字段未冻结',
+        '上线前再检查权限',
+      ]);
+
+      component.removeAttentionDraftRow(0);
+
+      expect(emitted.items.map((item: { text: string }) => item.text)).toEqual([
+        '接口字段未冻结',
+        '上线前再检查权限',
+      ]);
+    });
+
+    it('聚焦僚机草稿时不应被任务元数据刷新覆盖', () => {
+      const task = {
+        ...createMockTask('task-a', 'Task A', 'Content A'),
+        attentionMeta: {
+          items: [
+            {
+              id: 'attention-1',
+              text: 'Token 过期需刷新',
+              level: 'warning' as const,
+              done: false,
+              createdAt: '2026-06-05T00:00:00.000Z',
+              updatedAt: '2026-06-05T00:00:00.000Z',
+            },
+          ],
+          updatedAt: '2026-06-05T00:00:00.000Z',
+        },
+      };
+      const taskSignal = signal(task);
+      (component as any)['task'] = taskSignal;
+      fixture.detectChanges();
+
+      component.onAttentionFocus();
+      component.addAttentionDraftRow();
+
+      taskSignal.set({
+        ...task,
+        updatedAt: '2026-06-05T00:01:00.000Z',
+        attentionMeta: {
+          items: [
+            {
+              id: 'attention-1',
+              text: 'Token 过期需刷新',
+              level: 'warning' as const,
+              done: false,
+              createdAt: '2026-06-05T00:00:00.000Z',
+              updatedAt: '2026-06-05T00:01:00.000Z',
+            },
+          ],
+          updatedAt: '2026-06-05T00:01:00.000Z',
+        },
+      });
+      fixture.detectChanges();
+
+      expect(component.localAttentionDraft()).toBe('Token 过期需刷新\n');
+
+      component.onAttentionBlur();
+
+      expect(component.localAttentionDraft()).toBe('Token 过期需刷新');
+    });
+
+    it('僚机草稿失焦时应保留刚输入但父任务输入尚未刷新的内容', () => {
+      const task = {
+        ...createMockTask('task-a', 'Task A', 'Content A'),
+        attentionMeta: {
+          items: [
+            {
+              id: 'attention-1',
+              text: 'Token 过期需刷新',
+              level: 'warning' as const,
+              done: false,
+              createdAt: '2026-06-05T00:00:00.000Z',
+              updatedAt: '2026-06-05T00:00:00.000Z',
+            },
+          ],
+          updatedAt: '2026-06-05T00:00:00.000Z',
+        },
+      };
+      (component as any)['task'] = signal(task);
+      fixture.detectChanges();
+
+      let emitted: any = null;
+      component.attentionChange.subscribe((event) => {
+        emitted = event;
+      });
+
+      component.onAttentionFocus();
+      component.onAttentionDraftRowChange(0, 'Token 过期需刷新；先轮换密钥');
+      component.onAttentionBlur();
+
+      expect(emitted).toEqual({
+        taskId: 'task-a',
+        items: [
+          expect.objectContaining({
+            id: 'attention-1',
+            text: 'Token 过期需刷新；先轮换密钥',
+          }),
+        ],
+      });
+      expect(component.localAttentionDraft()).toBe('Token 过期需刷新；先轮换密钥');
+      expect(component.attentionDraftRows().map(row => row.text)).toEqual(['Token 过期需刷新；先轮换密钥']);
     });
 
     it('应该在任务切换时解锁旧任务的字段', () => {
@@ -321,626 +699,100 @@ describe('FlowTaskDetailComponent - Task Switching Fix', () => {
 
       expect(emittedEvent).toEqual({ taskId: 'task-b', title: 'User Input' });
     });
-  });
-
-  describe('同一任务的更新', () => {
-    it('应该在内容更新且未聚焦时同步 localContent', () => {
-      const task = createMockTask('task-a', 'Task A', 'Content A');
-
-      // 初始设置
-      (component as any)['task'] = signal(task);
-      fixture.detectChanges();
-
-      expect(component['localContent']()).toBe('Content A');
-
-      // 更新任务内容（同一任务 ID）
-      const updatedTask = { ...task, content: 'Updated Content A' };
-      (component as any)['task'].set(updatedTask);
-      fixture.detectChanges();
-
-      // 验证内容已同步（因为未聚焦）
-      expect(component['localContent']()).toBe('Updated Content A');
-    });
-
-    it('应该在内容更新但已聚焦时保持 localContent 不变', () => {
-      const task = createMockTask('task-a', 'Task A', 'Content A');
-
-      // 初始设置
-      (component as any)['task'] = signal(task);
-      fixture.detectChanges();
-
-      // 聚焦内容输入框
-      component.onInputFocus('content');
-      component['localContent'].set('Local Edit');
-
-      // 更新任务内容（模拟远程更新）
-      const updatedTask = { ...task, content: 'Remote Update' };
-      (component as any)['task'].set(updatedTask);
-      fixture.detectChanges();
-
-      // 验证 localContent 保持用户编辑的值（Split-Brain 防护）
-      expect(component['localContent']()).toBe('Local Edit');
-    });
-
-    it('应该在撤销回放命中当前任务内容时覆盖聚焦中的本地缓冲', () => {
-      const task = createMockTask('task-a', 'Task A', 'Content A');
-
-      (component as any)['task'] = signal(task);
-      fixture.detectChanges();
-
-      component.onInputFocus('content');
-      component['localContent'].set('');
-
-      (component as any)['task'].set({ ...task, content: 'Recovered Content' });
-      fixture.detectChanges();
-      expect(component['localContent']()).toBe('');
-
-      mockUndoService.appliedReplay.set({
-        sequence: 1,
-        kind: 'undo',
-        projectId: 'project-1',
-        taskFieldChanges: { 'task-a': ['content'] },
-      });
-      fixture.detectChanges();
-
-      expect(component['localContent']()).toBe('Recovered Content');
-
-      component['localContent'].set('Resume Edit');
-      (component as any)['task'].set({ ...task, content: 'Remote Update After Replay' });
-      fixture.detectChanges();
-
-      expect(component['localContent']()).toBe('Resume Edit');
-    });
-  });
-
-  describe('编辑模式切换', () => {
-    it('应该正确切换编辑模式', async () => {
-      // 使用 fake timers 避免等待真实的 350ms
-      vi.useFakeTimers();
-      
-      const task = createMockTask('task-a', 'Task A', 'Content A');
-      (component as any)['task'] = signal(task);
-      fixture.detectChanges();
-
-      expect(component.isEditMode()).toBe(false);
-
-      component.toggleEditMode();
-      expect(component.isEditMode()).toBe(true);
-
-      // 使用 fake timers 快进节流时间（300ms + 余量）
-      await vi.advanceTimersByTimeAsync(350);
-
-      component.toggleEditMode();
-      expect(component.isEditMode()).toBe(false);
-      
-      vi.useRealTimers();
-    });
-
-    it('应该防止快速连续切换（节流保护）', () => {
-      const task = createMockTask('task-a', 'Task A', 'Content A');
-      (component as any)['task'] = signal(task);
-      fixture.detectChanges();
-
-      component.toggleEditMode();
-      expect(component.isEditMode()).toBe(true);
-      expect(component['isTogglingMode']()).toBe(true);
-
-      // 快速再次点击应被忽略
-      component.toggleEditMode();
-      expect(component.isEditMode()).toBe(true); // 仍然是 true
-    });
-
-    it('编辑切换按钮只应在节流窗口内禁用', async () => {
-      vi.useFakeTimers();
-
-      const task = createMockTask('task-a', 'Task A', 'Content A');
-      (component as any)['task'] = signal(task);
-      fixture.detectChanges();
-
-      const editButton = fixture.nativeElement.querySelector('[data-testid="flow-edit-toggle-btn"]') as HTMLButtonElement | null;
-      expect(editButton?.disabled).toBe(false);
-
-      component.toggleEditMode();
-      fixture.detectChanges();
-      expect(editButton?.disabled).toBe(true);
-
-      await vi.advanceTimersByTimeAsync(300);
-      fixture.detectChanges();
-      expect(editButton?.disabled).toBe(false);
-
-      vi.clearAllTimers();
-      vi.useRealTimers();
-    });
-
-    it('任务切换后立刻点击预览区不应进入编辑态或卡住节流', () => {
-      vi.useFakeTimers();
-      vi.setSystemTime(new Date('2026-03-11T00:00:00.000Z'));
-
-      const taskA = createMockTask('task-a', 'Task A', 'Content A');
-      const taskB = createMockTask('task-b', 'Task B', 'Content B');
-
+    it('项目切换应退役详情态并拒绝所有过期直达写入', async () => {
+      const taskA = createMockTask('task-a', 'Task A', '- [ ] Todo');
+      const taskB = createMockTask('task-b', 'Task B', 'B');
       (component as any)['task'] = signal(taskA);
+      mockProjectState.activeProject.set({ ...mockProjectState.activeProject(), tasks: [taskA] });
       fixture.detectChanges();
-
-      (component as any)['task'].set(taskB);
+      component.showReminderMenu.set(true);
+      mockProjectState.activeProjectId.set('project-1');
       fixture.detectChanges();
-
-      component.onPreviewClick(createClickEvent(100));
-
-      expect(component.isEditMode()).toBe(false);
-      expect(component['isTogglingMode']()).toBe(false);
-
-      vi.useRealTimers();
-    });
-
-    it('预览区主动进入编辑态时，同一点击不应被 document:click 立即撤销', () => {
-      vi.useFakeTimers();
-      vi.setSystemTime(new Date('2026-03-11T00:00:00.000Z'));
-
-      const task = createMockTask('task-a', 'Task A', 'Content A');
-      (component as any)['task'] = signal(task);
-      fixture.detectChanges();
-
-      vi.advanceTimersByTime(181);
-
-      const previewClick = createClickEvent(200);
-      component.onPreviewClick(previewClick);
-      component.onDocumentClick(previewClick);
-
-      expect(component.isEditMode()).toBe(true);
-
-      vi.useRealTimers();
-    });
-
-    it('任务刚切换后的编辑按钮应确保保留编辑态，而不是把意外编辑态切回预览', () => {
-      vi.useFakeTimers();
-      vi.setSystemTime(new Date('2026-03-11T00:00:00.000Z'));
-
-      const task = createMockTask('task-a', 'Task A', 'Content A');
-      (component as any)['task'] = signal(task);
-      fixture.detectChanges();
-
-      component.isEditMode.set(true);
-      component['isTogglingMode'].set(true);
-
-      component.onEditToggleClick();
-
-      expect(component.isEditMode()).toBe(true);
-      expect(component['isTogglingMode']()).toBe(false);
-
-      vi.useRealTimers();
-    });
-
-    it('后续新的 document:click 仍应正常退出编辑态', () => {
-      vi.useFakeTimers();
-      vi.setSystemTime(new Date('2026-03-11T00:00:00.000Z'));
-
-      const task = createMockTask('task-a', 'Task A', 'Content A');
-      (component as any)['task'] = signal(task);
-      fixture.detectChanges();
-
-      vi.advanceTimersByTime(181);
-
-      component.onPreviewClick(createClickEvent(300));
-      expect(component.isEditMode()).toBe(true);
-
-      component.onDocumentClick(createClickEvent(301));
-      expect(component.isEditMode()).toBe(false);
-      expect(component['isTogglingMode']()).toBe(false);
-
-      vi.useRealTimers();
-    });
-
-    it('存在文本选区时第一次外部点击应只清空选区，第二次才退出编辑态', () => {
-      vi.useFakeTimers();
-      vi.setSystemTime(new Date('2026-03-11T00:00:00.000Z'));
-
-      const task = createMockTask('task-a', 'Task A', 'Content A');
-      (component as any)['task'] = signal(task);
-      fixture.detectChanges();
-
-      vi.advanceTimersByTime(181);
-
-      component.onPreviewClick(createClickEvent(400));
-      expect(component.isEditMode()).toBe(true);
-
-      let selectionActive = true;
-      const removeAllRanges = vi.fn(() => {
-        selectionActive = false;
-      });
-      const getSelectionSpy = vi.spyOn(window, 'getSelection').mockReturnValue({
-        toString: () => selectionActive ? 'Task' : '',
-        rangeCount: selectionActive ? 1 : 0,
-        isCollapsed: !selectionActive,
-        removeAllRanges,
-      } as unknown as Selection);
-
-      try {
-        component.onDocumentClick(createClickEvent(401));
-
-        expect(removeAllRanges).toHaveBeenCalledTimes(1);
-        expect(component.isEditMode()).toBe(true);
-
-        component.onDocumentClick(createClickEvent(402));
-
-        expect(component.isEditMode()).toBe(false);
-        expect(component['isTogglingMode']()).toBe(false);
-      } finally {
-        getSelectionSpy.mockRestore();
-      }
-
-      vi.useRealTimers();
-    });
-  });
-
-  describe('输入处理', () => {
-    it('应该在标题变更时发射事件', async () => {
-      const task = createMockTask('task-a', 'Task A', 'Content A');
-      (component as any)['task'] = signal(task);
-      fixture.detectChanges();
-      
-      // 🔴 等待 queueMicrotask 完成，确保 isTaskSwitching 标志被重置
-      await Promise.resolve();
-
-      let emittedEvent: any;
-      component.titleChange.subscribe((event) => {
-        emittedEvent = event;
-      });
-
-      component.onLocalTitleChange('New Title');
-
-      expect(emittedEvent).toEqual({ taskId: 'task-a', title: 'New Title' });
-      expect(component['localTitle']()).toBe('New Title');
-    });
-
-    it('应该在内容变更时发射事件', async () => {
-      const task = createMockTask('task-a', 'Task A', 'Content A');
-      (component as any)['task'] = signal(task);
-      fixture.detectChanges();
-      
-      // 🔴 等待 queueMicrotask 完成，确保 isTaskSwitching 标志被重置
-      await Promise.resolve();
-
-      let emittedEvent: any;
-      component.contentChange.subscribe((event) => {
-        emittedEvent = event;
-      });
-
-      component.onLocalContentChange('New Content');
-
-      expect(emittedEvent).toEqual({ taskId: 'task-a', content: 'New Content' });
-      expect(component['localContent']()).toBe('New Content');
-    });
-
-    it('应该在聚焦时锁定字段', () => {
-      const task = createMockTask('task-a', 'Task A', 'Content A');
-      (component as any)['task'] = signal(task);
-      fixture.detectChanges();
-
-      component.onInputFocus('title');
-
-      expect(mockChangeTracker.lockTaskField).toHaveBeenCalledWith(
-        'task-a',
-        'project-1',
-        'title',
-        expect.any(Number)
-      );
-      expect(component.formService.isTitleFocused).toBe(true);
-    });
-
-    it('点击停泊按钮时应发射 parkTask 事件', () => {
-      const task = createMockTask('task-a', 'Task A', 'Content A');
-      (component as any)['task'] = signal(task);
-      fixture.detectChanges();
-
-      let emittedTask: any = null;
-      component.parkTask.subscribe((event) => {
-        emittedTask = event;
-      });
-
-      const parkButton = fixture.nativeElement.querySelector('[data-testid="flow-task-park-button"]') as HTMLButtonElement | null;
-      parkButton?.click();
-
-      expect(mockFlowTaskOps.parkTask).toHaveBeenCalledWith(task);
-      expect(emittedTask?.id).toBe('task-a');
-    });
-
-    it('未停泊任务点击提醒按钮时应先发射 parkTask 事件并打开提醒菜单', () => {
-      const task = createMockTask('task-a', 'Task A', 'Content A');
-      (component as any)['task'] = signal(task);
-      fixture.detectChanges();
-
-      let emittedTask: any = null;
-      component.parkTask.subscribe((event) => {
-        emittedTask = event;
-      });
-
-      const reminderButton = fixture.nativeElement.querySelector('[data-testid="flow-task-reminder-trigger"]') as HTMLButtonElement | null;
-      reminderButton?.click();
-      fixture.detectChanges();
-
-      expect(mockFlowTaskOps.parkTask).toHaveBeenCalledWith(task);
-      expect(emittedTask?.id).toBe('task-a');
       expect(component.showReminderMenu()).toBe(true);
-    });
-
-    it('应该在失焦时延迟解锁字段', async () => {
-      // 使用 fake timers 加速测试
-      vi.useFakeTimers();
-
-      const task = createMockTask('task-a', 'Task A', 'Content A');
-      (component as any)['task'] = signal(task);
+      const detailChange = vi.fn();
+      const parkTask = vi.fn();
+      component.titleChange.subscribe(detailChange);
+      component.contentChange.subscribe(detailChange);
+      component.attentionChange.subscribe(detailChange);
+      component.parkTask.subscribe(parkTask);
+      mockProjectState.activeProjectId.set('project-2');
+      mockProjectState.activeProject.set({ ...mockProjectState.activeProject(), id: 'project-2', tasks: [taskB] });
       fixture.detectChanges();
-
-      component.onInputFocus('title');
-      component.onInputBlur('title');
-
-      // 验证定时器已创建
-      expect(component.formService['unlockTimers'].size).toBe(1);
-      expect(component.formService.isTitleFocused).toBe(true); // 仍然为 true（延迟解锁）
-
-      // 使用 fake timers 快进 10.1 秒
-      await vi.advanceTimersByTimeAsync(10100);
-
-      expect(component.formService.isTitleFocused).toBe(false);
-      expect(component.formService['unlockTimers'].size).toBe(0);
-      
-      vi.useRealTimers();
-    }, 5000);
-
-    it('点击任务 markdown 链接时应发射 openLinkedTask，而不是进入编辑态', () => {
-      const emitSpy = vi.spyOn(component.openLinkedTask, 'emit');
-      const anchor = document.createElement('a');
-      anchor.setAttribute('href', '#task:linked-task');
-      anchor.setAttribute('data-link-kind', 'task');
-      anchor.setAttribute('data-task-link-id', 'linked-task');
-      const stopPropagation = vi.fn();
-      const preventDefault = vi.fn();
-
-      component.onPreviewClick({ target: anchor, stopPropagation, preventDefault } as unknown as MouseEvent);
-
-      expect(stopPropagation).toHaveBeenCalled();
-      expect(preventDefault).toHaveBeenCalled();
-      expect(emitSpy).toHaveBeenCalledWith('linked-task');
-      expect(component.isEditMode()).toBe(false);
+      await Promise.resolve();
+      component.onLocalTitleChange('stale');
+      component.onLocalContentChange('stale');
+      component.onLocalAttentionDraftChange('stale');
+      const plannerSaved = await Promise.all([component.onExpectedMinutesChange(taskA.id, 20), component.onWaitMinutesChange(taskA.id, 20), component.onCognitiveLoadChange(taskA.id, 'high')]);
+      const input = Object.assign(document.createElement('input'), { value: 'stale todo' });
+      const quickSaved = await component.addQuickTodo(taskA.id, input);
+      await Promise.all([component.onParkTaskClick(taskA), component.setReminderPreset(taskA.id, 5), component.clearReminder(taskA.id)]);
+      const checkbox = document.createElement('button');
+      checkbox.dataset['todoIndex'] = '0';
+      await component.onPreviewClick({ target: checkbox, stopPropagation: vi.fn() } as unknown as MouseEvent);
+      expect.soft(component.showReminderMenu()).toBe(false);
+      expect.soft(detailChange).not.toHaveBeenCalled();
+      expect.soft(plannerSaved).toEqual([false, false, false]);
+      expect.soft(quickSaved).toBe(false);
+      expect.soft([mockTaskOpsAdapter.updateTaskExpectedMinutes, mockTaskOpsAdapter.updateTaskWaitMinutes, mockTaskOpsAdapter.updateTaskCognitiveLoad].every(mock => mock.mock.calls.length === 0)).toBe(true);
+      expect.soft(mockTaskOpsAdapter.updateTaskContent).not.toHaveBeenCalled();
+      expect.soft(mockFlowTaskOps.parkTask).not.toHaveBeenCalled();
+      expect.soft(mockReminderService.setReminder).not.toHaveBeenCalled();
+      expect.soft(mockReminderService.cancelReminder).not.toHaveBeenCalled();
+      expect.soft(parkTask).not.toHaveBeenCalled();
     });
-
-    it('点击外链时应保持预览态', () => {
-      const anchor = document.createElement('a');
-      anchor.setAttribute('href', 'https://example.com');
-      anchor.setAttribute('data-link-kind', 'external');
-      const stopPropagation = vi.fn();
-      const preventDefault = vi.fn();
-
-      component.onPreviewClick({ target: anchor, stopPropagation, preventDefault } as unknown as MouseEvent);
-
-      expect(stopPropagation).toHaveBeenCalled();
-      expect(preventDefault).not.toHaveBeenCalled();
-      expect(component.isEditMode()).toBe(false);
-    });
-
-    it('点击 blocked 链接时应阻止默认行为并保持预览态', () => {
-      const emitSpy = vi.spyOn(component.openLinkedTask, 'emit');
-      const anchor = document.createElement('a');
-      anchor.setAttribute('href', '#__nf_blocked__');
-      anchor.setAttribute('data-link-kind', 'blocked');
-      const stopPropagation = vi.fn();
-      const preventDefault = vi.fn();
-
-      component.onPreviewClick({ target: anchor, stopPropagation, preventDefault } as unknown as MouseEvent);
-
-      expect(stopPropagation).toHaveBeenCalled();
-      expect(preventDefault).toHaveBeenCalled();
-      expect(emitSpy).not.toHaveBeenCalled();
-      expect(component.isEditMode()).toBe(false);
-    });
-
-    it('点击本地路径链接时应尝试打开并保持预览态', async () => {
-      const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
-      const writeText = vi.fn().mockResolvedValue(undefined);
-      const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);
-      Object.defineProperty(navigator, 'clipboard', {
-        configurable: true,
-        value: { writeText },
+    it('自动停泊替换任务对象后仍应为同一项目任务写入提醒', async () => {
+      const taskA = createMockTask('task-a', 'Task A', 'Content A');
+      (component as any)['task'] = signal(taskA);
+      mockProjectState.activeProject.set({ ...mockProjectState.activeProject(), tasks: [taskA] });
+      mockFlowTaskOps.parkTask.mockImplementationOnce(async () => {
+        const parkedTask = { ...taskA, parkingMeta: { state: 'parked' as const, parkedAt: '2026-07-29T00:00:00.000Z', lastVisitedAt: '2026-07-29T00:00:00.000Z', contextSnapshot: null, reminder: null, pinned: false } };
+        mockProjectState.activeProject.set({ ...mockProjectState.activeProject(), tasks: [parkedTask] });
+        return true;
       });
-
-      try {
-        const anchor = document.createElement('a');
-        anchor.setAttribute('href', '#local-path');
-        anchor.setAttribute('data-link-kind', 'local');
-        anchor.setAttribute('data-local-link-path', 'C:\\Docs\\Plan.md');
-        const stopPropagation = vi.fn();
-        const preventDefault = vi.fn();
-
-        component.onPreviewClick({ target: anchor, stopPropagation, preventDefault } as unknown as MouseEvent);
-        await Promise.resolve();
-
-        expect(stopPropagation).toHaveBeenCalled();
-        expect(preventDefault).toHaveBeenCalled();
-        expect(component.isEditMode()).toBe(false);
-        expect(writeText).toHaveBeenCalledWith('C:\\Docs\\Plan.md');
-        expect(clickSpy).toHaveBeenCalled();
-      } finally {
-        clickSpy.mockRestore();
-        if (originalClipboard) {
-          Object.defineProperty(navigator, 'clipboard', originalClipboard);
-        } else {
-          Reflect.deleteProperty(navigator as object, 'clipboard');
-        }
-      }
-    });
-  });
-
-  describe('移动端抽屉高度自适应', () => {
-    it('自动高度模式下不应隐藏操作区（删除按钮必须可见）', () => {
-      (component as any)['autoHeightEnabled'] = signal(true);
-      (component as any)['drawerHeight'] = signal(8.5);
-
-      expect(component.isCompactMode()).toBe(false);
-    });
-
-    it('手动拖拽模式下允许进入紧凑态', () => {
-      (component as any)['autoHeightEnabled'] = signal(false);
-      (component as any)['drawerHeight'] = signal(8.5);
-
-      expect(component.isCompactMode()).toBe(true);
-    });
-
-    it('任务无关字段变化不应重复触发重测签名', () => {
-      const task = createMockTask('task-a', 'Task A', 'Content A');
-      (component as any)['task'] = signal(task);
-      (component as any)['autoHeightEnabled'] = signal(true);
-      mockUiState.isMobile.set(true);
-      mockUiState.isFlowDetailOpen.set(true);
       fixture.detectChanges();
 
-      const signature = (component as any).lastAutoHeightSignature;
-      (component as any)['task'].set({ ...task, x: 88, y: 99 });
-      fixture.detectChanges();
+      await component.setReminderPreset(taskA.id, 5);
 
-      expect((component as any).lastAutoHeightSignature).toBe(signature);
+      expect(mockReminderService.setReminder).toHaveBeenCalledTimes(1);
     });
-
-    it('幂等算法：重复调用 measureAndEmitHeight 不应多次 emit', async () => {
-      vi.useFakeTimers();
-      const originalRaf = globalThis.requestAnimationFrame;
-      const originalCancelRaf = globalThis.cancelAnimationFrame;
-
-      globalThis.requestAnimationFrame = ((cb: FrameRequestCallback): number => {
-        cb(0);
-        return 1;
-      }) as typeof requestAnimationFrame;
-      globalThis.cancelAnimationFrame = (() => undefined) as typeof cancelAnimationFrame;
-
-      try {
-        mockUiState.isMobile.set(true);
-        mockUiState.isFlowDetailOpen.set(true);
-
-        const task = createMockTask('task-a', 'Task A', 'Short content');
-        (component as any)['task'] = signal(task);
-
-        const viewportHeight = window.innerHeight || 844;
-        (component as any)['drawerHeight'] = signal(12);
-        (component as any)['autoHeightEnabled'] = signal(true);
-
-        fixture.detectChanges();
-
-        // 构建 mock DOM 元素
-        const container = document.createElement('div');
-        const title = document.createElement('div');
-        const content = document.createElement('div');
-        const handle = document.createElement('div');
-        const contentChild = document.createElement('div');
-        content.appendChild(contentChild);
-
-        Object.defineProperty(title, 'offsetHeight', { configurable: true, get: () => 20 });
-        Object.defineProperty(handle, 'offsetHeight', { configurable: true, get: () => 11 });
-        // 子元素高 165px（含 margin 0）
-        Object.defineProperty(contentChild, 'getBoundingClientRect', {
-          configurable: true,
-          value: () => ({ x: 0, y: 0, width: 200, height: 165, top: 0, right: 200, bottom: 165, left: 0, toJSON: () => ({}) })
-        });
-
-        (component as any).mobileDrawer = { nativeElement: container };
-        (component as any).mobileDrawerTitle = { nativeElement: title };
-        (component as any).mobileDrawerContent = { nativeElement: content };
-        (component as any).mobileDrawerHandle = { nativeElement: handle };
-
-        const emittedHeights: number[] = [];
-        component.drawerHeightChange.subscribe((value) => {
-          emittedHeights.push(value);
-          (component as any)['drawerHeight'].set(value);
-        });
-
-        // 第一次测量：应 emit（advanceTimersByTime 避免 ParkingService 递归 setTimeout 导致 10000 timer 限制）
-        (component as any).requestAutoHeight();
-        vi.advanceTimersByTime(200);
-
-        const firstEmitCount = emittedHeights.length;
-        expect(firstEmitCount).toBeGreaterThan(0);
-
-        // 第二次测量：内容不变，lastEmittedVh 已缓存，不应再 emit
-        (component as any).requestAutoHeight();
-        vi.advanceTimersByTime(200);
-
-        expect(emittedHeights.length).toBe(firstEmitCount);
-      } finally {
-        globalThis.requestAnimationFrame = originalRaf;
-        globalThis.cancelAnimationFrame = originalCancelRaf;
-        vi.useRealTimers();
-      }
-    }, 5000);
-
-    it('算法: targetPx = titleH + intrinsicContentH + handleH + guard', async () => {
-      vi.useFakeTimers();
-      const originalRaf = globalThis.requestAnimationFrame;
-      const originalCancelRaf = globalThis.cancelAnimationFrame;
-
-      globalThis.requestAnimationFrame = ((cb: FrameRequestCallback): number => {
-        cb(0);
-        return 1;
-      }) as typeof requestAnimationFrame;
-      globalThis.cancelAnimationFrame = (() => undefined) as typeof cancelAnimationFrame;
-
-      try {
-        mockUiState.isMobile.set(true);
-        mockUiState.isFlowDetailOpen.set(true);
-
-        const task = createMockTask('task-a', 'Task A', 'Short content');
-        (component as any)['task'] = signal(task);
-
-        const viewportHeight = window.innerHeight || 844;
-        (component as any)['drawerHeight'] = signal(12);
-        (component as any)['autoHeightEnabled'] = signal(true);
-
-        fixture.detectChanges();
-
-        // 构建 mock DOM：一个内容子元素 90px，加按钮区 45px
-        const container = document.createElement('div');
-        const title = document.createElement('div');
-        const content = document.createElement('div');
-        const handle = document.createElement('div');
-        const contentBody = document.createElement('div');
-        const actionSection = document.createElement('div');
-        content.appendChild(contentBody);
-        content.appendChild(actionSection);
-
-        Object.defineProperty(title, 'offsetHeight', { configurable: true, get: () => 20 });
-        Object.defineProperty(handle, 'offsetHeight', { configurable: true, get: () => 11 });
-        Object.defineProperty(contentBody, 'getBoundingClientRect', {
-          configurable: true,
-          value: () => ({ x: 0, y: 0, width: 200, height: 90, top: 0, right: 200, bottom: 90, left: 0, toJSON: () => ({}) })
-        });
-        Object.defineProperty(actionSection, 'getBoundingClientRect', {
-          configurable: true,
-          value: () => ({ x: 0, y: 90, width: 200, height: 45, top: 90, right: 200, bottom: 135, left: 0, toJSON: () => ({}) })
-        });
-
-        (component as any).mobileDrawer = { nativeElement: container };
-        (component as any).mobileDrawerTitle = { nativeElement: title };
-        (component as any).mobileDrawerContent = { nativeElement: content };
-        (component as any).mobileDrawerHandle = { nativeElement: handle };
-
-        const emittedHeights: number[] = [];
-        component.drawerHeightChange.subscribe((value) => {
-          emittedHeights.push(value);
-          (component as any)['drawerHeight'].set(value);
-        });
-
-        (component as any).requestAutoHeight();
-        vi.advanceTimersByTime(200);
-
-        // targetPx = 20 + (90+45) + 11 + 4 = 170
-        const expectedPx = 20 + 135 + 11 + 4;
-        const expectedVh = (expectedPx / viewportHeight) * 100;
-
-        expect(emittedHeights.length).toBeGreaterThan(0);
-        expect(emittedHeights[0]).toBeCloseTo(expectedVh, 1);
-      } finally {
-        globalThis.requestAnimationFrame = originalRaf;
-        globalThis.cancelAnimationFrame = originalCancelRaf;
-        vi.useRealTimers();
-      }
+    it('同项目 A→B→A 后应拒绝旧预览、待办、提醒和 planner 完成', async () => {
+      const taskA = createMockTask('task-a', 'Task A', '- [ ] Todo'), taskB = createMockTask('task-b', 'Task B', 'B');
+      const replacementA = createMockTask('task-a', 'Current A', 'Current A content');
+      let resolveContent!: (saved: boolean) => void, resolveTodo!: (saved: boolean) => void, resolvePlanner!: (saved: boolean) => void, resolveReminder!: (saved: boolean) => void;
+      mockTaskOpsAdapter.updateTaskContent.mockReturnValueOnce(new Promise(resolve => { resolveContent = resolve; }));
+      mockFlowTaskOps.addQuickTodo.mockReturnValueOnce(new Promise(resolve => { resolveTodo = resolve; }));
+      mockTaskOpsAdapter.updateTaskExpectedMinutes.mockReturnValueOnce(new Promise(resolve => { resolvePlanner = resolve; }));
+      mockReminderService.cancelReminder.mockReturnValueOnce(new Promise(resolve => { resolveReminder = resolve; }));
+      const taskSignal = signal(taskA);
+      (component as any)['task'] = taskSignal;
+      mockProjectState.activeProject.set({ ...mockProjectState.activeProject(), tasks: [taskA, taskB] });
+      fixture.detectChanges();
+      const checkbox = document.createElement('button');
+      checkbox.dataset['todoIndex'] = '0';
+      const input = Object.assign(document.createElement('input'), { value: 'A todo' });
+      const focus = vi.spyOn(input, 'focus');
+      const preview = component.onPreviewClick({ target: checkbox, stopPropagation: vi.fn() } as unknown as MouseEvent);
+      const todo = component.addQuickTodo(taskA.id, input);
+      const planner = component.onExpectedMinutesChange(taskA.id, 25);
+      const reminder = component.clearReminder(taskA.id);
+      taskSignal.set(taskB); fixture.detectChanges();
+      mockProjectState.activeProject.set({ ...mockProjectState.activeProject(), tasks: [replacementA, taskB] });
+      taskSignal.set(replacementA); fixture.detectChanges();
+      component.showReminderMenu.set(true);
+      resolveContent(true); resolveTodo(true); resolvePlanner(false); resolveReminder(true);
+      await Promise.all([preview, todo, planner, reminder]);
+      expect.soft(component.localContent()).toBe(replacementA.content);
+      expect.soft(input.value).toBe('A todo');
+      expect.soft(focus).not.toHaveBeenCalled();
+      expect.soft(component.plannerSaveState()).toBe('idle');
+      expect.soft(component.showReminderMenu()).toBe(true);
     });
   });
+  registerFlowTaskDetailSameTaskUpdateSpecs(() => ({ component, fixture, mockTaskOpsAdapter, mockUndoService, createMockTask }));
+  registerFlowTaskDetailEditModeSpecs(() => ({ component, fixture, createClickEvent, createMockTask }));
+
+  registerFlowTaskDetailInputSpecs(() => ({ component, fixture, mockChangeTracker, mockFlowTaskOps, createMockTask }));
+
+  registerFlowTaskDetailDrawerHeightSpecs(() => ({ component, fixture, mockUiState, createMockTask }));
+
 });

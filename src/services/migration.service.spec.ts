@@ -5,7 +5,10 @@ import { MigrationIntegrityService } from './migration-integrity.service';
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
-import { SimpleSyncService } from '../app/core/services/simple-sync.service';
+import { ProjectSaveFlightCoordinatorService } from '../app/core/services/sync/project-save-flight-coordinator.service';
+import { ProjectDataService } from '../app/core/services/sync/project-data.service';
+import { RetryQueueService } from '../app/core/services/sync/retry-queue.service';
+import { SyncStateService } from '../app/core/services/sync/sync-state.service';
 import { Project, Task } from '../models';
 
 const mockLoggerCategory = {
@@ -62,7 +65,10 @@ describe('MigrationService', () => {
         { provide: LoggerService, useValue: { category: () => mockLoggerCategory } },
         { provide: ToastService, useValue: mockToast },
         { provide: SentryLazyLoaderService, useValue: { captureException: vi.fn() } },
-        { provide: SimpleSyncService, useValue: { pushProject: vi.fn().mockResolvedValue({ ok: true }) } },
+        { provide: ProjectSaveFlightCoordinatorService, useValue: { save: vi.fn().mockResolvedValue({ success: true }) } },
+        { provide: ProjectDataService, useValue: { clearOfflineSnapshot: vi.fn(), loadProjectsFromCloud: vi.fn() } },
+        { provide: RetryQueueService, useValue: { clear: vi.fn() } },
+        { provide: SyncStateService, useValue: { update: vi.fn() } },
       ],
     });
 

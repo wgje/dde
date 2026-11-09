@@ -10,7 +10,7 @@ describe('STARTUP_PERF_CONFIG', () => {
 
   it('should expose tightened startup guards', () => {
     expect(STARTUP_PERF_CONFIG.STARTUP_INITIAL_STATIC_JS_MAX_KB).toBe(340);
-    expect(STARTUP_PERF_CONFIG.STARTUP_WORKSPACE_CHUNK_MAX_KB).toBe(125);
+    expect(STARTUP_PERF_CONFIG.STARTUP_WORKSPACE_CHUNK_MAX_KB).toBe(124);
     expect(STARTUP_PERF_CONFIG.STARTUP_MAIN_STATIC_IMPORT_MAX).toBe(10);
   });
 

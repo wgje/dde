@@ -7,6 +7,8 @@
 import {
   Component,
   ChangeDetectionStrategy,
+  ElementRef,
+  ViewChild,
 } from '@angular/core';
 
 @Component({
@@ -15,6 +17,7 @@ import {
   imports: [],
   template: `
     <button
+      #primaryAction
       type="button"
       class="w-full flex items-center gap-2 px-3 py-2 rounded-lg transition-all duration-200
              bg-amber-500/10 dark:bg-amber-400/10
@@ -36,6 +39,15 @@ import {
   changeDetection: ChangeDetectionStrategy.OnPush
 })
 export class FocusSessionTriggerComponent {
+  @ViewChild('primaryAction', { static: true })
+  private primaryAction!: ElementRef<HTMLButtonElement>;
+
+  focusPrimaryAction(): boolean {
+    const button = this.primaryAction.nativeElement;
+    button.focus();
+    return document.activeElement === button;
+  }
+
   /**
    * 切换专注模式：派发全局自定义事件，由 DockEngineService 监听并处理
    */

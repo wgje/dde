@@ -211,11 +211,92 @@ describe('StorePersistenceService Delta Sync Methods', () => {
   });
   
   afterEach(() => {
+    TestBed.resetTestingModule();
+    vi.restoreAllMocks();
     vi.clearAllMocks();
     mockIDBData.clear();
 
     consoleWarnSpy?.mockRestore();
     consoleErrorSpy?.mockRestore();
+  });
+
+  describe('saveProject 防抖定时器边界', () => {
+    it('同项目重新调度时应清理浏览器返回 0 的旧 timer handle', async () => {
+      let timerIndex = 0;
+      vi.spyOn(globalThis, 'setTimeout')
+        .mockImplementation((() => {
+          const handle = timerIndex;
+          timerIndex += 1;
+          return handle;
+        }) as unknown as typeof setTimeout);
+      const clearTimeoutSpy = vi
+        .spyOn(globalThis, 'clearTimeout')
+        .mockImplementation((() => undefined) as unknown as typeof clearTimeout);
+
+      await service.saveProject('project-1');
+      await service.saveProject('project-1');
+
+      expect(clearTimeoutSpy).toHaveBeenCalledWith(0);
+    });
+
+    it('被新 timer 替换后的旧 saveProject callback 不应继续保存', async () => {
+      const timerCallbacks: Array<() => void | Promise<void>> = [];
+      vi.spyOn(globalThis, 'setTimeout')
+        .mockImplementation(((callback: TimerHandler) => {
+          timerCallbacks.push(
+            typeof callback === 'function'
+              ? () => callback()
+              : () => undefined,
+          );
+          return timerCallbacks.length;
+        }) as unknown as typeof setTimeout);
+      vi.spyOn(globalThis, 'clearTimeout')
+        .mockImplementation((() => undefined) as unknown as typeof clearTimeout);
+      const doSaveProject = vi.spyOn(
+        service as unknown as { doSaveProject: (projectId: string) => Promise<void> },
+        'doSaveProject',
+      ).mockResolvedValue(undefined);
+
+      await service.saveProject('project-1');
+      const staleSaveCallback = timerCallbacks[0];
+      await service.saveProject('project-1');
+
+      await staleSaveCallback();
+
+      expect(doSaveProject).not.toHaveBeenCalled();
+    });
+
+    it('timer 回调中的保存失败不应变成未处理 rejection', async () => {
+      const timerCallbacks: Array<() => void | Promise<void>> = [];
+      const saveError = new Error('debounced save failed');
+      const loggerError = vi.fn();
+      vi.spyOn(globalThis, 'setTimeout')
+        .mockImplementation(((callback: TimerHandler) => {
+          timerCallbacks.push(
+            typeof callback === 'function'
+              ? () => callback()
+              : () => undefined,
+          );
+          return timerCallbacks.length;
+        }) as unknown as typeof setTimeout);
+      vi.spyOn(globalThis, 'clearTimeout')
+        .mockImplementation((() => undefined) as unknown as typeof clearTimeout);
+      vi.spyOn(
+        service as unknown as { doSaveProject: (projectId: string) => Promise<void> },
+        'doSaveProject',
+      ).mockRejectedValueOnce(saveError);
+      (service as unknown as { logger: { error: typeof loggerError } }).logger = {
+        error: loggerError,
+      };
+
+      await service.saveProject('project-1');
+      await expect(timerCallbacks[0]()).resolves.toBeUndefined();
+
+      expect(loggerError).toHaveBeenCalledWith(
+        '防抖保存项目失败',
+        { projectId: 'project-1', error: saveError },
+      );
+    });
   });
   
   describe('loadTasksFromLocal', () => {

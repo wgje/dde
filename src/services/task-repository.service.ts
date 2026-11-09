@@ -6,12 +6,31 @@ import { sanitizeTask } from '../utils/validation';
 import { supabaseErrorToError } from '../utils/supabase-error';
 import {
   getCompatibleTaskSelectFields,
-  getCompatibleTaskWriteRow,
   markTaskCompletedAtColumnUnavailable,
-  omitTaskCompletedAtColumn,
 } from '../utils/task-schema-compat';
+import {
+  buildSupabaseKeysetOrFilter,
+  fetchAllSupabaseKeysetPagesByCursor,
+  isSupabaseKeysetCursorAfter,
+  supabaseKeysetCursorKey,
+  type SupabaseKeysetCursor,
+} from '../utils/supabase-pagination';
+import {
+  buildTaskCreatedKeysetOrFilter,
+  isTaskCreatedCursorAfter,
+  readTaskCreatedPageCursor,
+  taskCreatedCursorKey,
+  type TaskCreatedPageCursor,
+} from '../utils/task-created-pagination';
+import {
+  buildTaskTombstoneKeysetOrFilter,
+  isTaskTombstoneCursorAfter,
+  readTaskTombstonePageCursor,
+  taskTombstoneCursorKey,
+  type TaskTombstonePageCursor,
+  type TaskTombstonePageRow,
+} from '../utils/task-tombstone-pagination';
 import { FIELD_SELECT_CONFIG } from '../config/sync.config';
-import type { Database } from '../types/supabase';
 import { 
   TaskRow, 
   ConnectionRow, 
@@ -21,14 +40,33 @@ import {
 // 重新导出类型以保持向后兼容
 export type { TaskRow, ConnectionRow, ProjectRow } from './task-repository.types';
 
+const LEGACY_TASK_DELETE_RETIRED_ERROR =
+  'Legacy TaskRepository delete path is retired; use sync_delete_tasks through the guarded sync pipeline.';
+const LEGACY_TASK_WRITE_RETIRED_ERROR =
+  'Legacy TaskRepository task write path is retired; use sync_upsert_task through the guarded sync pipeline.';
+const LEGACY_CONNECTION_WRITE_RETIRED_ERROR =
+  'Legacy TaskRepository connection write path is retired; use sync_upsert_connection through the guarded sync pipeline.';
+const LEGACY_TASK_ATTACHMENT_MUTATION_RETIRED_ERROR =
+  'Legacy TaskRepository attachment mutation path is retired; use the durable attachment outbox and sync_upsert_task pipeline.';
+
+function readUpdatedAtIdCursor(row: { id?: unknown; updated_at?: unknown }): SupabaseKeysetCursor | null {
+  if (
+    typeof row.id !== 'string'
+    || row.id.length === 0
+    || typeof row.updated_at !== 'string'
+    || Number.isNaN(Date.parse(row.updated_at))
+  ) {
+    return null;
+  }
+  return { updatedAt: row.updated_at, id: row.id };
+}
+
 /**
  * 任务仓库服务
  * 负责与 Supabase 的任务级 CRUD 操作
  * 使用独立的 tasks 和 connections 表
  */
-@Injectable({
-  providedIn: 'root'
-})
+@Injectable()
 export class TaskRepositoryService {
   private supabase = inject(SupabaseClientService);
   private readonly logger = inject(LoggerService).category('TaskRepository');
@@ -46,15 +84,48 @@ export class TaskRepositoryService {
   async loadTasks(projectId: string): Promise<Task[]> {
     if (!this.supabase.isConfigured) return [];
 
-    // 1. 加载所有任务（【P2-4 修复】使用具体字段替代 select('*')）
-    const loadTaskRows = async () => await this.supabase.client()
-      .from('tasks')
-      .select(getCompatibleTaskSelectFields(FIELD_SELECT_CONFIG.TASK_FULL_FIELDS))
-      .eq('project_id', projectId)
-      .order('created_at', { ascending: true });
+    const taskRows = await this.loadTaskRows(projectId);
+    if (taskRows.length === 0) {
+      return [];
+    }
+
+    // 预先将所有行映射为 Task（包含将被过滤掉的软删/ tombstone 任务），
+    // 以便在父任务被删除时，让子任务能够“顶替”父任务的位置属性（stage/order/rank/x/y）。
+    const allTasks = taskRows.map(row => this.mapRowToTask(row));
+    const taskById = new Map(allTasks.map(t => [t.id, t] as const));
+    const tombstoneIds = await this.loadTaskTombstoneIds(projectId);
+    const removedIds = this.collectRemovedTaskIds(allTasks, tombstoneIds);
+    const keptTasks = allTasks
+      .filter(t => !removedIds.has(t.id) && !t.deletedAt)
+      .map(task => this.promoteTaskPastRemovedParents(task, removedIds, taskById));
+
+    this.logFilteredTaskCounts(projectId, allTasks, tombstoneIds);
+
+    return keptTasks;
+  }
+
+  private async loadTaskRows(projectId: string): Promise<TaskRow[]> {
+    // 【P2-4 修复】使用具体字段替代 select('*')
+    const loadTaskRows = async () => await fetchAllSupabaseKeysetPagesByCursor<
+      TaskRow,
+      TaskCreatedPageCursor
+    >((cursor) => {
+      let query = this.supabase.client()
+        .from('tasks')
+        .select(getCompatibleTaskSelectFields(FIELD_SELECT_CONFIG.TASK_FULL_FIELDS))
+        .eq('project_id', projectId);
+      if (cursor) query = query.or(buildTaskCreatedKeysetOrFilter(cursor));
+      return query
+        .order('created_at', { ascending: true })
+        .order('id', { ascending: true });
+    }, { readCursor: readTaskCreatedPageCursor, cursorKey: taskCreatedCursorKey, isCursorAfter: isTaskCreatedCursorAfter });
+    const maxSchemaFallbackAttempts = 3;
     let { data, error } = await loadTaskRows();
-    if (error && markTaskCompletedAtColumnUnavailable(error)) {
-      this.logger.warn('tasks.completed_at 缺失，任务仓库全量加载已降级为旧 schema 字段', {
+    for (let attempt = 1; error && attempt < maxSchemaFallbackAttempts; attempt += 1) {
+      if (!markTaskCompletedAtColumnUnavailable(error)) {
+        break;
+      }
+      this.logger.warn('tasks 可选字段缺失，任务仓库全量加载已降级为旧 schema 字段', {
         projectId,
         error,
       });
@@ -66,87 +137,95 @@ export class TaskRepositoryService {
       throw supabaseErrorToError(error);
     }
 
-    if (!data || data.length === 0) {
-      return [];
-    }
+    return (data || []) as unknown as TaskRow[];
+  }
 
-    // 预先将所有行映射为 Task（包含将被过滤掉的软删/ tombstone 任务），
-    // 以便在父任务被删除时，让子任务能够“顶替”父任务的位置属性（stage/order/rank/x/y）。
-    const allTasks = data.map(row => this.mapRowToTask(row as unknown as TaskRow));
-    const taskById = new Map(allTasks.map(t => [t.id, t] as const));
-
-    // 2. 获取该项目的所有 tombstone 记录
-    const { data: tombstones, error: tombstoneError } = await this.supabase.client()
-      .from('task_tombstones')
-      .select('task_id')
-      .eq('project_id', projectId);
-
-    // 3. 过滤掉已 tombstone 或软删除的任务
-    // tombstone 查询失败时降级：只依赖 deleted_at 过滤
-    const tombstoneIds = tombstoneError
-      ? new Set<string>()
-      : new Set((tombstones || []).map(t => t.task_id));
+  private async loadTaskTombstoneIds(projectId: string): Promise<Set<string>> {
+    const { data: tombstones, error: tombstoneError } =
+      await fetchAllSupabaseKeysetPagesByCursor<
+        TaskTombstonePageRow,
+        TaskTombstonePageCursor,
+        unknown
+      >((cursor) => {
+        let query = this.supabase.client()
+          .from('task_tombstones')
+          .select('task_id,deleted_at')
+          .eq('project_id', projectId);
+        if (cursor) query = query.or(buildTaskTombstoneKeysetOrFilter(cursor));
+        return query
+          .order('deleted_at', { ascending: true })
+          .order('task_id', { ascending: true });
+      }, { readCursor: readTaskTombstonePageCursor, cursorKey: taskTombstoneCursorKey, isCursorAfter: isTaskTombstoneCursorAfter });
 
     if (tombstoneError) {
       this.logger.warn('Failed to load tombstones (continuing without tombstone filtering)', tombstoneError);
+      return new Set();
     }
 
+    return new Set((tombstones || []).map(t => t.task_id));
+  }
+
+  private collectRemovedTaskIds(allTasks: Task[], tombstoneIds: Set<string>): Set<string> {
     const removedIds = new Set<string>();
-    for (const t of allTasks) {
-      if (tombstoneIds.has(t.id) || t.deletedAt) {
-        removedIds.add(t.id);
+    for (const task of allTasks) {
+      if (tombstoneIds.has(task.id) || task.deletedAt) {
+        removedIds.add(task.id);
       }
     }
+    return removedIds;
+  }
 
-    // 4. 子任务“顶替”父任务：
-    // 若 task.parentId 指向已删除任务（软删/ tombstone），则把该任务提升到父任务的位置，
-    // 并把 parentId 指向祖父（支持多层级联）。
-    const promote = (task: Task): Task => {
-      let promoted: Task = { ...task };
-      let parentId = promoted.parentId;
-      let guard = 0;
-      while (parentId && removedIds.has(parentId) && guard < 50) {
-        const removedParent = taskById.get(parentId);
-        if (!removedParent) {
-          // 父任务行已不存在（可能已被物理 purge），无法继承其位置信息，只能断开父子关系
-          parentId = null;
-          break;
-        }
+  private promoteTaskPastRemovedParents(
+    task: Task,
+    removedIds: Set<string>,
+    taskById: Map<string, Task>
+  ): Task {
+    let promoted: Task = { ...task };
+    let parentId = promoted.parentId;
+    let guard = 0;
 
-        promoted = {
-          ...promoted,
-          stage: removedParent.stage,
-          order: removedParent.order,
-          rank: removedParent.rank,
-          x: removedParent.x,
-          y: removedParent.y,
-        };
-
-        parentId = removedParent.parentId;
-        guard++;
+    while (parentId && removedIds.has(parentId) && guard < 50) {
+      const removedParent = taskById.get(parentId);
+      if (!removedParent) {
+        parentId = null;
+        break;
       }
 
-      if (guard > 0) {
-        promoted = { ...promoted, parentId: parentId ?? null };
-      }
+      promoted = this.inheritRemovedParentPosition(promoted, removedParent);
+      parentId = removedParent.parentId;
+      guard++;
+    }
 
-      if (promoted.parentId === promoted.id) {
-        promoted = { ...promoted, parentId: null };
-      }
-      return promoted;
+    if (guard > 0) {
+      promoted = { ...promoted, parentId: parentId ?? null };
+    }
+
+    return promoted.parentId === promoted.id
+      ? { ...promoted, parentId: null }
+      : promoted;
+  }
+
+  private inheritRemovedParentPosition(task: Task, removedParent: Task): Task {
+    return {
+      ...task,
+      stage: removedParent.stage,
+      order: removedParent.order,
+      rank: removedParent.rank,
+      x: removedParent.x,
+      y: removedParent.y,
     };
+  }
 
-    const keptTasks = allTasks
-      .filter(t => !removedIds.has(t.id) && !t.deletedAt)
-      .map(promote);
-
+  private logFilteredTaskCounts(
+    projectId: string,
+    allTasks: Task[],
+    tombstoneIds: Set<string>
+  ): void {
     const tombstoneCount = tombstoneIds.size;
     const softDeleteCount = allTasks.filter(t => t.deletedAt && !tombstoneIds.has(t.id)).length;
     if (tombstoneCount > 0 || softDeleteCount > 0) {
       this.logger.debug(`Filtered out ${tombstoneCount} tombstoned and ${softDeleteCount} soft-deleted tasks`, { projectId, tombstoneCount, softDeleteCount });
     }
-
-    return keptTasks;
   }
 
   /**
@@ -157,368 +236,145 @@ export class TaskRepositoryService {
     if (!this.supabase.isConfigured) return [];
 
     // 【P2-4 修复】使用具体字段替代 select('*')
-    const { data, error } = await this.supabase.client()
-      .from('connections')
-      .select(FIELD_SELECT_CONFIG.CONNECTION_FULL_FIELDS)
-      .eq('project_id', projectId)
-      .is('deleted_at', null);
+    const { data, error } = await fetchAllSupabaseKeysetPagesByCursor<
+      ConnectionRow,
+      SupabaseKeysetCursor
+    >((cursor) => {
+      let query = this.supabase.client()
+        .from('connections')
+        .select(FIELD_SELECT_CONFIG.CONNECTION_FULL_FIELDS)
+        .eq('project_id', projectId)
+        .is('deleted_at', null);
+      if (cursor) query = query.or(buildSupabaseKeysetOrFilter(cursor));
+      return query
+        .order('updated_at', { ascending: true })
+        .order('id', { ascending: true });
+    }, { readCursor: readUpdatedAtIdCursor, cursorKey: supabaseKeysetCursorKey, isCursorAfter: isSupabaseKeysetCursorAfter });
 
     if (error) {
       this.logger.error('Failed to load connections', error);
       throw supabaseErrorToError(error);
     }
 
-    return (data || []).map(row => this.mapRowToConnection(row as ConnectionRow));
+    const rowsById = new Map<string, ConnectionRow>();
+    for (const row of data || []) {
+      rowsById.set(row.id, row);
+    }
+    return [...rowsById.values()]
+      .sort((left, right) => {
+        const updatedOrder = String(left.updated_at ?? '').localeCompare(String(right.updated_at ?? ''));
+        return updatedOrder !== 0 ? updatedOrder : left.id.localeCompare(right.id);
+      })
+      .map(row => this.mapRowToConnection(row));
   }
 
-  /**
-   * 保存单个任务（创建或更新）
-   */
+  /** Legacy compatibility boundary; production task writes use the guarded sync pipeline. */
   async saveTask(projectId: string, task: Task): Promise<{ success: boolean; error?: string }> {
     if (!this.supabase.isConfigured) return { success: true };
-
-    const taskRow = this.mapTaskToRow(projectId, task);
-    const rowToUpsert: Record<string, unknown> = { ...taskRow };
-    // tombstone-wins：不允许通过“缺省同步”清空 deleted_at。
-    // 恢复任务应走显式 restore（增量变更会携带 changedFields=deletedAt）。
-    if ((task.deletedAt ?? null) === null) {
-      delete rowToUpsert.deleted_at;
-    }
-
-    const upsertTask = async (payload: Record<string, unknown>) => await this.supabase.client()
-      .from('tasks')
-      .upsert(payload as never, { onConflict: 'id' });
-
-    let { error } = await upsertTask(getCompatibleTaskWriteRow(rowToUpsert));
-    if (error && markTaskCompletedAtColumnUnavailable(error)) {
-      this.logger.warn('tasks.completed_at 缺失，任务仓库保存已降级为旧 schema 写入', {
-        taskId: task.id,
-        projectId,
-        error,
-      });
-      ({ error } = await upsertTask(omitTaskCompletedAtColumn(rowToUpsert)));
-    }
-
-    if (error) {
-      this.logger.error('Failed to save task', error);
-      return { success: false, error: error.message };
-    }
-
-    return { success: true };
+    this.logger.warn('TaskRepositoryService.saveTask 已退役，拒绝绕过受控任务同步', {
+      projectId,
+      taskId: task.id,
+    });
+    return { success: false, error: LEGACY_TASK_WRITE_RETIRED_ERROR };
   }
 
-  /**
-   * 删除任务（永久删除 / purge）
-   *
-   * 设计说明：
-   * - 物理 DELETE 会导致旧端/离线端的 upsert 将任务“重新插回”（复活）。
-   * - 因此这里优先调用服务端 purge RPC（会写入 tombstone 并删除行），从根源阻断复活。
-   * - 若后端尚未部署该 RPC，则降级为软删除（deleted_at=now），保证跨端至少不会立刻复活。
-   */
+  /** Legacy compatibility boundary; production deletes use the guarded sync pipeline. */
   async deleteTask(taskId: string): Promise<{ success: boolean; error?: string }> {
     if (!this.supabase.isConfigured) return { success: true };
-
-    // 1) 优先走 project-scoped purge RPC（后端会记录 tombstone）
-    const { data: taskRow, error: lookupError } = await this.supabase.client()
-      .from('tasks')
-      .select('project_id')
-      .eq('id', taskId)
-      .maybeSingle();
-
-    if (!lookupError && taskRow?.project_id) {
-      const purgeResult = await this.supabase.client().rpc('purge_tasks_v2', {
-        p_project_id: taskRow.project_id,
-        p_task_ids: [taskId],
-      });
-
-      if (!purgeResult.error) {
-        return { success: true };
-      }
-    }
-
-    // 2) 降级：软删除
-    const { error } = await this.supabase.client()
-      .from('tasks')
-      .update({ deleted_at: new Date().toISOString() })
-      .eq('id', taskId);
-
-    if (error) {
-      this.logger.error('Failed to delete task', error);
-      return { success: false, error: error.message };
-    }
-
-    return { success: true };
+    this.logger.warn('TaskRepositoryService.deleteTask 已退役，拒绝绕过受控同步删除', { taskId });
+    return { success: false, error: LEGACY_TASK_DELETE_RETIRED_ERROR };
   }
 
-  /**
-   * 软删除任务
-   */
+  /** Legacy compatibility boundary; production task deletes use sync_delete_tasks. */
   async softDeleteTask(taskId: string): Promise<{ success: boolean; error?: string }> {
     if (!this.supabase.isConfigured) return { success: true };
-
-    const { error } = await this.supabase.client()
-      .from('tasks')
-      .update({ deleted_at: new Date().toISOString() })
-      .eq('id', taskId);
-
-    if (error) {
-      this.logger.error('Failed to soft delete task', error);
-      return { success: false, error: error.message };
-    }
-
-    return { success: true };
+    this.logger.warn('TaskRepositoryService.softDeleteTask 已退役，拒绝绕过受控同步删除', {
+      taskId,
+    });
+    return { success: false, error: LEGACY_TASK_DELETE_RETIRED_ERROR };
   }
 
-  /**
-   * 恢复任务
-   */
+  /** Legacy compatibility boundary; production task restores use sync_upsert_task. */
   async restoreTask(taskId: string): Promise<{ success: boolean; error?: string }> {
     if (!this.supabase.isConfigured) return { success: true };
-
-    const { error } = await this.supabase.client()
-      .from('tasks')
-      .update({ deleted_at: null })
-      .eq('id', taskId);
-
-    if (error) {
-      this.logger.error('Failed to restore task', error);
-      return { success: false, error: error.message };
-    }
-
-    return { success: true };
+    this.logger.warn('TaskRepositoryService.restoreTask 已退役，拒绝绕过受控任务同步', {
+      taskId,
+    });
+    return { success: false, error: LEGACY_TASK_WRITE_RETIRED_ERROR };
   }
 
-  /**
-   * 更新任务的单个字段（细粒度更新）
-   */
+  /** Legacy compatibility boundary; production task field writes use sync_upsert_task. */
   async updateTaskField(
     taskId: string, 
     field: keyof TaskRow, 
-    value: TaskRow[keyof TaskRow]
+    _value: TaskRow[keyof TaskRow]
   ): Promise<{ success: boolean; error?: string }> {
     if (!this.supabase.isConfigured) return { success: true };
-
-    const updatePayload = { [field]: value } as unknown as Database['public']['Tables']['tasks']['Update'];
-
-    const { error } = await this.supabase.client()
-      .from('tasks')
-      .update(updatePayload)
-      .eq('id', taskId);
-
-    if (error) {
-      this.logger.error(`Failed to update task ${field}`, error);
-      return { success: false, error: error.message };
-    }
-
-    return { success: true };
+    this.logger.warn('TaskRepositoryService.updateTaskField 已退役，拒绝绕过受控任务同步', {
+      taskId,
+      field,
+    });
+    return { success: false, error: LEGACY_TASK_WRITE_RETIRED_ERROR };
   }
 
-  /**
-   * 批量更新任务的多个字段（细粒度更新）
-   */
+  /** Legacy compatibility boundary; production task field writes use sync_upsert_task. */
   async updateTaskFields(
     taskId: string, 
     updates: Partial<TaskRow>
   ): Promise<{ success: boolean; error?: string }> {
     if (!this.supabase.isConfigured) return { success: true };
-
-    const { error } = await this.supabase.client()
-      .from('tasks')
-      .update(updates as never)
-      .eq('id', taskId);
-
-    if (error) {
-      this.logger.error('Failed to update task fields', error);
-      return { success: false, error: error.message };
-    }
-
-    return { success: true };
+    this.logger.warn('TaskRepositoryService.updateTaskFields 已退役，拒绝绕过受控任务同步', {
+      taskId,
+      fields: Object.keys(updates),
+    });
+    return { success: false, error: LEGACY_TASK_WRITE_RETIRED_ERROR };
   }
 
-  /**
-   * 添加附件到任务（原子操作）
-   */
+  /** Legacy compatibility boundary; production attachment writes use the durable sync pipeline. */
   async addAttachment(
     taskId: string, 
     attachment: Attachment
   ): Promise<{ success: boolean; error?: string }> {
     if (!this.supabase.isConfigured) return { success: true };
-
-    // 使用 Postgres 的 jsonb 数组追加操作
-    const { error } = await this.supabase.client()
-      .rpc('append_task_attachment', {
-        p_task_id: taskId,
-        p_attachment: JSON.parse(JSON.stringify(attachment))
-      });
-
-    if (error) {
-      // 如果 RPC 不存在，回退到读取-修改-写入模式
-      this.logger.warn('RPC not available, falling back to read-modify-write', error);
-      return this.addAttachmentFallback(taskId, attachment);
-    }
-
-    return { success: true };
+    this.logger.warn('TaskRepositoryService.addAttachment 已退役，拒绝绕过耐久附件同步', {
+      taskId,
+      attachmentId: attachment.id,
+    });
+    return { success: false, error: LEGACY_TASK_ATTACHMENT_MUTATION_RETIRED_ERROR };
   }
 
-  /**
-   * 添加附件的回退实现（读取-修改-写入）
-   */
-  private async addAttachmentFallback(
-    taskId: string, 
-    attachment: Attachment
-  ): Promise<{ success: boolean; error?: string }> {
-    // 【P1-20 修复】添加 updated_at 乐观锁，防止 TOCTOU 竞态覆盖
-    const { data, error: fetchError } = await this.supabase.client()
-      .from('tasks')
-      .select('attachments, updated_at')
-      .eq('id', taskId)
-      .maybeSingle();
-
-    if (fetchError) {
-      return { success: false, error: fetchError.message };
-    }
-    
-    if (!data) {
-      return { success: false, error: '任务不存在' };
-    }
-
-    const currentAttachments = (data?.attachments ?? []) as unknown as Attachment[];
-    // 去重：如果附件 ID 已存在则跳过
-    if (currentAttachments.some((a: Attachment) => a.id === attachment.id)) {
-      return { success: true };
-    }
-    const newAttachments = [...currentAttachments, attachment];
-
-    const updateQuery = this.supabase.client()
-      .from('tasks')
-      .update({ attachments: newAttachments as unknown as undefined, updated_at: new Date().toISOString() })
-      .eq('id', taskId);
-    
-    // 如果有 updated_at，用它做乐观锁
-    if (data.updated_at) {
-      (updateQuery as unknown as { eq: (col: string, val: string) => typeof updateQuery }).eq('updated_at', data.updated_at);
-    }
-
-    const { error } = await updateQuery;
-
-    if (error) {
-      return { success: false, error: error.message };
-    }
-
-    return { success: true };
-  }
-
-  /**
-   * 从任务移除附件（原子操作）
-   */
+  /** Legacy compatibility boundary; production attachment removals use the durable sync pipeline. */
   async removeAttachment(
     taskId: string, 
     attachmentId: string
   ): Promise<{ success: boolean; error?: string }> {
     if (!this.supabase.isConfigured) return { success: true };
-
-    // 尝试使用 RPC
-    const { error } = await this.supabase.client()
-      .rpc('remove_task_attachment', {
-        p_task_id: taskId,
-        p_attachment_id: attachmentId
-      });
-
-    if (error) {
-      // 回退到读取-修改-写入模式
-      this.logger.warn('RPC not available, falling back to read-modify-write', error);
-      return this.removeAttachmentFallback(taskId, attachmentId);
-    }
-
-    return { success: true };
+    this.logger.warn('TaskRepositoryService.removeAttachment 已退役，拒绝绕过耐久附件同步', {
+      taskId,
+      attachmentId,
+    });
+    return { success: false, error: LEGACY_TASK_ATTACHMENT_MUTATION_RETIRED_ERROR };
   }
 
-  /**
-   * 移除附件的回退实现
-   */
-  private async removeAttachmentFallback(
-    taskId: string, 
-    attachmentId: string
-  ): Promise<{ success: boolean; error?: string }> {
-    const { data, error: fetchError } = await this.supabase.client()
-      .from('tasks')
-      .select('attachments')
-      .eq('id', taskId)
-      .maybeSingle();
-
-    if (fetchError) {
-      return { success: false, error: fetchError.message };
-    }
-    
-    if (!data) {
-      return { success: false, error: '任务不存在' };
-    }
-
-    const currentAttachments = (data?.attachments ?? []) as unknown as Attachment[];
-    const newAttachments = currentAttachments.filter(
-      (a: Attachment) => a.id !== attachmentId
-    );
-
-    // 【P2-1 修复】与 addAttachmentFallback 保持一致，显式更新 updated_at
-    const { error } = await this.supabase.client()
-      .from('tasks')
-      .update({ attachments: newAttachments as unknown as undefined, updated_at: new Date().toISOString() })
-      .eq('id', taskId);
-
-    if (error) {
-      return { success: false, error: error.message };
-    }
-
-    return { success: true };
-  }
-
-  /**
-   * 保存连接
-   * 注意：使用连接 ID 作为冲突解决键，确保正确处理软删除状态
-   */
+  /** Legacy compatibility boundary; production connection writes use sync_upsert_connection. */
   async saveConnection(projectId: string, connection: Connection): Promise<{ success: boolean; error?: string }> {
     if (!this.supabase.isConfigured) return { success: true };
-
-    const { error } = await this.supabase.client()
-      .from('connections')
-      .upsert({
-        id: connection.id,
-        project_id: projectId,
-        source_id: connection.source,
-        target_id: connection.target,
-        title: connection.title ?? null,
-        description: connection.description ?? null,
-        deleted_at: connection.deletedAt ?? null
-      }, { onConflict: 'id' });
-
-    if (error) {
-      this.logger.error('Failed to save connection', error);
-      return { success: false, error: error.message };
-    }
-
-    return { success: true };
+    this.logger.warn('TaskRepositoryService.saveConnection 已退役，拒绝绕过受控连接同步', {
+      projectId,
+      connectionId: connection.id,
+    });
+    return { success: false, error: LEGACY_CONNECTION_WRITE_RETIRED_ERROR };
   }
 
-  /**
-   * 删除连接（软删除，防止离线端 upsert 复活）
-   */
+  /** Legacy compatibility boundary; production connection deletes use sync_upsert_connection. */
   async deleteConnection(projectId: string, sourceId: string, targetId: string): Promise<{ success: boolean; error?: string }> {
     if (!this.supabase.isConfigured) return { success: true };
-
-    // 【P1-2 修复】软删除替代硬删除，防止连接复活
-    const { error } = await this.supabase.client()
-      .from('connections')
-      .update({ deleted_at: new Date().toISOString() })
-      .eq('project_id', projectId)
-      .eq('source_id', sourceId)
-      .eq('target_id', targetId);
-
-    if (error) {
-      this.logger.error('Failed to delete connection', error);
-      return { success: false, error: error.message };
-    }
-
-    return { success: true };
+    this.logger.warn('TaskRepositoryService.deleteConnection 已退役，拒绝绕过受控连接同步', {
+      projectId,
+      sourceId,
+      targetId,
+    });
+    return { success: false, error: LEGACY_CONNECTION_WRITE_RETIRED_ERROR };
   }
 
   /**
@@ -559,18 +415,19 @@ export class TaskRepositoryService {
   async hasTaskUpdates(projectId: string, since: string): Promise<boolean> {
     if (!this.supabase.isConfigured) return false;
 
-    const { count, error } = await this.supabase.client()
+    const { data, error } = await this.supabase.client()
       .from('tasks')
-      .select('id', { count: 'exact', head: true })
+      .select('id')
       .eq('project_id', projectId)
-      .gt('updated_at', since);
+      .gt('updated_at', since)
+      .limit(1);
 
     if (error) {
       this.logger.error('Failed to check task updates', error);
       return false;
     }
 
-    return (count ?? 0) > 0;
+    return (data?.length ?? 0) > 0;
   }
 
   /**
@@ -580,14 +437,28 @@ export class TaskRepositoryService {
     if (!this.supabase.isConfigured) return [];
 
     // 【P2-4 修复】使用具体字段替代 select('*')
-    const loadUpdatedTaskRows = async () => await this.supabase.client()
-      .from('tasks')
-      .select(getCompatibleTaskSelectFields(FIELD_SELECT_CONFIG.TASK_FULL_FIELDS))
-      .eq('project_id', projectId)
-      .gt('updated_at', since);
+    const loadUpdatedTaskRows = async () => await fetchAllSupabaseKeysetPagesByCursor<
+      TaskRow,
+      SupabaseKeysetCursor
+    >((cursor) => {
+      let query = this.supabase.client()
+        .from('tasks')
+        .select(getCompatibleTaskSelectFields(FIELD_SELECT_CONFIG.TASK_FULL_FIELDS))
+        .eq('project_id', projectId);
+      query = cursor
+        ? query.or(buildSupabaseKeysetOrFilter(cursor))
+        : query.gt('updated_at', since);
+      return query
+        .order('updated_at', { ascending: true })
+        .order('id', { ascending: true });
+    }, { readCursor: readUpdatedAtIdCursor, cursorKey: supabaseKeysetCursorKey, isCursorAfter: isSupabaseKeysetCursorAfter });
+    const maxSchemaFallbackAttempts = 3;
     let { data, error } = await loadUpdatedTaskRows();
-    if (error && markTaskCompletedAtColumnUnavailable(error)) {
-      this.logger.warn('tasks.completed_at 缺失，任务仓库增量加载已降级为旧 schema 字段', {
+    for (let attempt = 1; error && attempt < maxSchemaFallbackAttempts; attempt += 1) {
+      if (!markTaskCompletedAtColumnUnavailable(error)) {
+        break;
+      }
+      this.logger.warn('tasks 可选字段缺失，任务仓库增量加载已降级为旧 schema 字段', {
         projectId,
         since,
         error,
@@ -600,7 +471,16 @@ export class TaskRepositoryService {
       throw supabaseErrorToError(error);
     }
 
-    return (data || []).map(row => this.mapRowToTask(row as unknown as TaskRow));
+    const rowsById = new Map<string, TaskRow>();
+    for (const row of data || []) {
+      rowsById.set(row.id, row);
+    }
+    return [...rowsById.values()]
+      .sort((left, right) => {
+        const updatedOrder = String(left.updated_at ?? '').localeCompare(String(right.updated_at ?? ''));
+        return updatedOrder !== 0 ? updatedOrder : left.id.localeCompare(right.id);
+      })
+      .map(row => this.mapRowToTask(row));
   }
 
   // ========== 映射函数 ==========
@@ -634,37 +514,17 @@ export class TaskRepositoryService {
       cognitive_load: row.cognitive_load ?? null,
       wait_minutes: row.wait_minutes ?? null,
       // State Overlap 停泊元数据
-      parkingMeta: row.parking_meta ?? undefined,
+      parkingMeta: this.mapParkingMeta(row),
+      attentionMeta: row.attention_meta ?? null,
     });
   }
 
-  private mapTaskToRow(projectId: string, task: Task): Partial<TaskRow> {
-    return {
-      id: task.id,
-      project_id: projectId,
-      parent_id: task.parentId,
-      title: task.title,
-      content: task.content,
-      stage: task.stage,
-      order: task.order,
-      rank: task.rank,
-      status: task.status,
-      x: task.x,
-      y: task.y,
-      short_id: task.shortId ?? null,
-      priority: task.priority ?? null,
-      due_date: task.dueDate ?? null,
-      expected_minutes: task.expected_minutes ?? null,
-      cognitive_load: task.cognitive_load ?? null,
-      wait_minutes: task.wait_minutes ?? null,
-      tags: task.tags ?? [],
-      attachments: task.attachments ?? [],
-      deleted_at: task.deletedAt ?? null,
-      completed_at: task.completedAt ?? null,
-      // State Overlap 停泊元数据
-      parking_meta: task.parkingMeta ?? null,
-      // 注意：不需要手动设置 updated_at，数据库触发器会自动更新
-    };
+  private mapParkingMeta(row: TaskRow): Task['parkingMeta'] | undefined {
+    if (!Object.prototype.hasOwnProperty.call(row, 'parking_meta')) {
+      return undefined;
+    }
+
+    return row.parking_meta ?? null;
   }
 
   private mapRowToConnection(row: ConnectionRow): Connection {

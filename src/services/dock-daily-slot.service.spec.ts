@@ -63,6 +63,7 @@ function buildContext(overrides?: {
     schedulerPhase,
     fragmentDefenseLevel,
     isFragmentPhase: isFragmentPhaseSignal,
+    persistCurrentSnapshot: vi.fn(() => Promise.resolve(true)),
   };
 }
 
@@ -77,6 +78,8 @@ describe('DockDailySlotService', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     focusPreferencesSignal.set({ ...DEFAULT_FOCUS_PREFERENCES });
+    mockAuthService.currentUserId.set(null);
+    mockAuthService.currentUserId.set(null);
 
     TestBed.configureTestingModule({
       providers: [
@@ -126,8 +129,8 @@ describe('DockDailySlotService', () => {
   // -----------------------------------------------------------------------
 
   describe('addDailySlot', () => {
-    it('creates a new slot with correct defaults', () => {
-      const id = service.addDailySlot('Morning exercise');
+    it('creates a new slot with correct defaults', async () => {
+      const id = await service.addDailySlot('Morning exercise');
 
       expect(id).toBeTruthy();
       const slots = ctx.dailySlots();
@@ -144,24 +147,34 @@ describe('DockDailySlotService', () => {
       expect(slots[0].createdAt).toBeTruthy();
     });
 
-    it('respects custom maxDailyCount', () => {
-      service.addDailySlot('Drink water', 3);
+    it('respects custom maxDailyCount', async () => {
+      await service.addDailySlot('Drink water', 3);
 
       const slots = ctx.dailySlots();
       expect(slots[0].maxDailyCount).toBe(3);
     });
 
-    it('floors maxDailyCount to at least 1', () => {
-      service.addDailySlot('Task', 0);
+    it('floors maxDailyCount to at least 1', async () => {
+      await service.addDailySlot('Task', 0);
       expect(ctx.dailySlots()[0].maxDailyCount).toBe(1);
 
-      service.addDailySlot('Task2', -5);
+      await service.addDailySlot('Task2', -5);
       expect(ctx.dailySlots()[1].maxDailyCount).toBe(1);
     });
 
-    it('trims title and falls back to default for empty', () => {
-      service.addDailySlot('  ');
+    it('trims title and falls back to default for empty', async () => {
+      await service.addDailySlot('  ');
       expect(ctx.dailySlots()[0].title).toBe('Untitled daily task');
+    });
+
+    it('rolls back added slot and skips cloud sync when local snapshot persistence fails', async () => {
+      vi.mocked(ctx.persistCurrentSnapshot).mockResolvedValueOnce(false);
+      mockAuthService.currentUserId.set('user-1');
+
+      await expect(service.addDailySlot('Slot')).resolves.toBe('');
+
+      expect(ctx.dailySlots()).toHaveLength(0);
+      expect(mockCloudSyncService.enqueueRoutineTaskSync).not.toHaveBeenCalled();
     });
   });
 
@@ -170,19 +183,19 @@ describe('DockDailySlotService', () => {
   // -----------------------------------------------------------------------
 
   describe('setDailySlotEnabled', () => {
-    it('toggles enabled state', () => {
-      const id = service.addDailySlot('Slot');
+    it('toggles enabled state', async () => {
+      const id = await service.addDailySlot('Slot');
       expect(ctx.dailySlots()[0].isEnabled).toBe(true);
 
-      service.setDailySlotEnabled(id, false);
+      await service.setDailySlotEnabled(id, false);
       expect(ctx.dailySlots()[0].isEnabled).toBe(false);
 
-      service.setDailySlotEnabled(id, true);
+      await service.setDailySlotEnabled(id, true);
       expect(ctx.dailySlots()[0].isEnabled).toBe(true);
     });
 
-    it('does nothing when value is the same', () => {
-      const id = service.addDailySlot('Slot');
+    it('does nothing when value is the same', async () => {
+      const id = await service.addDailySlot('Slot');
       vi.clearAllMocks();
 
       service.setDailySlotEnabled(id, true); // already true
@@ -195,6 +208,17 @@ describe('DockDailySlotService', () => {
       // Should not throw
       expect(ctx.dailySlots()).toHaveLength(0);
     });
+
+    it('rolls back enabled state when local snapshot persistence fails', async () => {
+      const id = await service.addDailySlot('Slot');
+      vi.clearAllMocks();
+      vi.mocked(ctx.persistCurrentSnapshot).mockResolvedValueOnce(false);
+
+      await expect(service.setDailySlotEnabled(id, false)).resolves.toBe(false);
+
+      expect(ctx.dailySlots()[0].isEnabled).toBe(true);
+      expect(mockCloudSyncService.enqueueRoutineTaskSync).not.toHaveBeenCalled();
+    });
   });
 
   // -----------------------------------------------------------------------
@@ -202,24 +226,24 @@ describe('DockDailySlotService', () => {
   // -----------------------------------------------------------------------
 
   describe('completeDailySlot', () => {
-    it('increments todayCompletedCount', () => {
-      const id = service.addDailySlot('Slot', 3);
+    it('increments todayCompletedCount', async () => {
+      const id = await service.addDailySlot('Slot', 3);
       expect(ctx.dailySlots()[0].todayCompletedCount).toBe(0);
 
-      service.completeDailySlot(id);
+      await service.completeDailySlot(id);
       expect(ctx.dailySlots()[0].todayCompletedCount).toBe(1);
 
-      service.completeDailySlot(id);
+      await service.completeDailySlot(id);
       expect(ctx.dailySlots()[0].todayCompletedCount).toBe(2);
     });
 
-    it('caps todayCompletedCount at maxDailyCount', () => {
-      const id = service.addDailySlot('Slot', 1);
+    it('caps todayCompletedCount at maxDailyCount', async () => {
+      const id = await service.addDailySlot('Slot', 1);
 
-      service.completeDailySlot(id);
+      await service.completeDailySlot(id);
       expect(ctx.dailySlots()[0].todayCompletedCount).toBe(1);
 
-      service.completeDailySlot(id);
+      await service.completeDailySlot(id);
       // Should not exceed maxDailyCount
       expect(ctx.dailySlots()[0].todayCompletedCount).toBe(1);
     });
@@ -229,15 +253,30 @@ describe('DockDailySlotService', () => {
       expect(ctx.dailySlots()).toHaveLength(0);
     });
 
-    it('sets fragment defense to 4 and pauses scheduler in fragment phase with level >= 3', () => {
+    it('sets fragment defense to 4 and pauses scheduler in fragment phase with level >= 3', async () => {
       ctx = buildContext({ isFragmentPhase: true, fragmentDefenseLevel: 3 });
       service.init(ctx);
 
-      const id = service.addDailySlot('Slot');
-      service.completeDailySlot(id);
+      const id = await service.addDailySlot('Slot');
+      await service.completeDailySlot(id);
 
       expect(ctx.fragmentDefenseLevel()).toBe(4);
       expect(ctx.schedulerPhase()).toBe('paused');
+    });
+
+    it('rolls back completion and fragment phase changes when local snapshot persistence fails', async () => {
+      ctx = buildContext({ isFragmentPhase: true, fragmentDefenseLevel: 3 });
+      service.init(ctx);
+      const id = await service.addDailySlot('Slot');
+      vi.clearAllMocks();
+      vi.mocked(ctx.persistCurrentSnapshot).mockResolvedValueOnce(false);
+
+      await expect(service.completeDailySlot(id)).resolves.toBe(false);
+
+      expect(ctx.dailySlots()[0].todayCompletedCount).toBe(0);
+      expect(ctx.fragmentDefenseLevel()).toBe(3);
+      expect(ctx.schedulerPhase()).toBe('active');
+      expect(mockCloudSyncService.enqueueRoutineCompletionSync).not.toHaveBeenCalled();
     });
   });
 
@@ -246,11 +285,11 @@ describe('DockDailySlotService', () => {
   // -----------------------------------------------------------------------
 
   describe('skipDailySlot', () => {
-    it('marks slot as fully completed (sets todayCompletedCount to maxDailyCount)', () => {
-      const id = service.addDailySlot('Slot', 3);
+    it('marks slot as fully completed (sets todayCompletedCount to maxDailyCount)', async () => {
+      const id = await service.addDailySlot('Slot', 3);
       expect(ctx.dailySlots()[0].todayCompletedCount).toBe(0);
 
-      service.skipDailySlot(id);
+      await service.skipDailySlot(id);
       expect(ctx.dailySlots()[0].todayCompletedCount).toBe(3);
     });
   });
@@ -260,20 +299,32 @@ describe('DockDailySlotService', () => {
   // -----------------------------------------------------------------------
 
   describe('removeDailySlot', () => {
-    it('removes the slot from the list', () => {
-      const id1 = service.addDailySlot('Slot A');
-      const id2 = service.addDailySlot('Slot B');
+    it('removes the slot from the list', async () => {
+      const id1 = await service.addDailySlot('Slot A');
+      const id2 = await service.addDailySlot('Slot B');
       expect(ctx.dailySlots()).toHaveLength(2);
 
-      service.removeDailySlot(id1);
+      await service.removeDailySlot(id1);
       expect(ctx.dailySlots()).toHaveLength(1);
       expect(ctx.dailySlots()[0].id).toBe(id2);
     });
 
-    it('does nothing for non-existent id', () => {
-      service.addDailySlot('Slot');
+    it('does nothing for non-existent id', async () => {
+      await service.addDailySlot('Slot');
       service.removeDailySlot('non-existent');
       expect(ctx.dailySlots()).toHaveLength(1);
+    });
+
+    it('restores the removed slot when local snapshot persistence fails', async () => {
+      const id = await service.addDailySlot('Slot');
+      vi.clearAllMocks();
+      vi.mocked(ctx.persistCurrentSnapshot).mockResolvedValueOnce(false);
+
+      await expect(service.removeDailySlot(id)).resolves.toBe(false);
+
+      expect(ctx.dailySlots()).toHaveLength(1);
+      expect(ctx.dailySlots()[0].id).toBe(id);
+      expect(mockCloudSyncService.enqueueRoutineTaskSync).not.toHaveBeenCalled();
     });
   });
 
@@ -308,6 +359,30 @@ describe('DockDailySlotService', () => {
       expect(ctx.dailySlots()[0].todayCompletedCount).toBe(0);
     });
 
+    it('rolls back reset date and completion counts when local snapshot persistence fails', async () => {
+      ctx = buildContext({
+        dailySlots: [
+          {
+            id: 'slot-1',
+            title: 'Morning',
+            maxDailyCount: 2,
+            todayCompletedCount: 2,
+            isEnabled: true,
+            createdAt: new Date().toISOString(),
+          },
+        ],
+        dailyResetDate: '2025-06-14',
+      });
+      service.init(ctx);
+      vi.spyOn(service, 'todayDateKey').mockReturnValue('2025-06-15');
+      vi.mocked(ctx.persistCurrentSnapshot).mockResolvedValueOnce(false);
+
+      await expect(service.resetDailySlotsIfNeeded()).resolves.toBe(false);
+
+      expect(ctx.dailyResetDate()).toBe('2025-06-14');
+      expect(ctx.dailySlots()[0].todayCompletedCount).toBe(2);
+    });
+
     it('does nothing when date has not changed', () => {
       ctx = buildContext({
         dailySlots: [
@@ -330,6 +405,7 @@ describe('DockDailySlotService', () => {
 
       // todayCompletedCount should remain unchanged
       expect(ctx.dailySlots()[0].todayCompletedCount).toBe(2);
+      expect(ctx.persistCurrentSnapshot).not.toHaveBeenCalled();
     });
   });
 });

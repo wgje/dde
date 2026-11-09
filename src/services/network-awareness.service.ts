@@ -131,17 +131,23 @@ export class NetworkAwarenessService {
   private connectionChangeHandler: EventListener | null = null;
   private batteryLevelChangeHandler: EventListener | null = null;
   private batteryChargingChangeHandler: EventListener | null = null;
+  private destroyed = false;
   
   // 【修复】保存事件处理器引用，确保 cleanup 时能正确移除
   private readonly onlineHandler = () => this.handleOnlineChange(true);
   private readonly offlineHandler = () => this.handleOnlineChange(false);
   
   constructor() {
-    this.initialize();
-    
     this.destroyRef.onDestroy(() => {
       this.cleanup();
     });
+
+    try {
+      this.initialize();
+    } catch (error) {
+      this.cleanup();
+      throw error;
+    }
   }
   
   /**
@@ -175,6 +181,10 @@ export class NetworkAwarenessService {
    * 检测 Chrome Data Saver / Lite Mode
    */
   detectDataSaver(): void {
+    if (this.destroyed) {
+      return;
+    }
+
     const nav = navigator as NavigatorWithConnection;
     const connection = nav.connection || nav.mozConnection || nav.webkitConnection;
     
@@ -220,6 +230,10 @@ export class NetworkAwarenessService {
     // 监听变化
     if (connection.addEventListener) {
       this.connectionChangeHandler = () => {
+        if (this.destroyed) {
+          return;
+        }
+
         this.updateNetworkState(connection);
       };
       connection.addEventListener('change', this.connectionChangeHandler);
@@ -230,6 +244,10 @@ export class NetworkAwarenessService {
    * 更新网络状态
    */
   private updateNetworkState(connection: NetworkInformation): void {
+    if (this.destroyed) {
+      return;
+    }
+
     // 更新有效类型
     if (connection.effectiveType) {
       this.effectiveType.set(connection.effectiveType);
@@ -244,6 +262,11 @@ export class NetworkAwarenessService {
     // 检测 Data Saver
     if (connection.saveData) {
       this.dataSaverMode.set('on');
+    }
+
+    if (!this.readNavigatorOnline()) {
+      this.isOnline.set(false);
+      this.networkQuality.set('offline');
     }
     
     this.logger.debug('网络状态更新', {
@@ -281,7 +304,12 @@ export class NetworkAwarenessService {
     }
     
     try {
-      this.batteryManager = await nav.getBattery();
+      const battery = await nav.getBattery();
+      if (this.destroyed) {
+        return;
+      }
+
+      this.batteryManager = battery;
       
       // 更新初始状态
       this.batteryLevel.set(Math.round(this.batteryManager.level * 100));
@@ -289,6 +317,10 @@ export class NetworkAwarenessService {
       
       // 监听变化
       this.batteryLevelChangeHandler = () => {
+        if (this.destroyed) {
+          return;
+        }
+
         if (this.batteryManager) {
           this.batteryLevel.set(Math.round(this.batteryManager.level * 100));
           this.checkLowBatteryWarning();
@@ -297,6 +329,10 @@ export class NetworkAwarenessService {
       this.batteryManager.addEventListener('levelchange', this.batteryLevelChangeHandler);
 
       this.batteryChargingChangeHandler = () => {
+        if (this.destroyed) {
+          return;
+        }
+
         if (this.batteryManager) {
           this.isCharging.set(this.batteryManager.charging);
         }
@@ -308,6 +344,7 @@ export class NetworkAwarenessService {
         charging: this.isCharging()
       });
     } catch (err) {
+      this.cleanupBatteryListeners();
       // 浏览器常会因权限策略、隐私设置或实现差异拒绝 Battery API；这不影响核心功能。
       this.logger.debug('Battery Status API 初始化失败，按不可用处理', err);
     }
@@ -348,6 +385,10 @@ export class NetworkAwarenessService {
    * 处理在线状态变化
    */
   private handleOnlineChange(online: boolean): void {
+    if (this.destroyed) {
+      return;
+    }
+
     this.isOnline.set(online);
     
     if (!online) {
@@ -395,6 +436,10 @@ export class NetworkAwarenessService {
    * 更新存储压力状态（由队列服务调用）
    */
   setStoragePressure(active: boolean, reason: string | null = null): void {
+    if (this.destroyed) {
+      return;
+    }
+
     this.storagePressure.set(active);
     this.storagePressureReason.set(reason);
     this.logger.info('存储压力状态更新', { active, reason });
@@ -404,39 +449,109 @@ export class NetworkAwarenessService {
    * 强制刷新网络状态
    */
   refresh(): void {
+    if (this.destroyed) {
+      return;
+    }
+
     this.detectDataSaver();
     
     if (this.networkConnection) {
       this.updateNetworkState(this.networkConnection);
     }
     
-    this.isOnline.set(typeof navigator !== 'undefined' ? navigator.onLine : true);
+    const online = this.readNavigatorOnline();
+    this.isOnline.set(online);
+    if (!online) {
+      this.networkQuality.set('offline');
+    } else if (this.networkQuality() === 'offline') {
+      this.networkQuality.set(
+        this.networkConnection?.effectiveType
+          ? this.mapEffectiveType(this.networkConnection.effectiveType)
+          : 'high',
+      );
+    }
     
     this.logger.debug('网络状态已刷新', this.getNetworkSummary());
+  }
+
+  private readNavigatorOnline(): boolean {
+    return typeof navigator !== 'undefined' ? navigator.onLine : true;
   }
   
   /**
    * 清理资源
    */
   private cleanup(): void {
-    if (this.networkConnection?.removeEventListener && this.connectionChangeHandler) {
-      this.networkConnection.removeEventListener('change', this.connectionChangeHandler);
+    this.destroyed = true;
+    const networkConnection = this.networkConnection;
+    const connectionChangeHandler = this.connectionChangeHandler;
+    this.networkConnection = null;
+    this.connectionChangeHandler = null;
+
+    if (networkConnection?.removeEventListener && connectionChangeHandler) {
+      this.removeLifecycleListener('network.change', () => {
+        networkConnection.removeEventListener?.('change', connectionChangeHandler);
+      });
     }
 
-    // 移除电池状态监听器
-    if (this.batteryManager) {
-      if (this.batteryLevelChangeHandler) {
-        this.batteryManager.removeEventListener('levelchange', this.batteryLevelChangeHandler);
-      }
-      if (this.batteryChargingChangeHandler) {
-        this.batteryManager.removeEventListener('chargingchange', this.batteryChargingChangeHandler);
-      }
-    }
+    this.cleanupBatteryListeners();
 
     // 【修复】使用保存的引用正确移除事件监听器
     if (typeof window !== 'undefined') {
-      window.removeEventListener('online', this.onlineHandler);
-      window.removeEventListener('offline', this.offlineHandler);
+      this.removeLifecycleListener('window.online', () => {
+        window.removeEventListener('online', this.onlineHandler);
+      });
+      this.removeLifecycleListener('window.offline', () => {
+        window.removeEventListener('offline', this.offlineHandler);
+      });
+    }
+  }
+
+  private cleanupBatteryListeners(): void {
+    const batteryManager = this.batteryManager;
+    const batteryLevelChangeHandler = this.batteryLevelChangeHandler;
+    const batteryChargingChangeHandler = this.batteryChargingChangeHandler;
+    this.batteryManager = null;
+    this.batteryLevelChangeHandler = null;
+    this.batteryChargingChangeHandler = null;
+
+    if (batteryManager) {
+      if (batteryLevelChangeHandler) {
+        this.removeLifecycleListener('battery.levelchange', () => {
+          batteryManager.removeEventListener('levelchange', batteryLevelChangeHandler);
+        });
+      }
+      if (batteryChargingChangeHandler) {
+        this.removeLifecycleListener('battery.chargingchange', () => {
+          batteryManager.removeEventListener('chargingchange', batteryChargingChangeHandler);
+        });
+      }
+    }
+  }
+
+  private removeLifecycleListener(label: string, remove: () => void): void {
+    try {
+      remove();
+      return;
+    } catch (error) {
+      this.warnLifecycleListenerCleanupFailure(label, error);
+    }
+
+    try {
+      remove();
+    } catch (error) {
+      this.warnLifecycleListenerCleanupFailure(label, error);
+    }
+  }
+
+  private warnLifecycleListenerCleanupFailure(label: string, error: unknown): void {
+    try {
+      this.logger.warn('网络感知生命周期监听解绑失败，继续清理其他监听', {
+        label,
+        message: error instanceof Error ? error.message : 'unknown',
+      });
+    } catch {
+      // Warning sinks must not interrupt lifecycle listener cleanup.
     }
   }
 }

@@ -1,12 +1,13 @@
-import { ChangeDetectionStrategy, Component, ElementRef, EnvironmentInjector, HostListener, OnDestroy, computed, inject, input, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, ElementRef, EnvironmentInjector, HostListener, OnDestroy, computed, effect, inject, input, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { A11yModule } from '@angular/cdk/a11y';
 import { SIYUAN_ERROR_MESSAGES } from '../../../../config/siyuan.config';
+import { AuthService } from '../../../../services/auth.service';
 import { LoggerService } from '../../../../services/logger.service';
 import type { ExternalSourceLink, SiyuanPreviewResult } from '../../../core/external-sources/external-source.model';
 import { ExternalSourceLinkService } from '../../../core/external-sources/external-source-link.service';
-import { SiyuanPreviewService } from '../../../core/external-sources/siyuan/siyuan-preview.service';
+import { SiyuanPreviewService, type SiyuanPreviewPromise } from '../../../core/external-sources/siyuan/siyuan-preview.service';
 import { shortenSiyuanBlockId } from '../../../core/external-sources/siyuan/siyuan-link-parser';
 import type { KnowledgeAnchorPopoverService } from './knowledge-anchor-popover.service';
 
@@ -187,6 +188,7 @@ function loadPopoverModule(): Promise<typeof import('./knowledge-anchor-popover.
   `],
 })
 export class KnowledgeAnchorComponent implements OnDestroy {
+  private readonly auth = inject(AuthService);
   private readonly linkService = inject(ExternalSourceLinkService);
   private readonly previewService = inject(SiyuanPreviewService);
   private readonly logger = inject(LoggerService).category('KnowledgeAnchor');
@@ -231,6 +233,10 @@ export class KnowledgeAnchorComponent implements OnDestroy {
    */
   private originChip: HTMLElement | null = null;
   private menuOriginChip: HTMLElement | null = null;
+  private previousOwnerId: string | null | undefined = undefined;
+  private previewRequestGeneration = 0;
+  private previewRequest: SiyuanPreviewPromise | null = null;
+  private destroyed = false;
   private longPressTimer: ReturnType<typeof setTimeout> | null = null;
   private longPressStart: { x: number; y: number; link: ExternalSourceLink; origin: HTMLElement | null } | null = null;
   private suppressNextClick = false;
@@ -240,11 +246,26 @@ export class KnowledgeAnchorComponent implements OnDestroy {
    */
   private popoverInstance: KnowledgeAnchorPopoverService | null = null;
 
+  constructor() {
+    effect(() => {
+      const ownerId = this.auth.currentUserId();
+      if (this.previousOwnerId === undefined) {
+        this.previousOwnerId = ownerId;
+        return;
+      }
+      if (this.previousOwnerId === ownerId) return;
+      this.previousOwnerId = ownerId;
+      this.clearOwnerBoundState();
+    });
+  }
+
   ngOnDestroy(): void {
+    this.destroyed = true;
+    this.previewRequestGeneration += 1;
     this.cancelLongPress();
     // popover 仅在桌面 hover 路径加载，未加载即未使用，无需清理。
     this.popoverInstance?.closeForHost(this.host.nativeElement);
-    this.previewService.abortActive();
+    this.cancelPreviewRequest();
   }
 
   /**
@@ -277,9 +298,9 @@ export class KnowledgeAnchorComponent implements OnDestroy {
     if (this.isMobile() || this.previewMode() === 'deep-link-only') return;
     const origin = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
     if (!origin) return;
-    void this.withPopover((p) => p.scheduleOpen(link, origin))
+    void this.withOwnerScopedPopover((p) => p.scheduleOpen(link, origin, this.host.nativeElement))
       .catch((error) => {
-        this.previewService.abortActive();
+        if (this.destroyed) return;
         this.logger.debug('桌面预览浮层加载失败（mouseenter）', {
           linkId: link.id,
           message: error instanceof Error ? error.message : 'unknown',
@@ -291,9 +312,9 @@ export class KnowledgeAnchorComponent implements OnDestroy {
     if (this.isMobile() || this.previewMode() === 'deep-link-only') return;
     const origin = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
     if (!origin) return;
-    void this.withPopover((p) => p.scheduleOpen(link, origin))
+    void this.withOwnerScopedPopover((p) => p.scheduleOpen(link, origin, this.host.nativeElement))
       .catch((error) => {
-        this.previewService.abortActive();
+        if (this.destroyed) return;
         this.logger.debug('桌面预览浮层加载失败（focus）', {
           linkId: link.id,
           message: error instanceof Error ? error.message : 'unknown',
@@ -304,7 +325,7 @@ export class KnowledgeAnchorComponent implements OnDestroy {
   onMouseLeave(): void {
     if (this.isMobile()) return;
     // popover 未加载意味着从未打开过，直接忽略 leave；避免无谓地拉起 chunk。
-    this.popoverInstance?.scheduleClose();
+    this.popoverInstance?.scheduleClose(this.host.nativeElement);
   }
 
   onChipClick(event: Event, link: ExternalSourceLink): void {
@@ -396,9 +417,11 @@ export class KnowledgeAnchorComponent implements OnDestroy {
   }
 
   closeSheet(): void {
+    this.previewRequestGeneration += 1;
+    this.cancelPreviewRequest();
     this.sheetOpen.set(false);
     this.activeLink.set(null);
-    this.previewService.abortActive();
+    this.sheetResult.set({ status: 'loading' });
     if (this.originChip instanceof HTMLElement && this.originChip.isConnected) {
       this.originChip.focus();
     }
@@ -415,15 +438,26 @@ export class KnowledgeAnchorComponent implements OnDestroy {
   }
 
   async refreshSheet(link: ExternalSourceLink): Promise<void> {
+    this.cancelPreviewRequest();
+    const requestGeneration = ++this.previewRequestGeneration;
+    const authFence = this.auth.captureAuthIdentityFence();
     this.sheetResult.set({ status: 'loading' });
+    const request = this.previewService.preview(link, { forceRefresh: true });
+    this.previewRequest = request;
     try {
-      this.sheetResult.set(await this.previewService.preview(link, { forceRefresh: true }));
+      const result = await request;
+      if (this.isCurrentPreviewRequest(link.id, requestGeneration, authFence)) {
+        this.sheetResult.set(result);
+      }
     } catch (error) {
+      if (!this.isCurrentPreviewRequest(link.id, requestGeneration, authFence)) return;
       this.logger.warn('移动端思源预览刷新失败，降级为安全错误态', {
         linkId: link.id,
         message: error instanceof Error ? error.message : 'unknown',
       });
       this.sheetResult.set(SHEET_PREVIEW_FALLBACK);
+    } finally {
+      if (this.previewRequest === request) this.previewRequest = null;
     }
   }
 
@@ -468,17 +502,56 @@ export class KnowledgeAnchorComponent implements OnDestroy {
   }
 
   private openSheet(link: ExternalSourceLink, origin?: HTMLElement, forceRefresh = false): void {
+    const requestGeneration = ++this.previewRequestGeneration;
+    const authFence = this.auth.captureAuthIdentityFence();
     this.originChip = origin ?? null;
     this.activeLink.set(link);
     this.sheetOpen.set(true);
     this.sheetResult.set({ status: 'loading' });
-    void this.previewService.preview(link, { forceRefresh })
+    this.cancelPreviewRequest();
+    const request = this.previewService.preview(link, { forceRefresh });
+    this.previewRequest = request;
+    void request
       .then(result => {
-        if (this.activeLink()?.id === link.id) this.sheetResult.set(result);
+        if (this.isCurrentPreviewRequest(link.id, requestGeneration, authFence)) this.sheetResult.set(result);
       })
       .catch(() => {
-        if (this.activeLink()?.id === link.id) this.sheetResult.set(SHEET_PREVIEW_FALLBACK);
+        if (this.isCurrentPreviewRequest(link.id, requestGeneration, authFence)) {
+          this.sheetResult.set(SHEET_PREVIEW_FALLBACK);
+        }
+      })
+      .finally(() => {
+        if (this.previewRequest === request) this.previewRequest = null;
       });
+  }
+
+  private isCurrentPreviewRequest(linkId: string, generation: number, authFence: string): boolean {
+    return !this.destroyed
+      && this.previewRequestGeneration === generation
+      && this.auth.captureAuthIdentityFence() === authFence
+      && this.activeLink()?.id === linkId;
+  }
+
+  private clearOwnerBoundState(): void {
+    this.cancelLongPress();
+    this.suppressNextClick = false;
+    this.previewRequestGeneration += 1;
+    this.cancelPreviewRequest();
+    this.sheetOpen.set(false);
+    this.activeLink.set(null);
+    this.sheetResult.set({ status: 'loading' });
+    this.actionMenuOpen.set(false);
+    this.menuLink.set(null);
+    this.clearEditor();
+    this.originChip = null;
+    this.menuOriginChip = null;
+    this.popoverInstance?.closeForHost(this.host.nativeElement);
+  }
+
+  private cancelPreviewRequest(): void {
+    const request = this.previewRequest;
+    this.previewRequest = null;
+    request?.cancel?.();
   }
 
   private openActionMenu(link: ExternalSourceLink, origin?: HTMLElement | null): void {
@@ -489,7 +562,7 @@ export class KnowledgeAnchorComponent implements OnDestroy {
   }
 
   private cancelLongPress(): void {
-    if (this.longPressTimer) {
+    if (this.longPressTimer !== null) {
       clearTimeout(this.longPressTimer);
       this.longPressTimer = null;
     }
@@ -502,12 +575,22 @@ export class KnowledgeAnchorComponent implements OnDestroy {
    * 避免 ManualBootstrapping 或 createEnvironmentInjector 的额外开销。
    */
   private async withPopover(action: (popover: KnowledgeAnchorPopoverService) => void): Promise<void> {
+    if (this.destroyed) return;
     if (this.popoverInstance) {
       action(this.popoverInstance);
       return;
     }
     const mod = await loadPopoverModule();
+    if (this.destroyed) return;
     this.popoverInstance ??= this.envInjector.get(mod.KnowledgeAnchorPopoverService);
     action(this.popoverInstance);
+  }
+
+  private withOwnerScopedPopover(action: (popover: KnowledgeAnchorPopoverService) => void): Promise<void> {
+    if (this.destroyed) return Promise.resolve();
+    const authFence = this.auth.captureAuthIdentityFence();
+    return this.withPopover(popover => {
+      if (!this.destroyed && this.auth.captureAuthIdentityFence() === authFence) action(popover);
+    });
   }
 }

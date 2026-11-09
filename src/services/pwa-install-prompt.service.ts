@@ -22,6 +22,7 @@ export class PwaInstallPromptService {
 
   private deferredPrompt: BeforeInstallPromptEvent | null = null;
   private initialized = false;
+  private listenerGeneration = 0;
 
   private readonly dismissedSignal = signal<boolean>(this.readDismissedFlag());
   readonly canInstall = signal<boolean>(false);
@@ -76,6 +77,14 @@ export class PwaInstallPromptService {
   private appInstalledHandler: (() => void) | null = null;
   private displayModeHandler: (() => void) | null = null;
   private displayModeMedia: MediaQueryList | null = null;
+  private pendingWindowListenerCleanup: Array<{
+    type: string;
+    listener: EventListener;
+  }> = [];
+  private pendingDisplayModeListenerCleanup: Array<{
+    media: MediaQueryList;
+    listener: () => void;
+  }> = [];
 
   private static readonly DISMISSED_KEY = 'nanoflow.pwa-install.dismissed';
 
@@ -90,8 +99,37 @@ export class PwaInstallPromptService {
 
     this.updatePlatformSignals();
     this.refreshDisplayMode();
+    const listenerGeneration = ++this.listenerGeneration;
 
-    this.beforeInstallPromptHandler = (event: Event) => {
+    this.beforeInstallPromptHandler = this.createBeforeInstallPromptHandler(listenerGeneration);
+    this.appInstalledHandler = this.createAppInstalledHandler(listenerGeneration);
+    this.displayModeHandler = this.createDisplayModeHandler(listenerGeneration);
+
+    try {
+      window.addEventListener('beforeinstallprompt', this.beforeInstallPromptHandler as EventListener);
+      window.addEventListener('appinstalled', this.appInstalledHandler);
+
+      this.displayModeMedia = window.matchMedia('(display-mode: standalone)');
+      this.displayModeMedia.addEventListener('change', this.displayModeHandler);
+
+      this.initialized = true;
+    } catch (error) {
+      this.cleanup();
+      throw error;
+    }
+    this.debugSafely('PWA 安装提示服务已初始化', {
+      standalone: this.isStandaloneMode(),
+      ios: this.isIos(),
+      android: this.isAndroid(),
+    });
+  }
+
+  private createBeforeInstallPromptHandler(listenerGeneration: number): (event: Event) => void {
+    return (event: Event) => {
+      if (!this.isCurrentListenerGeneration(listenerGeneration)) {
+        return;
+      }
+
       const installEvent = event as BeforeInstallPromptEvent;
       if (!installEvent.prompt || !installEvent.userChoice) {
         return;
@@ -101,7 +139,7 @@ export class PwaInstallPromptService {
         this.deferredPrompt = null;
         this.canInstall.set(false);
         this.nativeInstallHintAvailable.set(true);
-        this.logger.info('检测到 beforeinstallprompt 事件，交由浏览器原生安装 UX 处理');
+        this.infoSafely('检测到 beforeinstallprompt 事件，交由浏览器原生安装 UX 处理');
         return;
       }
 
@@ -109,11 +147,17 @@ export class PwaInstallPromptService {
       this.deferredPrompt = installEvent;
       this.canInstall.set(true);
       this.nativeInstallHintAvailable.set(false);
-      this.logger.info('捕获 beforeinstallprompt 事件');
+      this.infoSafely('捕获 beforeinstallprompt 事件');
     };
+  }
 
-    this.appInstalledHandler = () => {
-      this.logger.info('PWA 安装完成');
+  private createAppInstalledHandler(listenerGeneration: number): () => void {
+    return () => {
+      if (!this.isCurrentListenerGeneration(listenerGeneration)) {
+        return;
+      }
+
+      this.infoSafely('PWA 安装完成');
       this.deferredPrompt = null;
       this.canInstall.set(false);
       this.nativeInstallHintAvailable.set(false);
@@ -121,43 +165,43 @@ export class PwaInstallPromptService {
       this.dismissedSignal.set(true);
       this.writeDismissedFlag(true);
     };
+  }
 
-    this.displayModeHandler = () => this.refreshDisplayMode();
+  private createDisplayModeHandler(listenerGeneration: number): () => void {
+    return () => {
+      if (!this.isCurrentListenerGeneration(listenerGeneration)) {
+        return;
+      }
 
-    window.addEventListener('beforeinstallprompt', this.beforeInstallPromptHandler as EventListener);
-    window.addEventListener('appinstalled', this.appInstalledHandler);
+      this.refreshDisplayMode();
+    };
+  }
 
-    this.displayModeMedia = window.matchMedia('(display-mode: standalone)');
-    this.displayModeMedia.addEventListener('change', this.displayModeHandler);
-
-    this.initialized = true;
-    this.logger.debug('PWA 安装提示服务已初始化', {
-      standalone: this.isStandaloneMode(),
-      ios: this.isIos(),
-      android: this.isAndroid(),
-    });
+  private isCurrentListenerGeneration(listenerGeneration: number): boolean {
+    return this.listenerGeneration === listenerGeneration && this.initialized;
   }
 
   async promptInstall(): Promise<boolean> {
-    if (!this.deferredPrompt) {
+    const promptEvent = this.deferredPrompt;
+    if (!promptEvent) {
       return false;
     }
 
     try {
-      await this.deferredPrompt.prompt();
-      const result = await this.deferredPrompt.userChoice;
+      await promptEvent.prompt();
+      const result = await promptEvent.userChoice;
       const accepted = result.outcome === 'accepted';
 
-      this.logger.info('安装提示结果', { outcome: result.outcome, platform: result.platform });
+      this.infoSafely('安装提示结果', { outcome: result.outcome, platform: result.platform });
 
-      if (accepted) {
+      if (accepted && this.deferredPrompt === promptEvent) {
         this.deferredPrompt = null;
         this.canInstall.set(false);
       }
 
       return accepted;
     } catch (error) {
-      this.logger.warn('安装提示调用失败', error);
+      this.warnSafely('安装提示调用失败', error);
       return false;
     }
   }
@@ -223,27 +267,117 @@ export class PwaInstallPromptService {
   }
 
   private cleanup(): void {
+    this.listenerGeneration += 1;
     if (typeof window === 'undefined') {
+      this.initialized = false;
       return;
     }
 
-    if (this.beforeInstallPromptHandler) {
-      window.removeEventListener('beforeinstallprompt', this.beforeInstallPromptHandler as EventListener);
-      this.beforeInstallPromptHandler = null;
+    this.retryPendingListenerCleanup();
+
+    const beforeInstallPromptHandler = this.beforeInstallPromptHandler;
+    this.beforeInstallPromptHandler = null;
+    if (beforeInstallPromptHandler) {
+      this.removeWindowListenerWithRetry('beforeinstallprompt', beforeInstallPromptHandler as EventListener);
     }
 
-    if (this.appInstalledHandler) {
-      window.removeEventListener('appinstalled', this.appInstalledHandler);
-      this.appInstalledHandler = null;
+    const appInstalledHandler = this.appInstalledHandler;
+    this.appInstalledHandler = null;
+    if (appInstalledHandler) {
+      this.removeWindowListenerWithRetry('appinstalled', appInstalledHandler);
     }
 
-    if (this.displayModeHandler) {
-      this.displayModeMedia?.removeEventListener('change', this.displayModeHandler);
-      this.displayModeHandler = null;
-    }
-
+    const displayModeHandler = this.displayModeHandler;
+    const displayModeMedia = this.displayModeMedia;
+    this.displayModeHandler = null;
     this.displayModeMedia = null;
+    if (displayModeHandler && displayModeMedia) {
+      this.removeDisplayModeListenerWithRetry(displayModeMedia, displayModeHandler);
+    }
 
     this.initialized = false;
+  }
+
+  private retryPendingListenerCleanup(): void {
+    this.pendingWindowListenerCleanup = this.pendingWindowListenerCleanup.filter(({ type, listener }) => {
+      return !this.removeWindowListenerSafely(type, listener);
+    });
+    this.pendingDisplayModeListenerCleanup = this.pendingDisplayModeListenerCleanup.filter(({ media, listener }) => {
+      return !this.removeDisplayModeListenerSafely(media, listener);
+    });
+  }
+
+  private removeWindowListenerWithRetry(type: string, listener: EventListener): void {
+    if (!this.removeWindowListenerSafely(type, listener)) {
+      this.pendingWindowListenerCleanup.push({ type, listener });
+    }
+  }
+
+  private removeDisplayModeListenerWithRetry(
+    media: MediaQueryList,
+    listener: () => void,
+  ): void {
+    if (!this.removeDisplayModeListenerSafely(media, listener)) {
+      this.pendingDisplayModeListenerCleanup.push({ media, listener });
+    }
+  }
+
+  private removeWindowListenerSafely(type: string, listener: EventListener): boolean {
+    try {
+      window.removeEventListener(type, listener);
+      return true;
+    } catch {
+      // Listener cleanup is best-effort; listenerGeneration invalidates stale callbacks.
+      return false;
+    }
+  }
+
+  private removeDisplayModeListenerSafely(
+    media: MediaQueryList,
+    listener: () => void,
+  ): boolean {
+    try {
+      media.removeEventListener('change', listener);
+      return true;
+    } catch {
+      // Listener cleanup is best-effort; listenerGeneration invalidates stale callbacks.
+      return false;
+    }
+  }
+
+  private infoSafely(message: string, data?: unknown): void {
+    try {
+      if (data === undefined) {
+        this.logger.info(message);
+      } else {
+        this.logger.info(message, data);
+      }
+    } catch {
+      // Logging must not affect install prompt state.
+    }
+  }
+
+  private warnSafely(message: string, data?: unknown): void {
+    try {
+      if (data === undefined) {
+        this.logger.warn(message);
+      } else {
+        this.logger.warn(message, data);
+      }
+    } catch {
+      // Logging must not affect install prompt state.
+    }
+  }
+
+  private debugSafely(message: string, data?: unknown): void {
+    try {
+      if (data === undefined) {
+        this.logger.debug(message);
+      } else {
+        this.logger.debug(message, data);
+      }
+    } catch {
+      // Logging must not affect install prompt initialization.
+    }
   }
 }

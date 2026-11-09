@@ -3,7 +3,10 @@ import { TimerHandle, IntervalHandle } from './timer-handle';
 
 describe('TimerHandle', () => {
   beforeEach(() => { vi.useFakeTimers(); });
-  afterEach(() => { vi.useRealTimers(); });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
 
   it('should not be active initially', () => {
     const handle = new TimerHandle();
@@ -34,6 +37,32 @@ describe('TimerHandle', () => {
     vi.advanceTimersByTime(100);
     expect(fn1).not.toHaveBeenCalled();
     expect(fn2).toHaveBeenCalledOnce();
+  });
+
+  it('ignores a stale callback after re-schedule keeps a newer timer active', () => {
+    const handle = new TimerHandle();
+    const fn1 = vi.fn();
+    const fn2 = vi.fn();
+    const queuedTimeouts = new Map<number, () => void>();
+    let nextTimerId = 1;
+    vi.spyOn(globalThis, 'setTimeout').mockImplementation((callback: TimerHandler) => {
+      const timerId = nextTimerId++;
+      queuedTimeouts.set(timerId, callback as () => void);
+      return timerId as unknown as ReturnType<typeof setTimeout>;
+    });
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout').mockImplementation(() => undefined);
+
+    handle.schedule(fn1, 100);
+    handle.schedule(fn2, 100);
+    queuedTimeouts.get(1)?.();
+
+    expect(fn1).not.toHaveBeenCalled();
+    expect(fn2).not.toHaveBeenCalled();
+    expect(handle.active).toBe(true);
+
+    handle.cancel();
+
+    expect(clearTimeoutSpy).toHaveBeenCalledWith(2);
   });
 
   it('should cancel timer', () => {
@@ -74,11 +103,25 @@ describe('TimerHandle', () => {
     const handle = new TimerHandle();
     expect(() => handle.cancel()).not.toThrow();
   });
+
+  it('should clear internal state even when clearTimeout throws', () => {
+    const handle = new TimerHandle();
+    handle.schedule(() => {}, 100);
+    vi.spyOn(globalThis, 'clearTimeout').mockImplementation(() => {
+      throw new Error('timer cleanup unavailable');
+    });
+
+    expect(() => handle.cancel()).not.toThrow();
+    expect(handle.active).toBe(false);
+  });
 });
 
 describe('IntervalHandle', () => {
   beforeEach(() => { vi.useFakeTimers(); });
-  afterEach(() => { vi.useRealTimers(); });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
 
   it('should not be active initially', () => {
     const handle = new IntervalHandle();
@@ -124,6 +167,32 @@ describe('IntervalHandle', () => {
     handle.stop();
   });
 
+  it('ignores stale interval ticks after re-start keeps a newer interval active', () => {
+    const handle = new IntervalHandle();
+    const fn1 = vi.fn();
+    const fn2 = vi.fn();
+    const queuedIntervals = new Map<number, () => void>();
+    let nextIntervalId = 1;
+    vi.spyOn(globalThis, 'setInterval').mockImplementation((callback: TimerHandler) => {
+      const intervalId = nextIntervalId++;
+      queuedIntervals.set(intervalId, callback as () => void);
+      return intervalId as unknown as ReturnType<typeof setInterval>;
+    });
+    const clearIntervalSpy = vi.spyOn(globalThis, 'clearInterval').mockImplementation(() => undefined);
+
+    handle.start(fn1, 50);
+    handle.start(fn2, 50);
+    queuedIntervals.get(1)?.();
+
+    expect(fn1).not.toHaveBeenCalled();
+    expect(fn2).not.toHaveBeenCalled();
+    expect(handle.active).toBe(true);
+
+    handle.stop();
+
+    expect(clearIntervalSpy).toHaveBeenCalledWith(2);
+  });
+
   it('should clamp non-positive interval to 1ms', () => {
     const handle = new IntervalHandle();
     const fn = vi.fn();
@@ -136,5 +205,16 @@ describe('IntervalHandle', () => {
   it('stop on inactive handle is a no-op', () => {
     const handle = new IntervalHandle();
     expect(() => handle.stop()).not.toThrow();
+  });
+
+  it('should clear internal state even when clearInterval throws', () => {
+    const handle = new IntervalHandle();
+    handle.start(() => {}, 100);
+    vi.spyOn(globalThis, 'clearInterval').mockImplementation(() => {
+      throw new Error('interval cleanup unavailable');
+    });
+
+    expect(() => handle.stop()).not.toThrow();
+    expect(handle.active).toBe(false);
   });
 });

@@ -18,6 +18,7 @@ import * as go from 'gojs';
 export interface FlowTemplateEventHandlers {
   onNodeClick?: (node: go.Node) => void;
   onNodeDoubleClick?: (node: go.Node) => void;
+  onSidecarToggle?: (taskId: string, part?: go.Part) => void;
   onLinkClick?: (link: go.Link) => void;
   onLinkDoubleClick?: (link: go.Link) => void;
   onLinkDeleteRequest?: (link: go.Link) => void;
@@ -28,9 +29,7 @@ export interface FlowTemplateEventHandlers {
   onDeleteKeyPressed?: () => void;
   /** 选择变化时触发 */
   onSelectionChanged?: (selectedNodeKeys: string[]) => void;
-  /** Alt+拖拽节点时触发（用于将任务拖入停泊坞） */
-  onNodeAltDragStart?: (taskId: string, clientX: number, clientY: number) => void;
-  /** 拖拽节点出画布边界时触发（支持多选拖入停泊坞） */
+  /** 拖拽节点出画布边界时触发（支持多选拖入停泊坞；单任务拖入停泊坞也走此路径） */
   onNodesDragOutOfBounds?: (taskIds: string[], clientX: number, clientY: number) => void;
 }
 
@@ -49,6 +48,7 @@ export const flowTemplateEventHandlers: FlowTemplateEventHandlers = {};
 export const FLOW_TEMPLATE_EVENTS = {
   NODE_CLICKED: 'NodeClicked',
   NODE_DOUBLE_CLICKED: 'NodeDoubleClicked',
+  SIDECAR_TOGGLED: 'SidecarToggled',
   LINK_CLICKED: 'LinkClicked',
   LINK_DOUBLE_CLICKED: 'LinkDoubleClicked',
   LINK_DELETE_REQUESTED: 'LinkDeleteRequested',

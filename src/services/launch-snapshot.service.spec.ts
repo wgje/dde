@@ -1,6 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { TestBed } from '@angular/core/testing';
 import { LaunchSnapshotService, type LaunchSnapshot } from './launch-snapshot.service';
 import type { Project } from '../models';
+import { SessionRuntimeResetRegistry } from './session-runtime-reset.service';
+import {
+  LocalBackupUiRestoreWriterPausedError,
+  LocalBackupUiRestoreWriterQuiescenceService,
+} from './local-backup-ui-restore-writer-quiescence.service';
 
 function createProject(id: string, name: string, updatedAt: string, taskCount = 4): Project {
   return {
@@ -31,17 +37,37 @@ function createProject(id: string, name: string, updatedAt: string, taskCount = 
 
 describe('LaunchSnapshotService', () => {
   let service: LaunchSnapshotService;
+  let sessionResetCallback: (() => void) | null;
+  let mockSessionRuntimeReset: Pick<SessionRuntimeResetRegistry, 'register' | 'resetAll'>;
 
   beforeEach(() => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-03-25T10:00:00.000Z'));
     localStorage.clear();
-    service = new LaunchSnapshotService();
+    sessionResetCallback = null;
+    mockSessionRuntimeReset = {
+      register: vi.fn((_owner: string, reset: () => void) => {
+        sessionResetCallback = reset;
+        return vi.fn();
+      }),
+      resetAll: vi.fn((reason) => {
+        sessionResetCallback?.();
+        return { ok: true, reason, attemptedOwners: [], failures: [] };
+      }),
+    };
+    TestBed.configureTestingModule({
+      providers: [
+        LaunchSnapshotService,
+        { provide: SessionRuntimeResetRegistry, useValue: mockSessionRuntimeReset },
+      ],
+    });
+    service = TestBed.inject(LaunchSnapshotService);
   });
 
   afterEach(() => {
     service.flushPendingPersist();
     service.dispose();
+    TestBed.resetTestingModule();
     localStorage.clear();
     vi.useRealTimers();
   });
@@ -134,6 +160,48 @@ describe('LaunchSnapshotService', () => {
     expect(stored.colorMode).toBe('dark');
   });
 
+  it('should register pending owner launch snapshots with restore quiescence and block new owner writes after freeze', async () => {
+    vi.useRealTimers();
+    const snapshot = service.capture([createProject('project-restore', 'Restore', '2026-03-25T09:00:00.000Z')], {
+      userId: 'restore-owner',
+      activeProjectId: 'project-restore',
+      lastActiveView: 'text',
+      theme: 'default',
+      colorMode: 'dark',
+    });
+    const quiescence = new LocalBackupUiRestoreWriterQuiescenceService({ pollIntervalMs: 1 });
+
+    service.schedulePersist(snapshot);
+    let prepared = false;
+    const preparing = quiescence.prepare('restore-owner').then(handle => {
+      prepared = true;
+      return handle;
+    });
+
+    await new Promise(resolve => setTimeout(resolve, 10));
+    expect(prepared).toBe(false);
+
+    const handle = await preparing;
+    expect(JSON.parse(localStorage.getItem('nanoflow.launch-snapshot.v2') ?? 'null')).toMatchObject({
+      userId: 'restore-owner',
+      activeProjectId: 'project-restore',
+    });
+
+    expect(() => service.schedulePersist(snapshot)).toThrow(LocalBackupUiRestoreWriterPausedError);
+    expect(() => service.schedulePersistDeferred(
+      [createProject('project-blocked', 'Blocked', '2026-03-25T09:10:00.000Z')],
+      {
+        userId: 'restore-owner',
+        activeProjectId: 'project-blocked',
+        lastActiveView: 'flow',
+        theme: 'default',
+        colorMode: 'light',
+      },
+    )).toThrow(LocalBackupUiRestoreWriterPausedError);
+
+    await handle.abortBeforeMutation();
+  });
+
   it('should cancel pending deferred persist without writing snapshot', () => {
     service.schedulePersistDeferred([createProject('project-3', 'Canceled', '2026-03-25T09:30:00.000Z')], {
       activeProjectId: 'project-3',
@@ -147,6 +215,57 @@ describe('LaunchSnapshotService', () => {
 
     expect(localStorage.getItem('nanoflow.launch-snapshot.v1')).toBeNull();
     expect(localStorage.getItem('nanoflow.launch-snapshot.v2')).toBeNull();
+  });
+
+  it('should cancel pending owner snapshot when the session runtime resets', () => {
+    service.schedulePersistDeferred([createProject('project-old', 'Old Owner', '2026-03-25T09:30:00.000Z')], {
+      userId: 'old-user',
+      activeProjectId: 'project-old',
+      lastActiveView: 'text',
+      theme: 'default',
+      colorMode: 'dark',
+    });
+
+    mockSessionRuntimeReset.resetAll('owner-change');
+    vi.advanceTimersByTime(400);
+
+    expect(localStorage.getItem('nanoflow.launch-snapshot.v1')).toBeNull();
+    expect(localStorage.getItem('nanoflow.launch-snapshot.v2')).toBeNull();
+  });
+
+  it('should ignore a replaced debounce callback instead of flushing the latest snapshot early', () => {
+    vi.useRealTimers();
+    const scheduledCallbacks: Array<() => void> = [];
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation((handler: TimerHandler) => {
+      scheduledCallbacks.push(handler as () => void);
+      return scheduledCallbacks.length as unknown as ReturnType<typeof setTimeout>;
+    });
+    const firstSnapshot = service.capture([createProject('project-first', 'First', '2026-03-25T09:00:00.000Z')], {
+      activeProjectId: 'project-first',
+      lastActiveView: 'text',
+      theme: 'default',
+      colorMode: 'light',
+    });
+    const latestSnapshot = service.capture([createProject('project-latest', 'Latest', '2026-03-25T10:00:00.000Z')], {
+      activeProjectId: 'project-latest',
+      lastActiveView: 'flow',
+      theme: 'default',
+      colorMode: 'dark',
+    });
+
+    try {
+      service.schedulePersist(firstSnapshot);
+      service.schedulePersist(latestSnapshot);
+      scheduledCallbacks[0]?.();
+
+      expect(localStorage.getItem('nanoflow.launch-snapshot.v2')).toBeNull();
+
+      scheduledCallbacks[1]?.();
+      const stored = JSON.parse(localStorage.getItem('nanoflow.launch-snapshot.v2') ?? 'null') as LaunchSnapshot;
+      expect(stored.activeProjectId).toBe('project-latest');
+    } finally {
+      setTimeoutSpy.mockRestore();
+    }
   });
 
   it('should prefer v2 payloads over v1 when both snapshots exist', () => {

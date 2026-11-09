@@ -4,7 +4,15 @@ import { LayoutService } from './layout.service';
 import { UiStateService } from './ui-state.service';
 import { TaskStore, ProjectStore, ConnectionStore } from '../core-bridge';
 import { SUPERSCRIPT_DIGITS } from '../config';
+import { AUTH_CONFIG } from '../config/auth.config';
 import { summarizeMarkdownTodos } from '../utils/markdown-todo';
+import { AuthService } from './auth.service';
+import { localBackupUiRestoreWriterQuiescence } from './local-backup-ui-restore-writer-quiescence.service';
+import type {
+  ConnectionStoreStateSnapshot,
+  ProjectStoreStateSnapshot,
+  TaskStoreStateSnapshot,
+} from '../app/core/state/store-data-safety.helpers';
 
 /**
  * 任务连接信息（缓存用）
@@ -20,6 +28,52 @@ interface TaskTodoSnapshot {
   total: number;
   completed: number;
   pending: number;
+}
+
+interface ProjectStateStoreSnapshot {
+  tasks: TaskStoreStateSnapshot;
+  projects: ProjectStoreStateSnapshot;
+  connections: ConnectionStoreStateSnapshot;
+}
+
+export type BeforeActiveProjectChangeListener = (
+  previousProjectId: string | null,
+  nextProjectId: string | null,
+) => void;
+
+export type ActiveProjectOwner = Readonly<{
+  projectId: string | null;
+  generation: number;
+}>;
+
+function assertUniqueAuthoritativeIds(projects: Project[]): void {
+  const projectIds = new Set<string>();
+  const taskIds = new Set<string>();
+  const connectionIds = new Set<string>();
+  for (const project of projects) {
+    if (projectIds.has(project.id)) {
+      throw new Error(`Duplicate project id in authoritative replacement: ${project.id}`);
+    }
+    projectIds.add(project.id);
+
+    if (Array.isArray(project.tasks)) {
+      for (const task of project.tasks) {
+        if (taskIds.has(task.id)) {
+          throw new Error(`Duplicate task id in authoritative replacement: ${task.id}`);
+        }
+        taskIds.add(task.id);
+      }
+    }
+
+    if (Array.isArray(project.connections)) {
+      for (const connection of project.connections) {
+        if (connectionIds.has(connection.id)) {
+          throw new Error(`Duplicate connection id in authoritative replacement: ${connection.id}`);
+        }
+        connectionIds.add(connection.id);
+      }
+    }
+  }
 }
 
 /**
@@ -45,26 +99,29 @@ interface TaskTodoSnapshot {
 export class ProjectStateService {
   private layoutService = inject(LayoutService);
   private uiState = inject(UiStateService);
+  private readonly authService = inject(AuthService, { optional: true });
   
   // ========== 新架构：底层 Store ==========
   private readonly taskStore = inject(TaskStore);
   private readonly projectStore = inject(ProjectStore);
   private readonly connectionStore = inject(ConnectionStore);
+  private readonly beforeActiveProjectChangeListeners = new Set<BeforeActiveProjectChangeListener>();
+  private activeProjectGeneration = 0;
   
   // ========== 核心数据状态（代理到 Store） ==========
   
   /** 项目列表 - 代理到 ProjectStore */
   readonly projects = computed(() => this.projectStore.projects());
   
-  /** 
-   * 活动项目 ID - 直接暴露 ProjectStore 的 WritableSignal
-   * 保持 .set() 可用性
-   */
-  readonly activeProjectId = this.projectStore.activeProjectId;
+  /** 活动项目 ID；所有写入必须通过 setActiveProjectId。 */
+  readonly activeProjectId = this.projectStore.activeProjectId.asReadonly();
 
   // ========== 计算属性 ==========
 
-  readonly activeProject = computed(() => this.projectStore.activeProject());
+  readonly activeProject = computed(() => {
+    const projectId = this.projectStore.activeProjectId();
+    return projectId ? this.getProjectWithCurrentData(projectId) ?? null : null;
+  });
 
   /** 当前项目的任务列表 - 使用 TaskStore O(1) 查找 */
   readonly tasks = computed(() => {
@@ -381,7 +438,37 @@ export class ProjectStateService {
    * 直接更新项目列表
    * 同时更新 ProjectStore、TaskStore、ConnectionStore
    */
-  setProjects(projects: Project[]): void {
+  setProjects(projects: Project[], ownerUserId?: string): void {
+    const owner = this.resolveWriteOwner(ownerUserId);
+    this.runGuardedProjectStateMutation(() => {
+      assertUniqueAuthoritativeIds(projects);
+      const snapshot = this.captureStoreSnapshot();
+      try {
+        this.replaceProjects(projects, owner);
+      } catch (error) {
+        this.restoreStoreSnapshot(snapshot, owner);
+        throw error;
+      }
+    }, owner);
+  }
+
+  replaceProjectsForRestore(ownerUserId: string, projects: Project[]): void {
+    this.setProjects(projects, ownerUserId);
+  }
+
+  assertWriteOwner(ownerUserId: string): void {
+    this.resolveWriteOwner(ownerUserId);
+  }
+
+  private replaceProjects(projects: Project[], ownerUserId: string): void {
+    const incomingProjectIds = new Set(projects.map(project => project.id));
+    const activeProjectId = this.projectStore.activeProjectId();
+    if (activeProjectId && !incomingProjectIds.has(activeProjectId)) {
+      this.setActiveProjectId(null, ownerUserId);
+    }
+    this.taskStore.clearProjectsExcept(incomingProjectIds);
+    this.connectionStore.clearProjectsExcept(incomingProjectIds);
+
     // 更新 ProjectStore
     this.projectStore.setProjects(projects);
     
@@ -408,31 +495,87 @@ export class ProjectStateService {
     }
   }
 
+  private captureStoreSnapshot(): ProjectStateStoreSnapshot {
+    return {
+      tasks: this.taskStore.captureState(),
+      projects: this.projectStore.captureState(),
+      connections: this.connectionStore.captureState(),
+    };
+  }
+
+  private restoreStoreSnapshot(snapshot: ProjectStateStoreSnapshot, ownerUserId: string): void {
+    this.taskStore.restoreState(snapshot.tasks);
+    this.connectionStore.restoreState(snapshot.connections);
+    this.setActiveProjectId(snapshot.projects.activeProjectId, ownerUserId);
+    this.projectStore.restoreState(snapshot.projects);
+  }
+
   /**
    * 仅更新项目元数据（不触碰 TaskStore / ConnectionStore）
    *
    * 适用于 syncProjectListMetadata 等只更新项目 name/description/updatedAt 的场景。
    * 空壳项目（tasks: []）不会覆盖 TaskStore 中已加载好的任务数据。
    */
-  setProjectsMetadataOnly(projects: Project[]): void {
-    this.projectStore.setProjects(projects);
+  setProjectsMetadataOnly(projects: Project[], ownerUserId?: string): void {
+    const owner = this.resolveWriteOwner(ownerUserId);
+    this.runGuardedProjectStateMutation(() => {
+      const incomingProjectIds = new Set(projects.map(project => project.id));
+      const activeProjectId = this.projectStore.activeProjectId();
+      if (activeProjectId && !incomingProjectIds.has(activeProjectId)) {
+        this.setActiveProjectId(null, owner);
+      }
+      this.projectStore.setProjects(projects);
+    }, owner);
   }
 
   /**
    * 更新项目列表
    * 兼容旧的 updater 模式
    */
-  updateProjects(updater: (projects: Project[]) => Project[]): void {
-    const currentProjects = this.projectStore.projects();
+  updateProjects(updater: (projects: Project[]) => Project[], ownerUserId?: string): void {
+    // ProjectStore 只保证项目壳元数据最新；tasks/connections 的权威状态在独立 Store。
+    // updater 若从陈旧壳开始，会把旧 stage/parentId 或缺失任务重新灌回 TaskStore。
+    const currentProjects = this.getProjectsWithCurrentData();
     const updatedProjects = updater(currentProjects);
-    this.setProjects(updatedProjects);
+    this.setProjects(updatedProjects, ownerUserId);
+  }
+
+  updateProjectsForOwner(ownerUserId: string, updater: (projects: Project[]) => Project[]): void {
+    this.updateProjects(updater, ownerUserId);
   }
 
   /**
    * 设置活动项目 ID
    */
-  setActiveProjectId(projectId: string | null): void {
-    this.projectStore.activeProjectId.set(projectId);
+  setActiveProjectId(projectId: string | null, ownerUserId?: string): void {
+    const owner = this.resolveWriteOwner(ownerUserId);
+    this.runGuardedProjectStateMutation(() => {
+      const previousProjectId = this.projectStore.activeProjectId();
+      if (previousProjectId === projectId) return;
+      this.activeProjectGeneration += 1;
+      for (const listener of [...this.beforeActiveProjectChangeListeners]) {
+        listener(previousProjectId, projectId);
+      }
+      this.projectStore.activeProjectId.set(projectId);
+    }, owner);
+  }
+
+  setActiveProjectIdForOwner(ownerUserId: string, projectId: string | null): void {
+    this.setActiveProjectId(projectId, ownerUserId);
+  }
+
+  captureActiveProjectOwner(): ActiveProjectOwner {
+    return { projectId: this.projectStore.activeProjectId(), generation: this.activeProjectGeneration };
+  }
+
+  isActiveProjectOwnerCurrent(owner: ActiveProjectOwner): boolean {
+    return owner.projectId === this.projectStore.activeProjectId()
+      && owner.generation === this.activeProjectGeneration;
+  }
+
+  registerBeforeActiveProjectChange(listener: BeforeActiveProjectChangeListener): () => void {
+    this.beforeActiveProjectChangeListeners.add(listener);
+    return () => this.beforeActiveProjectChangeListeners.delete(listener);
   }
 
   /**
@@ -455,10 +598,14 @@ export class ProjectStateService {
   /**
    * 清空数据
    */
-  clearData(): void {
-    this.projectStore.clear();
-    this.taskStore.clear();
-    this.connectionStore.clear();
+  clearData(ownerUserId?: string): void {
+    const owner = this.resolveWriteOwner(ownerUserId);
+    this.runGuardedProjectStateMutation(() => {
+      this.setActiveProjectId(null, owner);
+      this.projectStore.clear();
+      this.taskStore.clear();
+      this.connectionStore.clear();
+    }, owner);
   }
   
   // ========== 新增：O(1) 查找方法 ==========
@@ -481,20 +628,20 @@ export class ProjectStateService {
    * 更新单个任务
    */
   updateTask(task: Task, projectId?: string): void {
-    const pid = projectId || this.activeProjectId();
-    if (pid) {
-      this.taskStore.setTask(task, pid);
-    }
+    this.runGuardedProjectStateMutation(() => {
+      const pid = projectId || this.activeProjectId();
+      if (pid) this.taskStore.setTask(task, pid);
+    });
   }
   
   /**
    * 更新单个连接
    */
   updateConnection(connection: Connection, projectId?: string): void {
-    const pid = projectId || this.activeProjectId();
-    if (pid) {
-      this.connectionStore.setConnection(connection, pid);
-    }
+    this.runGuardedProjectStateMutation(() => {
+      const pid = projectId || this.activeProjectId();
+      if (pid) this.connectionStore.setConnection(connection, pid);
+    });
   }
 
   /**
@@ -502,40 +649,61 @@ export class ProjectStateService {
    * 与循环调用 updateTask 相比，减少 N 次 Map 克隆为 1 次
    */
   bulkUpdateTasks(tasks: Task[], projectId?: string): void {
-    const pid = projectId || this.activeProjectId();
-    if (pid) {
-      this.taskStore.bulkSetTasks(tasks, pid);
-    }
+    this.runGuardedProjectStateMutation(() => {
+      const pid = projectId || this.activeProjectId();
+      if (pid) this.taskStore.bulkSetTasks(tasks, pid);
+    });
   }
 
   /**
    * 批量删除任务（单次 Map 克隆）
    */
   bulkRemoveTasks(taskIds: string[], projectId?: string): void {
-    const pid = projectId || this.activeProjectId();
-    if (pid) {
-      this.taskStore.bulkRemoveTasks(taskIds, pid);
-    }
+    this.runGuardedProjectStateMutation(() => {
+      const pid = projectId || this.activeProjectId();
+      if (pid) this.taskStore.bulkRemoveTasks(taskIds, pid);
+    });
   }
 
   /**
    * 批量更新连接（单次 Map 克隆）
    */
   bulkUpdateConnections(connections: Connection[], projectId?: string): void {
-    const pid = projectId || this.activeProjectId();
-    if (pid) {
-      this.connectionStore.bulkSetConnections(connections, pid);
-    }
+    this.runGuardedProjectStateMutation(() => {
+      const pid = projectId || this.activeProjectId();
+      if (pid) this.connectionStore.bulkSetConnections(connections, pid);
+    });
   }
 
   /**
    * 批量删除连接（单次 Map 克隆）
    */
   bulkRemoveConnections(connectionIds: string[], projectId?: string): void {
-    const pid = projectId || this.activeProjectId();
-    if (pid) {
-      this.connectionStore.bulkRemoveConnections(connectionIds, pid);
+    this.runGuardedProjectStateMutation(() => {
+      const pid = projectId || this.activeProjectId();
+      if (pid) this.connectionStore.bulkRemoveConnections(connectionIds, pid);
+    });
+  }
+
+  private resolveProjectStateOwnerUserId(): string {
+    return this.authService?.currentUserId()
+      || this.authService?.peekPersistedSessionIdentity?.()?.userId
+      || AUTH_CONFIG.LOCAL_MODE_USER_ID;
+  }
+
+  private resolveWriteOwner(ownerUserId?: string): string {
+    const currentOwnerUserId = this.resolveProjectStateOwnerUserId();
+    if (ownerUserId !== undefined && ownerUserId !== currentOwnerUserId) {
+      throw new Error('project state write owner does not match the authenticated owner');
     }
+    return ownerUserId ?? currentOwnerUserId;
+  }
+
+  private runGuardedProjectStateMutation<T>(
+    write: () => T,
+    ownerUserId = this.resolveProjectStateOwnerUserId(),
+  ): T {
+    return localBackupUiRestoreWriterQuiescence.guardSync(ownerUserId, 'project-state', write);
   }
   
   /**

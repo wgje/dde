@@ -21,6 +21,10 @@ dist-ssr
 src/environments/environment.ts
 src/environments/environment.development.ts
 
+# Sentry CLI local credentials/defaults
+.sentryclirc
+sentry.properties
+
 # Supabase local config
 .supabase/
 
@@ -30,11 +34,26 @@ src/environments/environment.development.ts
 # projects. Place your file at android/app/google-services.json locally.
 android/app/google-services.json
 
+# Android 签名密钥 - SENSITIVE (DO NOT COMMIT!)
+# 发布签名的 keystore 与密码绝不能进入仓库
+*.jks
+*.keystore
+keystore.properties
+
+# Cloudflare Workers (Wrangler) - 本地状态与开发密钥
+.wrangler/
+.dev.vars
+.dev.vars.*
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
+!.vscode/mcp.json
 .idea
 .DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
 *.suo
 *.ntvs*
 *.njsproj
@@ -49,13 +68,18 @@ coverage/
 # Test results
 test-results/
 playwright-report/
+blob-report/
+playwright/.cache/
 .worktrees/
 
 # Build cache
 .cache/
 .parcel-cache/
 .vercel
+*.tsbuildinfo
+.eslintcache
 android/.gradle/
+android/.kotlin/
 android/local.properties
 android/**/build/
 
@@ -69,10 +93,14 @@ playwright-report/
 
 # AI session transcripts (local working files, never commit)
 ai_conversations/
+.codegraph/
 .codex/
 .copilot-tracking/
 .feedback_images/
 supabase/.temp/
+
+# Local IDE MCP config with machine-specific absolute paths
+.cursor/mcp.json
 
 .vercel
 .env*.local

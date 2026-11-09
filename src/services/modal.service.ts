@@ -1,6 +1,7 @@
 import { Injectable, signal, computed } from '@angular/core';
 import { Project } from '../models';
 import { UI_FEEDBACK_DELAY } from '../config/timeout.config';
+import type { OperationConflictRecord } from './conflict-storage.helpers';
 
 /**
  * 模态框类型
@@ -57,6 +58,7 @@ export interface ConflictData {
   remoteProject: Project;
   projectId: string;
   pendingTaskDeleteIds?: string[];
+  operationConflicts?: OperationConflictRecord[];
 }
 
 export interface ConnectionEditorData {

@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nanoflow.local/schemas/nanoflow-domain.schema.json",
+  "title": "NanoFlow Domain Model Summary",
+  "type": "object",
+  "required": [
+    "project",
+    "task",
+    "connection",
+    "blackBoxEntry",
+    "dockEntry"
+  ],
+  "properties": {
+    "project": {
+      "type": "object",
+      "required": ["id", "name", "updatedAt"],
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "updatedAt": { "type": "string" },
+        "deletedAt": { "type": ["string", "null"] }
+      }
+    },
+    "task": {
+      "type": "object",
+      "required": ["id", "title", "content", "status"],
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "content": { "type": "string" },
+        "stage": { "type": ["number", "null"] },
+        "parentId": { "type": ["string", "null"] },
+        "status": {
+          "type": "string",
+          "enum": ["active", "completed", "archived"]
+        },
+        "updatedAt": { "type": "string" },
+        "deletedAt": { "type": ["string", "null"] },
+        "priority": {
+          "type": "string",
+          "enum": ["low", "medium", "high", "urgent"]
+        },
+        "cognitive_load": {
+          "type": ["string", "null"],
+          "enum": ["high", "low", null]
+        }
+      }
+    },
+    "connection": {
+      "type": "object",
+      "required": ["id", "source", "target"],
+      "properties": {
+        "id": { "type": "string" },
+        "source": { "type": "string" },
+        "target": { "type": "string" },
+        "updatedAt": { "type": "string" },
+        "deletedAt": { "type": ["string", "null"] }
+      }
+    },
+    "blackBoxEntry": {
+      "type": "object",
+      "required": ["id", "userId", "content", "updatedAt"],
+      "properties": {
+        "id": { "type": "string" },
+        "projectId": { "type": ["string", "null"] },
+        "userId": { "type": "string" },
+        "content": { "type": "string" },
+        "isRead": { "type": "boolean" },
+        "isCompleted": { "type": "boolean" },
+        "updatedAt": { "type": "string" },
+        "deletedAt": { "type": ["string", "null"] }
+      }
+    },
+    "dockEntry": {
+      "type": "object",
+      "required": ["taskId", "title", "status", "load"],
+      "properties": {
+        "taskId": { "type": "string" },
+        "title": { "type": "string" },
+        "status": {
+          "type": "string",
+          "enum": [
+            "pending_start",
+            "focusing",
+            "suspended_waiting",
+            "wait_finished",
+            "stalled",
+            "completed"
+          ]
+        },
+        "load": {
+          "type": "string",
+          "enum": ["high", "low"]
+        },
+        "expectedMinutes": { "type": ["number", "null"] },
+        "waitMinutes": { "type": ["number", "null"] }
+      }
+    }
+  }
+}

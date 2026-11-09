@@ -4,28 +4,27 @@
  * 负责：任务完成后推荐、候选排序、待决策管理、碎片阶段进入、
  * 主控台排序、主任务一致性修复等纯调度流逻辑。
  */
-import { Injectable, Signal, WritableSignal, inject, DestroyRef } from '@angular/core';
+import { Injectable, inject, DestroyRef } from '@angular/core';
 import { PARKING_CONFIG } from '../config/parking.config';
 import {
   CognitiveLoad,
   DockEntry,
   DockPendingDecision,
-  DockRuleDecision,
-  DockSchedulerPhase,
   DockTaskStatus,
   FocusTaskSlot,
-  FragmentDefenseLevel,
   RecommendationGroupType,
 } from '../models/parking-dock';
 import {
   type DockWaitFitMode,
-  computeThreeDimensionalRecommendation,
   createRuleDecision,
   effectiveExecMin,
   evaluateTimeRemaining,
   rankDockCandidates,
 } from './dock-scheduler.rules';
 import {
+  applyRecommendationEntries as applyRecommendationEntriesPure,
+  applyPendingDecisionEntryFlags,
+  buildDockPendingDecision,
   clearSuspendRecommendationFlags,
   clearSystemSelectionFlags,
   deriveBackgroundStatus as deriveBackgroundStatusPure,
@@ -37,6 +36,7 @@ import { DockFragmentRestService } from './dock-fragment-rest.service';
 import { DockPromotionService } from './dock-promotion.service';
 import { DockZoneService } from './dock-zone.service';
 import { LoggerService } from './logger.service';
+import type { DockCompletionContext } from './dock-completion-flow.types';
 import {
   entryOrder,
   getWaitRemainingSeconds,
@@ -44,28 +44,12 @@ import {
   toFocusTaskSlot,
   toSchedulerCandidate,
 } from './dock-engine.utils';
-import { TimerHandle } from '../utils/timer-handle';
-
-// ---------------------------------------------------------------------------
-//  Context interface — engine 在 constructor 中调用 init() 注入信号引用
-// ---------------------------------------------------------------------------
-
-export interface DockCompletionContext {
-  entries: WritableSignal<DockEntry[]>;
-  pendingDecision: WritableSignal<DockPendingDecision | null>;
-  highlightedIds: WritableSignal<Set<string>>;
-  lastRuleDecision: WritableSignal<DockRuleDecision | null>;
-  lastRecommendationGroups: WritableSignal<import('../models/parking-dock').RecommendationGroup[]>;
-  schedulerPhase: WritableSignal<DockSchedulerPhase>;
-  fragmentDefenseLevel: WritableSignal<FragmentDefenseLevel>;
-  lastConsoleDemotedTaskId: WritableSignal<string | null>;
-  consoleVisibleOrderHint: Signal<string[]>;
-  consoleVisibleEntries: Signal<DockEntry[]>;
-  focusingEntry: Signal<DockEntry | null>;
-  focusMode: Signal<boolean>;
-  suspendChainRootTaskId: Signal<string | null>;
-  highlightClearTimer: TimerHandle;
-}
+import {
+  buildDockRankedFallbackGroups,
+  buildDockRecommendationCandidateGroups,
+  buildDockTwoStageRecommendationCandidateGroups,
+  rankDockRecommendedCandidates,
+} from './dock-completion-recommendation.helpers';
 
 @Injectable({
   providedIn: 'root',
@@ -331,18 +315,38 @@ export class DockCompletionFlowService {
     this.startFragmentTransitionCountdown(rootTaskId, rootRemainingMinutes);
   }
 
-  /** 恢复路径：高亮 wait_finished 的主任务。返回 true 表示已处理。 */
+  /** 恢复路径：优先恢复等待结束的挂起链根任务。返回 true 表示已处理。 */
   private resolveWithRecoveredMain(rootRemainingSeconds: number | null): boolean {
+    const rootTaskId = this.ctx.suspendChainRootTaskId();
     const recoveredMain = this.ctx.entries()
-      .filter(entry => entry.isMain && entry.status === 'wait_finished')
+      .filter(entry =>
+        entry.status === 'wait_finished'
+        && (entry.taskId === rootTaskId || entry.isMain)
+      )
       .sort((a, b) => entryOrder(a) - entryOrder(b))[0];
     if (!recoveredMain) return false;
 
     this.ctx.pendingDecision.set(null);
     this.ctx.highlightedIds.set(new Set([recoveredMain.taskId]));
+    this.ctx.entries.update(prev => this.enforceSingleMainInvariant(
+      prev.map(entry => {
+        if (entry.taskId !== recoveredMain.taskId) return entry;
+        return {
+          ...entry,
+          status: 'focusing',
+          isMain: true,
+          waitMinutes: null,
+          waitStartedAt: null,
+          systemSelected: false,
+          recommendationLocked: false,
+          recommendedScore: null,
+        };
+      }),
+      recoveredMain.taskId,
+    ));
     this.setLastDecision({
       type: 'completion_followup',
-      reason: '主任务等待结束，置顶高亮等待用户恢复',
+      reason: '主任务等待结束，恢复挂起任务为主任务',
       rootTaskId: recoveredMain.taskId,
       recommendedTaskIds: [recoveredMain.taskId],
       remainingMinutes: rootRemainingSeconds !== null ? rootRemainingSeconds / 60 : undefined,
@@ -505,25 +509,15 @@ export class DockCompletionFlowService {
     remainingMinutes: number,
     waitFitMode: DockWaitFitMode = 'strict',
   ): Array<{ type: RecommendationGroupType; taskIds: string[] }> {
-    const excluded = new Set(excludedTaskIds.filter(Boolean));
-    const mainSlot = this.toFocusTaskSlot(rootEntry, 'command', 0);
-    const pendingEntries = this.ctx.entries().filter(
-      entry => isAutoPromotableStatus(entry.status) && !excluded.has(entry.taskId),
-    );
-    const pendingSlots = pendingEntries.map((entry, idx) =>
-      this.toFocusTaskSlot(entry, entry.lane, idx),
-    );
-    const groups = computeThreeDimensionalRecommendation(mainSlot, pendingSlots, remainingMinutes, waitFitMode);
-    this.ctx.lastRecommendationGroups.set(groups);
-
-    return groups
-      .map(group => ({
-        type: group.type,
-        taskIds: group.candidates
-          .map(candidate => candidate.taskId)
-          .filter((taskId): taskId is string => typeof taskId === 'string' && taskId.length > 0),
-      }))
-      .filter(group => group.taskIds.length > 0);
+    return buildDockRecommendationCandidateGroups({
+      entries: this.ctx.entries(),
+      rootEntry,
+      excludedTaskIds,
+      remainingMinutes,
+      waitFitMode,
+      resolveSourceProjectId: entry => this.zoneService.resolveSourceProjectId(entry),
+      onRawGroups: groups => this.ctx.lastRecommendationGroups.set(groups),
+    });
   }
 
   buildTwoStageRecommendationCandidateGroups(
@@ -534,43 +528,15 @@ export class DockCompletionFlowService {
     groups: Array<{ type: RecommendationGroupType; taskIds: string[] }>;
     mode: DockWaitFitMode | 'ranked-fallback' | 'none';
   } {
-    const strictGroups = this.buildRecommendationCandidateGroups(
+    return buildDockTwoStageRecommendationCandidateGroups({
+      entries: this.ctx.entries(),
       rootEntry,
       excludedTaskIds,
       remainingMinutes,
-      'strict',
-    );
-    if (strictGroups.length > 0) {
-      return { groups: strictGroups, mode: 'strict' };
-    }
-
-    const relaxedGroups = this.buildRecommendationCandidateGroups(
-      rootEntry,
-      excludedTaskIds,
-      remainingMinutes,
-      'relaxed',
-    );
-    if (relaxedGroups.length > 0) {
-      return { groups: relaxedGroups, mode: 'relaxed' };
-    }
-
-    // 策划案：等待时间完全不匹配时忽略 wait 属性进行三维推荐组合挑选
-    const ignoreWaitGroups = this.buildRecommendationCandidateGroups(
-      rootEntry,
-      excludedTaskIds,
-      remainingMinutes,
-      'ignore-wait',
-    );
-    if (ignoreWaitGroups.length > 0) {
-      return { groups: ignoreWaitGroups, mode: 'ignore-wait' };
-    }
-
-    const fallbackGroups = this.buildRankedFallbackGroups(rootEntry, excludedTaskIds, remainingMinutes);
-    if (fallbackGroups.length > 0) {
-      return { groups: fallbackGroups, mode: 'ranked-fallback' };
-    }
-
-    return { groups: [], mode: 'none' };
+      resolveSourceProjectId: entry => this.zoneService.resolveSourceProjectId(entry),
+      candidateLimit: DockCompletionFlowService.RECOMMENDATION_CANDIDATE_LIMIT,
+      onRawGroups: groups => this.ctx.lastRecommendationGroups.set(groups),
+    });
   }
 
   buildRankedFallbackGroups(
@@ -578,16 +544,14 @@ export class DockCompletionFlowService {
     excludedTaskIds: string[],
     remainingMinutes: number,
   ): Array<{ type: RecommendationGroupType; taskIds: string[] }> {
-    const ranked = this.rankRecommendedCandidates(
+    return buildDockRankedFallbackGroups({
+      entries: this.ctx.entries(),
       rootEntry,
       excludedTaskIds,
       remainingMinutes,
-      // GAP-3: 完全忽略等待时间匹配，仅按其他属性排序
-      'ignore-wait',
-    );
-    const candidateIds = ranked.slice(0, DockCompletionFlowService.RECOMMENDATION_CANDIDATE_LIMIT).map(item => item.taskId);
-    if (candidateIds.length === 0) return [];
-    return [{ type: 'homologous-advancement', taskIds: candidateIds }];
+      resolveSourceProjectId: entry => this.zoneService.resolveSourceProjectId(entry),
+      candidateLimit: DockCompletionFlowService.RECOMMENDATION_CANDIDATE_LIMIT,
+    });
   }
 
   rankRecommendedCandidates(
@@ -596,19 +560,14 @@ export class DockCompletionFlowService {
     remainingMinutes: number,
     waitFitMode: DockWaitFitMode = 'strict',
   ) {
-    const excluded = new Set(excludedTaskIds.filter(Boolean));
-    const candidateEntries = this.ctx.entries().filter(
-      entry => isAutoPromotableStatus(entry.status) && !excluded.has(entry.taskId),
-    );
-    return rankDockCandidates(
-      candidateEntries.map(entry => this.toSchedulerCandidate(entry)),
+    return rankDockRecommendedCandidates({
+      entries: this.ctx.entries(),
+      rootEntry,
+      excludedTaskIds,
       remainingMinutes,
-      {
-        rootLoad: rootEntry.load,
-        rootProjectId: this.zoneService.resolveSourceProjectId(rootEntry),
-        waitFitMode,
-      },
-    );
+      waitFitMode,
+      resolveSourceProjectId: entry => this.zoneService.resolveSourceProjectId(entry),
+    });
   }
 
   promoteNext(): void {
@@ -662,32 +621,7 @@ export class DockCompletionFlowService {
     scoreByTaskId: Map<string, number>,
   ): void {
     this.ctx.entries.update(prev =>
-      prev.map(entry => {
-        if (entry.taskId === suspendedTaskId) {
-          return {
-            ...entry,
-            status: 'suspended_waiting',
-            systemSelected: false,
-            recommendationLocked: false,
-            recommendedScore: null,
-          };
-        }
-        if (recommendationIds.includes(entry.taskId)) {
-          return {
-            ...entry,
-            status: 'pending_start',
-            systemSelected: true,
-            recommendationLocked: true,
-            recommendedScore: scoreByTaskId.get(entry.taskId) ?? null,
-          };
-        }
-        return {
-          ...entry,
-          systemSelected: false,
-          recommendationLocked: false,
-          recommendedScore: scoreByTaskId.get(entry.taskId) ?? null,
-        };
-      }),
+      applyRecommendationEntriesPure(prev, { suspendedTaskId, recommendationIds, scoreByTaskId }),
     );
   }
 
@@ -730,40 +664,24 @@ export class DockCompletionFlowService {
     reason: string,
     autoPromoteAfterMs?: number,
   ): void {
-    const nowDate = new Date();
-    const now = nowDate.toISOString();
-    const expiresAtMs =
-      typeof autoPromoteAfterMs === 'number'
-        ? Math.max(DockCompletionFlowService.MIN_AUTO_PROMOTE_MS, autoPromoteAfterMs)
-        : null;
-    const candidateIds = candidateGroups.flatMap(group => group.taskIds);
-    this.ctx.pendingDecision.set({
+    const { candidateIds, pendingDecision } = buildDockPendingDecision({
       rootTaskId,
       rootRemainingMinutes,
       candidateGroups,
       reason,
-      expiresAt: expiresAtMs === null ? undefined : new Date(nowDate.getTime() + expiresAtMs).toISOString(),
-      autoPromoteAfterMs: expiresAtMs ?? undefined,
-      createdAt: now,
+      autoPromoteAfterMs,
+      now: new Date(),
+      minAutoPromoteMs: DockCompletionFlowService.MIN_AUTO_PROMOTE_MS,
     });
+    this.ctx.pendingDecision.set(pendingDecision);
 
+    const scoreByTaskId = new Map(
+      this.ctx.entries()
+        .filter(entry => candidateIds.includes(entry.taskId))
+        .map(entry => [entry.taskId, this.scoreCandidate(entry, rootRemainingMinutes)] as const),
+    );
     this.ctx.entries.update(prev =>
-      prev.map(entry => {
-        if (candidateIds.includes(entry.taskId)) {
-          return {
-            ...entry,
-            // 策划案 §2.8 G-38c：isMain 仅标记唯一主任务，推荐候选不应设 isMain
-            systemSelected: true,
-            recommendationLocked: true,
-            recommendedScore: this.scoreCandidate(entry, rootRemainingMinutes),
-          };
-        }
-        return {
-          ...entry,
-          systemSelected: false,
-          recommendationLocked: false,
-        };
-      }),
+      applyPendingDecisionEntryFlags(prev, { candidateIds, scoreByTaskId }),
     );
 
     this.ctx.highlightedIds.set(new Set(candidateIds));

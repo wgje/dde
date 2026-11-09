@@ -5,11 +5,16 @@ const { buildDevServerUrl, resolveDevServerBinding } = require('./dev-server-por
 
 const args = process.argv.slice(2);
 const nodeMajor = Number(process.versions.node.split('.')[0]);
+const generatedIndexHtmlPath = path.join(__dirname, '..', '.tmp', 'index.generated.html');
 
 function hasOption(argsToInspect, optionNames) {
   return argsToInspect.some((arg) => {
     return optionNames.some((optionName) => arg === optionName || arg.startsWith(`${optionName}=`));
   });
+}
+
+function isAngularBuildOrServeCommand(argsToInspect) {
+  return argsToInspect.some((arg) => arg === 'build' || arg === 'serve');
 }
 
 function isServeCommand(argsToInspect) {
@@ -46,6 +51,28 @@ async function prepareNgArgs(argsToInspect) {
   }
 
   return resolvedArgs;
+}
+
+function ensureGeneratedIndexForAngularCommand(argsToInspect) {
+  if (!isAngularBuildOrServeCommand(argsToInspect)) {
+    return;
+  }
+
+  const setEnvPath = path.join(__dirname, 'set-env.cjs');
+  const result = require('node:child_process').spawnSync(process.execPath, [setEnvPath], {
+    cwd: path.join(__dirname, '..'),
+    stdio: 'inherit',
+    env: process.env,
+  });
+
+  if (result.status !== 0) {
+    process.exit(result.status ?? 1);
+  }
+
+  if (!fs.existsSync(generatedIndexHtmlPath)) {
+    console.error(`[run-ng] 生成 index 失败：${generatedIndexHtmlPath} 不存在。`);
+    process.exit(1);
+  }
 }
 
 function resolveDependencyPath(...segments) {
@@ -90,18 +117,62 @@ function buildChildEnv() {
   return childEnv;
 }
 
+function quoteCmdArg(value) {
+  const text = String(value);
+  if (text.length === 0) return '""';
+  if (!/[\s"%&()<>^|]/.test(text)) return text;
+  return `"${text.replace(/(["^&()<>|])/g, '^$1').replace(/%/g, '^%')}"`;
+}
+function resolveWindowsNpxCli() {
+  let runtimeDir;
+  try {
+    runtimeDir = fs.realpathSync.native(path.dirname(process.execPath));
+  } catch {
+    throw new Error('run-ng-node22-launcher-unavailable');
+  }
+  const segments = ['node_modules', 'npm', 'bin', 'npx-cli.js'];
+  const candidate = path.resolve(runtimeDir, ...segments);
+  const relative = path.relative(runtimeDir, candidate);
+  if (!relative || relative === '..' || path.isAbsolute(relative) || relative.startsWith(`..${path.sep}`)) {
+    throw new Error('run-ng-node22-launcher-invalid');
+  }
+  let current = runtimeDir;
+  for (let index = 0; index < segments.length; index += 1) {
+    current = path.join(current, segments[index]);
+    let stat;
+    try {
+      stat = fs.lstatSync(current);
+    } catch {
+      throw new Error('run-ng-node22-launcher-unavailable');
+    }
+    const final = index === segments.length - 1;
+    if (stat.isSymbolicLink() || (final ? !stat.isFile() : !stat.isDirectory())) {
+      throw new Error('run-ng-node22-launcher-invalid');
+    }
+  }
+  try {
+    fs.closeSync(fs.openSync(candidate, 'r'));
+  } catch {
+    throw new Error('run-ng-node22-launcher-unavailable');
+  }
+  return candidate;
+}
 function runWithSignalForwarding(nodeBin, scriptArgs) {
   const childEnv = buildChildEnv();
   const startedAt = Date.now();
   const isBuildCommand = scriptArgs.some((arg) => arg === 'build');
   const heartbeatIntervalMs = Number(process.env.RUN_NG_HEARTBEAT_INTERVAL_MS || 8000);
 
-  // Windows 下 .cmd/.bat 文件必须通过 shell 执行，否则 Node 24 会抛出 EINVAL
-  const needsShell = process.platform === 'win32' && /\.(cmd|bat)$/i.test(nodeBin);
-  const child = spawn(nodeBin, scriptArgs, {
+  // Windows 下 .cmd/.bat 文件不能直接 spawn；显式调用 cmd.exe，避免 shell:true + args 的 DEP0190。
+  const command = process.platform === 'win32' && /\.(cmd|bat)$/i.test(nodeBin)
+    ? 'cmd.exe'
+    : nodeBin;
+  const commandArgs = command === 'cmd.exe'
+    ? ['/d', '/c', [nodeBin, ...scriptArgs].map(quoteCmdArg).join(' ')]
+    : scriptArgs;
+  const child = spawn(command, commandArgs, {
     stdio: 'inherit',
     env: childEnv,
-    ...(needsShell ? { shell: true } : {}),
   });
 
   let heartbeatTimer = null;
@@ -163,6 +234,7 @@ function runWithSignalForwarding(nodeBin, scriptArgs) {
  */
 async function main() {
   const resolvedArgs = await prepareNgArgs(args);
+  ensureGeneratedIndexForAngularCommand(resolvedArgs);
 
   if (Number.isFinite(nodeMajor) && nodeMajor >= 24) {
     // Node 24+ 与 Angular CLI 19.x 不兼容，强制使用 Node 22
@@ -179,15 +251,16 @@ async function main() {
         if (!fs.existsSync(node22Path)) node22Path = null;
       }
     }
-
     // 方法2：使用 npx 下载并运行 Node 22（作为后备）
     if (!node22Path) {
       console.log('[run-ng] Node 24+ 检测到（Angular CLI 不支持），使用 npx node@22 运行构建...');
-      const npxCmd = process.platform === 'win32' ? 'npx.cmd' : 'npx';
-      runWithSignalForwarding(npxCmd, ['-y', 'node@22.14.0', '--', ngPath, ...resolvedArgs]);
+      const npxCmd = process.platform === 'win32' ? process.execPath : 'npx';
+      const npxArgs = process.platform === 'win32'
+        ? [resolveWindowsNpxCli(), '-y', 'node@22.14.0', '--', ngPath, ...resolvedArgs]
+        : ['-y', 'node@22.14.0', '--', ngPath, ...resolvedArgs];
+      runWithSignalForwarding(npxCmd, npxArgs);
       return;
     }
-
     console.log(`[run-ng] Node 24+ 检测到（Angular CLI 不支持），使用本地 Node 22: ${node22Path}`);
     runWithSignalForwarding(node22Path, [ngPath, ...resolvedArgs]);
     return;

@@ -1,0 +1,108 @@
+<section class="space-y-1.5">
+  <h3 class="text-[10px] font-bold text-slate-400 dark:text-stone-500 uppercase tracking-wider px-1">外观风格</h3>
+  <div class="bg-white dark:bg-stone-800 border border-slate-200 dark:border-stone-700 rounded-xl p-2.5 shadow-sm space-y-3">
+    <div class="flex flex-wrap items-center justify-between gap-y-1.5 pb-2 border-b border-slate-100 dark:border-stone-700">
+      <span class="text-xs font-medium text-slate-600 dark:text-stone-400">颜色模式</span>
+      <div class="flex items-center gap-1 bg-slate-100 dark:bg-stone-700 rounded-lg p-0.5">
+        <button
+          (click)="updateColorMode('light')"
+          class="flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-medium transition-all"
+          [ngClass]="{
+            'bg-white dark:bg-stone-600 shadow-sm text-slate-800 dark:text-stone-200': colorMode === 'light',
+            'text-slate-500 dark:text-stone-400': colorMode !== 'light'
+          }">
+          <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
+          </svg>
+          浅色
+        </button>
+        <button
+          (click)="updateColorMode('system')"
+          class="flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-medium transition-all"
+          [ngClass]="{
+            'bg-white dark:bg-stone-600 shadow-sm text-slate-800 dark:text-stone-200': colorMode === 'system',
+            'text-slate-500 dark:text-stone-400': colorMode !== 'system'
+          }">
+          <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+          </svg>
+          自动
+        </button>
+        <button
+          (click)="updateColorMode('dark')"
+          class="flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-medium transition-all"
+          [ngClass]="{
+            'bg-white dark:bg-stone-600 shadow-sm text-slate-800 dark:text-stone-200': colorMode === 'dark',
+            'text-slate-500 dark:text-stone-400': colorMode !== 'dark'
+          }">
+          <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
+          </svg>
+          深色
+        </button>
+      </div>
+    </div>
+
+    <div class="grid grid-cols-5 gap-2">
+      <button
+        (click)="updateTheme('default')"
+        class="flex flex-col items-center gap-1.5 p-1.5 rounded-lg transition-all group hover:bg-slate-50 dark:hover:bg-stone-700"
+        [ngClass]="{
+          'bg-slate-50 dark:bg-stone-700': theme === 'default'
+        }">
+        <div class="w-5 h-5 rounded-full bg-gradient-to-br from-slate-100 to-slate-300 border-2 group-hover:scale-110 transition-transform shadow-sm"
+             [class.border-indigo-500]="theme === 'default'"
+             [class.border-transparent]="theme !== 'default'"></div>
+        <span class="text-[9px] font-medium" [class.text-indigo-600]="theme === 'default'" [class.text-slate-500]="theme !== 'default'">默认</span>
+      </button>
+
+      <button
+        (click)="updateTheme('ocean')"
+        class="flex flex-col items-center gap-1.5 p-1.5 rounded-lg transition-all group hover:bg-slate-50 dark:hover:bg-stone-700"
+        [ngClass]="{
+          'bg-slate-50 dark:bg-stone-700': theme === 'ocean'
+        }">
+        <div class="w-5 h-5 rounded-full bg-gradient-to-br from-sky-200 to-cyan-400 border-2 group-hover:scale-110 transition-transform shadow-sm"
+             [class.border-sky-500]="theme === 'ocean'"
+             [class.border-transparent]="theme !== 'ocean'"></div>
+        <span class="text-[9px] font-medium" [class.text-sky-600]="theme === 'ocean'" [class.text-slate-500]="theme !== 'ocean'">海洋</span>
+      </button>
+
+      <button
+        (click)="updateTheme('forest')"
+        class="flex flex-col items-center gap-1.5 p-1.5 rounded-lg transition-all group hover:bg-slate-50 dark:hover:bg-stone-700"
+        [ngClass]="{
+          'bg-slate-50 dark:bg-stone-700': theme === 'forest'
+        }">
+        <div class="w-5 h-5 rounded-full bg-gradient-to-br from-green-200 to-emerald-400 border-2 group-hover:scale-110 transition-transform shadow-sm"
+             [class.border-green-500]="theme === 'forest'"
+             [class.border-transparent]="theme !== 'forest'"></div>
+        <span class="text-[9px] font-medium" [class.text-green-600]="theme === 'forest'" [class.text-slate-500]="theme !== 'forest'">森林</span>
+      </button>
+
+      <button
+        (click)="updateTheme('sunset')"
+        class="flex flex-col items-center gap-1.5 p-1.5 rounded-lg transition-all group hover:bg-slate-50 dark:hover:bg-stone-700"
+        [ngClass]="{
+          'bg-slate-50 dark:bg-stone-700': theme === 'sunset'
+        }">
+        <div class="w-5 h-5 rounded-full bg-gradient-to-br from-orange-200 to-red-400 border-2 group-hover:scale-110 transition-transform shadow-sm"
+             [class.border-orange-500]="theme === 'sunset'"
+             [class.border-transparent]="theme !== 'sunset'"></div>
+        <span class="text-[9px] font-medium" [class.text-orange-600]="theme === 'sunset'" [class.text-slate-500]="theme !== 'sunset'">日落</span>
+      </button>
+
+      <button
+        (click)="updateTheme('lavender')"
+        class="flex flex-col items-center gap-1.5 p-1.5 rounded-lg transition-all group hover:bg-slate-50 dark:hover:bg-stone-700"
+        [ngClass]="{
+          'bg-slate-50 dark:bg-stone-700': theme === 'lavender'
+        }">
+        <div class="w-5 h-5 rounded-full bg-gradient-to-br from-purple-200 to-fuchsia-400 border-2 group-hover:scale-110 transition-transform shadow-sm"
+             [class.border-purple-500]="theme === 'lavender'"
+             [class.border-transparent]="theme !== 'lavender'"></div>
+        <span class="text-[9px] font-medium" [class.text-purple-600]="theme === 'lavender'" [class.text-slate-500]="theme !== 'lavender'">薰衣草</span>
+      </button>
+    </div>
+  </div>
+</section>

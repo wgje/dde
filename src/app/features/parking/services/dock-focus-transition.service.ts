@@ -46,6 +46,9 @@ export class DockFocusTransitionService implements OnDestroy {
   private readonly exitUnmount = new TimerHandle();
   private readonly pendingRafs: number[] = [];
   private readonly motion = PARKING_CONFIG.MOTION;
+  private enterTransitionToken = 0;
+  private enterCommitReady = false;
+  private enterVisualReady = false;
 
   /** MEM-H4 fix: rAF 执行后从数组中移除，防止无限增长 */
   private scheduleRaf(fn: () => void): void {
@@ -60,6 +63,7 @@ export class DockFocusTransitionService implements OnDestroy {
   // ── Public methods ──
 
   runEnterFocusTransition(): void {
+    const enterToken = this.beginEnterTransitionCommit();
     this.clearExitVisualSnapshot();
     this.floatingUiDelay.cancel();
     this.floatingUiVisible.set(false);
@@ -69,7 +73,7 @@ export class DockFocusTransitionService implements OnDestroy {
       this.transitionPerformanceTierLock.set(null);
       this.engine.clearFocusChromeRestore();
       this.floatingUiVisible.set(true);
-      this.engine.toggleFocusMode();
+      void this.commitEnterFocusMode(enterToken);
       return;
     }
 
@@ -86,26 +90,29 @@ export class DockFocusTransitionService implements OnDestroy {
     }, this.motion.focus.hudDelayMs);
 
     this.scheduleRaf(() => {
-      this.engine.toggleFocusMode();
+      void this.commitEnterFocusMode(enterToken);
     });
 
     this.flip.schedule(() => {
+      if (enterToken !== this.enterTransitionToken) return;
       const current = this.engine.focusTransition();
       if (current?.phase === 'entering') {
-        this.finalizeEnterFocusTransition(current);
+        this.enterVisualReady = true;
+        this.finalizeEnterFocusTransitionIfReady(enterToken);
       }
     }, transition.durationMs!);
   }
 
   runExitFocusTransition(): void {
+    this.cancelPendingEnterCommit();
     this.floatingUiDelay.cancel();
     this.floatingUiVisible.set(true);
     const transition = buildFocusTransition('exit', this.motion.focus, this.engine.dockExpanded());
     if (!transition) {
       this.transitionPerformanceTierLock.set(null);
-      this.engine.toggleFocusMode();
+      void this.engine.toggleFocusMode();
       if (this.engine.lastExitAction() === 'clear_exit') {
-        this.engine.finalizeClearDockForExit();
+        void this.engine.finalizeClearDockForExit();
       }
       this.engine.beginFocusChromeRestore(PARKING_CONFIG.DOCK_ANIMATION_MS);
       this.floatingUiVisible.set(false);
@@ -131,6 +138,10 @@ export class DockFocusTransitionService implements OnDestroy {
   }
 
   finalizeEnterFocusTransition(transition: DockFocusTransitionState): void {
+    if (!this.enterCommitReady && transition.phase === 'entering') {
+      this.enterVisualReady = true;
+      return;
+    }
     this.flip.cancel();
     this.floatingUiDelay.cancel();
     this.engine.beginFocusTransition({
@@ -146,10 +157,10 @@ export class DockFocusTransitionService implements OnDestroy {
   finalizeExitFocusTransition(): void {
     this.flip.cancel();
     if (this.engine.lastExitAction() === 'clear_exit') {
-      this.engine.finalizeClearDockForExit();
+      void this.engine.finalizeClearDockForExit();
     }
     if (this.engine.focusMode()) {
-      this.engine.toggleFocusMode();
+      void this.engine.toggleFocusMode();
     }
     // 使用 CSS 令牌 --pk-shell-smooth-restore 对应的时长 (480ms)，确保 restoring 阶段在 CSS transition 完成后才结束。
     // 原先用 shell.enterMs (320ms)，少于 CSS transition 时长，导致 restoring 阶段在 48.6% 完成时被强行结束，
@@ -157,13 +168,13 @@ export class DockFocusTransitionService implements OnDestroy {
     // 注意：需要加上 40ms 安全戚，避免定时器与 CSS 动画生命周期竞争。
     const cssRestoreMs = 480; // 对应 --pk-shell-smooth-restore
     const restoreDuration = cssRestoreMs + 40;
-    this.engine.beginFocusChromeRestore(restoreDuration);
     // 延迟卸载浮动 UI：必须大于最长的退出动画，并且留有充足内容。
     // hud.enterMs (200ms) 用于 HUD 退出， focus.exitMs (280ms) 用于主场景退出。
     const exitUnmountDelay = Math.max(this.motion.focus.exitMs, this.motion.hud.enterMs) + 80;
     this.exitUnmount.schedule(() => {
       this.floatingUiVisible.set(false);
       this.engine.endFocusTransition();
+      this.engine.beginFocusChromeRestore(restoreDuration);
     }, exitUnmountDelay);
     this.clearFlipGhost();
     this.clearExitVisualSnapshot();
@@ -196,6 +207,55 @@ export class DockFocusTransitionService implements OnDestroy {
 
   // ── Private methods ──
 
+  private beginEnterTransitionCommit(): number {
+    this.enterTransitionToken += 1;
+    this.enterCommitReady = false;
+    this.enterVisualReady = false;
+    return this.enterTransitionToken;
+  }
+
+  private cancelPendingEnterCommit(): void {
+    this.enterTransitionToken += 1;
+    this.enterCommitReady = false;
+    this.enterVisualReady = false;
+  }
+
+  private async commitEnterFocusMode(token: number): Promise<void> {
+    try {
+      const committed = await this.engine.toggleFocusMode();
+      if (token !== this.enterTransitionToken) return;
+      if (!committed || !this.engine.focusMode()) {
+        this.abortEnterFocusTransition(token);
+        return;
+      }
+      this.enterCommitReady = true;
+      this.finalizeEnterFocusTransitionIfReady(token);
+    } catch {
+      this.abortEnterFocusTransition(token);
+    }
+  }
+
+  private finalizeEnterFocusTransitionIfReady(token: number): void {
+    if (token !== this.enterTransitionToken) return;
+    if (!this.enterCommitReady || !this.enterVisualReady) return;
+    const current = this.engine.focusTransition();
+    if (current?.phase === 'entering') {
+      this.finalizeEnterFocusTransition(current);
+    }
+  }
+
+  private abortEnterFocusTransition(token: number): void {
+    if (token !== this.enterTransitionToken) return;
+    this.cancelPendingEnterCommit();
+    this.flip.cancel();
+    this.floatingUiDelay.cancel();
+    this.floatingUiVisible.set(false);
+    this.clearFlipGhost();
+    this.clearExitVisualSnapshot();
+    this.transitionPerformanceTierLock.set(null);
+    this.engine.endFocusTransition();
+  }
+
   private startFlipGhost(transition: DockFocusTransitionState): void {
     const ghost = createFlipGhostState(transition);
     if (!ghost) return;
@@ -222,6 +282,7 @@ export class DockFocusTransitionService implements OnDestroy {
   // ── Lifecycle ──
 
   ngOnDestroy(): void {
+    this.cancelPendingEnterCommit();
     this.flip.cancel();
     this.floatingUiDelay.cancel();
     this.exitUnmount.cancel();

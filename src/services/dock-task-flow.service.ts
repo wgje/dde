@@ -4,7 +4,7 @@
  * 负责：专注模式切换、任务完成流程、任务挂起/切换、决策处理、从坞区移除等。
  * 包含完成队列的 FIFO 序列化管理，防止并发完成操作产生竞态。
  */
-import { Injectable, WritableSignal, inject } from '@angular/core';
+import { Injectable, Injector, WritableSignal, inject } from '@angular/core';
 import { PARKING_CONFIG } from '../config/parking.config';
 import { 
   DockEntry, 
@@ -35,6 +35,7 @@ import {
   checkBurnoutThreshold
 } from './dock-scheduler.rules';
 import { TimerHandle } from '../utils/timer-handle';
+import { AuthService } from './auth.service';
 
 // ---------------------------------------------------------------------------
 //  Context interface — engine 在 constructor 中调用 init() 注入信号引用
@@ -68,6 +69,27 @@ export interface DockTaskFlowContext {
   rebalanceAutoZones: () => void;
   clearFirstMainSelectionWindow: () => void;
   startFirstMainSelectionWindow: (taskId: string) => void;
+  persistDockSnapshotNow: (entries: DockEntry[]) => Promise<boolean>;
+}
+
+interface DockTaskFlowFocusModeSnapshot {
+  entries: DockEntry[];
+  focusMode: boolean;
+  focusScrimOn: boolean;
+  schedulerPhase: DockSchedulerPhase;
+  focusSessionContext: { id: string; startedAt: number } | null;
+  lastRuleDecision: DockRuleDecision | null;
+  lastRecommendationGroups: import('../models/parking-dock').RecommendationGroup[];
+  focusTransition: DockFocusTransitionState | null;
+  pendingDecision: DockPendingDecision | null;
+  highlightedIds: Set<string>;
+  suspendRecommendationLocked: boolean;
+  suspendChainRootTaskId: string | null;
+  highLoadCounter: HighLoadCounter;
+  burnoutTriggeredAt: number | null;
+  lastConsoleDemotedTaskId: string | null;
+  consoleVisibleOrderHint: string[];
+  waitEndNotifiedIds: string[];
 }
 
 @Injectable({
@@ -75,9 +97,9 @@ export interface DockTaskFlowContext {
 })
 export class DockTaskFlowService {
   private readonly taskStore = inject(TaskStore);
+  private readonly injector = inject(Injector);
   private readonly logger = inject(LoggerService).category('DockTaskFlow');
   private readonly projectState = inject(ProjectStateService);
-  private readonly taskOps = inject(TaskOperationAdapterService);
   private readonly completionFlow = inject(DockCompletionFlowService);
   private readonly promotionService = inject(DockPromotionService);
   private readonly taskSync = inject(DockTaskSyncService);
@@ -91,6 +113,14 @@ export class DockTaskFlowService {
   private completionQueue: string[] = [];
   private isProcessingCompletion = false;
   private readonly completionDrain = new TimerHandle();
+
+  private get taskOps(): TaskOperationAdapterService {
+    return this.injector.get(TaskOperationAdapterService);
+  }
+
+  private get authService(): AuthService {
+    return this.injector.get(AuthService);
+  }
 
   /**
    * 获取上下文——必须在 DockEngineService 构造期间调用 init() 注入。
@@ -131,13 +161,75 @@ export class DockTaskFlowService {
   //  Focus Mode Management
   // ---------------------------------------------------------------------------
 
-  toggleFocusMode(): void {
+  toggleFocusMode(): Promise<boolean> {
+    const snapshot = this.captureFocusModeSnapshot();
     const next = !this.ctx.focusMode();
     this.ctx.focusMode.set(next);
     if (next) {
       this.enterFocusMode();
     } else {
       this.exitFocusMode();
+    }
+    return this.persistCurrentSnapshot().then(persisted => {
+      if (!persisted) {
+        this.restoreFocusModeSnapshot(snapshot);
+        this.logger.warn('Focus mode snapshot persisted only in memory');
+        return false;
+      }
+      return true;
+    });
+  }
+
+  private captureFocusModeSnapshot(): DockTaskFlowFocusModeSnapshot {
+    return {
+      entries: this.ctx.entries().map(entry => ({ ...entry })),
+      focusMode: this.ctx.focusMode(),
+      focusScrimOn: this.ctx.focusScrimOn(),
+      schedulerPhase: this.ctx.schedulerPhase(),
+      focusSessionContext: this.ctx.focusSessionContext()
+        ? { ...this.ctx.focusSessionContext()! }
+        : null,
+      lastRuleDecision: this.ctx.lastRuleDecision()
+        ? structuredClone(this.ctx.lastRuleDecision())
+        : null,
+      lastRecommendationGroups: structuredClone(this.ctx.lastRecommendationGroups()),
+      focusTransition: this.ctx.focusTransition()
+        ? structuredClone(this.ctx.focusTransition())
+        : null,
+      pendingDecision: this.ctx.pendingDecision()
+        ? structuredClone(this.ctx.pendingDecision())
+        : null,
+      highlightedIds: new Set(this.ctx.highlightedIds()),
+      suspendRecommendationLocked: this.ctx.suspendRecommendationLocked(),
+      suspendChainRootTaskId: this.ctx.suspendChainRootTaskId(),
+      highLoadCounter: { ...this.ctx.highLoadCounter() },
+      burnoutTriggeredAt: this.ctx.burnoutTriggeredAt(),
+      lastConsoleDemotedTaskId: this.ctx.lastConsoleDemotedTaskId(),
+      consoleVisibleOrderHint: [...this.ctx.consoleVisibleOrderHint()],
+      waitEndNotifiedIds: [...this.ctx.waitEndNotifiedIds],
+    };
+  }
+
+  private restoreFocusModeSnapshot(snapshot: DockTaskFlowFocusModeSnapshot): void {
+    this.ctx.entries.set(snapshot.entries.map(entry => ({ ...entry })));
+    this.ctx.focusMode.set(snapshot.focusMode);
+    this.ctx.focusScrimOn.set(snapshot.focusScrimOn);
+    this.ctx.schedulerPhase.set(snapshot.schedulerPhase);
+    this.ctx.focusSessionContext.set(snapshot.focusSessionContext);
+    this.ctx.lastRuleDecision.set(snapshot.lastRuleDecision);
+    this.ctx.lastRecommendationGroups.set(snapshot.lastRecommendationGroups);
+    this.ctx.focusTransition.set(snapshot.focusTransition);
+    this.ctx.pendingDecision.set(snapshot.pendingDecision);
+    this.ctx.highlightedIds.set(new Set(snapshot.highlightedIds));
+    this.ctx.suspendRecommendationLocked.set(snapshot.suspendRecommendationLocked);
+    this.ctx.suspendChainRootTaskId.set(snapshot.suspendChainRootTaskId);
+    this.ctx.highLoadCounter.set({ ...snapshot.highLoadCounter });
+    this.ctx.burnoutTriggeredAt.set(snapshot.burnoutTriggeredAt);
+    this.ctx.lastConsoleDemotedTaskId.set(snapshot.lastConsoleDemotedTaskId);
+    this.ctx.consoleVisibleOrderHint.set([...snapshot.consoleVisibleOrderHint]);
+    this.ctx.waitEndNotifiedIds.clear();
+    for (const taskId of snapshot.waitEndNotifiedIds) {
+      this.ctx.waitEndNotifiedIds.add(taskId);
     }
   }
 
@@ -212,10 +304,10 @@ export class DockTaskFlowService {
     }
     this.completionQueue.push(taskId);
     if (this.isProcessingCompletion) return;
-    this.drainCompletionQueue();
+    void this.drainCompletionQueue();
   }
 
-  private drainCompletionQueue(): void {
+  private async drainCompletionQueue(): Promise<void> {
     if (this.completionQueue.length === 0) {
       this.isProcessingCompletion = false;
       return;
@@ -223,7 +315,7 @@ export class DockTaskFlowService {
     this.isProcessingCompletion = true;
     const taskId = this.completionQueue.shift()!;
     try {
-      this.executeCompleteTask(taskId);
+      await this.executeCompleteTask(taskId);
     } catch (error) {
       // 防止 executeCompleteTask 异常导致队列永久卡死
       this.logger.error('executeCompleteTask 抛出异常，跳过该任务继续处理队列', { taskId, error });
@@ -232,7 +324,7 @@ export class DockTaskFlowService {
     // 执行期间被同步追加了新条目，也确保当前调用栈先退出，让信号传播完成后
     // 再处理下一个，避免 re-entrancy 导致的状态竞态。
     if (this.completionQueue.length > 0) {
-      this.completionDrain.schedule(() => this.drainCompletionQueue(), PARKING_CONFIG.COMPLETION_DRAIN_INTERVAL_MS);
+      this.completionDrain.schedule(() => { void this.drainCompletionQueue(); }, PARKING_CONFIG.COMPLETION_DRAIN_INTERVAL_MS);
     } else {
       // 延迟重置标志：如果 executeCompleteTask 的 effect 在同一 microtask 内
       // 触发了 completeTask，此时 isProcessingCompletion 仍为 true，新任务会
@@ -240,7 +332,7 @@ export class DockTaskFlowService {
       // 处理完成后才执行，保证最终一致。
       queueMicrotask(() => {
         if (this.completionQueue.length > 0) {
-          this.drainCompletionQueue();
+          void this.drainCompletionQueue();
         } else {
           this.isProcessingCompletion = false;
         }
@@ -248,13 +340,27 @@ export class DockTaskFlowService {
     }
   }
 
-  private executeCompleteTask(taskId: string): void {
+  private async executeCompleteTask(taskId: string): Promise<void> {
     const entry = this.ctx.entries().find(item => item.taskId === taskId);
     if (!entry || entry.status === 'completed') return;
     const wasMaster = entry.isMain;
+    const expectedUserId = this.authService.currentUserId();
+    const expectedAuthFence = this.authService.captureAuthIdentityFence();
+
+    const synced = await this.syncTaskCompletion(taskId, entry);
+    if (!synced) {
+      this.logger.warn('任务完成本地持久化失败，停泊坞完成态未提交', { taskId });
+      return;
+    }
+    if (
+      this.authService.currentUserId() !== expectedUserId
+      || this.authService.captureAuthIdentityFence() !== expectedAuthFence
+    ) {
+      this.logger.info('任务完成结算遇到身份切换，已保留持久化证据但未提交当前停泊坞视图', { taskId });
+      return;
+    }
 
     this.trackBurnoutIfHighLoad(entry);
-
     this.ctx.entries.update(prev =>
       patchEntryByTaskId(prev, taskId, {
         status: 'completed',
@@ -264,7 +370,6 @@ export class DockTaskFlowService {
       }),
     );
 
-    this.syncTaskCompletion(taskId, entry);
     this.completionFlow.resolveAfterCompletion(taskId);
     if (wasMaster && !this.ctx.pendingDecision()) {
       this.promotionService.promoteFocusedTaskToMaster();
@@ -296,26 +401,29 @@ export class DockTaskFlowService {
   }
 
   /** 同步任务完成状态到项目数据层 */
-  private syncTaskCompletion(taskId: string, entry: DockEntry): void {
-    this.taskSync.syncInlineCompletion(entry);
+  private async syncTaskCompletion(taskId: string, entry: DockEntry): Promise<boolean> {
+    if (entry.sourceKind === 'dock-created' && !await this.taskSync.syncInlineCompletion(entry)) {
+      return false;
+    }
     const task = this.taskStore.getTask(taskId);
     const projectId = this.taskSync.resolveTaskProjectId(taskId);
     if (task && projectId) {
       if (this.projectState.activeProjectId() === projectId) {
-        this.taskOps.updateTaskStatus(taskId, 'completed');
+        return this.taskOps.updateTaskStatus(taskId, 'completed');
       } else {
-        this.taskSync.applyCrossProjectTaskPatch(taskId, projectId, {
+        return this.taskSync.applyCrossProjectTaskPatch(taskId, projectId, {
           status: 'completed',
         });
       }
     }
+    return true;
   }
 
   // ---------------------------------------------------------------------------
   //  Task Suspend/Switch Operations
   // ---------------------------------------------------------------------------
 
-  suspendTask(taskId: string, waitMinutes: number): void {
+  suspendTask(taskId: string, waitMinutes: number): Promise<boolean> {
     const normalizedWait = Math.max(1, Math.floor(waitMinutes));
     const firstSuspendInChain = !this.ctx.suspendRecommendationLocked();
 
@@ -333,7 +441,7 @@ export class DockTaskFlowService {
         return suspended;
       }),
     );
-    this.taskSync.syncTaskPlannerFields(taskId, { wait_minutes: normalizedWait });
+    void this.taskSync.syncTaskPlannerFields(taskId, { wait_minutes: normalizedWait });
 
     // 多层挂起嵌套检测（策划案 §7.9）：≥3 层同时挂起 → 直接进入碎片阶段
     const suspendNestingDepth = this.ctx.entries().filter(
@@ -342,24 +450,25 @@ export class DockTaskFlowService {
     if (suspendNestingDepth >= 3) {
       this.logger.info(`挂起嵌套深度 ${suspendNestingDepth} ≥ 3，自动进入碎片阶段`);
       this.completionFlow.enterFragmentPhase('挂起嵌套 ≥ 3 层，自动进入碎片阶段', taskId, normalizedWait);
-      return;
+      return this.persistCurrentSnapshot();
     }
 
     if (firstSuspendInChain) {
       this.ctx.suspendChainRootTaskId.set(taskId);
       this.ctx.suspendRecommendationLocked.set(true);
       this.completionFlow.scheduleFirstSuspendRecommendation(taskId, normalizedWait);
-      return;
+      return this.persistCurrentSnapshot();
     }
 
     this.promotionService.promoteNext();
+    return this.persistCurrentSnapshot();
   }
 
-  switchToTask(taskId: string): void {
+  switchToTask(taskId: string): Promise<boolean> {
     this.fragmentRest.stopFragmentEntryCountdown();
     this.fragmentRest.setFragmentDismissed(false);
     const target = this.ctx.entries().find(entry => entry.taskId === taskId && entry.status !== 'completed');
-    if (!target) return;
+    if (!target) return Promise.resolve(false);
 
     const preVisible = this.ctx.consoleVisibleEntries();
     const currentFocusId = this.ctx.focusingEntry()?.taskId ?? null;
@@ -370,7 +479,7 @@ export class DockTaskFlowService {
     const shouldClearPending = !!pending && this.completionFlow.pendingCandidateIds(pending).includes(taskId);
 
     const result = this.applySwitchEntries(taskId, currentFocusId, currentFocus, target, shouldClearPending);
-    if (!result.committed) return;
+    if (!result.committed) return Promise.resolve(false);
 
     if (currentFocusId && currentFocusId !== taskId) {
       this.ctx.lastConsoleDemotedTaskId.set(currentFocusId);
@@ -383,13 +492,18 @@ export class DockTaskFlowService {
       this.ctx.suspendChainRootTaskId.set(null);
       this.ctx.pendingDecision.set(null);
       this.ctx.highlightedIds.set(new Set());
-      return;
+      return this.persistCurrentSnapshot();
     }
 
     if (shouldClearPending) {
       this.ctx.pendingDecision.set(null);
       this.ctx.highlightedIds.set(new Set());
     }
+    return this.persistCurrentSnapshot();
+  }
+
+  private persistCurrentSnapshot(): Promise<boolean> {
+    return this.ctx.persistDockSnapshotNow(this.ctx.entries());
   }
 
   /** 切换任务 entries 更新逻辑（从 switchToTask 提取，降低方法体积） */
@@ -452,11 +566,11 @@ export class DockTaskFlowService {
   //  Pending Decision Management
   // ---------------------------------------------------------------------------
 
-  choosePendingDecisionCandidate(taskId: string): void {
+  choosePendingDecisionCandidate(taskId: string): Promise<boolean> {
     const pending = this.ctx.pendingDecision();
-    if (!pending) return;
+    if (!pending) return Promise.resolve(false);
     const candidateIds = this.completionFlow.pendingCandidateIds(pending);
-    if (!candidateIds.includes(taskId)) return;
+    if (!candidateIds.includes(taskId)) return Promise.resolve(false);
 
     const rejectedIds = candidateIds.filter(id => id !== taskId);
     this.promotionService.promoteCandidate(taskId, false);
@@ -473,6 +587,7 @@ export class DockTaskFlowService {
         remainingMinutes: pending.rootRemainingMinutes,
       }),
     );
+    return this.persistCurrentSnapshot();
   }
 
   /** 清除候选推荐标记：选中/拒绝/其余条目分别处理 */
@@ -499,9 +614,9 @@ export class DockTaskFlowService {
     );
   }
 
-  cancelPendingDecisionAutoPromote(): void {
+  cancelPendingDecisionAutoPromote(): Promise<boolean> {
     const pending = this.ctx.pendingDecision();
-    if (!pending) return;
+    if (!pending) return Promise.resolve(false);
     this.ctx.pendingDecision.set(null);
     this.ctx.highlightedIds.set(new Set());
     this.ctx.entries.update(prev => {
@@ -526,19 +641,21 @@ export class DockTaskFlowService {
         remainingMinutes: pending.rootRemainingMinutes,
       }),
     );
+    return this.persistCurrentSnapshot();
   }
 
   // ---------------------------------------------------------------------------
   //  Remove from Dock
   // ---------------------------------------------------------------------------
 
-  removeFromDock(taskId: string): void {
+  removeFromDock(taskId: string): Promise<boolean> {
     // 从完成队列中移除该任务，防止 removeFromDock 后 drainCompletionQueue 操作已移除的幽灵条目
     const queueIdx = this.completionQueue.indexOf(taskId);
     if (queueIdx !== -1) {
       this.completionQueue.splice(queueIdx, 1);
     }
     const removed = this.ctx.entries().find(entry => entry.taskId === taskId) ?? null;
+    if (!removed) return Promise.resolve(false);
     this.ctx.entries.update(prev => prev.filter(entry => entry.taskId !== taskId));
     if (removed?.isMain) {
       this.promotionService.promoteFocusedTaskToMaster();
@@ -561,5 +678,6 @@ export class DockTaskFlowService {
       }
     }
     this.lifecycle.refreshSuspendRecommendationLock();
+    return this.persistCurrentSnapshot();
   }
 }

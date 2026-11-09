@@ -1,10 +1,12 @@
 import type { DockLane } from '../models/parking-dock';
+import type { ActiveProjectOwner } from '../services/project-state.service';
 
 export interface TaskDragPayloadV1 {
   v: 1;
   type: 'task';
   taskId: string;
   projectId: string | null;
+  projectOwner?: ActiveProjectOwner | null;
   source: 'text' | 'flow' | 'dock';
   laneHint?: DockLane | null;
   fromProjectId?: string | null;
@@ -39,6 +41,15 @@ function normalizeTaskId(value: unknown): string | null {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
 }
 
+function normalizeProjectOwner(value: unknown): ActiveProjectOwner | null {
+  if (!isPlainObject(value)) return null;
+  const projectId = value['projectId'];
+  const generation = value['generation'];
+  if ((projectId !== null && (typeof projectId !== 'string' || projectId.length === 0))
+    || typeof generation !== 'number' || !Number.isSafeInteger(generation) || generation < 0) return null;
+  return { projectId, generation };
+}
+
 function toPayloadFromUnknown(raw: unknown): TaskDragPayloadV1 | null {
   if (!isPlainObject(raw)) return null;
 
@@ -47,11 +58,13 @@ function toPayloadFromUnknown(raw: unknown): TaskDragPayloadV1 | null {
   const rawTaskId = raw['taskId'];
 
   if (rawV === 1 && rawType === 'task' && typeof rawTaskId === 'string' && rawTaskId.trim()) {
+    const projectOwner = normalizeProjectOwner(raw['projectOwner']);
     return {
       v: 1,
       type: 'task',
       taskId: rawTaskId.trim(),
-      projectId: normalizeProjectId(raw['projectId']),
+      projectId: projectOwner?.projectId ?? normalizeProjectId(raw['projectId']),
+      projectOwner,
       source: normalizeSource(raw['source']),
       laneHint: normalizeLaneHint(raw['laneHint'] ?? raw['relationHint']),
       fromProjectId: normalizeProjectId(raw['fromProjectId'] ?? raw['projectId']),
@@ -66,6 +79,7 @@ function toPayloadFromUnknown(raw: unknown): TaskDragPayloadV1 | null {
     type: 'task',
     taskId: legacyTaskId,
     projectId: normalizeProjectId(raw['projectId'] ?? raw['sourceProjectId']),
+    projectOwner: null,
     source: normalizeSource(raw['source']),
     laneHint: normalizeLaneHint(raw['laneHint'] ?? raw['relationHint']),
     fromProjectId: normalizeProjectId(raw['fromProjectId'] ?? raw['projectId'] ?? raw['sourceProjectId']),
@@ -104,14 +118,17 @@ export function writeTaskDragPayload(dataTransfer: DataTransfer, payload: TaskDr
   const taskId = payload.taskId.trim();
   if (!taskId) return;
 
+  const projectOwner = normalizeProjectOwner(payload.projectOwner);
+  const projectId = projectOwner?.projectId ?? normalizeProjectId(payload.projectId);
   const normalized: TaskDragPayloadV1 = {
     v: 1,
     type: 'task',
     taskId,
-    projectId: normalizeProjectId(payload.projectId),
+    projectId,
+    projectOwner,
     source: payload.source,
     laneHint: normalizeLaneHint(payload.laneHint),
-    fromProjectId: normalizeProjectId(payload.fromProjectId ?? payload.projectId),
+    fromProjectId: projectOwner?.projectId ?? normalizeProjectId(payload.fromProjectId ?? projectId),
   };
 
   const json = JSON.stringify(normalized);
@@ -146,6 +163,7 @@ export function readTaskDragPayload(dataTransfer: DataTransfer): TaskDragPayload
       type: 'task',
       taskId: fromTaskId,
       projectId: null,
+      projectOwner: null,
       source: 'dock',
       laneHint: null,
       fromProjectId: null,
@@ -163,6 +181,7 @@ export function readTaskDragPayload(dataTransfer: DataTransfer): TaskDragPayload
     type: 'task',
     taskId: textTaskId,
     projectId: null,
+    projectOwner: null,
     source: 'dock',
     laneHint: null,
     fromProjectId: null,

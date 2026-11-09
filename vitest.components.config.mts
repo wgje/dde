@@ -17,6 +17,7 @@ export default defineConfig({
     ],
     // 显式关闭文件并行 + 单线程 worker
     fileParallelism: false,
+    isolate: true,
     pool: 'threads',
   },
 });

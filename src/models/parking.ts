@@ -96,9 +96,8 @@ export interface ParkingReminder {
  * 通知事件契约
  * 用于提醒和衰老清理通知
  */
-export interface ParkingNotice {
+interface ParkingNoticeBase {
   id: string;
-  type: 'reminder' | 'eviction';
   /** 任务 ID */
   taskId: string;
   /** 任务标题 */
@@ -120,6 +119,20 @@ export interface ParkingNotice {
   /** 批量清理条目（summary + 逐条撤回） */
   evictionItems?: ParkingNoticeEvictionItem[];
 }
+
+export interface ParkingReminderNotice extends ParkingNoticeBase {
+  type: 'reminder';
+  /** 提醒创建时的不可变来源项目。 */
+  readonly projectId: string;
+}
+
+export interface ParkingEvictionNotice extends ParkingNoticeBase {
+  type: 'eviction';
+  /** 衰老清理通知不是项目切换动作，不携带项目 owner。 */
+  readonly projectId?: never;
+}
+
+export type ParkingNotice = ParkingReminderNotice | ParkingEvictionNotice;
 
 /** 停泊清理通知中的逐条撤回项 */
 export interface ParkingNoticeEvictionItem {

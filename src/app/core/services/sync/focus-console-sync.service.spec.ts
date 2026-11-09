@@ -5,14 +5,21 @@ import { SupabaseClientService } from '../../../../services/supabase-client.serv
 import { AuthService } from '../../../../services/auth.service';
 import { LoggerService } from '../../../../services/logger.service';
 import { SessionManagerService } from './session-manager.service';
+import { SyncRpcClientService } from '../../../../services/sync-rpc-client.service';
+import { DataSafetyAuditPersistence } from '../../../../services/data-safety-audit-persistence';
 import {
-  createBrowserNetworkSuspendedError,
+  SessionRuntimeResetRegistry,
+  type SessionRuntimeResetReason,
+} from '../../../../services/session-runtime-reset.service';
+import {
   ensureBrowserNetworkSuspensionTracking,
   resetBrowserNetworkSuspensionTrackingForTests,
 } from '../../../../utils/browser-network-suspension';
+import { registerFocusConsoleRoutineSyncSpecs } from './focus-console-sync.service.spec-helpers';
 
 describe('FocusConsoleSyncService', () => {
   let service: FocusConsoleSyncService;
+  let sessionResetCallback: ((reason: SessionRuntimeResetReason) => void) | null;
   const mockClient = {
     from: vi.fn(),
     rpc: vi.fn(),
@@ -36,13 +43,40 @@ describe('FocusConsoleSyncService', () => {
     tryRefreshSessionWithSession: vi.fn().mockResolvedValue({ refreshed: false }),
   };
 
+  const mockSyncRpc = {
+    isFeatureEnabled: vi.fn(() => true),
+    isClientRejected: vi.fn(() => false),
+    upsertFocusSession: vi.fn().mockResolvedValue({
+      status: 'applied',
+      raw: {},
+    }),
+    upsertRoutineTask: vi.fn().mockResolvedValue({
+      status: 'applied',
+      raw: {},
+    }),
+    incrementRoutineCompletion: vi.fn().mockResolvedValue({
+      status: 'applied',
+      raw: {},
+    }),
+  };
+
+  const mockLoggerCategory = {
+    warn: vi.fn(),
+    info: vi.fn(),
+    debug: vi.fn(),
+    error: vi.fn(),
+  };
+
   const mockLogger = {
-    category: vi.fn(() => ({
-      warn: vi.fn(),
-      info: vi.fn(),
-      debug: vi.fn(),
-      error: vi.fn(),
-    })),
+    category: vi.fn(() => mockLoggerCategory),
+  };
+
+  const mockSessionRuntimeReset = {
+    register: vi.fn((_owner: string, reset: (reason: SessionRuntimeResetReason) => void) => {
+      sessionResetCallback = reset;
+      return vi.fn();
+    }),
+    resetAll: vi.fn((reason: SessionRuntimeResetReason) => sessionResetCallback?.(reason)),
   };
 
   const setVisibilityState = (state: DocumentVisibilityState): void => {
@@ -54,6 +88,7 @@ describe('FocusConsoleSyncService', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    sessionResetCallback = null;
     mockClient.from.mockReset();
     mockClient.rpc.mockReset();
     mockSupabaseClientService.client.mockClear();
@@ -63,8 +98,28 @@ describe('FocusConsoleSyncService', () => {
     mockAuthService.authState.mockClear();
     mockAuthService.runtimeState.mockClear();
     mockAuthService.peekPersistedSessionIdentity.mockClear();
+    mockAuthService.currentUserId.mockReturnValue('user-1');
+    mockAuthService.sessionInitialized.mockReturnValue(true);
+    mockAuthService.authState.mockReturnValue({ isCheckingSession: false });
+    mockAuthService.runtimeState.mockReturnValue('ready');
+    mockAuthService.peekPersistedSessionIdentity.mockReturnValue({ userId: 'user-1' });
     mockSessionManager.isSessionExpiredError.mockClear();
     mockSessionManager.tryRefreshSessionWithSession.mockClear();
+    mockSyncRpc.isFeatureEnabled.mockReturnValue(true);
+    mockSyncRpc.isClientRejected.mockReturnValue(false);
+    mockSyncRpc.upsertFocusSession.mockResolvedValue({
+      status: 'applied',
+      raw: {},
+    });
+    mockSyncRpc.upsertRoutineTask.mockResolvedValue({
+      status: 'applied',
+      raw: {},
+    });
+    mockSyncRpc.incrementRoutineCompletion.mockResolvedValue({
+      status: 'applied',
+      raw: {},
+    });
+    new DataSafetyAuditPersistence().save('user-1', { replayLog: [], lastWriteExplain: null });
     resetBrowserNetworkSuspensionTrackingForTests();
     ensureBrowserNetworkSuspensionTracking();
     setVisibilityState('visible');
@@ -76,6 +131,8 @@ describe('FocusConsoleSyncService', () => {
         { provide: AuthService, useValue: mockAuthService },
         { provide: SessionManagerService, useValue: mockSessionManager },
         { provide: LoggerService, useValue: mockLogger },
+        { provide: SyncRpcClientService, useValue: mockSyncRpc },
+        { provide: SessionRuntimeResetRegistry, useValue: mockSessionRuntimeReset },
       ],
     });
 
@@ -124,12 +181,193 @@ describe('FocusConsoleSyncService', () => {
     }
   });
 
-  it('saveFocusSession should return failure Result on error so queue can retry', async () => {
-    const upsert = vi.fn().mockResolvedValue({
-      error: { message: 'temporary failure' },
-    });
-    mockClient.from.mockReturnValue({ upsert });
+  it('loadFocusSession should reuse inflight request even when debug logger fails', async () => {
+    let resolveMaybeSingle!: (value: {
+      data: null;
+      error: null;
+    }) => void;
+    const maybeSingle = vi.fn(() => new Promise<{ data: null; error: null }>(resolve => {
+      resolveMaybeSingle = resolve;
+    }));
+    const limit = vi.fn(() => ({ maybeSingle }));
+    const order = vi.fn(() => ({ limit }));
+    const eq = vi.fn(() => ({ order }));
+    const select = vi.fn(() => ({ eq }));
+    mockClient.from.mockReturnValue({ select });
 
+    const first = service.loadFocusSession('user-1');
+    mockLoggerCategory.debug.mockImplementationOnce(() => {
+      throw new Error('debug sink failed');
+    });
+    const second = service.loadFocusSession('user-1');
+
+    resolveMaybeSingle({ data: null, error: null });
+
+    await expect(first).resolves.toEqual({ ok: true, value: null });
+    await expect(second).resolves.toEqual({ ok: true, value: null });
+    expect(maybeSingle).toHaveBeenCalledTimes(1);
+  });
+
+  it('loadFocusSession should not reuse an inflight result across different LWW baselines', async () => {
+    const maybeSingle = vi.fn().mockResolvedValue({
+      data: {
+        id: 'session-lww',
+        user_id: 'user-1',
+        started_at: '2026-03-03T00:00:00.000Z',
+        ended_at: null,
+        updated_at: '2026-03-03T10:00:00.000Z',
+        session_state: { version: 6, entries: [] },
+      },
+      error: null,
+    });
+    const limit = vi.fn(() => ({ maybeSingle }));
+    const order = vi.fn(() => ({ limit }));
+    const eq = vi.fn(() => ({ order }));
+    const select = vi.fn(() => ({ eq }));
+    mockClient.from.mockReturnValue({ select });
+
+    const [olderBaseline, newerBaseline] = await Promise.all([
+      service.loadFocusSession('user-1', '2026-03-03T09:00:00.000Z'),
+      service.loadFocusSession('user-1', '2026-03-03T11:00:00.000Z'),
+    ]);
+
+    expect(olderBaseline.ok && olderBaseline.value).not.toBeNull();
+    expect(newerBaseline).toEqual({ ok: true, value: null });
+    expect(maybeSingle).toHaveBeenCalledTimes(2);
+  });
+
+  it('loadFocusSession should discard a remote result after the session owner changes', async () => {
+    let resolveMaybeSingle!: (value: {
+      data: {
+        id: string;
+        user_id: string;
+        started_at: string;
+        ended_at: null;
+        updated_at: string;
+        session_state: { version: number; entries: never[] };
+      };
+      error: null;
+    }) => void;
+    const maybeSingle = vi.fn(() => new Promise<{
+      data: {
+        id: string;
+        user_id: string;
+        started_at: string;
+        ended_at: null;
+        updated_at: string;
+        session_state: { version: number; entries: never[] };
+      };
+      error: null;
+    }>(resolve => {
+      resolveMaybeSingle = resolve;
+    }));
+    const limit = vi.fn(() => ({ maybeSingle }));
+    const order = vi.fn(() => ({ limit }));
+    const eq = vi.fn(() => ({ order }));
+    const select = vi.fn(() => ({ eq }));
+    mockClient.from.mockReturnValue({ select });
+
+    const pending = service.loadFocusSession('user-1');
+    mockAuthService.currentUserId.mockReturnValue('user-2');
+    resolveMaybeSingle({
+      data: {
+        id: 'session-old-owner',
+        user_id: 'user-1',
+        started_at: '2026-03-03T00:00:00.000Z',
+        ended_at: null,
+        updated_at: '2026-03-03T10:00:00.000Z',
+        session_state: { version: 6, entries: [] },
+      },
+      error: null,
+    });
+
+    await expect(pending).resolves.toEqual({ ok: true, value: null });
+  });
+
+  it('loadFocusSession should preserve a newer same-user inflight request after session reset', async () => {
+    type QueryResult = { data: null; error: null };
+    let resolveOld!: (value: QueryResult) => void;
+    let resolveNew!: (value: QueryResult) => void;
+    const maybeSingle = vi.fn()
+      .mockImplementationOnce(() => new Promise<QueryResult>(resolve => {
+        resolveOld = resolve;
+      }))
+      .mockImplementationOnce(() => new Promise<QueryResult>(resolve => {
+        resolveNew = resolve;
+      }));
+    const limit = vi.fn(() => ({ maybeSingle }));
+    const order = vi.fn(() => ({ limit }));
+    const eq = vi.fn(() => ({ order }));
+    const select = vi.fn(() => ({ eq }));
+    mockClient.from.mockReturnValue({ select });
+
+    const oldRequest = service.loadFocusSession('user-1');
+    mockSessionRuntimeReset.resetAll('owner-change');
+    const newRequest = service.loadFocusSession('user-1');
+    expect(maybeSingle).toHaveBeenCalledTimes(2);
+
+    resolveOld({ data: null, error: null });
+    await expect(oldRequest).resolves.toEqual({ ok: true, value: null });
+
+    const reusedNewRequest = service.loadFocusSession('user-1');
+    expect(maybeSingle).toHaveBeenCalledTimes(2);
+    resolveNew({ data: null, error: null });
+
+    await expect(newRequest).resolves.toEqual({ ok: true, value: null });
+    await expect(reusedNewRequest).resolves.toEqual({ ok: true, value: null });
+  });
+
+  it('listRoutineTasks should discard rows after the session owner changes', async () => {
+    let resolveLimit!: (value: {
+      data: Array<{
+        id: string;
+        user_id: string;
+        title: string;
+        max_times_per_day: number;
+        is_enabled: boolean;
+        updated_at: string;
+      }>;
+      error: null;
+    }) => void;
+    const limit = vi.fn(() => new Promise<{
+      data: Array<{
+        id: string;
+        user_id: string;
+        title: string;
+        max_times_per_day: number;
+        is_enabled: boolean;
+        updated_at: string;
+      }>;
+      error: null;
+    }>(resolve => {
+      resolveLimit = resolve;
+    }));
+    const query = {
+      select: vi.fn(() => query),
+      eq: vi.fn(() => query),
+      order: vi.fn(() => query),
+      limit,
+    };
+    mockClient.from.mockReturnValue(query);
+
+    const pending = service.listRoutineTasks('user-1');
+    mockAuthService.currentUserId.mockReturnValue('user-2');
+    resolveLimit({
+      data: [{
+        id: 'routine-old-owner',
+        user_id: 'user-1',
+        title: 'Old owner routine',
+        max_times_per_day: 1,
+        is_enabled: true,
+        updated_at: '2026-03-03T10:00:00.000Z',
+      }],
+      error: null,
+    });
+
+    await expect(pending).resolves.toEqual({ ok: true, value: [] });
+  });
+
+  it('saveFocusSession should reject missing operationId before legacy REST write', async () => {
     const result = await service.saveFocusSession({
       id: 'session-1',
       userId: 'user-1',
@@ -161,26 +399,59 @@ describe('FocusConsoleSyncService', () => {
     });
 
     expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe('FOCUS_CONSOLE_SAVE_FAILED');
+      expect(result.error.details?.['reason']).toBe('missing-operation-id');
+    }
+    expect(mockClient.from).not.toHaveBeenCalled();
   });
 
-  it('saveFocusSession should not overwrite a newer remote snapshot with stale local order', async () => {
-    const maybeSingle = vi.fn().mockResolvedValue({
-      data: {
-        updated_at: '2026-03-03T01:10:00.000Z',
-        session_state: {
-          version: 7,
-          savedAt: '2026-03-03T01:10:00.000Z',
+  it('saveFocusSession should return deferred failure when warning logger fails', async () => {
+    mockLoggerCategory.warn.mockImplementationOnce(() => {
+      throw new Error('warn sink failed');
+    });
+
+    await expect(service.saveFocusSession({
+      id: 'session-logger-failure',
+      userId: 'user-1',
+      startedAt: '2026-03-03T00:00:00.000Z',
+      endedAt: null,
+      updatedAt: '2026-03-03T01:00:00.000Z',
+      snapshot: {
+        version: 6,
+        entries: [],
+        focusMode: true,
+        isDockExpanded: true,
+        muteWaitTone: false,
+        session: {
+          firstDragIntervened: true,
+          focusBlurOn: true,
+          focusScrimOn: true,
+          mainTaskId: null,
+          comboSelectIds: [],
+          backupIds: [],
+        },
+        dailySlots: [],
+        suspendChainRootTaskId: null,
+        suspendRecommendationLocked: false,
+        pendingDecision: null,
+        lastRuleDecision: null,
+        dailyResetDate: '2026-03-03',
+        savedAt: '2026-03-03T01:00:00.000Z',
+      },
+    })).resolves.toMatchObject({
+      ok: false,
+      error: {
+        code: 'FOCUS_CONSOLE_SAVE_FAILED',
+        details: {
+          reason: 'missing-operation-id',
         },
       },
-      error: null,
     });
-    const eq = vi.fn(() => ({ maybeSingle }));
-    const select = vi.fn(() => ({ eq }));
-    const upsert = vi.fn().mockResolvedValue({ error: null });
-    mockClient.from
-      .mockReturnValueOnce({ select })
-      .mockReturnValueOnce({ upsert });
+    expect(mockClient.from).not.toHaveBeenCalled();
+  });
 
+  it('saveFocusSession should not run legacy freshness/read path when operationId is missing', async () => {
     const result = await service.saveFocusSession({
       id: 'session-1',
       userId: 'user-1',
@@ -211,9 +482,203 @@ describe('FocusConsoleSyncService', () => {
       },
     });
 
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.details?.['reason']).toBe('missing-operation-id');
+    }
+    expect(mockClient.from).not.toHaveBeenCalled();
+  });
+
+  it('saveFocusSession should use Sync RPC when operationId is provided', async () => {
+    const record = {
+      id: 'session-1',
+      userId: 'user-1',
+      startedAt: '2026-03-03T00:00:00.000Z',
+      endedAt: null,
+      updatedAt: '2026-03-03T01:00:00.000Z',
+      snapshot: {
+        version: 6,
+        entries: [],
+        focusMode: true,
+        isDockExpanded: true,
+        muteWaitTone: false,
+        session: {
+          firstDragIntervened: true,
+          focusBlurOn: true,
+          focusScrimOn: true,
+          mainTaskId: null,
+          comboSelectIds: [],
+          backupIds: [],
+        },
+        dailySlots: [],
+        suspendChainRootTaskId: null,
+        suspendRecommendationLocked: false,
+        pendingDecision: null,
+        lastRuleDecision: null,
+        dailyResetDate: '2026-03-03',
+        savedAt: '2026-03-03T01:00:00.000Z',
+      },
+    };
+
+    const result = await service.saveFocusSession(record, 'op-focus-session');
+
     expect(result.ok).toBe(true);
-    expect(select).toHaveBeenCalledWith('updated_at,session_state');
-    expect(upsert).not.toHaveBeenCalled();
+    expect(mockSyncRpc.upsertFocusSession).toHaveBeenCalledWith({
+      operationId: 'op-focus-session',
+      record,
+    });
+    expect(mockClient.from).not.toHaveBeenCalled();
+  });
+
+  it('saveFocusSession should fail when Sync RPC keeps remote state for stale payload', async () => {
+    mockSyncRpc.upsertFocusSession.mockResolvedValueOnce({
+      status: 'applied',
+      stalePayload: true,
+      reason: 'remote-newer-payload-preserved',
+      raw: {},
+    });
+    const record = {
+      id: 'session-stale',
+      userId: 'user-1',
+      startedAt: '2026-03-03T00:00:00.000Z',
+      endedAt: null,
+      updatedAt: '2026-03-03T01:00:00.000Z',
+      snapshot: {
+        version: 6,
+        entries: [],
+        focusMode: true,
+        isDockExpanded: true,
+        muteWaitTone: false,
+        session: {
+          firstDragIntervened: true,
+          focusBlurOn: true,
+          focusScrimOn: true,
+          mainTaskId: null,
+          comboSelectIds: [],
+          backupIds: [],
+        },
+        dailySlots: [],
+        suspendChainRootTaskId: null,
+        suspendRecommendationLocked: false,
+        pendingDecision: null,
+        lastRuleDecision: null,
+        dailyResetDate: '2026-03-03',
+        savedAt: '2026-03-03T01:00:00.000Z',
+      },
+    };
+
+    const result = await service.saveFocusSession(record, 'op-focus-session-stale');
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe('FOCUS_CONSOLE_SAVE_FAILED');
+      expect(result.error.details?.['reason']).toBe('stale-payload-preserved-remotely');
+    }
+    expect(mockClient.from).not.toHaveBeenCalled();
+  });
+
+  it('saveFocusSession should persist write explain and replay entry after Sync RPC applies', async () => {
+    mockSyncRpc.upsertFocusSession.mockResolvedValueOnce({
+      status: 'applied',
+      serverUpdatedAt: '2026-06-15T03:00:00.000Z',
+      raw: {},
+    });
+    const record = {
+      id: 'session-audit',
+      userId: 'user-1',
+      startedAt: '2026-03-03T00:00:00.000Z',
+      endedAt: null,
+      updatedAt: '2026-03-03T01:00:00.000Z',
+      snapshot: {
+        version: 6,
+        entries: [],
+        focusMode: true,
+        isDockExpanded: true,
+        muteWaitTone: false,
+        session: {
+          firstDragIntervened: true,
+          focusBlurOn: true,
+          focusScrimOn: true,
+          mainTaskId: null,
+          comboSelectIds: [],
+          backupIds: [],
+        },
+        dailySlots: [],
+        suspendChainRootTaskId: null,
+        suspendRecommendationLocked: false,
+        pendingDecision: null,
+        lastRuleDecision: null,
+        dailyResetDate: '2026-03-03',
+        savedAt: '2026-03-03T01:00:00.000Z',
+      },
+    };
+
+    const result = await service.saveFocusSession(record, 'op-focus-session-audit');
+
+    expect(result.ok).toBe(true);
+    const audit = new DataSafetyAuditPersistence().load('user-1');
+    expect(audit.lastWriteExplain).toMatchObject({
+      operationId: 'op-focus-session-audit',
+      actor: { sourceUserId: 'user-1' },
+      entity: { type: 'focus-session', id: 'session-audit' },
+      operation: 'upsert',
+      updatedAtBaseline: '2026-03-03T01:00:00.000Z',
+      beforeVersion: '2026-03-03T01:00:00.000Z',
+      afterVersion: '2026-06-15T03:00:00.000Z',
+      queueResult: { enteredRetryQueue: false, retryCount: 0 },
+      rpcResult: { status: 'applied', serverUpdatedAt: '2026-06-15T03:00:00.000Z' },
+      lwwDecision: { decision: 'local-applied', reason: 'applied' },
+      lastSyncTime: { before: null, after: null, advanced: false },
+    });
+    expect(audit.replayLog[0]).toMatchObject({
+      operationId: 'op-focus-session-audit',
+      entityType: 'focus-session',
+      entityId: 'session-audit',
+      operation: 'upsert',
+      baseUpdatedAt: '2026-03-03T01:00:00.000Z',
+      rpc: { status: 'applied', serverUpdatedAt: '2026-06-15T03:00:00.000Z' },
+      lww: { decision: 'local-applied', reason: 'applied' },
+    });
+  });
+
+  it('saveFocusSession should fail instead of legacy upserting when operationId is missing', async () => {
+    const result = await service.saveFocusSession({
+      id: 'session-1',
+      userId: 'user-1',
+      startedAt: '2026-03-03T00:00:00.000Z',
+      endedAt: null,
+      updatedAt: '2026-03-03T01:00:00.000Z',
+      snapshot: {
+        version: 6,
+        entries: [],
+        focusMode: true,
+        isDockExpanded: true,
+        muteWaitTone: false,
+        session: {
+          firstDragIntervened: true,
+          focusBlurOn: true,
+          focusScrimOn: true,
+          mainTaskId: null,
+          comboSelectIds: [],
+          backupIds: [],
+        },
+        dailySlots: [],
+        suspendChainRootTaskId: null,
+        suspendRecommendationLocked: false,
+        pendingDecision: null,
+        lastRuleDecision: null,
+        dailyResetDate: '2026-03-03',
+        savedAt: '2026-03-03T01:00:00.000Z',
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe('FOCUS_CONSOLE_SAVE_FAILED');
+      expect(result.error.details?.['reason']).toBe('missing-operation-id');
+    }
+    expect(mockSyncRpc.upsertFocusSession).not.toHaveBeenCalled();
+    expect(mockClient.from).not.toHaveBeenCalled();
   });
 
   it('saveFocusSession should defer remote write during browser suspension window', async () => {
@@ -284,58 +749,9 @@ describe('FocusConsoleSyncService', () => {
     expect(mockClient.from).not.toHaveBeenCalled();
   });
 
-  it('listRoutineTasks should return success([]) when browser IO is suspended mid-request', async () => {
-    const order = vi.fn().mockRejectedValue(createBrowserNetworkSuspendedError());
-    const eq = vi.fn(() => ({ order }));
-    const select = vi.fn(() => ({ eq }));
-    mockClient.from.mockReturnValue({ select });
-
-    const result = await service.listRoutineTasks('user-1');
-
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.error.code).toBe('SYNC_OFFLINE');
-      expect(result.error.details?.['reason']).toBe('browser-network-suspended');
-    }
-  });
-
-  // TODO(L-28): Add test for listRoutineTasks — verify it maps RoutineTaskRow to RoutineTask[]
-  // TODO(L-28): Add test for upsertRoutineTask — verify upsert payload shape and error handling
-  // TODO(L-28): Add test for importLegacyDockSnapshot — verify it reads from user_preferences table
-  // TODO(L-28): Add test for saveFocusSession success path — verify it returns true and upsert payload
-  // TODO(L-28): Add test for incrementRoutineCompletion 挂起窗口外的 retry-queue 协同行为
-
-  it('incrementRoutineCompletion should call atomic rpc with date_key path', async () => {
-    mockClient.rpc.mockResolvedValue({ data: 1, error: null });
-
-    const result = await service.incrementRoutineCompletion({
-      completionId: 'comp-1',
-      userId: 'user-1',
-      routineId: 'routine-1',
-      dateKey: '2026-03-03',
-    });
-
-    expect(result.ok).toBe(true);
-    expect(mockClient.rpc).toHaveBeenCalledWith('increment_routine_completion', {
-      p_completion_id: 'comp-1',
-      p_routine_id: 'routine-1',
-      p_date_key: '2026-03-03',
-    });
-  });
-
-  it('incrementRoutineCompletion should return failure when atomic rpc fails', async () => {
-    mockClient.rpc.mockResolvedValue({
-      data: null,
-      error: { message: 'rpc failed' },
-    });
-
-    const result = await service.incrementRoutineCompletion({
-      completionId: 'comp-1',
-      userId: 'user-1',
-      routineId: 'routine-1',
-      dateKey: '2026-03-03',
-    });
-
-    expect(result.ok).toBe(false);
+  registerFocusConsoleRoutineSyncSpecs({
+    service: () => service,
+    mockClient,
+    mockSyncRpc,
   });
 });

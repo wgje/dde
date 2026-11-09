@@ -12,16 +12,26 @@ export class TimerHandle {
   schedule(fn: () => void, delay: number): void {
     this.cancel();
     const safeDelay = Number.isFinite(delay) && delay >= 0 ? delay : 0;
-    this.id = setTimeout(() => {
+    const id = setTimeout(() => {
+      if (this.id !== id) {
+        return;
+      }
+
       this.id = null;
       fn();
     }, safeDelay);
+    this.id = id;
   }
 
   cancel(): void {
-    if (this.id !== null) {
-      clearTimeout(this.id);
-      this.id = null;
+    if (this.id === null) return;
+
+    const id = this.id;
+    this.id = null;
+    try {
+      clearTimeout(id);
+    } catch {
+      // Timer cleanup is best-effort; internal state must still be released.
     }
   }
 }
@@ -39,13 +49,25 @@ export class IntervalHandle {
   start(fn: () => void, interval: number): void {
     this.stop();
     const safeInterval = Number.isFinite(interval) && interval > 0 ? interval : 1;
-    this.id = setInterval(fn, safeInterval);
+    const id = setInterval(() => {
+      if (this.id !== id) {
+        return;
+      }
+
+      fn();
+    }, safeInterval);
+    this.id = id;
   }
 
   stop(): void {
-    if (this.id !== null) {
-      clearInterval(this.id);
-      this.id = null;
+    if (this.id === null) return;
+
+    const id = this.id;
+    this.id = null;
+    try {
+      clearInterval(id);
+    } catch {
+      // Interval cleanup is best-effort; internal state must still be released.
     }
   }
 }

@@ -1,4 +1,4 @@
-import { Component, inject, input, output, ChangeDetectionStrategy, effect } from '@angular/core';
+import { Component, Injector, inject, input, output, ChangeDetectionStrategy, effect } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { UiStateService } from '../../../../services/ui-state.service';
 import { ProjectStateService } from '../../../../services/project-state.service';
@@ -67,10 +67,14 @@ import { UnfinishedItem } from './text-view.types';
   `]
 })
 export class TextUnfinishedComponent {
+  private readonly injector = inject(Injector);
   readonly uiState = inject(UiStateService);
   private readonly projectState = inject(ProjectStateService);
-  private readonly taskOpsAdapter = inject(TaskOperationAdapterService);
-  
+
+  private get taskOpsAdapter(): TaskOperationAdapterService {
+    return this.injector.get(TaskOperationAdapterService);
+  }
+
   readonly isMobile = input(false);
   readonly jumpToTask = output<string>();
 

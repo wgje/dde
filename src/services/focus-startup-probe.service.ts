@@ -166,8 +166,7 @@ export class FocusStartupProbeService {
     }
 
     this.initializedForUser = userId;
-    this.probeDoneSignal.set(false);
-    this.pendingGateWorkSignal.set(false);
+    this.resetProbeSignals();
 
     if (this.probePromise) {
       if (options.force && options.reloadLocal && options.localFirstWhileInFlight) {
@@ -186,16 +185,31 @@ export class FocusStartupProbeService {
 
     const remoteFirst = this.widgetWorkspaceRemoteFirst;
     this.widgetWorkspaceRemoteFirst = false;
-    const capturedVersion = ++this.probeVersion;
-    this.probePromise = this.runProbe(capturedVersion, userId, {
+    this.probePromise = this.createProbePromise(userId, {
       ...options,
       reloadLocal: remoteFirst ? false : options.reloadLocal,
       source: remoteFirst ? 'widget-open-workspace' : options.source,
-    }).finally(() => {
-      this.probePromise = null;
     });
 
     await this.probePromise;
+  }
+
+  private resetProbeSignals(): void {
+    this.probeDoneSignal.set(false);
+    this.pendingGateWorkSignal.set(false);
+  }
+
+  private createProbePromise(
+    userId: string,
+    options: { reloadLocal: boolean; source: FocusProbeSource },
+  ): Promise<void> {
+    const capturedVersion = ++this.probeVersion;
+    const probePromise = this.runProbe(capturedVersion, userId, options).finally(() => {
+      if (this.probePromise === probePromise) {
+        this.probePromise = null;
+      }
+    });
+    return probePromise;
   }
 
   private resolveProbeUserId(force: boolean): string | null {
@@ -280,8 +294,16 @@ export class FocusStartupProbeService {
         this.pendingGateWorkSignal.set(false);
       }
     } finally {
-      this.probeDoneSignal.set(true);
+      this.markProbeDoneIfCurrent(version, userId, options.source);
     }
+  }
+
+  private markProbeDoneIfCurrent(version: number, userId: string, source: FocusProbeSource): void {
+    if (version !== this.probeVersion || !this.isProbeUserStillValid(userId, source)) {
+      return;
+    }
+
+    this.probeDoneSignal.set(true);
   }
 
   private loadLocalSnapshotForProbe(userId: string, source: FocusProbeSource): Promise<unknown> {

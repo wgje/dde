@@ -9,6 +9,7 @@
 
 // 纯测试环境仍有部分服务需要 JIT 注入器，显式引入编译器避免 "JIT compiler is not available"。
 import '@angular/compiler';
+import { afterEach, vi } from 'vitest';
 
 // 导入全局 Mocks（Supabase/Sentry/浏览器 API）
 import './test-setup.mocks';
@@ -97,6 +98,10 @@ console.warn = (...args: unknown[]) => {
   }
   originalWarn.apply(console, args);
 };
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 // 导出 resetMocks 供测试使用
 export { resetMocks } from './test-setup.mocks';

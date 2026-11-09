@@ -56,6 +56,10 @@ export class BeforeUnloadManagerService {
   /** 是否已初始化 */
   private initialized = false;
   private suppressNextBeforeUnloadConfirmation = false;
+  private passiveUnloadFlushedThisTask = false;
+  private passiveUnloadDedupeResetTimer: ReturnType<typeof setTimeout> | null = null;
+  private listenerGeneration = 0;
+  private pendingListenerCleanups: Array<() => void> = [];
 
   constructor() {
     this.destroyRef.onDestroy(() => this.cleanup());
@@ -68,9 +72,19 @@ export class BeforeUnloadManagerService {
   initialize(): void {
     if (this.initialized || typeof window === 'undefined') return;
 
-    this.setupEventListeners();
-    this.initialized = true;
-    this.logger.debug('BeforeUnloadManager 已初始化');
+    const generation = this.listenerGeneration + 1;
+    this.listenerGeneration = generation;
+    try {
+      this.setupEventListeners(generation);
+      this.initialized = true;
+      this.debugSafely('BeforeUnloadManager 已初始化');
+    } catch (error) {
+      this.listenerGeneration += 1;
+      this.teardownEventListeners();
+      this.initialized = false;
+      this.suppressNextBeforeUnloadConfirmation = false;
+      throw error;
+    }
   }
 
   /**
@@ -88,7 +102,7 @@ export class BeforeUnloadManagerService {
     // 按优先级排序
     this.callbacks.sort((a, b) => a.priority - b.priority);
 
-    this.logger.debug(`BeforeUnload 回调已注册: ${id}`, { priority });
+    this.debugSafely(`BeforeUnload 回调已注册: ${id}`, { priority });
   }
 
   /**
@@ -100,7 +114,7 @@ export class BeforeUnloadManagerService {
     const index = this.callbacks.findIndex(c => c.id === id);
     if (index !== -1) {
       this.callbacks.splice(index, 1);
-      this.logger.debug(`BeforeUnload 回调已取消注册: ${id}`);
+      this.debugSafely(`BeforeUnload 回调已取消注册: ${id}`);
     }
   }
 
@@ -118,7 +132,7 @@ export class BeforeUnloadManagerService {
    */
   suppressNextConfirmation(): void {
     this.suppressNextBeforeUnloadConfirmation = true;
-    this.logger.debug('下一次 BeforeUnload 确认弹窗已跳过');
+    this.debugSafely('下一次 BeforeUnload 确认弹窗已跳过');
   }
 
   // ==================== 私有方法 ====================
@@ -126,14 +140,21 @@ export class BeforeUnloadManagerService {
   /**
    * 设置事件监听器
    */
-  private setupEventListeners(): void {
+  private setupEventListeners(generation: number): void {
     // 统一的保存逻辑
     const handleUnload = (e?: BeforeUnloadEvent): void => {
+      if (!this.isCurrentListenerGeneration(generation)) {
+        return;
+      }
+
       const needConfirm = this.executeCallbacks();
+      const suppressConfirmation = this.suppressNextBeforeUnloadConfirmation;
+      if (e) {
+        this.suppressNextBeforeUnloadConfirmation = false;
+      }
 
       if (needConfirm && e) {
-        if (this.suppressNextBeforeUnloadConfirmation) {
-          this.suppressNextBeforeUnloadConfirmation = false;
+        if (suppressConfirmation) {
           return;
         }
 
@@ -142,12 +163,25 @@ export class BeforeUnloadManagerService {
         e.returnValue = '您有未保存的内容，确定要离开吗？';
       }
     };
+    const handlePassiveUnload = (): void => {
+      if (!this.isCurrentListenerGeneration(generation)) {
+        return;
+      }
+
+      if (this.passiveUnloadFlushedThisTask) {
+        return;
+      }
+
+      this.passiveUnloadFlushedThisTask = true;
+      this.schedulePassiveUnloadDedupeReset();
+      handleUnload();
+    };
 
     this.beforeUnloadHandler = (e: BeforeUnloadEvent) => handleUnload(e);
-    this.pagehideHandler = () => handleUnload();
+    this.pagehideHandler = () => handlePassiveUnload();
     this.visibilityChangeHandler = () => {
       if (document.visibilityState === 'hidden') {
-        handleUnload();
+        handlePassiveUnload();
       }
     };
 
@@ -172,7 +206,7 @@ export class BeforeUnloadManagerService {
           needConfirm = true;
         }
       } catch (e) {
-        this.logger.error(`BeforeUnload 回调执行失败: ${registration.id}`, { error: e });
+        this.errorSafely(`BeforeUnload 回调执行失败: ${registration.id}`, { error: e });
         // 继续执行其他回调
       }
     }
@@ -186,19 +220,112 @@ export class BeforeUnloadManagerService {
   private cleanup(): void {
     if (typeof window === 'undefined') return;
 
-    if (this.beforeUnloadHandler) {
-      window.removeEventListener('beforeunload', this.beforeUnloadHandler);
-    }
-    if (this.pagehideHandler) {
-      window.removeEventListener('pagehide', this.pagehideHandler as EventListener, { capture: true });
-    }
-    if (this.visibilityChangeHandler) {
-      document.removeEventListener('visibilitychange', this.visibilityChangeHandler);
-    }
-
+    this.listenerGeneration += 1;
     this.callbacks = [];
     this.suppressNextBeforeUnloadConfirmation = false;
+    this.resetPassiveUnloadDedupe();
     this.initialized = false;
-    this.logger.debug('BeforeUnloadManager 已清理');
+    this.teardownEventListeners();
+    this.debugSafely('BeforeUnloadManager 已清理');
+  }
+
+  private schedulePassiveUnloadDedupeReset(): void {
+    if (this.passiveUnloadDedupeResetTimer !== null) {
+      return;
+    }
+
+    this.passiveUnloadDedupeResetTimer = setTimeout(() => {
+      this.passiveUnloadDedupeResetTimer = null;
+      this.passiveUnloadFlushedThisTask = false;
+    }, 0);
+  }
+
+  private resetPassiveUnloadDedupe(): void {
+    if (this.passiveUnloadDedupeResetTimer !== null) {
+      const timer = this.passiveUnloadDedupeResetTimer;
+      this.passiveUnloadDedupeResetTimer = null;
+      this.clearTimeoutSafely(timer);
+    }
+    this.passiveUnloadFlushedThisTask = false;
+  }
+
+  private teardownEventListeners(): void {
+    this.retryPendingListenerCleanups();
+
+    if (this.beforeUnloadHandler) {
+      const handler = this.beforeUnloadHandler;
+      this.beforeUnloadHandler = null;
+      this.removeBrowserListener(() => window.removeEventListener('beforeunload', handler));
+    }
+    if (this.pagehideHandler) {
+      const handler = this.pagehideHandler;
+      this.pagehideHandler = null;
+      this.removeBrowserListener(() =>
+        window.removeEventListener('pagehide', handler as EventListener, { capture: true }));
+    }
+    if (this.visibilityChangeHandler) {
+      const handler = this.visibilityChangeHandler;
+      this.visibilityChangeHandler = null;
+      this.removeBrowserListener(() => document.removeEventListener('visibilitychange', handler));
+    }
+
+    this.retryPendingListenerCleanups();
+  }
+
+  private isCurrentListenerGeneration(generation: number): boolean {
+    return this.initialized && generation === this.listenerGeneration;
+  }
+
+  private removeBrowserListener(removeListener: () => void): void {
+    try {
+      removeListener();
+    } catch (error) {
+      this.warnSafely('BeforeUnload listener cleanup failed', { error });
+      this.pendingListenerCleanups.push(removeListener);
+    }
+  }
+
+  private retryPendingListenerCleanups(): void {
+    if (this.pendingListenerCleanups.length === 0) {
+      return;
+    }
+
+    const pendingCleanups = this.pendingListenerCleanups;
+    this.pendingListenerCleanups = [];
+    for (const cleanup of pendingCleanups) {
+      this.removeBrowserListener(cleanup);
+    }
+  }
+
+  private clearTimeoutSafely(timer: ReturnType<typeof setTimeout>): void {
+    try {
+      clearTimeout(timer);
+    } catch (error) {
+      this.warnSafely('BeforeUnload passive unload dedupe reset failed', { error });
+    }
+  }
+
+  private debugSafely(message: string, context?: Record<string, unknown>): void {
+    try {
+      this.logger.debug(message, context);
+    } catch {
+      // Diagnostic sinks must not interrupt unload persistence state.
+    }
+  }
+
+  private warnSafely(message: string, context: Record<string, unknown>): void {
+    try {
+      this.logger.warn(message, context);
+    } catch {
+      // Diagnostic sinks must not interrupt listener cleanup.
+    }
+  }
+
+  private errorSafely(message: string, context: Record<string, unknown>): void {
+    try {
+      this.logger.error(message, context);
+    } catch {
+      // Diagnostic sinks must not interrupt remaining beforeunload callbacks.
+    }
   }
 }

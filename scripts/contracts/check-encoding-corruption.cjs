@@ -1,8 +1,10 @@
 #!/usr/bin/env node
-const { execFileSync } = require('node:child_process');
-const fs = require('node:fs');
 const path = require('node:path');
 const { TextDecoder } = require('node:util');
+const {
+  getGitVisibleErrorCode,
+  listGitVisibleWorktreeFiles,
+} = require('./git-visible-worktree.cjs');
 
 const projectRoot = process.cwd();
 const decoder = new TextDecoder('utf-8', { fatal: true });
@@ -11,18 +13,6 @@ const excludedPaths = new Set([]);
 const excludedPathPatterns = [
   /^docs\/archive\/.+\.corrupted-[^/]+\.md$/u,
 ];
-const excludedDirectoryNames = new Set([
-  '.angular',
-  '.copilot-tracking',
-  '.git',
-  '.tmp',
-  'dist',
-  'node_modules',
-  'playwright-report',
-  'test-results',
-  'tmp',
-]);
-
 const binaryExtensions = new Set([
   '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.ico',
   '.pdf', '.zip', '.gz', '.7z', '.tar',
@@ -61,80 +51,9 @@ const allowedQuestionPatterns = [
   /\?\s*\|/,
 ];
 
-function normalizePath(filePath) {
-  return filePath.replace(/\\/g, '/');
-}
-
 function isExcludedPath(filePath) {
   return excludedPaths.has(filePath)
     || excludedPathPatterns.some((pattern) => pattern.test(filePath));
-}
-
-function listWorkspaceFilesFromFs(rootDir = projectRoot) {
-  const files = [];
-  const queue = [rootDir];
-
-  while (queue.length > 0) {
-    const currentDir = queue.pop();
-    const entries = fs.readdirSync(currentDir, { withFileTypes: true });
-
-    for (const entry of entries) {
-      const absolutePath = path.join(currentDir, entry.name);
-      const relativePath = normalizePath(path.relative(projectRoot, absolutePath));
-
-      if (!relativePath) {
-        continue;
-      }
-
-      if (entry.isDirectory()) {
-        if (excludedDirectoryNames.has(entry.name)) {
-          continue;
-        }
-
-        queue.push(absolutePath);
-        continue;
-      }
-
-      if (entry.isSymbolicLink() || isExcludedPath(relativePath)) {
-        continue;
-      }
-
-      files.push(relativePath);
-    }
-  }
-
-  return files.sort((left, right) => left.localeCompare(right));
-}
-
-function listGitVisibleFiles(rootDir = projectRoot) {
-  try {
-    const output = execFileSync(
-      'git',
-      ['ls-files', '-z', '--cached', '--others', '--exclude-standard'],
-      {
-        cwd: rootDir,
-        encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'pipe'],
-      },
-    );
-
-    return output
-      .split('\0')
-      .map(filePath => normalizePath(filePath))
-      .filter(filePath => filePath.length > 0 && !isExcludedPath(filePath))
-      .sort((left, right) => left.localeCompare(right));
-  } catch {
-    return null;
-  }
-}
-
-function listWorkspaceFiles(rootDir = projectRoot) {
-  const gitVisibleFiles = listGitVisibleFiles(rootDir);
-  if (gitVisibleFiles) {
-    return gitVisibleFiles;
-  }
-
-  return listWorkspaceFilesFromFs(rootDir);
 }
 
 function isLikelyBinary(filePath, buffer) {
@@ -144,10 +63,6 @@ function isLikelyBinary(filePath, buffer) {
   }
 
   return buffer.includes(0);
-}
-
-function sanitizeLinePreview(line) {
-  return line.replace(/^\uFEFF/u, '').replace(/\t/g, '  ').trimEnd();
 }
 
 function hasUtf8Bom(buffer) {
@@ -162,12 +77,7 @@ function countCrlfSequences(content) {
   return matches ? matches.length : 0;
 }
 
-function validateFile(relativePath) {
-  const absolutePath = path.join(projectRoot, relativePath);
-  if (!fs.existsSync(absolutePath)) {
-    return { scannable: false, issues: [] };
-  }
-  const raw = fs.readFileSync(absolutePath);
+function validateFile(relativePath, raw) {
 
   if (isLikelyBinary(relativePath, raw)) {
     return { scannable: false, issues: [] };
@@ -181,20 +91,18 @@ function validateFile(relativePath) {
     issues.push({
       type: 'utf8_bom',
       line: 1,
-      detail: 'UTF-8 BOM detected',
     });
   }
 
   let content;
   try {
     content = decoder.decode(sourceBuffer);
-  } catch (error) {
+  } catch {
     return {
       scannable: true,
       issues: [{
         type: 'invalid_utf8',
         line: 1,
-        detail: error instanceof Error ? error.message : String(error),
       }],
     };
   }
@@ -204,7 +112,6 @@ function validateFile(relativePath) {
     issues.push({
       type: 'crlf_line_endings',
       line: 1,
-      detail: `Detected ${crlfCount} CRLF line ending(s); repository requires LF.`,
     });
   }
 
@@ -217,7 +124,6 @@ function validateFile(relativePath) {
       issues.push({
         type: 'replacement_char',
         line: lineNumber,
-        detail: sanitizeLinePreview(line),
       });
     }
 
@@ -225,7 +131,6 @@ function validateFile(relativePath) {
       issues.push({
         type: 'private_use_char',
         line: lineNumber,
-        detail: sanitizeLinePreview(line),
       });
     }
 
@@ -234,7 +139,6 @@ function validateFile(relativePath) {
       issues.push({
         type: 'mojibake_fragment',
         line: lineNumber,
-        detail: `${matchedFragments.join(', ')} | ${sanitizeLinePreview(line)}`,
       });
     }
 
@@ -250,7 +154,6 @@ function validateFile(relativePath) {
       issues.push({
         type: 'suspicious_question',
         line: lineNumber,
-        detail: sanitizeLinePreview(line),
       });
     }
   }
@@ -261,26 +164,34 @@ function validateFile(relativePath) {
 function main() {
   let workspaceFiles;
   try {
-    workspaceFiles = listWorkspaceFiles();
+    workspaceFiles = listGitVisibleWorktreeFiles(projectRoot);
   } catch (error) {
-    console.error('[encoding-guard] Failed to enumerate workspace files.');
-    console.error(error instanceof Error ? error.message : String(error));
+    console.error(`[encoding-guard] FAIL reason=${getGitVisibleErrorCode(error)}`);
     process.exit(1);
   }
 
   const allIssues = [];
   let scannedCount = 0;
 
-  for (const file of workspaceFiles) {
-    const result = validateFile(file);
-    if (!result.scannable) {
-      continue;
-    }
+  try {
+    for (const fileRecord of workspaceFiles) {
+      const file = fileRecord.relativePath;
+      if (isExcludedPath(file)) {
+        continue;
+      }
+      const result = validateFile(file, fileRecord.readBuffer());
+      if (!result.scannable) {
+        continue;
+      }
 
-    scannedCount += 1;
-    if (result.issues.length > 0) {
-      allIssues.push({ file, issues: result.issues });
+      scannedCount += 1;
+      if (result.issues.length > 0) {
+        allIssues.push({ file, issues: result.issues });
+      }
     }
+  } catch (error) {
+    console.error(`[encoding-guard] FAIL reason=${getGitVisibleErrorCode(error)}`);
+    process.exit(1);
   }
 
   if (allIssues.length === 0) {
@@ -292,7 +203,7 @@ function main() {
   for (const item of allIssues) {
     console.error(`- ${item.file}`);
     for (const issue of item.issues.slice(0, 20)) {
-      console.error(`  [${issue.type}] line ${issue.line}: ${issue.detail}`);
+      console.error(`  [${issue.type}] line ${issue.line}`);
     }
     if (item.issues.length > 20) {
       console.error(`  ... ${item.issues.length - 20} more issue(s)`);

@@ -42,17 +42,24 @@ export class FocusHudWindowService {
   private componentRef: ComponentRef<DockStatusMachinePipComponent> | null = null;
   private pipWindow: Window | null = null;
   private pageHideHandler: ((event: PageTransitionEvent) => void) | null = null;
+  private openRequestGeneration = 0;
+  private destroyed = false;
 
   readonly isActive = computed(() => this.active());
   readonly isSupported = computed(() => this.hasDocumentPictureInPictureSupport());
 
   constructor() {
     this.destroyRef.onDestroy(() => {
+      this.destroyed = true;
       void this.close();
     });
   }
 
   async open(): Promise<boolean> {
+    if (this.destroyed) {
+      return false;
+    }
+
     if (!this.hasDocumentPictureInPictureSupport()) {
       return false;
     }
@@ -71,11 +78,16 @@ export class FocusHudWindowService {
     if (!controller) return false;
 
     try {
+      const requestGeneration = ++this.openRequestGeneration;
       const pipWindow = await controller.requestWindow({
         width: PARKING_CONFIG.STATUS_MACHINE_PIP_DEFAULT_WIDTH_PX,
         height: PARKING_CONFIG.STATUS_MACHINE_PIP_DEFAULT_HEIGHT_PX,
         preferInitialWindowPlacement: true,
       });
+      if (requestGeneration !== this.openRequestGeneration || this.destroyed) {
+        this.closeWindow(pipWindow);
+        return false;
+      }
       this.mountToWindow(pipWindow);
       this.active.set(true);
       return true;
@@ -87,8 +99,13 @@ export class FocusHudWindowService {
   }
 
   async close(): Promise<void> {
+    this.openRequestGeneration++;
     const windowRef = this.pipWindow;
     this.teardown();
+    this.closeWindow(windowRef);
+  }
+
+  private closeWindow(windowRef: Window | null): void {
     if (!windowRef || windowRef.closed) return;
     try {
       windowRef.close();

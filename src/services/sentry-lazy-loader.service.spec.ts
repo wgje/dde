@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { TestBed } from '@angular/core/testing';
 import { SentryLazyLoaderService } from './sentry-lazy-loader.service';
 import { environment } from '../environments/environment';
 import { resetBrowserNetworkSuspensionTrackingForTests } from '../utils/browser-network-suspension';
@@ -8,14 +9,36 @@ type MutableService = {
   pendingUser: { id: string } | null;
   sentryModule: { set: (value: unknown) => void };
   flushPendingEvents: () => void;
+  cleanupPendingFlushResume: () => void;
+  buildRelease: () => string;
 };
 
 /** 绕过 private 访问限制的测试辅助 */
 const mut = (s: SentryLazyLoaderService): MutableService => s as unknown as MutableService;
+const createdServices: SentryLazyLoaderService[] = [];
+const createService = (): SentryLazyLoaderService => {
+  const service = new SentryLazyLoaderService();
+  createdServices.push(service);
+  return service;
+};
 
 type SentryLazyLoaderStatic = {
   sanitizeUrlForTelemetry: (rawUrl: string) => string;
   sanitizeTelemetryString: (value: string) => string;
+  shouldDropNonActionableSentryEvent: (event: {
+    message?: string | null;
+    environment?: string | null;
+    tags?: Record<string, string | number | boolean | null | undefined> | null;
+    extra?: Record<string, unknown> | null;
+    request?: { url?: string | null } | null;
+    exception?: {
+      values?: Array<{
+        type?: string | null;
+        value?: string | null;
+        stacktrace?: { frames?: Array<{ filename?: string | null; absPath?: string | null }> } | null;
+      }>;
+    } | null;
+  }) => boolean;
   redactTelemetryRecord: <T extends Record<string, unknown> | undefined>(record: T) => T;
   sanitizeSentryEventUser: (user: unknown) => unknown;
 };
@@ -58,6 +81,12 @@ function setVisibilityState(state: DocumentVisibilityState): void {
   });
 }
 
+afterEach(() => {
+  for (const createdService of createdServices.splice(0)) {
+    mut(createdService).cleanupPendingFlushResume();
+  }
+});
+
 describe('SentryLazyLoaderService', () => {
   let service: SentryLazyLoaderService;
   const originalDsn = environment.SENTRY_DSN;
@@ -65,12 +94,14 @@ describe('SentryLazyLoaderService', () => {
   beforeEach(() => {
     localStorage.clear();
     (environment as { SENTRY_DSN: string }).SENTRY_DSN = 'https://dsn.example.invalid/1';
-    service = new SentryLazyLoaderService();
+    service = createService();
     vi.spyOn(service, 'triggerLazyInit').mockImplementation(() => {});
   });
 
   afterEach(() => {
+    TestBed.resetTestingModule();
     vi.restoreAllMocks();
+    vi.useRealTimers();
     localStorage.clear();
     resetBrowserNetworkSuspensionTrackingForTests();
     setVisibilityState('visible');
@@ -160,6 +191,47 @@ describe('SentryLazyLoaderService', () => {
 
     vi.useRealTimers();
   });
+
+  it('pending flush timer id 为 0 时不应重复调度且 cleanup 应清理该 timer', () => {
+    const scope = createScopeMock();
+    const sentryMock = createSentryMock(scope);
+    mut(service).sentryModule.set(sentryMock);
+    mut(service).pendingEvents.push({
+      type: 'message',
+      message: 'resume warning',
+      timestamp: Date.now(),
+    });
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout')
+      .mockImplementation(() => 0 as unknown as ReturnType<typeof setTimeout>);
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout')
+      .mockImplementation(() => undefined);
+
+    setVisibilityState('visible');
+    document.dispatchEvent(new Event('visibilitychange'));
+    document.dispatchEvent(new Event('visibilitychange'));
+
+    expect(setTimeoutSpy).toHaveBeenCalledTimes(1);
+
+    mut(service).cleanupPendingFlushResume();
+
+    expect(clearTimeoutSpy).toHaveBeenCalledWith(0);
+  });
+
+  it('DestroyRef 销毁时应移除恢复事件监听器', () => {
+    const documentRemoveSpy = vi.spyOn(document, 'removeEventListener');
+    const windowRemoveSpy = vi.spyOn(window, 'removeEventListener');
+
+    TestBed.configureTestingModule({
+      providers: [SentryLazyLoaderService],
+    });
+    TestBed.inject(SentryLazyLoaderService);
+
+    TestBed.resetTestingModule();
+
+    expect(documentRemoveSpy).toHaveBeenCalledWith('visibilitychange', expect.any(Function));
+    expect(windowRemoveSpy).toHaveBeenCalledWith('online', expect.any(Function));
+    expect(windowRemoveSpy).toHaveBeenCalledWith('pageshow', expect.any(Function));
+  });
 });
 
 describe('SentryLazyLoaderService triggerLazyInit', () => {
@@ -168,7 +240,7 @@ describe('SentryLazyLoaderService triggerLazyInit', () => {
     const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => undefined);
 
     (environment as { SENTRY_DSN: string }).SENTRY_DSN = '';
-    const service = new SentryLazyLoaderService();
+    const service = createService();
 
     service.triggerLazyInit();
     service.triggerLazyInit();
@@ -179,7 +251,7 @@ describe('SentryLazyLoaderService triggerLazyInit', () => {
 
   it('缺少 DSN 时不再缓存待发送事件', () => {
     (environment as { SENTRY_DSN: string }).SENTRY_DSN = '';
-    const disabledService = new SentryLazyLoaderService();
+    const disabledService = createService();
 
     disabledService.captureMessage('should be dropped');
     disabledService.captureException(new Error('should also be dropped'));
@@ -192,12 +264,58 @@ describe('SentryLazyLoaderService triggerLazyInit', () => {
     const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => undefined);
 
     (environment as { SENTRY_DSN: string }).SENTRY_DSN = '';
-    const service = new SentryLazyLoaderService();
+    const service = createService();
 
     service.triggerLazyInit();
     service.triggerLazyInit();
 
     expect(infoSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('SentryLazyLoaderService release', () => {
+  const mutableEnvironment = environment as typeof environment & {
+    sentryRelease?: string;
+    deploymentEpoch?: number | string;
+  };
+  const originalRelease = mutableEnvironment.sentryRelease;
+  const originalDeploymentEpoch = mutableEnvironment.deploymentEpoch;
+
+  afterEach(() => {
+    mutableEnvironment.sentryRelease = originalRelease;
+    mutableEnvironment.deploymentEpoch = originalDeploymentEpoch;
+    delete (document as unknown as { currentScript?: unknown }).currentScript;
+    delete (document as unknown as { scripts?: unknown }).scripts;
+  });
+
+  it('应优先使用显式注入的 release', () => {
+    mutableEnvironment.sentryRelease = 'commit-sha-123';
+
+    const service = createService();
+
+    expect(mut(service).buildRelease()).toBe('nanoflow@commit-sha-123');
+  });
+
+  it('缺少显式 release 时应优先使用 main 脚本指纹', () => {
+    mutableEnvironment.sentryRelease = '';
+    mutableEnvironment.deploymentEpoch = 0;
+
+    const lazyChunkScript = document.createElement('script');
+    lazyChunkScript.src = 'https://nanoflow.pages.dev/chunk-45V5LS6K.js';
+    const mainScript = document.createElement('script');
+    mainScript.src = 'https://nanoflow.pages.dev/main-ABC12345.js';
+    Object.defineProperty(document, 'currentScript', {
+      configurable: true,
+      value: lazyChunkScript,
+    });
+    Object.defineProperty(document, 'scripts', {
+      configurable: true,
+      value: [lazyChunkScript, mainScript],
+    });
+
+    const service = createService();
+
+    expect(mut(service).buildRelease()).toBe('nanoflow@main-ABC12345');
   });
 });
 
@@ -208,7 +326,7 @@ describe('SentryLazyLoaderService setUser', () => {
   beforeEach(() => {
     localStorage.clear();
     (environment as { SENTRY_DSN: string }).SENTRY_DSN = 'https://dsn.example.invalid/1';
-    service = new SentryLazyLoaderService();
+    service = createService();
     vi.spyOn(service, 'triggerLazyInit').mockImplementation(() => {});
   });
 
@@ -256,6 +374,53 @@ describe('SentryLazyLoaderService setUser', () => {
 });
 
 describe('SentryLazyLoaderService telemetry scrubber', () => {
+  it('应丢弃可恢复的 chunk/JIT/NG0750 版本偏移事件', () => {
+    expect(sentryStatic.shouldDropNonActionableSentryEvent({
+      exception: {
+        values: [{ value: 'Failed to fetch dynamically imported module: https://dde-eight.vercel.app/chunk-ABC.js' }],
+      },
+    })).toBe(true);
+
+    expect(sentryStatic.shouldDropNonActionableSentryEvent({
+      exception: {
+        values: [{ value: 'JIT compiler unavailable' }],
+      },
+    })).toBe(true);
+
+    expect(sentryStatic.shouldDropNonActionableSentryEvent({ message: 'Error: NG0750' })).toBe(true);
+  });
+
+  it('应丢弃本地开发和浏览器网络挂起事件但保留业务异常', () => {
+    expect(sentryStatic.shouldDropNonActionableSentryEvent({
+      environment: 'development',
+      request: { url: 'http://localhost:3000/#/projects' },
+      exception: { values: [{ value: 'TypeError: Cannot read properties of undefined' }] },
+    })).toBe(true);
+
+    expect(sentryStatic.shouldDropNonActionableSentryEvent({
+      exception: {
+        values: [{ value: 'BrowserNetworkSuspendedError: Browser network IO suspended' }],
+      },
+    })).toBe(true);
+
+    expect(sentryStatic.shouldDropNonActionableSentryEvent({
+      message: '任务存在性查询失败',
+      tags: {
+        operation: 'pushConnection',
+        errorType: 'BrowserNetworkSuspendedError',
+      },
+      extra: {
+        message: 'BrowserNetworkSuspendedError: Browser network IO suspended',
+      },
+    })).toBe(true);
+
+    expect(sentryStatic.shouldDropNonActionableSentryEvent({
+      exception: {
+        values: [{ type: 'SupabaseError', value: 'column tasks.completed_at does not exist' }],
+      },
+    })).toBe(false);
+  });
+
   it('应移除 hash 并脱敏认证相关 query 参数', () => {
     const sanitized = sentryStatic.sanitizeUrlForTelemetry(
       'https://nanoflow.pages.dev/callback?code=abc123&accessToken=camel&token_hash=secret&apiKey=key&statusCode=200&projectId=project-1#access_token=hidden'

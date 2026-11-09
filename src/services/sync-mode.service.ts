@@ -1,13 +1,13 @@
 /**
  * SyncModeService - 同步模式服务
- * 
+ *
  * 借鉴思源笔记的多模式同步设计，提供灵活的同步控制选项。
- * 
+ *
  * 【同步模式】
  * - automatic: 自动模式 - 按间隔自动同步，适合桌面端稳定网络
  * - manual: 手动模式 - 仅在用户手动触发或应用启动/退出时同步，适合移动端
  * - completely-manual: 完全手动模式 - 用户必须明确选择"上传"或"下载"，适合敏感数据场景
- * 
+ *
  * 【设计理念】
  * 不同场景需要不同的同步策略：
  * - 桌面端 WiFi 环境：自动同步，最大化便利性
@@ -18,6 +18,7 @@ import { Injectable, inject, signal, computed, DestroyRef } from '@angular/core'
 import { LoggerService } from './logger.service';
 import { APP_LIFECYCLE_CONFIG } from '../config/app-lifecycle.config';
 import { CONFIG_OPERATION_DELAY } from '../config/timeout.config';
+import { SessionRuntimeResetRegistry } from './session-runtime-reset.service';
 
 /**
  * 同步模式枚举
@@ -47,7 +48,7 @@ export interface SyncModeConfig {
   generateConflictDoc: boolean;
 }
 
-/** 
+/**
  * 默认同步间隔（秒）
  * 【性能优化 2026-01-27】从 30s 增加到 300s（5分钟）
  * 理由：与 SYNC_CONFIG.POLLING_INTERVAL 保持一致，减少不必要的 API 请求
@@ -56,7 +57,7 @@ export interface SyncModeConfig {
  */
 const DEFAULT_SYNC_INTERVAL = 300;
 
-/** 
+/**
  * 最小同步间隔（秒）
  * 【性能优化 2026-01-27】从 10s 增加到 60s
  * 理由：过于频繁的同步会影响首屏性能
@@ -69,6 +70,11 @@ const MAX_SYNC_INTERVAL = 43200;
 /** 配置存储 key */
 const CONFIG_STORAGE_KEY = 'nanoflow.sync-mode-config';
 
+interface SyncModeLifecycleListenerCleanup {
+  eventName: string;
+  remove: () => void;
+}
+
 @Injectable({
   providedIn: 'root'
 })
@@ -76,12 +82,25 @@ export class SyncModeService {
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('SyncMode');
   private readonly destroyRef = inject(DestroyRef);
-  
+  private readonly sessionRuntimeReset = inject(SessionRuntimeResetRegistry);
+  private lifecycleClosed = false;
+  private unregisterSessionRuntimeReset: (() => void) | null = null;
+
+  /** 旧配置迁移的延迟保存定时器；必须早于 config 初始化，因为 loadConfig() 会创建它 */
+  private configMigrationSaveTimer: ReturnType<typeof setTimeout> | null = null;
+
   /** 同步配置 */
   private readonly config = signal<SyncModeConfig>(this.loadConfig());
-  
+
   /** 自动同步定时器 */
   private autoSyncTimer: ReturnType<typeof setInterval> | null = null;
+
+  /** 自动同步是否仍在执行，避免 interval tick 重入同一条同步链路 */
+  private autoSyncInFlight = false;
+  private syncRunToken = 0;
+
+  /** 首次自动同步启动延迟定时器 */
+  private startupDelayTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** 页面恢复后的自动同步抑制窗口，避免与恢复链路抢占带宽 */
   private autoSyncBlockedUntil = 0;
@@ -94,60 +113,57 @@ export class SyncModeService {
 
   /** 网络恢复监听器 */
   private onlineHandler: (() => void) | null = null;
-  
+
   /** 同步回调 */
   private syncCallback: ((direction: SyncDirection) => Promise<void>) | null = null;
-  
+
   // ========== 公开的响应式属性 ==========
-  
+
   /** 当前同步模式 */
   readonly mode = computed(() => this.config().mode);
-  
+
   /** 自动同步间隔 */
   readonly interval = computed(() => this.config().interval);
-  
+
   /** 是否启用感知 */
   readonly perceptionEnabled = computed(() => this.config().perceptionEnabled);
-  
+
   /** 是否为自动模式 */
   readonly isAutomatic = computed(() => this.config().mode === 'automatic');
-  
+
   /** 是否为手动模式 */
   readonly isManual = computed(() => this.config().mode === 'manual');
-  
+
   /** 是否为完全手动模式 */
   readonly isCompletelyManual = computed(() => this.config().mode === 'completely-manual');
-  
+
   /** 完整配置（只读） */
   readonly currentConfig = computed(() => this.config());
-  
+
   constructor() {
+    this.unregisterSessionRuntimeReset = this.sessionRuntimeReset.register(
+      'SyncModeService',
+      () => this.resetSessionRuntime(),
+    );
     this.registerVisibilityListener();
 
     this.destroyRef.onDestroy(() => {
+      this.lifecycleClosed = true;
+      this.unregisterSessionRuntimeReset?.();
+      this.unregisterSessionRuntimeReset = null;
       this.stopAutoSync();
-
-      if (this.visibilityHandler && typeof document !== 'undefined') {
-        document.removeEventListener('visibilitychange', this.visibilityHandler);
-      }
-
-      if (this.pageshowHandler && typeof window !== 'undefined') {
-        window.removeEventListener('pageshow', this.pageshowHandler as EventListener);
-      }
-
-      if (this.onlineHandler && typeof window !== 'undefined') {
-        window.removeEventListener('online', this.onlineHandler);
-      }
+      this.clearPendingConfigMigrationSave();
+      this.teardownLifecycleListeners();
     });
-    
+
     // 如果是自动模式，启动定时器
     if (this.config().mode === 'automatic') {
       this.startAutoSync();
     }
   }
-  
+
   // ========== 公开方法 ==========
-  
+
   /**
    * 设置同步回调
    * 当需要执行同步时，会调用此回调
@@ -155,44 +171,44 @@ export class SyncModeService {
   setSyncCallback(callback: (direction: SyncDirection) => Promise<void>): void {
     this.syncCallback = callback;
   }
-  
+
   /**
    * 设置同步模式
    */
   setMode(mode: SyncMode): void {
     const current = this.config();
     if (current.mode === mode) return;
-    
+
     this.config.update(c => ({ ...c, mode }));
     this.saveConfig();
-    
+
     // 根据模式调整定时器
     if (mode === 'automatic') {
       this.startAutoSync();
     } else {
       this.stopAutoSync();
     }
-    
+
     this.logger.info('同步模式已更改', { mode });
   }
-  
+
   /**
    * 设置自动同步间隔（秒）
    */
   setInterval(seconds: number): void {
     const interval = Math.max(MIN_SYNC_INTERVAL, Math.min(MAX_SYNC_INTERVAL, seconds));
-    
+
     this.config.update(c => ({ ...c, interval }));
     this.saveConfig();
-    
+
     // 如果是自动模式，重启定时器
     if (this.config().mode === 'automatic') {
       this.startAutoSync();
     }
-    
+
     this.logger.info('同步间隔已更改', { interval });
   }
-  
+
   /**
    * 设置是否启用同步感知
    */
@@ -201,7 +217,7 @@ export class SyncModeService {
     this.saveConfig();
     this.logger.info('同步感知已更改', { enabled });
   }
-  
+
   /**
    * 设置是否生成冲突文档
    */
@@ -210,16 +226,16 @@ export class SyncModeService {
     this.saveConfig();
     this.logger.info('冲突文档生成已更改', { enabled });
   }
-  
+
   /**
    * 更新完整配置
    */
   updateConfig(updates: Partial<SyncModeConfig>): void {
     const oldMode = this.config().mode;
-    
+
     this.config.update(c => ({ ...c, ...updates }));
     this.saveConfig();
-    
+
     // 检查模式变化
     const newMode = this.config().mode;
     if (oldMode !== newMode) {
@@ -232,38 +248,48 @@ export class SyncModeService {
       // 间隔变化，重启定时器
       this.startAutoSync();
     }
-    
+
     this.logger.info('同步配置已更新', updates);
   }
-  
+
   /**
    * 手动触发同步
    * 所有模式下都可用
    */
   async triggerSync(direction: SyncDirection = 'both'): Promise<void> {
     if (!this.syncCallback) {
-      this.logger.warn('未设置同步回调');
+      this.warnManualSyncSafely('未设置同步回调');
       return;
     }
-    
-    this.logger.info('手动触发同步', { direction, mode: this.config().mode });
-    await this.syncCallback(direction);
+
+    this.infoManualSyncSafely('手动触发同步', { direction, mode: this.config().mode });
+    const runToken = this.beginSyncRun();
+    if (runToken === null) {
+      this.debugManualSyncSafely('同步仍在执行，跳过本次触发', { direction });
+      return;
+    }
+
+    try {
+      await this.syncCallback(direction);
+    } finally {
+      this.finishSyncRun(runToken);
+    }
   }
-  
+
   /**
    * 仅上传（完全手动模式下使用）
    */
   async uploadOnly(): Promise<void> {
     return this.triggerSync('upload');
   }
-  
+
   /**
    * 仅下载（完全手动模式下使用）
    */
   async downloadOnly(): Promise<void> {
     return this.triggerSync('download');
   }
-  
+
   /**
    * 应用启动时调用
    */
@@ -273,7 +299,7 @@ export class SyncModeService {
       await this.triggerSync('both');
     }
   }
-  
+
   /**
    * 应用退出时调用
    */
@@ -283,7 +309,7 @@ export class SyncModeService {
       await this.triggerSync('upload');
     }
   }
-  
+
   /**
    * 重置为默认配置
    */
@@ -291,85 +317,190 @@ export class SyncModeService {
     const defaults = this.getDefaultConfig();
     this.config.set(defaults);
     this.saveConfig();
-    
+
     if (defaults.mode === 'automatic') {
       this.startAutoSync();
     } else {
       this.stopAutoSync();
     }
-    
+
     this.logger.info('同步配置已重置为默认值');
   }
-  
+
   // ========== 私有方法 ==========
-  
+
   /** 是否已完成首次同步延迟（避免启动时立即触发同步与 loadProjects 竞争） */
   private startupDelayCooldown = true;
-  
+
   /**
    * 启动自动同步定时器
    * 【性能优化 2026-01-27】添加启动延迟，避免首屏加载时触发冗余同步
    */
   private startAutoSync(): void {
     this.stopAutoSync();
-    
+
+    if (this.lifecycleClosed) {
+      return;
+    }
+
     const intervalMs = this.config().interval * 1000;
-    
+
     // 【性能优化】首次启动延迟 30 秒后才开始自动同步
     // 避免与 loadProjects、后台同步竞争资源
     if (this.startupDelayCooldown) {
       this.startupDelayCooldown = false;
       this.logger.info('启动延迟：30 秒后开始自动同步');
-      setTimeout(() => {
+      const startupDelayTimer = setTimeout(() => {
+        if (this.startupDelayTimer !== startupDelayTimer) return;
+        this.startupDelayTimer = null;
         if (this.config().mode === 'automatic' && !this.autoSyncTimer) {
           this.startAutoSyncTimer(intervalMs);
         }
       }, 30000);
+      this.startupDelayTimer = startupDelayTimer;
       return;
     }
-    
+
     this.startAutoSyncTimer(intervalMs);
   }
-  
+
   /**
    * 实际启动自动同步定时器
    * 【增强 2026-01-31】添加更详细的监控日志
    */
   private startAutoSyncTimer(intervalMs: number): void {
     let syncCount = 0;
-    
-    this.autoSyncTimer = setInterval(async () => {
+
+    const autoSyncTimer = setInterval(async () => {
+      if (this.autoSyncTimer !== autoSyncTimer) {
+        return;
+      }
+
       if (this.shouldSkipAutoSyncTick()) {
         return;
       }
 
-      if (this.syncCallback && this.config().mode === 'automatic') {
-        syncCount++;
-        const syncStartTime = Date.now();
-        this.logger.debug('自动同步触发', { 
-          syncNumber: syncCount,
+      if (!this.syncCallback || this.config().mode !== 'automatic') {
+        return;
+      }
+
+      const runToken = this.beginSyncRun();
+      if (runToken === null) {
+        this.debugAutoSyncSafely('自动同步仍在执行，跳过本次触发', {
           intervalSeconds: intervalMs / 1000
         });
-        try {
-          await this.syncCallback('both');
-          const duration = Date.now() - syncStartTime;
-          this.logger.debug('自动同步完成', { 
-            syncNumber: syncCount, 
-            durationMs: duration 
-          });
-        } catch (e) {
-          this.logger.error('自动同步失败', { 
-            syncNumber: syncCount, 
-            error: e 
-          });
-        }
+        return;
+      }
+
+      syncCount++;
+      const syncStartTime = Date.now();
+      this.debugAutoSyncSafely('自动同步触发', {
+        syncNumber: syncCount,
+        intervalSeconds: intervalMs / 1000
+      });
+      try {
+        await this.syncCallback('both');
+        const duration = Date.now() - syncStartTime;
+        this.debugAutoSyncSafely('自动同步完成', {
+          syncNumber: syncCount,
+          durationMs: duration
+        });
+      } catch (e) {
+        this.errorAutoSyncSafely('自动同步失败', {
+          syncNumber: syncCount,
+          error: e
+        });
+      } finally {
+        this.finishSyncRun(runToken);
       }
     }, intervalMs);
-    
-    this.logger.info('自动同步已启动', { 
-      intervalMs, 
-      intervalMinutes: Math.round(intervalMs / 60000 * 10) / 10 
+    this.autoSyncTimer = autoSyncTimer;
+
+    this.logger.info('自动同步已启动', {
+      intervalMs,
+      intervalMinutes: Math.round(intervalMs / 60000 * 10) / 10
     });
+  }
+
+  private warnManualSyncSafely(message: string, data?: unknown): void {
+    try {
+      if (data === undefined) {
+        this.logger.warn(message);
+      } else {
+        this.logger.warn(message, data);
+      }
+    } catch {
+      // Manual sync entry failures must not be caused by diagnostics.
+    }
+  }
+
+  private infoManualSyncSafely(message: string, data?: unknown): void {
+    try {
+      if (data === undefined) {
+        this.logger.info(message);
+      } else {
+        this.logger.info(message, data);
+      }
+    } catch {
+      // Manual sync entry failures must not be caused by diagnostics.
+    }
+  }
+
+  private debugManualSyncSafely(message: string, data?: unknown): void {
+    try {
+      if (data === undefined) {
+        this.logger.debug(message);
+      } else {
+        this.logger.debug(message, data);
+      }
+    } catch {
+      // Manual sync entry failures must not be caused by diagnostics.
+    }
+  }
+
+  private debugAutoSyncSafely(message: string, data?: unknown): void {
+    try {
+      if (data === undefined) {
+        this.logger.debug(message);
+      } else {
+        this.logger.debug(message, data);
+      }
+    } catch {
+      // Auto-sync observability failures must not interrupt interval state.
+    }
+  }
+
+  private errorAutoSyncSafely(message: string, data?: unknown): void {
+    try {
+      this.logger.error(message, data);
+    } catch {
+      // Auto-sync error reporting failures must not keep in-flight stuck.
+    }
+  }
+
+  private beginSyncRun(): number | null {
+    if (this.autoSyncInFlight) return null;
+    this.autoSyncInFlight = true;
+    return ++this.syncRunToken;
+  }
+
+  private finishSyncRun(runToken: number): void {
+    if (runToken === this.syncRunToken) {
+      this.autoSyncInFlight = false;
+    }
+  }
+
+  private invalidateSyncRun(): void {
+    this.syncRunToken += 1;
+    this.autoSyncInFlight = false;
+  }
+
+  private resetSessionRuntime(): void {
+    this.stopAutoSync();
+    this.autoSyncBlockedUntil = 0;
+    if (!this.lifecycleClosed && this.config().mode === 'automatic') {
+      this.startAutoSync();
+    }
   }
 
   private registerVisibilityListener(): void {
@@ -381,7 +512,7 @@ export class SyncModeService {
       this.autoSyncBlockedUntil = Date.now() + APP_LIFECYCLE_CONFIG.RESUME_TIMEOUT_MS;
     };
 
-    this.visibilityHandler = () => {
+    const visibilityHandler = () => {
       if (document.visibilityState !== 'visible') {
         return;
       }
@@ -389,7 +520,7 @@ export class SyncModeService {
       armResumeGuard();
     };
 
-    this.pageshowHandler = (event: PageTransitionEvent) => {
+    const pageshowHandler = (event: PageTransitionEvent) => {
       if (!event.persisted) {
         return;
       }
@@ -397,13 +528,129 @@ export class SyncModeService {
       armResumeGuard();
     };
 
-    this.onlineHandler = () => {
+    const onlineHandler = () => {
       armResumeGuard();
     };
 
-    document.addEventListener('visibilitychange', this.visibilityHandler);
-    window.addEventListener('pageshow', this.pageshowHandler as EventListener);
-    window.addEventListener('online', this.onlineHandler);
+    this.registerResumeGuardLifecycleListeners(visibilityHandler, pageshowHandler, onlineHandler);
+  }
+
+  private registerResumeGuardLifecycleListeners(
+    visibilityHandler: () => void,
+    pageshowHandler: (event: PageTransitionEvent) => void,
+    onlineHandler: () => void,
+  ): void {
+    const cleanupRegisteredListeners: SyncModeLifecycleListenerCleanup[] = [];
+    let pendingEventName = 'unknown';
+
+    try {
+      pendingEventName = 'visibilitychange';
+      this.registerLifecycleListener(
+        cleanupRegisteredListeners,
+        'visibilitychange',
+        () => document.addEventListener('visibilitychange', visibilityHandler),
+        () => document.removeEventListener('visibilitychange', visibilityHandler),
+      );
+      pendingEventName = 'pageshow';
+      this.registerLifecycleListener(
+        cleanupRegisteredListeners,
+        'pageshow',
+        () => window.addEventListener('pageshow', pageshowHandler as EventListener),
+        () => window.removeEventListener('pageshow', pageshowHandler as EventListener),
+      );
+      pendingEventName = 'online';
+      this.registerLifecycleListener(
+        cleanupRegisteredListeners,
+        'online',
+        () => window.addEventListener('online', onlineHandler),
+        () => window.removeEventListener('online', onlineHandler),
+      );
+      this.visibilityHandler = visibilityHandler;
+      this.pageshowHandler = pageshowHandler;
+      this.onlineHandler = onlineHandler;
+    } catch (error) {
+      for (const { eventName, remove } of cleanupRegisteredListeners.reverse()) {
+        this.removeLifecycleListener(eventName, remove);
+      }
+      this.visibilityHandler = null;
+      this.pageshowHandler = null;
+      this.onlineHandler = null;
+      this.warnLifecycleListenerSetupFailure(pendingEventName, error);
+    }
+  }
+
+  private registerLifecycleListener(
+    cleanupRegisteredListeners: SyncModeLifecycleListenerCleanup[],
+    eventName: string,
+    add: () => void,
+    remove: () => void,
+  ): void {
+    add();
+    cleanupRegisteredListeners.push({ eventName, remove });
+  }
+
+  private teardownLifecycleListeners(): void {
+    const visibilityHandler = this.visibilityHandler;
+    const pageshowHandler = this.pageshowHandler;
+    const onlineHandler = this.onlineHandler;
+    this.visibilityHandler = null;
+    this.pageshowHandler = null;
+    this.onlineHandler = null;
+
+    if (visibilityHandler && typeof document !== 'undefined') {
+      this.removeLifecycleListener('visibilitychange', () => {
+        document.removeEventListener('visibilitychange', visibilityHandler);
+      });
+    }
+
+    if (pageshowHandler && typeof window !== 'undefined') {
+      this.removeLifecycleListener('pageshow', () => {
+        window.removeEventListener('pageshow', pageshowHandler as EventListener);
+      });
+    }
+
+    if (onlineHandler && typeof window !== 'undefined') {
+      this.removeLifecycleListener('online', () => {
+        window.removeEventListener('online', onlineHandler);
+      });
+    }
+  }
+
+  private removeLifecycleListener(eventName: string, remove: () => void): void {
+    try {
+      remove();
+      return;
+    } catch (error) {
+      this.warnLifecycleListenerCleanupFailure(eventName, error);
+    }
+
+    try {
+      remove();
+    } catch (error) {
+      this.warnLifecycleListenerCleanupFailure(eventName, error);
+    }
+  }
+
+  private warnLifecycleListenerCleanupFailure(eventName: string, error: unknown): void {
+    try {
+      this.logger.warn('同步模式生命周期监听解绑失败，继续清理其他监听', {
+        eventName,
+        message: error instanceof Error ? error.message : 'unknown',
+      });
+    } catch {
+      // Warning sinks must not interrupt lifecycle listener cleanup.
+    }
+  }
+
+  private warnLifecycleListenerSetupFailure(eventName: string, error: unknown): void {
+    try {
+      this.logger.warn('同步模式生命周期监听注册失败，已回滚已注册监听并跳过恢复保护', {
+        eventName,
+        message: error instanceof Error ? error.message : 'unknown',
+      });
+    } catch {
+      // Warning sinks must not interrupt service construction.
+    }
   }
 
   private shouldSkipAutoSyncTick(): boolean {
@@ -413,21 +660,59 @@ export class SyncModeService {
 
     return Date.now() < this.autoSyncBlockedUntil;
   }
-  
+
   /**
    * 停止自动同步定时器
    */
   private stopAutoSync(): void {
-    if (this.autoSyncTimer) {
-      clearInterval(this.autoSyncTimer);
-      this.autoSyncTimer = null;
-      this.logger.debug('自动同步已停止');
+    this.invalidateSyncRun();
+    const startupDelayTimer = this.startupDelayTimer;
+    this.startupDelayTimer = null;
+    if (startupDelayTimer !== null) {
+      this.clearTimeoutSafely(startupDelayTimer, 'startup-delay');
+    }
+
+    const autoSyncTimer = this.autoSyncTimer;
+    this.autoSyncTimer = null;
+    if (autoSyncTimer !== null) {
+      this.clearIntervalSafely(autoSyncTimer, 'auto-sync');
+      this.debugAutoSyncSafely('自动同步已停止');
     }
   }
-  
+
+  private clearPendingConfigMigrationSave(): void {
+    const configMigrationSaveTimer = this.configMigrationSaveTimer;
+    this.configMigrationSaveTimer = null;
+    if (configMigrationSaveTimer === null) return;
+
+    this.clearTimeoutSafely(configMigrationSaveTimer, 'config-migration-save');
+  }
+
+  private clearTimeoutSafely(
+    timer: ReturnType<typeof setTimeout>,
+    source: string,
+  ): void {
+    try {
+      clearTimeout(timer);
+    } catch (error) {
+      this.debugAutoSyncSafely('同步 timeout 清理失败，继续释放本地状态', { source, error });
+    }
+  }
+
+  private clearIntervalSafely(
+    timer: ReturnType<typeof setInterval>,
+    source: string,
+  ): void {
+    try {
+      clearInterval(timer);
+    } catch (error) {
+      this.debugAutoSyncSafely('同步 interval 清理失败，继续释放本地状态', { source, error });
+    }
+  }
+
   /**
    * 加载配置
-   * 
+   *
    * 【配置迁移 2026-01-31】
    * - 旧版本默认 interval 为 30-60 秒，现已优化为 300 秒
    * - 需要检测并迁移旧配置，避免用户被困在低效的轮询间隔
@@ -438,7 +723,7 @@ export class SyncModeService {
       if (stored) {
         const parsed = JSON.parse(stored);
         const merged = { ...this.getDefaultConfig(), ...parsed };
-        
+
         // 【配置迁移】如果存储的 interval 小于新的默认值且不是用户明确设置的极端值，
         // 升级到新的默认值。这里使用 120 秒作为阈值，假设小于 120 秒的值是旧默认值。
         // 用户如果明确需要快速同步，可以在设置中重新配置。
@@ -449,12 +734,18 @@ export class SyncModeService {
           });
           merged.interval = DEFAULT_SYNC_INTERVAL;
           // 保存迁移后的配置（稳定化延迟，给加载过程充足时间）
-          setTimeout(() => this.saveConfig(), CONFIG_OPERATION_DELAY.SAVE_STABILIZE);
+          this.clearPendingConfigMigrationSave();
+          const configMigrationSaveTimer = setTimeout(() => {
+            if (this.configMigrationSaveTimer !== configMigrationSaveTimer) return;
+            this.configMigrationSaveTimer = null;
+            this.saveConfig();
+          }, CONFIG_OPERATION_DELAY.SAVE_STABILIZE);
+          this.configMigrationSaveTimer = configMigrationSaveTimer;
         }
-        
+
         // 【安全检查】确保 interval 在有效范围内
         merged.interval = Math.max(MIN_SYNC_INTERVAL, Math.min(MAX_SYNC_INTERVAL, merged.interval));
-        
+
         return merged;
       }
     } catch (e) {
@@ -462,7 +753,7 @@ export class SyncModeService {
     }
     return this.getDefaultConfig();
   }
-  
+
   /**
    * 保存配置
    */
@@ -473,7 +764,7 @@ export class SyncModeService {
       this.logger.warn('保存同步配置失败', e);
     }
   }
-  
+
   /**
    * 获取默认配置
    */

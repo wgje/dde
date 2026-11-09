@@ -1,10 +1,28 @@
 import { signal } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { FlowConnectionEditorComponent } from './flow-connection-editor.component';
 import { LoggerService } from '../../../../services/logger.service';
 import type { Task } from '../../../../models';
+import { registerFlowConnectionEditorSaveSyncSpecs } from './flow-connection-editor-save-sync.spec-helpers';
+
+describe('flow-connection-editor.component.ts structure', () => {
+  it('keeps public payload/task types in helpers and re-exports them from the component', () => {
+    const componentPath = join(process.cwd(), 'src/app/features/flow/components/flow-connection-editor.component.ts');
+    const helpersPath = join(process.cwd(), 'src/app/features/flow/components/flow-connection-editor.helpers.ts');
+    const componentSource = readFileSync(componentPath, 'utf8');
+    const helpersSource = readFileSync(helpersPath, 'utf8');
+
+    expect(helpersSource).toContain('export interface ConnectionTasks');
+    expect(helpersSource).toContain('export interface ConnectionEditorSavePayload');
+    expect(componentSource).toContain('export type { ConnectionTasks, ConnectionEditorSavePayload }');
+    expect(componentSource).not.toContain('export interface ConnectionTasks');
+    expect(componentSource).not.toContain('export interface ConnectionEditorSavePayload');
+  });
+});
 
 function createTask(overrides: Partial<Task> = {}): Task {
   return {
@@ -68,6 +86,114 @@ describe('FlowConnectionEditorComponent', () => {
     outsideEl = null;
     vi.runOnlyPendingTimers();
     vi.useRealTimers();
+  });
+
+  function getTimerInternals(): {
+    saveTimer: ReturnType<typeof setTimeout> | null;
+    focusTimer: ReturnType<typeof setTimeout> | null;
+  } {
+    return component as unknown as {
+      saveTimer: ReturnType<typeof setTimeout> | null;
+      focusTimer: ReturnType<typeof setTimeout> | null;
+    };
+  }
+
+  it('为每次新的连接编辑会话分配递增代次，包括关闭后重开同一连接', () => {
+    const connectionA = {
+      sourceId: 'source-a',
+      targetId: 'target-a',
+      title: 'Connection A',
+      description: 'Description A',
+      x: 160,
+      y: 240,
+      isCrossTree: true,
+      mode: 'edit',
+    };
+    const data = signal<any>(connectionA);
+    (component as any).data = data;
+
+    const sessionIdentity = (component as any).sessionIdentity;
+    expect(sessionIdentity).toBeTypeOf('function');
+    if (typeof sessionIdentity !== 'function') {
+      return;
+    }
+
+    fixture.detectChanges();
+    expect(sessionIdentity()).toEqual({
+      key: 'source-a->target-a@160,240',
+      generation: 1,
+    });
+
+    data.set({
+      ...connectionA,
+      sourceId: 'source-b',
+      targetId: 'target-b',
+      title: 'Connection B',
+    });
+    fixture.detectChanges();
+    expect(sessionIdentity()).toEqual({
+      key: 'source-b->target-b@160,240',
+      generation: 2,
+    });
+
+    data.set(null);
+    fixture.detectChanges();
+    data.set(connectionA);
+    fixture.detectChanges();
+    expect(sessionIdentity()).toEqual({
+      key: 'source-a->target-a@160,240',
+      generation: 3,
+    });
+  });
+
+  it('标题变化重排保存时应清理 handle 为 0 的旧 save timer', () => {
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+    const internal = getTimerInternals();
+    internal.saveTimer = 0 as unknown as ReturnType<typeof setTimeout>;
+
+    component.onTitleChange('新标题');
+
+    expect(clearTimeoutSpy).toHaveBeenCalledWith(0);
+    expect(internal.saveTimer).not.toBe(0);
+    expect(internal.saveTimer).not.toBeNull();
+  });
+
+  it('退出编辑态立即保存时应清理 handle 为 0 的旧 save timer', () => {
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+    const internal = getTimerInternals();
+    component.isEditMode.set(true);
+    internal.saveTimer = 0 as unknown as ReturnType<typeof setTimeout>;
+
+    component.exitEditMode();
+
+    expect(clearTimeoutSpy).toHaveBeenCalledWith(0);
+    expect(internal.saveTimer).toBeNull();
+  });
+
+  it('进入编辑态重排聚焦时应清理 handle 为 0 的旧 focus timer', () => {
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+    const internal = getTimerInternals();
+    internal.focusTimer = 0 as unknown as ReturnType<typeof setTimeout>;
+
+    component.enterEditMode();
+
+    expect(clearTimeoutSpy).toHaveBeenCalledWith(0);
+    expect(internal.focusTimer).not.toBe(0);
+    expect(internal.focusTimer).not.toBeNull();
+  });
+
+  it('销毁时应清理 handle 为 0 的保存和聚焦 timer', () => {
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+    const internal = getTimerInternals();
+    internal.saveTimer = 0 as unknown as ReturnType<typeof setTimeout>;
+    internal.focusTimer = 0 as unknown as ReturnType<typeof setTimeout>;
+
+    component.ngOnDestroy();
+
+    expect(clearTimeoutSpy).toHaveBeenCalledWith(0);
+    expect(clearTimeoutSpy).toHaveBeenCalledTimes(2);
+    expect(internal.saveTimer).toBeNull();
+    expect(internal.focusTimer).toBeNull();
   });
 
   it('跨树关联首次打开应进入预览态', () => {
@@ -436,6 +562,44 @@ describe('FlowConnectionEditorComponent', () => {
     expect(closeSpy).not.toHaveBeenCalled();
   });
 
+  it('销毁后延迟触摸回调不应再保存或切换编辑态', () => {
+    const saveSpy = vi.spyOn(component.save, 'emit');
+    const closeSpy = vi.spyOn(component.close, 'emit');
+    const modeChangeSpy = vi.spyOn(component.modeChange, 'emit');
+
+    (component as any).position = signal({ x: 160, y: 240 });
+    (component as any).connectionTasks = signal({
+      source: createTask({ id: 'source-task', displayId: 'A' }),
+      target: createTask({ id: 'target-task', displayId: 'B' }),
+    });
+    (component as any).data = signal<any>({
+      sourceId: 'source-task',
+      targetId: 'target-task',
+      title: '依赖',
+      description: '旧描述',
+      x: 160,
+      y: 240,
+      isCrossTree: true,
+      mode: 'edit',
+    });
+
+    fixture.detectChanges();
+    vi.advanceTimersByTime(60);
+    fixture.detectChanges();
+
+    outsideEl = document.createElement('button');
+    document.body.appendChild(outsideEl);
+
+    component.onDocumentTouchStart(createPreviewTouchEvent(outsideEl));
+    component.ngOnDestroy();
+    vi.advanceTimersByTime(100);
+
+    expect(saveSpy).not.toHaveBeenCalled();
+    expect(closeSpy).not.toHaveBeenCalled();
+    expect(modeChangeSpy).not.toHaveBeenCalledWith('preview');
+    expect(component.isEditMode()).toBe(true);
+  });
+
   it('同一关联块会话从预览切到编辑时应响应外部 mode 变化', () => {
     const dataSignal = signal<any>({
       sourceId: 'source-task',
@@ -514,458 +678,8 @@ describe('FlowConnectionEditorComponent', () => {
     expect(modeChangeSpy).toHaveBeenCalledWith('preview');
   });
 
-  it('同会话 data 更新后立即触摸外部也应退出编辑并保存（不应被保护窗口误拦截）', () => {
-    const saveSpy = vi.spyOn(component.save, 'emit');
-
-    const dataSignal = signal<any>({
-      sourceId: 'source-task',
-      targetId: 'target-task',
-      title: '旧标题',
-      description: '旧描述',
-      x: 160,
-      y: 240,
-      isCrossTree: true,
-      mode: 'edit',
-    });
-
-    (component as any).position = signal({ x: 160, y: 240 });
-    (component as any).connectionTasks = signal({
-      source: createTask({ id: 'source-task', displayId: 'A' }),
-      target: createTask({ id: 'target-task', displayId: 'B' }),
-    });
-    (component as any).data = dataSignal;
-
-    fixture.detectChanges();
-    vi.advanceTimersByTime(260);
-    fixture.detectChanges();
-
-    const titleInput = fixture.nativeElement.querySelector('input') as HTMLInputElement;
-    const textarea = fixture.nativeElement.querySelector('textarea') as HTMLTextAreaElement;
-
-    component.editingTitle = '过期标题';
-    component.editingDescription = '过期描述';
-    titleInput.value = '同会话最新标题';
-    textarea.value = '同会话最新描述';
-
-    // 同一关联块会话内的父层更新（不应重置外部点击保护窗口）
-    dataSignal.set({
-      ...dataSignal(),
-      title: '旧标题',
-      description: '旧描述',
-      mode: 'edit',
-    });
-    fixture.detectChanges();
-
-    outsideEl = document.createElement('button');
-    document.body.appendChild(outsideEl);
-
-    component.onDocumentTouchStart(createPreviewTouchEvent(outsideEl));
-    vi.advanceTimersByTime(120);
-
-    expect(saveSpy).toHaveBeenCalledTimes(1);
-    expect(saveSpy).toHaveBeenCalledWith({
-      sourceId: 'source-task',
-      targetId: 'target-task',
-      title: '同会话最新标题',
-      description: '同会话最新描述',
-    });
-  });
-
-  it('父层将 mode 从 edit 切到 preview 时应先保存最新 DOM 值', () => {
-    const saveSpy = vi.spyOn(component.save, 'emit');
-
-    const dataSignal = signal<any>({
-      sourceId: 'source-task',
-      targetId: 'target-task',
-      title: '旧标题',
-      description: '旧描述',
-      x: 160,
-      y: 240,
-      isCrossTree: true,
-      mode: 'edit',
-    });
-
-    (component as any).position = signal({ x: 160, y: 240 });
-    (component as any).connectionTasks = signal({
-      source: createTask({ id: 'source-task', displayId: 'A' }),
-      target: createTask({ id: 'target-task', displayId: 'B' }),
-    });
-    (component as any).data = dataSignal;
-
-    fixture.detectChanges();
-    vi.advanceTimersByTime(60);
-    fixture.detectChanges();
-
-    const titleInput = fixture.nativeElement.querySelector('input') as HTMLInputElement;
-    const textarea = fixture.nativeElement.querySelector('textarea') as HTMLTextAreaElement;
-
-    component.editingTitle = '过期标题';
-    component.editingDescription = '过期描述';
-    titleInput.value = '切换前最新标题';
-    textarea.value = '切换前最新描述';
-
-    // 父层强制切到预览，服务层值尚未回流时仍应保存最新输入
-    dataSignal.set({
-      ...dataSignal(),
-      mode: 'preview',
-      title: '旧标题',
-      description: '旧描述',
-    });
-    fixture.detectChanges();
-
-    expect(saveSpy).toHaveBeenCalledTimes(1);
-    expect(saveSpy).toHaveBeenCalledWith({
-      sourceId: 'source-task',
-      targetId: 'target-task',
-      title: '切换前最新标题',
-      description: '切换前最新描述',
-    });
-    expect(component.isEditMode()).toBe(false);
-  });
-
-  it('父层触发 edit->preview 的同一次外部点击不应立即把预览态关闭', () => {
-    const saveSpy = vi.spyOn(component.save, 'emit');
-    const closeSpy = vi.spyOn(component.close, 'emit');
-
-    const dataSignal = signal<any>({
-      sourceId: 'source-task',
-      targetId: 'target-task',
-      title: '旧标题',
-      description: '旧描述',
-      x: 160,
-      y: 240,
-      isCrossTree: true,
-      mode: 'edit',
-    });
-
-    (component as any).position = signal({ x: 160, y: 240 });
-    (component as any).connectionTasks = signal({
-      source: createTask({ id: 'source-task', displayId: 'A' }),
-      target: createTask({ id: 'target-task', displayId: 'B' }),
-    });
-    (component as any).data = dataSignal;
-
-    fixture.detectChanges();
-    vi.advanceTimersByTime(60);
-    fixture.detectChanges();
-
-    const titleInput = fixture.nativeElement.querySelector('input') as HTMLInputElement;
-    const textarea = fixture.nativeElement.querySelector('textarea') as HTMLTextAreaElement;
-    titleInput.value = '竞态标题';
-    textarea.value = '竞态描述';
-
-    // 背景点击先由父层把 mode 切到 preview
-    dataSignal.set({
-      ...dataSignal(),
-      mode: 'preview',
-      title: '旧标题',
-      description: '旧描述',
-    });
-    fixture.detectChanges();
-
-    // 同一外部点击继续冒泡到 document:click，不应立即关闭浮层
-    outsideEl = document.createElement('button');
-    document.body.appendChild(outsideEl);
-    component.onDocumentClick(createPreviewMouseEvent(outsideEl));
-
-    expect(saveSpy).toHaveBeenCalledTimes(1);
-    expect(saveSpy).toHaveBeenCalledWith({
-      sourceId: 'source-task',
-      targetId: 'target-task',
-      title: '竞态标题',
-      description: '竞态描述',
-    });
-    expect(closeSpy).not.toHaveBeenCalled();
-    expect(component.isEditMode()).toBe(false);
-  });
-
-  it('触摸编辑器外部时应优先保存输入框中的最新 DOM 值并退出编辑态', () => {
-    const saveSpy = vi.spyOn(component.save, 'emit');
-    const closeSpy = vi.spyOn(component.close, 'emit');
-    const modeChangeSpy = vi.spyOn(component.modeChange, 'emit');
-
-    (component as any).position = signal({ x: 160, y: 240 });
-    (component as any).connectionTasks = signal({
-      source: createTask({ id: 'source-task', displayId: 'A' }),
-      target: createTask({ id: 'target-task', displayId: 'B' }),
-    });
-    (component as any).data = signal<any>({
-      sourceId: 'source-task',
-      targetId: 'target-task',
-      title: '旧标题',
-      description: '旧描述',
-      x: 160,
-      y: 240,
-      isCrossTree: true,
-      mode: 'edit',
-    });
-
-    fixture.detectChanges();
-    vi.advanceTimersByTime(60);
-    fixture.detectChanges();
-
-    const titleInput = fixture.nativeElement.querySelector('input') as HTMLInputElement;
-    const textarea = fixture.nativeElement.querySelector('textarea') as HTMLTextAreaElement;
-
-    component.editingTitle = '过期标题';
-    component.editingDescription = '过期描述';
-    titleInput.value = 'DOM 最新标题';
-    textarea.value = 'DOM 最新描述';
-    vi.advanceTimersByTime(300);
-
-    outsideEl = document.createElement('button');
-    document.body.appendChild(outsideEl);
-
-    component.onDocumentTouchStart(createPreviewTouchEvent(outsideEl));
-    // 推进定时器以触发延迟保存
-    vi.advanceTimersByTime(100);
-
-    expect(saveSpy).toHaveBeenCalledTimes(1);
-    expect(saveSpy).toHaveBeenCalledWith({
-      sourceId: 'source-task',
-      targetId: 'target-task',
-      title: 'DOM 最新标题',
-      description: 'DOM 最新描述',
-    });
-    expect(modeChangeSpy).toHaveBeenCalledWith('preview');
-    expect(component.isEditMode()).toBe(false);
-    expect(closeSpy).not.toHaveBeenCalled();
-  });
-
-  it('输入法组合输入期间触摸编辑器外部时也应保存最后可见文本并退出编辑态', () => {
-    const saveSpy = vi.spyOn(component.save, 'emit');
-    const closeSpy = vi.spyOn(component.close, 'emit');
-    const modeChangeSpy = vi.spyOn(component.modeChange, 'emit');
-
-    (component as any).position = signal({ x: 160, y: 240 });
-    (component as any).connectionTasks = signal({
-      source: createTask({ id: 'source-task', displayId: 'A' }),
-      target: createTask({ id: 'target-task', displayId: 'B' }),
-    });
-    (component as any).data = signal<any>({
-      sourceId: 'source-task',
-      targetId: 'target-task',
-      title: '依赖',
-      description: '旧描述',
-      x: 160,
-      y: 240,
-      isCrossTree: true,
-      mode: 'edit',
-    });
-
-    fixture.detectChanges();
-    vi.advanceTimersByTime(60);
-    fixture.detectChanges();
-
-    const titleInput = fixture.nativeElement.querySelector('input') as HTMLInputElement;
-    const textarea = fixture.nativeElement.querySelector('textarea') as HTMLTextAreaElement;
-    expect(textarea).not.toBeNull();
-
-    component.onCompositionStart('description');
-    component.editingDescription = '组合前旧值';
-    titleInput.value = '依赖';
-    textarea.value = '中文输入中的最新值';
-    vi.advanceTimersByTime(300);
-
-    outsideEl = document.createElement('button');
-    document.body.appendChild(outsideEl);
-
-    component.onDocumentTouchStart(createPreviewTouchEvent(outsideEl));
-    // IME 输入中需要更长延迟：touchstart 延迟 100ms + saveAndClose 延迟 100ms = 200ms
-    vi.advanceTimersByTime(250);
-
-    expect(saveSpy).toHaveBeenCalledTimes(1);
-    expect(saveSpy).toHaveBeenCalledWith({
-      sourceId: 'source-task',
-      targetId: 'target-task',
-      title: '依赖',
-      description: '中文输入中的最新值',
-    });
-    expect(modeChangeSpy).toHaveBeenCalledWith('preview');
-    expect(component.isEditMode()).toBe(false);
-    expect(closeSpy).not.toHaveBeenCalled();
-  });
-
-  it('父层直接清空编辑器数据时也应保存最新 DOM 值', () => {
-    const saveSpy = vi.spyOn(component.save, 'emit');
-
-    const dataSignal = signal<any>({
-      sourceId: 'source-task',
-      targetId: 'target-task',
-      title: '旧标题',
-      description: '旧描述',
-      x: 160,
-      y: 240,
-      isCrossTree: true,
-      mode: 'edit',
-    });
-
-    (component as any).position = signal({ x: 160, y: 240 });
-    (component as any).connectionTasks = signal({
-      source: createTask({ id: 'source-task', displayId: 'A' }),
-      target: createTask({ id: 'target-task', displayId: 'B' }),
-    });
-    (component as any).data = dataSignal;
-
-    fixture.detectChanges();
-    vi.advanceTimersByTime(60);
-    fixture.detectChanges();
-
-    const titleInput = fixture.nativeElement.querySelector('input') as HTMLInputElement;
-    const textarea = fixture.nativeElement.querySelector('textarea') as HTMLTextAreaElement;
-
-    component.editingTitle = '过期标题';
-    component.editingDescription = '过期描述';
-    titleInput.value = '父层关闭前的最新标题';
-    textarea.value = '父层关闭前的最新描述';
-    vi.advanceTimersByTime(300);
-
-    dataSignal.set(null);
-    fixture.detectChanges();
-
-    expect(saveSpy).toHaveBeenCalledTimes(1);
-    expect(saveSpy).toHaveBeenCalledWith({
-      sourceId: 'source-task',
-      targetId: 'target-task',
-      title: '父层关闭前的最新标题',
-      description: '父层关闭前的最新描述',
-    });
-  });
-
-  it('服务层回流更新后用户继续编辑再触摸外部仍应保存最新内容并退出编辑态', () => {
-    const saveSpy = vi.spyOn(component.save, 'emit');
-    const closeSpy = vi.spyOn(component.close, 'emit');
-    const modeChangeSpy = vi.spyOn(component.modeChange, 'emit');
-
-    const dataSignal = signal<any>({
-      sourceId: 'source-task',
-      targetId: 'target-task',
-      title: '初始标题',
-      description: '初始描述',
-      x: 160,
-      y: 240,
-      isCrossTree: true,
-      mode: 'edit',
-    });
-
-    (component as any).position = signal({ x: 160, y: 240 });
-    (component as any).connectionTasks = signal({
-      source: createTask({ id: 'source-task', displayId: 'A' }),
-      target: createTask({ id: 'target-task', displayId: 'B' }),
-    });
-    (component as any).data = dataSignal;
-
-    fixture.detectChanges();
-    vi.advanceTimersByTime(60);
-    fixture.detectChanges();
-
-    const titleInput = fixture.nativeElement.querySelector('input') as HTMLInputElement;
-    const textarea = fixture.nativeElement.querySelector('textarea') as HTMLTextAreaElement;
-
-    // 第一次编辑
-    titleInput.value = '第一次编辑标题';
-    textarea.value = '第一次编辑描述';
-    component.onTitleChange('第一次编辑标题');
-    component.onDescriptionChange('第一次编辑描述');
-
-    // 等待防抖保存触发
-    vi.advanceTimersByTime(600);
-
-    // 模拟服务层回流更新 data（这在真实场景中会由 saveConnectionContent 触发）
-    dataSignal.set({
-      ...dataSignal(),
-      title: '第一次编辑标题',
-      description: '第一次编辑描述',
-    });
-    fixture.detectChanges();
-
-    // 用户继续编辑
-    titleInput.value = '最终标题';
-    textarea.value = '最终描述';
-    component.onTitleChange('最终标题');
-    component.onDescriptionChange('最终描述');
-
-    // 此时用户立即点击外部（不等待防抖），应该保存最新值
-    outsideEl = document.createElement('button');
-    document.body.appendChild(outsideEl);
-
-    saveSpy.mockClear();
-    component.onDocumentTouchStart(createPreviewTouchEvent(outsideEl));
-    vi.advanceTimersByTime(100);
-
-    expect(saveSpy).toHaveBeenCalledTimes(1);
-    expect(saveSpy).toHaveBeenCalledWith({
-      sourceId: 'source-task',
-      targetId: 'target-task',
-      title: '最终标题',
-      description: '最终描述',
-    });
-    expect(modeChangeSpy).toHaveBeenCalledWith('preview');
-    expect(component.isEditMode()).toBe(false);
-    expect(closeSpy).not.toHaveBeenCalled();
-  });
-
-  it('标题和描述重组后即使包含分隔符也应再次保存，不应被旧 payload key 误判去重', () => {
-    const saveSpy = vi.spyOn(component.save, 'emit');
-
-    const dataSignal = signal<any>({
-      sourceId: 'source-task',
-      targetId: 'target-task',
-      title: '',
-      description: '',
-      x: 160,
-      y: 240,
-      isCrossTree: true,
-      mode: 'edit',
-    });
-
-    (component as any).position = signal({ x: 160, y: 240 });
-    (component as any).connectionTasks = signal({
-      source: createTask({ id: 'source-task', displayId: 'A' }),
-      target: createTask({ id: 'target-task', displayId: 'B' }),
-    });
-    (component as any).data = dataSignal;
-
-    fixture.detectChanges();
-    vi.advanceTimersByTime(60);
-    fixture.detectChanges();
-
-    const titleInput = fixture.nativeElement.querySelector('input') as HTMLInputElement;
-    const textarea = fixture.nativeElement.querySelector('textarea') as HTMLTextAreaElement;
-
-    titleInput.value = 'Alpha|Beta';
-    textarea.value = 'Gamma';
-    component.onTitleChange('Alpha|Beta');
-    component.onDescriptionChange('Gamma');
-
-    vi.advanceTimersByTime(600);
-
-    expect(saveSpy).toHaveBeenCalledWith({
-      sourceId: 'source-task',
-      targetId: 'target-task',
-      title: 'Alpha|Beta',
-      description: 'Gamma',
-    });
-
-    saveSpy.mockClear();
-
-    titleInput.value = 'Alpha';
-    textarea.value = 'Beta|Gamma';
-    component.onTitleChange('Alpha');
-    component.onDescriptionChange('Beta|Gamma');
-
-    outsideEl = document.createElement('button');
-    document.body.appendChild(outsideEl);
-
-    component.onDocumentTouchStart(createPreviewTouchEvent(outsideEl));
-    vi.advanceTimersByTime(120);
-
-    expect(saveSpy).toHaveBeenCalledTimes(1);
-    expect(saveSpy).toHaveBeenCalledWith({
-      sourceId: 'source-task',
-      targetId: 'target-task',
-      title: 'Alpha',
-      description: 'Beta|Gamma',
-    });
+  registerFlowConnectionEditorSaveSyncSpecs({
+    getFixture: () => fixture,
+    getComponent: () => component,
   });
 });

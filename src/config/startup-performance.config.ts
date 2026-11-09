@@ -111,7 +111,7 @@ export const STARTUP_PERF_CONFIG = {
   /**
    * 构建门禁：workspace shell 入口 chunk 体积上限（KB，raw）
    */
-  STARTUP_WORKSPACE_CHUNK_MAX_KB: 125,
+  STARTUP_WORKSPACE_CHUNK_MAX_KB: 124,
 
   /**
    * 构建门禁：main 静态 import-statement 数量上限

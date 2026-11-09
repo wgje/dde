@@ -1,10 +1,11 @@
-import { ChangeDetectionStrategy, Component, inject, input, output, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, inject, input, output, signal, type OnDestroy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { SIYUAN_CONFIG, SIYUAN_ERROR_MESSAGES } from '../../../../config/siyuan.config';
+import { AuthService } from '../../../../services/auth.service';
 import { LoggerService } from '../../../../services/logger.service';
 import type { ExternalSourceLink, SiyuanPreviewResult } from '../../../core/external-sources/external-source.model';
 import { ExternalSourceLinkService } from '../../../core/external-sources/external-source-link.service';
-import { SiyuanPreviewService } from '../../../core/external-sources/siyuan/siyuan-preview.service';
+import { SiyuanPreviewService, type SiyuanPreviewPromise } from '../../../core/external-sources/siyuan/siyuan-preview.service';
 import { shortenSiyuanBlockId } from '../../../core/external-sources/siyuan/siyuan-link-parser';
 
 @Component({
@@ -89,7 +90,8 @@ import { shortenSiyuanBlockId } from '../../../core/external-sources/siyuan/siyu
     .anchor-absolute-location:hover { color: rgb(79 70 229); }
   `],
 })
-export class KnowledgeAnchorPopoverComponent {
+export class KnowledgeAnchorPopoverComponent implements OnDestroy {
+  private readonly auth = inject(AuthService);
   private readonly previewService = inject(SiyuanPreviewService);
   private readonly linkService = inject(ExternalSourceLinkService);
   private readonly logger = inject(LoggerService).category('KnowledgeAnchorPopover');
@@ -101,24 +103,47 @@ export class KnowledgeAnchorPopoverComponent {
   readonly result = signal<SiyuanPreviewResult>({ status: 'loading' });
   readonly maxWidth = SIYUAN_CONFIG.POPOVER_MAX_WIDTH_PX;
   readonly maxHeight = SIYUAN_CONFIG.POPOVER_MAX_HEIGHT_PX;
+  private loadSequence = 0;
+  private previewRequest: SiyuanPreviewPromise | null = null;
+  private destroyed = false;
 
   ngOnInit(): void {
     void this.load(false);
   }
 
   async load(forceRefresh: boolean): Promise<void> {
+    this.cancelPreviewRequest();
+    const requestSequence = ++this.loadSequence;
+    const requestLink = this.link();
+    const authFence = this.auth.captureAuthIdentityFence();
     this.result.set({ status: 'loading' });
+    const request = this.previewService.preview(requestLink, { forceRefresh });
+    this.previewRequest = request;
     try {
-      const result = await this.previewService.preview(this.link(), { forceRefresh });
+      const result = await request;
+      if (!this.isCurrentLoad(requestSequence, requestLink, authFence)) {
+        return;
+      }
       this.result.set(result);
       this.syncResolvedMetadata(result);
     } catch (error) {
+      if (!this.isCurrentLoad(requestSequence, requestLink, authFence)) {
+        return;
+      }
       this.logger.warn('桌面思源预览加载失败，降级为安全错误态', {
-        linkId: this.link().id,
+        linkId: requestLink.id,
         message: error instanceof Error ? error.message : 'unknown',
       });
       this.result.set({ status: 'error', errorCode: 'unknown' });
+    } finally {
+      if (this.previewRequest === request) this.previewRequest = null;
     }
+  }
+
+  ngOnDestroy(): void {
+    this.destroyed = true;
+    this.loadSequence += 1;
+    this.cancelPreviewRequest();
   }
 
   open(): void {
@@ -170,6 +195,25 @@ export class KnowledgeAnchorPopoverComponent {
         message: error instanceof Error ? error.message : 'unknown',
       });
     });
+  }
+
+  private isCurrentLoad(
+    requestSequence: number,
+    requestLink: ExternalSourceLink,
+    authFence: string,
+  ): boolean {
+    const currentLink = this.link();
+    return !this.destroyed
+      && requestSequence === this.loadSequence
+      && this.auth.captureAuthIdentityFence() === authFence
+      && currentLink.id === requestLink.id
+      && currentLink.targetId === requestLink.targetId;
+  }
+
+  private cancelPreviewRequest(): void {
+    const request = this.previewRequest;
+    this.previewRequest = null;
+    request?.cancel?.();
   }
 
   private extractHPathTitle(hpath: string | undefined): string | undefined {

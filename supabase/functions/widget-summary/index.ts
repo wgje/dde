@@ -1,5 +1,3 @@
-import 'jsr:@supabase/functions-js/edge-runtime.d.ts';
-
 import {
   buildWidgetClientCapabilitiesPatch,
   consumeWidgetRateLimit,
@@ -10,6 +8,8 @@ import {
   getClientIp,
   getCorsHeaders,
   getBearerToken,
+  hasServiceRoleConfig,
+  isWidgetRequestBodyTooLargeError,
   jsonResponse,
   loadWidgetCapabilities,
   loadWidgetLimits,
@@ -17,7 +17,9 @@ import {
   mergeJsonObjects,
   normalizeWidgetPlatform,
   parseWidgetToken,
+  readWidgetRequestText,
   redactId,
+  serviceNotConfiguredPayload,
   sha256Hex,
   toPublicWidgetCapabilities,
   type WidgetPlatform,
@@ -127,6 +129,11 @@ interface ProjectIdRow {
   id: string;
 }
 
+interface WidgetSummaryRowsResult<Row> {
+  data: Row[] | null;
+  error: unknown | null;
+}
+
 interface BlackBoxRow {
   id: string;
   date: string | null;
@@ -155,7 +162,26 @@ const SUMMARY_SCHEMA_VERSION = 1;
 const ENTRY_QUERY = 'entry=widget&intent=open-workspace';
 const ENTRY_URL = `./#/projects?${ENTRY_QUERY}`;
 const MAX_BLACK_BOX_PREVIEW_COUNT = 5;
+const WIDGET_SUMMARY_POSTGREST_ID_CHUNK_SIZE = 100;
 const GATE_READ_REAPPEAR_COOLDOWN_MS = 30 * 60 * 1000;
+
+async function collectWidgetSummaryRowsById<Row>(
+  ids: readonly string[],
+  loadChunk: (chunk: string[]) => PromiseLike<WidgetSummaryRowsResult<Row>>,
+): Promise<WidgetSummaryRowsResult<Row>> {
+  const rows: Row[] = [];
+
+  for (let offset = 0; offset < ids.length; offset += WIDGET_SUMMARY_POSTGREST_ID_CHUNK_SIZE) {
+    const chunk = ids.slice(offset, offset + WIDGET_SUMMARY_POSTGREST_ID_CHUNK_SIZE);
+    const result = await loadChunk(chunk);
+    if (result.error) {
+      return { data: null, error: result.error };
+    }
+    rows.push(...(result.data ?? []));
+  }
+
+  return { data: rows, error: null };
+}
 
 function parseTimestampMs(value: string | null | undefined): number | null {
   if (!value) return null;
@@ -667,7 +693,7 @@ function maxIsoTimestamp(values: Array<string | null | undefined>): string | nul
 }
 
 async function readSummaryRequest(req: Request): Promise<WidgetSummaryRequest> {
-  const text = await req.text();
+  const text = await readWidgetRequestText(req);
   if (text.trim().length === 0) {
     return {};
   }
@@ -793,7 +819,16 @@ Deno.serve(async (req: Request) => {
   let body: WidgetSummaryRequest;
   try {
     body = await readSummaryRequest(req);
-  } catch {
+  } catch (error) {
+    if (isWidgetRequestBodyTooLargeError(error)) {
+      return summaryResponse(responseHeaders, 413, {
+        error: 'Request body too large',
+        code: 'REQUEST_BODY_TOO_LARGE',
+        degradedReasons: ['request-body-too-large'],
+        warnings: ['open-app-to-finish-setup'],
+      });
+    }
+
     return summaryResponse(responseHeaders, 400, {
       error: 'Invalid JSON body',
       code: 'INVALID_JSON',
@@ -838,6 +873,14 @@ Deno.serve(async (req: Request) => {
       error: 'instanceId must be a UUID',
       code: 'INSTANCE_CONTEXT_INVALID',
       degradedReasons: ['instance-context-invalid'],
+      warnings: ['open-app-to-finish-setup'],
+    });
+  }
+
+  if (!hasServiceRoleConfig()) {
+    return summaryResponse(responseHeaders, 503, {
+      ...serviceNotConfiguredPayload(),
+      degradedReasons: ['service-not-configured'],
       warnings: ['open-app-to-finish-setup'],
     });
   }
@@ -1216,6 +1259,7 @@ Deno.serve(async (req: Request) => {
 
   // Wave 2：tasks 校验 / projects 校验 这 2 个查询依赖 wave1 解出的 taskIds/projectIds，
   // dockCount/dockWatermark 已在 wave1 RPC 内一次性算出，这里无需再查。
+  const accessibleProjectIdSet = new Set(accessibleProjectIds);
   const needsTaskLookup = taskIds.length > 0 && accessibleProjectIds.length > 0;
   const needsProjectLookup = projectIds.length > 0 && accessibleProjectIds.length > 0;
   const [
@@ -1223,20 +1267,25 @@ Deno.serve(async (req: Request) => {
     projectLookupResult,
   ] = await Promise.all([
     needsTaskLookup
-      ? client
-          .from('tasks')
-          .select('id,title,project_id,updated_at')
-          .in('id', taskIds)
-          .in('project_id', accessibleProjectIds)
-          .is('deleted_at', null)
+      ? collectWidgetSummaryRowsById<TaskRow>(
+          taskIds,
+          chunk => client
+            .from('tasks')
+            .select<TaskRow[]>('id,title,project_id,updated_at')
+            .in('id', chunk)
+            .is('deleted_at', null),
+        )
       : Promise.resolve({ data: [], error: null } as const),
     needsProjectLookup
-      ? client
-          .from('projects')
-          .select('id,title,updated_at')
-          .in('id', projectIds)
-          .eq('owner_id', device.user_id)
-          .is('deleted_at', null)
+      ? collectWidgetSummaryRowsById<ProjectRow>(
+          projectIds,
+          chunk => client
+            .from('projects')
+            .select<ProjectRow[]>('id,title,updated_at')
+            .in('id', chunk)
+            .eq('owner_id', device.user_id)
+            .is('deleted_at', null),
+        )
       : Promise.resolve({ data: [], error: null } as const),
   ]);
 
@@ -1261,6 +1310,7 @@ Deno.serve(async (req: Request) => {
 
   const taskMap = new Map<string, TaskRow>();
   for (const row of (taskLookupResult.data ?? []) as TaskRow[]) {
+    if (!accessibleProjectIdSet.has(row.project_id)) continue;
     taskMap.set(row.id, row);
   }
   const projectMap = new Map<string, ProjectRow>();

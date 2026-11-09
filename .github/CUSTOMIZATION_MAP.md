@@ -10,6 +10,7 @@
 - `.github/instructions/*.instructions.md` 只写文件类型增量约束，不重复全局规则。
 - 新增 skill / agent / instruction 前，先确认现有文件是否能承载目标，避免并行创建第二份权威说明。
 - 能链接现有文档时，不把 README 或 `docs/` 的长段说明再嵌入到聊天定制文件。
+- codegraph / MCP / Codex 仓库事实入口变化时，优先更新 [AGENTS.md](../AGENTS.md) 的 §-1、§0、§0.1，再同步 [.github/copilot-instructions.md](copilot-instructions.md) 摘要和 [docs/codegraph-nanoflow-adaptation.md](../docs/codegraph-nanoflow-adaptation.md) 操作说明。
 
 ## 定制层级
 
@@ -29,8 +30,9 @@
 ### 代码实现 / Bug 修复
 
 1. 先读 [AGENTS.md](../AGENTS.md) 和 [.github/copilot-instructions.md](copilot-instructions.md)。
-2. 再读匹配文件类型的 [instructions/](instructions/) 指令。
-3. 需要额外工作流时，从 [skills/](skills/skill.md) 选择技能。
+2. 按 `AGENTS.md §0` 先用 codegraph MCP 建立仓库事实；NanoFlow 默认入口为 `nanoflow_context_pack`。
+3. 再读匹配文件类型的 [instructions/](instructions/) 指令。
+4. 需要额外工作流时，从 [skills/](skills/skill.md) 选择技能。
 
 ### 维护聊天定制文件
 
@@ -57,6 +59,7 @@
 | Parking Dock 设计 | [docs/parking-dock-modular-design.md](../docs/parking-dock-modular-design.md) |
 | 数据保护 / 回收站 / 备份 | [docs/data-protection-plan.md](../docs/data-protection-plan.md) |
 | 语音转写排障 | [docs/transcribe-troubleshooting.md](../docs/transcribe-troubleshooting.md) |
+| CodeGraph / NanoFlow overlay / MCP 适配 | [docs/codegraph-nanoflow-adaptation.md](../docs/codegraph-nanoflow-adaptation.md) |
 
 ## 新增定制文件前的检查
 

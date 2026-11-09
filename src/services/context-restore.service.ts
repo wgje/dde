@@ -11,14 +11,24 @@
  * 3. 跨视图降级 → 仅用 structuralAnchor + scrollPercent
  */
 
-import { Injectable, inject, Injector } from '@angular/core';
+import { DestroyRef, Injectable, inject, Injector } from '@angular/core';
 import { TaskStore, ProjectStore } from '../app/core/state/stores';
-import { ParkingSnapshot, ParkingStructuralAnchor, ParkingScrollAnchor, ParkingFlowViewport } from '../models';
+import { ParkingSnapshot, ParkingStructuralAnchor, ParkingScrollAnchor, ParkingFlowViewport, Task } from '../models';
 import { UiStateService } from './ui-state.service';
 import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
 import { PARKING_CONFIG } from '../config/parking.config';
 import { UI_FEEDBACK_DELAY } from '../config/timeout.config';
+import { SessionRuntimeResetRegistry } from './session-runtime-reset.service';
+import { ProjectStateService, type ActiveProjectOwner } from './project-state.service';
+
+interface ContextRestoreRunContext {
+  generation: number;
+  taskId: string;
+  projectId: string;
+  owner: ActiveProjectOwner;
+  viewMode: 'text' | 'flow';
+}
 
 @Injectable({
   providedIn: 'root'
@@ -26,23 +36,52 @@ import { UI_FEEDBACK_DELAY } from '../config/timeout.config';
 export class ContextRestoreService {
   private readonly taskStore = inject(TaskStore);
   private readonly projectStore = inject(ProjectStore);
+  private readonly projectState = inject(ProjectStateService);
   private readonly uiState = inject(UiStateService);
   private readonly toastService = inject(ToastService);
   private readonly logger = inject(LoggerService);
   private readonly injector = inject(Injector);
+  private readonly destroyRef = inject(DestroyRef);
+  private readonly sessionRuntimeReset = inject(SessionRuntimeResetRegistry);
+  private restoreGeneration = 0;
+  private readonly pendingHighlightTimers = new Set<ReturnType<typeof setTimeout>>();
+  private activeHighlightEl: HTMLElement | null = null;
+  private unregisterSessionRuntimeReset: (() => void) | null = null;
+
+  constructor() {
+    this.unregisterSessionRuntimeReset = this.sessionRuntimeReset.register(
+      'ContextRestoreService',
+      () => this.cancelPendingRestore(),
+    );
+    this.destroyRef.onDestroy(() => {
+      this.unregisterSessionRuntimeReset?.();
+      this.unregisterSessionRuntimeReset = null;
+      this.cancelPendingRestore();
+    });
+  }
 
   /**
    * 保存当前任务的上下文快照
    * 在停泊或关闭页面前调用
    */
-  async saveSnapshot(taskId: string): Promise<void> {
-    const task = this.taskStore.getTask(taskId);
+  saveSnapshot(taskId: string): Promise<void>;
+  saveSnapshot(projectId: string, taskId: string): Promise<void>;
+  async saveSnapshot(projectOrTaskId: string, explicitTaskId?: string): Promise<void> {
+    const taskId = explicitTaskId ?? projectOrTaskId;
+    const projectId = explicitTaskId === undefined ? this.findProjectId(taskId) : projectOrTaskId;
+    if (!projectId) return;
+    const owner = this.projectState.captureActiveProjectOwner();
+    if (owner.projectId !== projectId) return;
+    const task = this.getProjectTask(projectId, taskId);
     if (!task) return;
 
     const viewMode = this.uiState.activeView() === 'flow' ? 'flow' : 'text';
     const contentHash = this.computeContentHash(task.content);
 
     const flowViewport = viewMode === 'flow' ? await this.captureFlowViewport() : null;
+    if (!this.isProjectTaskOwnerCurrent(owner, projectId, taskId)) return;
+    const currentTask = this.getProjectTask(projectId, taskId);
+    if (!currentTask || this.computeContentHash(currentTask.content) !== contentHash) return;
 
     const snapshot: ParkingSnapshot = {
       savedAt: new Date().toISOString(),
@@ -55,18 +94,15 @@ export class ContextRestoreService {
     };
 
     // 将快照写入 parkingMeta
-    if (task.parkingMeta) {
-      const projectId = this.findProjectId(taskId);
-      if (projectId) {
-        this.taskStore.setTask(
-          {
-            ...task,
-            parkingMeta: { ...task.parkingMeta, contextSnapshot: snapshot },
-            updatedAt: new Date().toISOString(),
-          },
-          projectId
-        );
-      }
+    if (currentTask.parkingMeta) {
+      this.taskStore.setTask(
+        {
+          ...currentTask,
+          parkingMeta: { ...currentTask.parkingMeta, contextSnapshot: snapshot },
+          updatedAt: new Date().toISOString(),
+        },
+        projectId
+      );
     }
   }
 
@@ -74,11 +110,33 @@ export class ContextRestoreService {
    * 恢复任务上下文
    * 先判断 contentHash 是否匹配，不匹配走四级 fallback
    */
-  restore(taskId: string, snapshot: ParkingSnapshot): void {
-    const task = this.taskStore.getTask(taskId);
+  restore(taskId: string, snapshot: ParkingSnapshot): void;
+  restore(projectId: string, taskId: string, snapshot: ParkingSnapshot): void;
+  restore(
+    projectOrTaskId: string,
+    taskIdOrSnapshot: string | ParkingSnapshot,
+    explicitSnapshot?: ParkingSnapshot,
+  ): void {
+    this.cancelPendingRestore();
+    const taskId = typeof taskIdOrSnapshot === 'string' ? taskIdOrSnapshot : projectOrTaskId;
+    const projectId = typeof taskIdOrSnapshot === 'string'
+      ? projectOrTaskId
+      : this.findProjectId(taskId);
+    const snapshot = typeof taskIdOrSnapshot === 'string' ? explicitSnapshot : taskIdOrSnapshot;
+    if (!projectId || !snapshot) return;
+    const owner = this.projectState.captureActiveProjectOwner();
+    if (owner.projectId !== projectId) return;
+    const task = this.getProjectTask(projectId, taskId);
     if (!task) return;
 
     const currentViewMode = this.uiState.activeView() === 'flow' ? 'flow' : 'text';
+    const runContext: ContextRestoreRunContext = {
+      generation: this.restoreGeneration,
+      taskId,
+      projectId,
+      owner,
+      viewMode: currentViewMode,
+    };
     const currentHash = this.computeContentHash(task.content);
     const hashMatches = currentHash === snapshot.contentHash;
 
@@ -86,9 +144,9 @@ export class ContextRestoreService {
     const isCrossView = currentViewMode !== snapshot.viewMode;
 
     if (currentViewMode === 'flow') {
-      void this.restoreFlowView(snapshot, isCrossView);
+      void this.restoreFlowView(snapshot, isCrossView, runContext);
     } else {
-      this.restoreTextView(snapshot, task.content, hashMatches, isCrossView);
+      this.restoreTextView(snapshot, task.content, hashMatches, isCrossView, runContext);
     }
   }
 
@@ -98,13 +156,14 @@ export class ContextRestoreService {
     snapshot: ParkingSnapshot,
     currentContent: string,
     hashMatches: boolean,
-    isCrossView: boolean
+    isCrossView: boolean,
+    runContext: ContextRestoreRunContext,
   ): void {
     if (hashMatches && !isCrossView) {
       // 精确恢复
       this.restoreCursorPosition(snapshot.cursorPosition);
       this.restoreScrollAnchor(snapshot.scrollAnchor);
-      this.flashEditLine(snapshot.cursorPosition?.line ?? 1);
+      this.flashEditLine(snapshot.cursorPosition?.line ?? 1, runContext);
       return;
     }
 
@@ -114,7 +173,12 @@ export class ContextRestoreService {
         '内容已变更，已跳转到最近匹配位置',
         undefined,
         {
-          action: { label: '跳到顶部', onClick: () => this.scrollToTop() },
+          action: {
+            label: '跳到顶部',
+            onClick: () => {
+              if (this.isRestoreCurrent(runContext)) this.scrollToTop();
+            },
+          },
         }
       );
     }
@@ -122,7 +186,7 @@ export class ContextRestoreService {
     // 四级 fallback（A5.2.3）
     const restored = this.fallbackRestore(snapshot, currentContent, isCrossView);
     if (restored.line) {
-      this.flashEditLine(restored.line);
+      this.flashEditLine(restored.line, runContext);
     }
   }
 
@@ -174,7 +238,11 @@ export class ContextRestoreService {
    * require() 会被 esbuild 静态分析并打包，导致 1.3MB GoJS 进入首屏 bundle。
    * import() 是真正的动态导入，只在运行时按需加载。
    */
-  private async restoreFlowView(snapshot: ParkingSnapshot, isCrossView: boolean): Promise<void> {
+  private async restoreFlowView(
+    snapshot: ParkingSnapshot,
+    isCrossView: boolean,
+    runContext: ContextRestoreRunContext,
+  ): Promise<void> {
     if (isCrossView || !snapshot.flowViewport) {
       // 跨视图降级——仅尝试 structuralAnchor
       return;
@@ -183,10 +251,12 @@ export class ContextRestoreService {
     try {
       // 动态 import()：真正的代码分割，不会被 esbuild 静态打包
       const { FlowDiagramService } = await import('../app/features/flow/services/flow-diagram.service');
+      if (!this.isRestoreCurrent(runContext)) return;
       const flowService = this.injector.get(FlowDiagramService, null);
       if (!flowService) return;
 
       const { FlowZoomService } = await import('../app/features/flow/services/flow-zoom.service');
+      if (!this.isRestoreCurrent(runContext)) return;
       const zoomService = this.injector.get(FlowZoomService, null);
 
       // 恢复缩放比例
@@ -204,7 +274,9 @@ export class ContextRestoreService {
         selectedNodeId: snapshot.flowViewport.selectedNodeId,
       });
     } catch {
-      this.logger.info('ContextRestoreService', 'Flow 服务未加载，跳过视口恢复');
+      if (this.isRestoreCurrent(runContext)) {
+        this.logger.info('ContextRestoreService', 'Flow 服务未加载，跳过视口恢复');
+      }
     }
   }
 
@@ -434,7 +506,8 @@ export class ContextRestoreService {
     this.scrollToPercent(anchor.scrollPercent);
   }
 
-  private flashEditLine(line: number): void {
+  private flashEditLine(line: number, runContext: ContextRestoreRunContext): void {
+    if (!this.isRestoreCurrent(runContext)) return;
     // 三段式闪烁：亮起→保持→淡出（共 1000ms）
     // 检查 prefers-reduced-motion，降级为静态高亮
     const prefersReduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
@@ -458,17 +531,73 @@ export class ContextRestoreService {
       transition: opacity ${prefersReduced ? '0ms' : `${duration}ms`} ease-out;
     `;
     editorContainer.appendChild(highlightEl);
+    this.activeHighlightEl = highlightEl;
 
     if (prefersReduced) {
       // 静态高亮 1s 后移除
-      setTimeout(() => highlightEl.remove(), duration);
+      this.scheduleHighlightTimer(() => this.removeHighlight(highlightEl), duration);
     } else {
       // 三段式：亮起 200ms → 保持 500ms → 淡出 300ms
-      setTimeout(() => {
+      this.scheduleHighlightTimer(() => {
+        if (!this.isRestoreCurrent(runContext)) {
+          this.removeHighlight(highlightEl);
+          return;
+        }
         highlightEl.style.opacity = '0';
-        setTimeout(() => highlightEl.remove(), UI_FEEDBACK_DELAY.HIGHLIGHT_CLEAR);
+        this.scheduleHighlightTimer(
+          () => this.removeHighlight(highlightEl),
+          UI_FEEDBACK_DELAY.HIGHLIGHT_CLEAR,
+        );
       }, 700);
     }
+  }
+
+  private scheduleHighlightTimer(callback: () => void, delayMs: number): void {
+    const timer = setTimeout(() => {
+      this.pendingHighlightTimers.delete(timer);
+      callback();
+    }, delayMs);
+    this.pendingHighlightTimers.add(timer);
+  }
+
+  private removeHighlight(highlightEl: HTMLElement): void {
+    highlightEl.remove();
+    if (this.activeHighlightEl === highlightEl) {
+      this.activeHighlightEl = null;
+    }
+  }
+
+  private cancelPendingRestore(): void {
+    this.restoreGeneration += 1;
+    for (const timer of this.pendingHighlightTimers) {
+      clearTimeout(timer);
+    }
+    this.pendingHighlightTimers.clear();
+    if (this.activeHighlightEl) {
+      this.removeHighlight(this.activeHighlightEl);
+    }
+  }
+
+  private isRestoreCurrent(context: ContextRestoreRunContext): boolean {
+    if (context.generation !== this.restoreGeneration) return false;
+    const currentViewMode = this.uiState.activeView() === 'flow' ? 'flow' : 'text';
+    return currentViewMode === context.viewMode
+      && this.isProjectTaskOwnerCurrent(context.owner, context.projectId, context.taskId);
+  }
+
+  private isProjectTaskOwnerCurrent(
+    owner: ActiveProjectOwner,
+    projectId: string,
+    taskId: string,
+  ): boolean {
+    return owner.projectId === projectId
+      && this.projectState.isActiveProjectOwnerCurrent(owner)
+      && !!this.getProjectTask(projectId, taskId);
+  }
+
+  private getProjectTask(projectId: string, taskId: string): Task | undefined {
+    return this.projectState.getProjectWithCurrentData(projectId)
+      ?.tasks.find(task => task.id === taskId);
   }
 
   private scrollToLine(line: number): void {

@@ -20,12 +20,21 @@ import { ProjectStateService } from './project-state.service';
 import { ProjectOperationService } from './project-operation.service';
 import { SyncCoordinatorService } from './sync-coordinator.service';
 import { AppAuthCoordinatorService } from '../app/core/services/app-auth-coordinator.service';
+import { UserSessionService } from './user-session.service';
 import { type ConflictResolutionPlan } from './conflict-resolution.types';
 /* eslint-enable no-restricted-imports */
 import type { StorageEscapeData } from '../app/shared/modals';
 import { ThemeType, Project } from '../models';
+import type { ProjectUiOwner } from './task-operation-trash-adapter.controller';
 
 type ConflictResolutionAction = 'local' | 'remote' | 'merge' | 'plan';
+
+interface SettingsImportOwnerContext {
+  readonly sessionGeneration: number;
+  readonly userId: string | null;
+}
+
+const SETTINGS_IMPORT_STALE_SESSION_ERROR = '会话已切换，导入已取消';
 
 @Injectable({ providedIn: 'root' })
 export class WorkspaceModalCoordinatorService {
@@ -38,6 +47,7 @@ export class WorkspaceModalCoordinatorService {
   private readonly projectOps = inject(ProjectOperationService);
   private readonly syncCoordinator = inject(SyncCoordinatorService);
   private readonly authCoord = inject(AppAuthCoordinatorService);
+  private readonly userSession = inject(UserSessionService);
 
   // ── State ───────────────────────────────────────────────────────────
 
@@ -61,6 +71,11 @@ export class WorkspaceModalCoordinatorService {
   private _dashboardModalRef: ModalRef | null = null;
   /** Conflict modal ref */
   private _conflictModalRef: ModalRef | null = null;
+  private _trashModalRef: ModalRef | null = null;
+  private _trashOperationToken: symbol | null = null;
+  private _projectOwnerGeneration = 0;
+  private _ownedProjectId = this.projectState.activeProjectId();
+  private unregisterProjectChange: (() => void) | null = null;
 
   // ── Callbacks ──────────────────────────────────────────────────────
   // These are set by the component via `initCallbacks` so the service
@@ -72,11 +87,23 @@ export class WorkspaceModalCoordinatorService {
   /** One-time initialisation called by the host component */
   initCallbacks(callbacks: ModalCallbacks): void {
     this._callbacks = callbacks;
+    this.unregisterProjectChange ??= this.projectState.registerBeforeActiveProjectChange(
+      (_previousId, nextId) => {
+        this._projectOwnerGeneration += 1;
+        this._ownedProjectId = nextId;
+        this.retireTrashModal();
+      },
+    );
   }
 
   /** 清除回调引用，避免宿主组件销毁后持有过期引用 */
   clearCallbacks(): void {
     this._callbacks = {};
+    this.unregisterProjectChange?.();
+    this.unregisterProjectChange = null;
+    this._projectOwnerGeneration += 1;
+    this._ownedProjectId = this.projectState.activeProjectId();
+    this.retireTrashModal();
   }
 
   // ── Helpers ────────────────────────────────────────────────────────
@@ -114,18 +141,20 @@ export class WorkspaceModalCoordinatorService {
     if (this.isModalLoading('settings')) return;
     this.setModalLoading('settings', true);
     try {
+      const importOwner = this.captureSettingsImportOwner();
       const component = await this.modalLoader.loadSettingsModal();
       this.dynamicModal.open(component, {
         inputs: {
           sessionEmail: this.authCoord.sessionEmail(),
-          projects: this.projectState.projects()
+          projects: this.projectState.getProjectsWithCurrentData(),
+          importProject: (project: Project) => this.forwardSettingsImport(importOwner, project),
         },
         outputs: {
           close: () => this.closeSettings(),
           signOut: () => this._callbacks.signOut?.(),
           themeChange: (theme: unknown) => this._callbacks.updateTheme?.(theme as ThemeType),
           openDashboard: () => this.openDashboardFromSettings(),
-          importComplete: (project: unknown) => this._callbacks.handleImportComplete?.(project as Project)
+          importComplete: (project: unknown) => this.forwardSettingsImport(importOwner, project as Project)
         }
       });
     } catch {
@@ -133,6 +162,23 @@ export class WorkspaceModalCoordinatorService {
     } finally {
       this.setModalLoading('settings', false);
     }
+  }
+
+  private captureSettingsImportOwner(): SettingsImportOwnerContext {
+    return Object.freeze({
+      sessionGeneration: this.userSession.getCurrentSessionGeneration(),
+      userId: this.userSession.currentUserId(),
+    });
+  }
+
+  private forwardSettingsImport(
+    owner: SettingsImportOwnerContext,
+    project: Project,
+  ): Promise<void> | void {
+    if (!this.userSession.isSessionContextCurrent(owner.sessionGeneration, owner.userId)) {
+      throw new Error(SETTINGS_IMPORT_STALE_SESSION_ERROR);
+    }
+    return this._callbacks.handleImportComplete?.(project);
   }
 
   closeSettings(): void {
@@ -207,6 +253,11 @@ export class WorkspaceModalCoordinatorService {
   // ── Login ──────────────────────────────────────────────────────────
 
   async openLoginModal(): Promise<void> {
+    if (this._loginModalRef) {
+      this.toast.info('登录窗口已打开', '请先完成当前登录流程');
+      return;
+    }
+
     if (this.isModalLoading('login')) return;
     this.setModalLoading('login', true);
     try {
@@ -255,22 +306,67 @@ export class WorkspaceModalCoordinatorService {
 
   // ── Trash ──────────────────────────────────────────────────────────
 
-  async openTrashModal(): Promise<void> {
-    if (this.isModalLoading('trash')) return;
+  captureProjectUiOwner(): ProjectUiOwner | null {
+    const projectId = this.projectState.activeProjectId();
+    if (projectId !== this._ownedProjectId) {
+      this._projectOwnerGeneration += 1;
+      this._ownedProjectId = projectId;
+      this.retireTrashModal();
+    }
+    return projectId
+      ? Object.freeze({ projectId, generation: this._projectOwnerGeneration })
+      : null;
+  }
+
+  async openTrashModal(owner: ProjectUiOwner | null = this.captureProjectUiOwner()): Promise<void> {
+    if (!owner || !this.canPublishProjectUi(owner)) return;
+    if (this.isModalLoading('trash') || this._trashModalRef) return;
+    const token = Symbol('trash-modal-operation');
+    this._trashOperationToken = token;
     this.setModalLoading('trash', true);
     try {
       const component = await this.modalLoader.loadTrashModal();
-      this.dynamicModal.open(component, {
-        inputs: { show: true },
+      if (!this.canPublishProjectUi(owner) || this._trashOperationToken !== token) return;
+      const modalRef = this.dynamicModal.open(component, {
+        inputs: {
+          show: true,
+          projectOwner: owner,
+          canPublishUi: () => this.canPublishProjectUi(owner),
+        },
         outputs: {
-          close: () => this.dynamicModal.close()
-        }
+          close: () => {
+            if (this._trashOperationToken !== token) return;
+            modalRef.close();
+          },
+        },
+      });
+      this._trashModalRef = modalRef;
+      void modalRef.result.finally(() => {
+        if (this._trashOperationToken !== token || this._trashModalRef !== modalRef) return;
+        this._trashModalRef = null;
+        this._trashOperationToken = null;
       });
     } catch {
-      this.toast.error('回收站加载失败', '请检查网络连接后重试');
+      if (this.canPublishProjectUi(owner) && this._trashOperationToken === token) {
+        this.toast.error('回收站加载失败', '请检查网络连接后重试');
+      }
     } finally {
-      this.setModalLoading('trash', false);
+      if (this._trashOperationToken === token) this.setModalLoading('trash', false);
     }
+  }
+
+  private canPublishProjectUi(owner: ProjectUiOwner): boolean {
+    return this._ownedProjectId === owner.projectId
+      && this._projectOwnerGeneration === owner.generation
+      && this.projectState.activeProjectId() === owner.projectId;
+  }
+
+  private retireTrashModal(): void {
+    this._trashOperationToken = null;
+    const modalRef = this._trashModalRef;
+    this._trashModalRef = null;
+    modalRef?.close();
+    this.setModalLoading('trash', false);
   }
 
   // ── Config help ────────────────────────────────────────────────────
@@ -575,7 +671,7 @@ export class WorkspaceModalCoordinatorService {
 export interface ModalCallbacks {
   signOut?: () => void;
   updateTheme?: (theme: ThemeType) => void;
-  handleImportComplete?: (project: Project) => void;
+  handleImportComplete?: (project: Project) => Promise<void> | void;
   handleLoginFromModal?: (data: { email: string; password: string }) => void;
   handleSignupFromModal?: (data: { email: string; password: string; confirmPassword: string }) => void;
   handleResetPasswordFromModal?: (email: string) => void;

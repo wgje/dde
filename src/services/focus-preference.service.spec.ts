@@ -10,9 +10,14 @@ import { AuthService } from './auth.service';
 import { LoggerService } from './logger.service';
 import { focusPreferences } from '../state/focus-stores';
 import { DEFAULT_FOCUS_PREFERENCES } from '../models/focus';
+import { FOCUS_CONFIG } from '../config/focus.config';
 
 describe('FocusPreferenceService', () => {
   let service: FocusPreferenceService;
+  let currentUserId: string | null;
+  let mockPreferenceService: {
+    saveUserPreferences: ReturnType<typeof vi.fn>;
+  };
   let mockLoggerService: {
     category: ReturnType<typeof vi.fn>;
     debug: ReturnType<typeof vi.fn>;
@@ -24,9 +29,14 @@ describe('FocusPreferenceService', () => {
   beforeEach(() => {
     // 清除 localStorage
     localStorage.clear();
+    currentUserId = null;
     
     // 重置状态到默认值
     focusPreferences.set({ ...DEFAULT_FOCUS_PREFERENCES });
+
+    mockPreferenceService = {
+      saveUserPreferences: vi.fn(),
+    };
 
     mockLoggerService = {
       category: vi.fn(),
@@ -39,8 +49,8 @@ describe('FocusPreferenceService', () => {
     TestBed.configureTestingModule({
       providers: [
         FocusPreferenceService,
-        { provide: PreferenceService, useValue: {} },
-        { provide: AuthService, useValue: { currentUserId: vi.fn(() => null) } },
+        { provide: PreferenceService, useValue: mockPreferenceService },
+        { provide: AuthService, useValue: { currentUserId: vi.fn(() => currentUserId) } },
         { provide: LoggerService, useValue: mockLoggerService }
       ]
     });
@@ -77,6 +87,46 @@ describe('FocusPreferenceService', () => {
       expect(stored).not.toBeNull();
       expect(JSON.parse(stored!).gateEnabled).toBe(false);
     });
+
+    it('云端偏好未保存到远端或 Outbox 时应记录非阻塞告警', async () => {
+      currentUserId = 'user-1';
+      mockPreferenceService.saveUserPreferences.mockResolvedValueOnce(false);
+
+      service.update({ gateEnabled: false });
+
+      await vi.waitFor(() => {
+        expect(mockPreferenceService.saveUserPreferences).toHaveBeenCalled();
+      });
+      expect(mockLoggerService.warn).toHaveBeenCalledWith(
+        'FocusPreferences',
+        'Cloud sync queued/failed (non-blocking)',
+        'user-1',
+      );
+    });
+
+    it('localStorage 持久化失败时不应更新 UI 偏好或继续云端同步', async () => {
+      currentUserId = 'user-1';
+      const setItemSpy = vi
+        .spyOn(window.localStorage, 'setItem')
+        .mockImplementationOnce(() => {
+          throw new Error('quota exceeded');
+        });
+
+      try {
+        service.update({ gateEnabled: false });
+        await Promise.resolve();
+
+        expect(focusPreferences().gateEnabled).toBe(true);
+        expect(mockPreferenceService.saveUserPreferences).not.toHaveBeenCalled();
+        expect(mockLoggerService.error).toHaveBeenCalledWith(
+          'FocusPreferences',
+          'Failed to save locally',
+          'quota exceeded',
+        );
+      } finally {
+        setItemSpy.mockRestore();
+      }
+    });
   });
 
   describe('setGateEnabled', () => {
@@ -98,8 +148,8 @@ describe('FocusPreferenceService', () => {
 
   describe('setMaxSnoozePerDay', () => {
     it('应该设置每日最大跳过次数', () => {
-      service.setMaxSnoozePerDay(5);
-      expect(focusPreferences().maxSnoozePerDay).toBe(5);
+      service.setMaxSnoozePerDay(2);
+      expect(focusPreferences().maxSnoozePerDay).toBe(2);
     });
 
     it('应该限制在有效范围内', () => {
@@ -107,7 +157,7 @@ describe('FocusPreferenceService', () => {
       expect(focusPreferences().maxSnoozePerDay).toBe(0);
 
       service.setMaxSnoozePerDay(100);
-      expect(focusPreferences().maxSnoozePerDay).toBe(10);
+      expect(focusPreferences().maxSnoozePerDay).toBe(FOCUS_CONFIG.GATE.MAX_SNOOZE_PER_DAY);
     });
   });
 
@@ -139,6 +189,39 @@ describe('FocusPreferenceService', () => {
     it('应该返回当前偏好', () => {
       const prefs = service.getPreferences();
       expect(prefs).toEqual(focusPreferences());
+    });
+  });
+
+  describe('applyCloudPreferences', () => {
+    it('should skip older cloud preferences when local preferences are newer', () => {
+      focusPreferences.set({
+        ...DEFAULT_FOCUS_PREFERENCES,
+        gateEnabled: false,
+        updatedAt: '2026-04-23T11:00:00.000Z',
+      });
+
+      service.applyCloudPreferences({
+        gateEnabled: true,
+        updatedAt: '2026-04-23T10:00:00.000Z',
+      });
+
+      expect(focusPreferences().gateEnabled).toBe(false);
+      expect(focusPreferences().updatedAt).toBe('2026-04-23T11:00:00.000Z');
+    });
+
+    it('should treat legacy cloud preferences without updatedAt as older than local LWW data', () => {
+      focusPreferences.set({
+        ...DEFAULT_FOCUS_PREFERENCES,
+        gateEnabled: false,
+        updatedAt: '2026-04-23T11:00:00.000Z',
+      });
+
+      service.applyCloudPreferences({
+        gateEnabled: true,
+      });
+
+      expect(focusPreferences().gateEnabled).toBe(false);
+      expect(focusPreferences().updatedAt).toBe('2026-04-23T11:00:00.000Z');
     });
   });
 

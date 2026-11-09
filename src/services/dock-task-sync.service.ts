@@ -3,7 +3,7 @@
  * Dock 引擎中任务同步相关的操作：项目归属查找、详情/规划字段同步、跨项目更新。
  * 从 DockEngineService 提取，降低引擎文件体量。
  */
-import { Injectable, inject } from '@angular/core';
+import { Injectable, Injector, inject } from '@angular/core';
 import { CognitiveLoad, DockEntry } from '../models/parking-dock';
 import { Task } from '../models';
 import { TaskStore } from '../core-bridge';
@@ -13,16 +13,37 @@ import { TaskOperationAdapterService } from './task-operation-adapter.service';
 import { BlackBoxService } from './black-box.service';
 import { normalizeNullableNumber } from './dock-snapshot-persistence.service';
 import { sanitizePlannerFields } from '../utils/planner-fields';
+import { ActionQueueService } from './action-queue.service';
+import { AuthService } from './auth.service';
+import { AUTH_CONFIG } from '../config/auth.config';
+
+type DockTaskPlannerPatch = {
+  expected_minutes?: number | null;
+  cognitive_load?: CognitiveLoad | null;
+  wait_minutes?: number | null;
+};
+
+type TaskOperationPlannerPatch = {
+  expectedMinutes?: number | null;
+  waitMinutes?: number | null;
+  cognitiveLoad?: CognitiveLoad | null;
+};
 
 @Injectable({
   providedIn: 'root',
 })
 export class DockTaskSyncService {
   private readonly taskStore = inject(TaskStore);
-  private readonly taskOps = inject(TaskOperationAdapterService);
+  private readonly injector = inject(Injector);
   private readonly projectState = inject(ProjectStateService);
   private readonly blackBoxService = inject(BlackBoxService);
+  private readonly actionQueue = inject(ActionQueueService);
+  private readonly authService = inject(AuthService);
   private readonly logger = inject(LoggerService).category('DockTaskSync');
+
+  private get taskOps(): TaskOperationAdapterService {
+    return this.injector.get(TaskOperationAdapterService);
+  }
 
   resolveTaskProjectId(taskId: string, fallbackProjectId?: string | null): string | null {
     const directProjectId = this.taskStore.getTaskProjectId(taskId);
@@ -46,11 +67,12 @@ export class DockTaskSyncService {
       entries: DockEntry[];
       focusSessionContext: { id: string; startedAt: number } | null;
     },
-  ): void {
+  ): Promise<boolean> {
     const inlineEntry = context.entries.find(entry => entry.taskId === taskId) ?? null;
     if (inlineEntry?.sourceKind === 'dock-created') {
-      if (!inlineEntry.sourceBlackBoxEntryId) return;
-      this.blackBoxService.update(inlineEntry.sourceBlackBoxEntryId, {
+      if (!inlineEntry.sourceBlackBoxEntryId) return Promise.resolve(false);
+      return this.monitorBlackBoxMutation(
+        this.blackBoxService.updateDurably(inlineEntry.sourceBlackBoxEntryId, {
         content: detail.trim() || inlineEntry.title,
         focusMeta: {
           source: 'focus-console-inline',
@@ -63,43 +85,53 @@ export class DockTaskSyncService {
           cognitiveLoad: inlineEntry.load,
           dockEntryId: inlineEntry.taskId,
         },
-      });
-      return;
+        }),
+        'Inline dock detail failed to update source black-box entry',
+        {
+          dockEntryId: inlineEntry.taskId,
+          blackBoxEntryId: inlineEntry.sourceBlackBoxEntryId,
+        },
+      );
     }
 
     const task = this.taskStore.getTask(taskId);
-    if (!task) return;
+    if (!task) return Promise.resolve(false);
     const projectId = this.resolveTaskProjectId(taskId, inlineEntry?.sourceProjectId ?? null);
-    if (!projectId) return;
+    if (!projectId) return Promise.resolve(false);
 
     if (this.projectState.activeProjectId() === projectId) {
-      this.taskOps.updateTaskContent(taskId, detail);
-      return;
+      return this.monitorBooleanMutation(
+        this.taskOps.updateTaskContent(taskId, detail),
+        'Dock task detail failed to persist through task operations',
+        { taskId, projectId },
+      );
     }
 
-    this.applyCrossProjectTaskPatch(taskId, projectId, {
+    return this.applyCrossProjectTaskPatch(taskId, projectId, {
       content: detail,
     });
   }
 
-  syncTaskPlannerFields(
+  async syncTaskPlannerFields(
     taskId: string,
-    patch: {
-      expected_minutes?: number | null;
-      cognitive_load?: CognitiveLoad | null;
-      wait_minutes?: number | null;
-    },
-  ): void {
+    patch: DockTaskPlannerPatch,
+  ): Promise<boolean> {
     const task = this.taskStore.getTask(taskId);
-    if (!task) return;
+    if (!task) return false;
     const projectId = this.resolveTaskProjectId(taskId);
-    if (!projectId) return;
+    if (!projectId) return false;
 
-    const normalizedPatch: {
-      expected_minutes?: number | null;
-      cognitive_load?: CognitiveLoad | null;
-      wait_minutes?: number | null;
-    } = {};
+    const normalizedPatch = this.normalizePlannerPatch(task, patch);
+
+    if (this.projectState.activeProjectId() === projectId) {
+      return this.syncActiveProjectPlannerFields(taskId, projectId, normalizedPatch);
+    }
+
+    return this.applyCrossProjectTaskPatch(taskId, projectId, normalizedPatch);
+  }
+
+  private normalizePlannerPatch(task: Task, patch: DockTaskPlannerPatch): DockTaskPlannerPatch {
+    const normalizedPatch: DockTaskPlannerPatch = {};
     const plannerFields = sanitizePlannerFields({
       expectedMinutes:
         'expected_minutes' in patch ? patch.expected_minutes : task.expected_minutes,
@@ -108,6 +140,7 @@ export class DockTaskSyncService {
       cognitiveLoad:
         'cognitive_load' in patch ? patch.cognitive_load : task.cognitive_load,
     });
+
     if ('expected_minutes' in patch || ('wait_minutes' in patch && plannerFields.adjusted)) {
       normalizedPatch.expected_minutes = plannerFields.expectedMinutes;
     }
@@ -117,55 +150,70 @@ export class DockTaskSyncService {
     if ('wait_minutes' in patch) {
       normalizedPatch.wait_minutes = plannerFields.waitMinutes;
     }
-
-    if (this.projectState.activeProjectId() === projectId) {
-      if ('expected_minutes' in normalizedPatch) {
-        this.taskOps.updateTaskExpectedMinutes(taskId, normalizedPatch.expected_minutes ?? null);
-      }
-      if ('cognitive_load' in normalizedPatch) {
-        this.taskOps.updateTaskCognitiveLoad(taskId, normalizedPatch.cognitive_load ?? null);
-      }
-      if ('wait_minutes' in normalizedPatch) {
-        this.taskOps.updateTaskWaitMinutes(taskId, normalizedPatch.wait_minutes ?? null);
-      }
-      return;
-    }
-
-    this.applyCrossProjectTaskPatch(taskId, projectId, normalizedPatch);
+    return normalizedPatch;
   }
 
-  syncInlineCompletion(entry: DockEntry): void {
-    if (entry.sourceKind !== 'dock-created') return;
+  private syncActiveProjectPlannerFields(
+    taskId: string,
+    projectId: string,
+    normalizedPatch: DockTaskPlannerPatch,
+  ): Promise<boolean> {
+    const durablePatch: TaskOperationPlannerPatch = {};
+    if ('expected_minutes' in normalizedPatch) {
+      durablePatch.expectedMinutes = normalizedPatch.expected_minutes ?? null;
+    }
+    if ('cognitive_load' in normalizedPatch) {
+      durablePatch.cognitiveLoad = normalizedPatch.cognitive_load ?? null;
+    }
+    if ('wait_minutes' in normalizedPatch) {
+      durablePatch.waitMinutes = normalizedPatch.wait_minutes ?? null;
+    }
+
+    if (Object.keys(durablePatch).length === 0) return Promise.resolve(false);
+    return this.monitorBooleanMutation(
+      this.taskOps.updateTaskPlannerFields(taskId, durablePatch),
+      'Dock task planner fields failed to persist through task operations',
+      { taskId, projectId },
+    );
+  }
+
+  async syncInlineCompletion(entry: DockEntry): Promise<boolean> {
+    if (entry.sourceKind !== 'dock-created') return true;
     const blackBoxEntryId = entry.sourceBlackBoxEntryId ?? null;
-    if (!blackBoxEntryId) return;
+    if (!blackBoxEntryId) return false;
 
-    if (this.blackBoxService.getEntry(blackBoxEntryId)?.isCompleted) return;
+    if (this.blackBoxService.getEntry(blackBoxEntryId)?.isCompleted) return true;
 
-    const result = this.blackBoxService.markAsCompleted(blackBoxEntryId);
-    if (!result.ok) {
-      this.logger.warn('Inline dock completion failed to mark source black-box entry completed', {
+    const expectedUserId = this.authService.currentUserId();
+    const expectedAuthFence = this.authService.captureAuthIdentityFence();
+    const completed = await this.monitorBlackBoxMutation(
+      this.blackBoxService.markAsCompletedDurably(blackBoxEntryId),
+      'Inline dock completion failed to mark source black-box entry completed',
+      {
         dockEntryId: entry.taskId,
         blackBoxEntryId,
-        message: result.error.message,
-      });
-    }
+      },
+    );
+    return completed
+      && this.authService.currentUserId() === expectedUserId
+      && this.authService.captureAuthIdentityFence() === expectedAuthFence;
   }
 
   syncCompletedInlineEntries(entries: readonly DockEntry[]): void {
     for (const entry of entries) {
       if (entry.status === 'completed') {
-        this.syncInlineCompletion(entry);
+        void this.syncInlineCompletion(entry);
       }
     }
   }
 
-  applyCrossProjectTaskPatch(
+  async applyCrossProjectTaskPatch(
     taskId: string,
     projectId: string,
     patch: Partial<Task>,
-  ): void {
+  ): Promise<boolean> {
     const currentTask = this.taskStore.getTask(taskId);
-    if (!currentTask) return;
+    if (!currentTask) return false;
     const now = new Date().toISOString();
     const completedAt = this.resolveCompletedAt(currentTask, patch, now);
 
@@ -175,6 +223,41 @@ export class DockTaskSyncService {
       completedAt,
       updatedAt: now,
     };
+    const ownerUserId = this.authService.currentUserId();
+    if (!ownerUserId) {
+      this.logger.warn('跨项目任务补丁缺少当前用户，未提交本地 UI 更新', { taskId, projectId });
+      return false;
+    }
+    const authIdentityFence = this.authService.captureAuthIdentityFence();
+
+    if (ownerUserId !== AUTH_CONFIG.LOCAL_MODE_USER_ID) {
+      const actionId = await this.actionQueue.enqueueDurablyForOwner(ownerUserId, {
+        type: 'update',
+        entityType: 'task',
+        entityId: taskId,
+        payload: {
+          task: updatedTask,
+          projectId,
+          sourceUserId: ownerUserId,
+        },
+        priority: 'normal',
+      });
+      if (!actionId) {
+        this.logger.warn('跨项目任务补丁未能写入本地持久化队列，未提交 UI 更新', { taskId, projectId });
+        return false;
+      }
+    }
+
+    if (
+      this.authService.currentUserId() !== ownerUserId
+      || this.authService.captureAuthIdentityFence() !== authIdentityFence
+    ) return false;
+
+    this.publishCrossProjectTaskPatch(taskId, projectId, updatedTask);
+    return true;
+  }
+
+  private publishCrossProjectTaskPatch(taskId: string, projectId: string, updatedTask: Task): void {
     this.taskStore.setTask(updatedTask, projectId);
     this.projectState.updateProjects(projects =>
       projects.map(project =>
@@ -202,5 +285,46 @@ export class DockTaskSyncService {
       return null;
     }
     return patch.completedAt === undefined ? currentTask.completedAt : patch.completedAt;
+  }
+
+  private async monitorBooleanMutation(
+    mutation: Promise<unknown>,
+    message: string,
+    context: Record<string, unknown>,
+  ): Promise<boolean> {
+    try {
+      const result = await mutation;
+      return result !== false;
+    } catch (error) {
+      this.logger.warn(message, {
+        ...context,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      return false;
+    }
+  }
+
+  private async monitorBlackBoxMutation(
+    mutation: Promise<{ ok: true } | { ok: false; error: { message: string } }>,
+    message: string,
+    context: Record<string, unknown>,
+  ): Promise<boolean> {
+    try {
+      const result = await mutation;
+      if (!result.ok) {
+        this.logger.warn(message, {
+          ...context,
+          message: result.error.message,
+        });
+        return false;
+      }
+      return true;
+    } catch (error) {
+      this.logger.warn(message, {
+        ...context,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      return false;
+    }
   }
 }

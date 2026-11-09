@@ -84,6 +84,10 @@ export class BlackBoxTextInputComponent {
    * 处理 Enter 键
    */
   onEnterKey(event: KeyboardEvent): void {
+    if (event.isComposing) {
+      return;
+    }
+
     if (event.ctrlKey || event.metaKey) {
       event.preventDefault();
       this.submit();

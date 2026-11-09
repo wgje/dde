@@ -2,8 +2,10 @@
 const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
+const { loadRequiredFilesManifest } = require('./required-files-manifest.cjs');
 
 const projectRoot = process.cwd();
+const expectedIndexAbsences = new Set();
 
 const RULES = [
   {
@@ -76,37 +78,69 @@ function parseModeArg() {
   return arg ? arg.slice('--mode='.length) : 'staged';
 }
 
-function getStagedFiles() {
+function runGit(args) {
   try {
-    const output = execFileSync('git', ['diff', '--cached', '--name-only', '--diff-filter=ACMRD'], {
-      cwd: projectRoot,
-      encoding: 'utf8',
-    });
-
-    return output
-      .split(/\r?\n/)
-      .map(item => normalizePath(item.trim()))
-      .filter(Boolean);
-  } catch {
-    return [];
-  }
-}
-
-function getHeadCommitFiles() {
-  try {
-    const output = execFileSync('git', ['diff-tree', '--no-commit-id', '--name-only', '-r', '--diff-filter=ACMRD', 'HEAD'], {
+    return execFileSync('git', args, {
       cwd: projectRoot,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
+      maxBuffer: 8 * 1024 * 1024,
     });
-
-    return output
-      .split(/\r?\n/)
-      .map(item => normalizePath(item.trim()))
-      .filter(Boolean);
   } catch {
-    return [];
+    throw new Error('coupled-change-evidence-unavailable');
   }
+}
+
+function getGitFiles(args) {
+  return runGit(args)
+    .split(/\r?\n/)
+    .map(item => normalizePath(item.trim()))
+    .filter(Boolean);
+}
+
+function parseNameStatus(output, indexRole) {
+  const fields = output.split('\0');
+  const files = [];
+  for (let index = 0; fields[index];) {
+    const status = fields[index++];
+    const firstPath = fields[index++];
+    files.push(firstPath);
+    if (/^[RC]/.test(status)) {
+      const secondPath = fields[index++];
+      files.push(secondPath);
+      if (indexRole === 'staged' && status.startsWith('R')) expectedIndexAbsences.add(firstPath);
+    } else if (status === 'D' && indexRole === 'staged') {
+      expectedIndexAbsences.add(firstPath);
+    }
+  }
+  return files.map(normalizePath);
+}
+
+function uniqueFiles(files) {
+  return [...new Set(files.filter(Boolean))].sort((left, right) => (
+    left < right ? -1 : left > right ? 1 : 0
+  ));
+}
+
+function getStagedFiles() {
+  return getGitFiles(['diff', '--cached', '--name-only', '--diff-filter=ACMRD']);
+}
+
+function getWorkingTreeFiles() {
+  const staged = parseNameStatus(runGit(['diff', '--cached', '--name-status', '-z', '--find-renames', '--diff-filter=ACMRD']), 'staged');
+  const unstaged = parseNameStatus(runGit(['diff', '--name-status', '-z', '--find-renames', '--diff-filter=ACMRD']));
+  const untracked = runGit(['ls-files', '--others', '--exclude-standard', '-z'])
+    .split('\0').map(normalizePath).filter(Boolean);
+  for (const file of untracked) expectedIndexAbsences.add(file);
+  return uniqueFiles([
+    ...staged,
+    ...unstaged,
+    ...untracked,
+  ]);
+}
+
+function getHeadCommitFiles() {
+  return getGitFiles(['diff-tree', '--no-commit-id', '--name-only', '-r', '--diff-filter=ACMRD', 'HEAD']);
 }
 
 function canResolveGitRef(ref) {
@@ -123,20 +157,7 @@ function canResolveGitRef(ref) {
 }
 
 function getFilesForRange(range) {
-  try {
-    const output = execFileSync('git', ['diff', '--name-only', '--diff-filter=ACMRD', range], {
-      cwd: projectRoot,
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    });
-
-    return output
-      .split(/\r?\n/)
-      .map(item => normalizePath(item.trim()))
-      .filter(Boolean);
-  } catch {
-    return [];
-  }
+  return getGitFiles(['diff', '--name-only', '--diff-filter=ACMRD', range]);
 }
 
 function getCiComparisonFiles() {
@@ -162,33 +183,25 @@ function getCiComparisonFiles() {
 }
 
 function readStagedDiff(relPath) {
-  try {
-    return execFileSync('git', ['diff', '--cached', '--unified=0', '--', relPath], {
-      cwd: projectRoot,
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-      maxBuffer: 8 * 1024 * 1024,
-    });
-  } catch {
-    return '';
-  }
+  return runGit(['diff', '--cached', '--unified=0', '--', relPath]);
+}
+
+function indexAbsenceExpected(relPath) {
+  if (expectedIndexAbsences.has(relPath)) return true;
+  parseNameStatus(runGit(['diff', '--cached', '--name-status', '-z', '--find-renames', '--', relPath]), 'staged');
+  if (expectedIndexAbsences.has(relPath)) return true;
+  return runGit(['ls-files', '--others', '--exclude-standard', '-z', '--', relPath]).split('\0').map(normalizePath).includes(relPath);
 }
 
 function readStagedContent(relPath) {
-  try {
-    return execFileSync('git', ['show', `:${relPath}`], {
-      cwd: projectRoot,
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-      maxBuffer: 8 * 1024 * 1024,
-    });
-  } catch {
-    const absolutePath = path.join(projectRoot, relPath);
-    if (!fs.existsSync(absolutePath)) {
-      return '';
-    }
-    return fs.readFileSync(absolutePath, 'utf8');
-  }
+  const indexed = runGit(['ls-files', '--stage', '--', relPath]);
+  if (indexed) return runGit(['show', `:${relPath}`]);
+  if (indexAbsenceExpected(relPath)) return '';
+  throw new Error('coupled-change-evidence-unavailable');
+}
+
+function readWorkingTreeDiff(relPath) {
+  return runGit(['diff', 'HEAD', '--unified=0', '--', relPath]);
 }
 
 function matches(patterns, relPath) {
@@ -203,9 +216,23 @@ function hasRequiredCompanion(rule, changedFiles) {
   return changedFiles.some(file => matches(rule.requireAny, file));
 }
 
-function hasTriggerEvidence(rule, relPath) {
+function hasTriggerEvidence(rule, relPath, evidenceSource) {
   if (!rule.evidencePattern) {
     return true;
+  }
+
+  if (evidenceSource === 'explicit') {
+    const absolutePath = path.join(projectRoot, relPath);
+    const content = fs.existsSync(absolutePath) ? fs.readFileSync(absolutePath, 'utf8') : '';
+    return rule.evidencePattern.test(content);
+  }
+
+  if (evidenceSource === 'working-tree') {
+    const absolutePath = path.join(projectRoot, relPath);
+    const content = fs.existsSync(absolutePath) ? fs.readFileSync(absolutePath, 'utf8') : '';
+    return rule.evidencePattern.test(content)
+      || rule.evidencePattern.test(readStagedContent(relPath))
+      || rule.evidencePattern.test(readWorkingTreeDiff(relPath));
   }
 
   const diff = readStagedDiff(relPath);
@@ -217,7 +244,7 @@ function hasTriggerEvidence(rule, relPath) {
   return rule.evidencePattern.test(content);
 }
 
-function collectViolations(changedFiles) {
+function collectViolations(changedFiles, evidenceSource) {
   const violations = [];
 
   for (const rule of RULES) {
@@ -226,7 +253,7 @@ function collectViolations(changedFiles) {
       continue;
     }
 
-    const relevantTriggers = triggeredFiles.filter(file => hasTriggerEvidence(rule, file));
+    const relevantTriggers = triggeredFiles.filter(file => hasTriggerEvidence(rule, file, evidenceSource));
     if (relevantTriggers.length === 0) {
       continue;
     }
@@ -245,20 +272,40 @@ function collectViolations(changedFiles) {
 }
 
 function main() {
-  const explicitFiles = parseFilesArg();
-  const mode = parseModeArg();
-  let changedFiles = explicitFiles;
-
-  if (changedFiles.length === 0) {
-    const stagedFiles = getStagedFiles();
-    if (mode === 'staged') {
-      changedFiles = stagedFiles;
-    } else if (mode === 'staged-or-head') {
-      changedFiles = stagedFiles.length > 0 ? stagedFiles : getCiComparisonFiles();
+  let mode = 'required-files-manifest';
+  let evidenceSource = 'staged';
+  let changedFiles;
+  let violations = [];
+  try {
+    const manifestFiles = loadRequiredFilesManifest({ projectRoot });
+    if (manifestFiles) {
+      changedFiles = manifestFiles;
+      evidenceSource = 'explicit';
     } else {
-      console.error(`[quality:guard:coupled-changes] unsupported mode: ${mode}`);
-      process.exit(1);
+      const explicitFiles = parseFilesArg();
+      mode = parseModeArg();
+      changedFiles = explicitFiles;
+      if (explicitFiles.length > 0) evidenceSource = 'explicit';
+
+      if (changedFiles.length === 0) {
+        if (mode === 'staged') {
+          changedFiles = getStagedFiles();
+        } else if (mode === 'staged-or-head') {
+          const stagedFiles = getStagedFiles();
+          changedFiles = stagedFiles.length > 0 ? stagedFiles : getCiComparisonFiles();
+        } else if (mode === 'working-tree-or-head') {
+          changedFiles = getWorkingTreeFiles();
+          if (changedFiles.length > 0) evidenceSource = 'working-tree';
+          else changedFiles = getCiComparisonFiles();
+        } else {
+          throw new Error(`unsupported mode: ${mode}`);
+        }
+      }
     }
+    if (changedFiles.length > 0) violations = collectViolations(changedFiles, evidenceSource);
+  } catch (error) {
+    console.error(`[quality:guard:coupled-changes] ${error instanceof Error ? error.message : String(error)}`);
+    process.exit(1);
   }
 
   if (changedFiles.length === 0) {
@@ -266,7 +313,6 @@ function main() {
     process.exit(0);
   }
 
-  const violations = collectViolations(changedFiles);
   if (violations.length === 0) {
     console.log('[quality:guard:coupled-changes] passed');
     process.exit(0);

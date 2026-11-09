@@ -1,0 +1,70 @@
+-- Converge task tombstone reads on a stable deleted_at/task_id keyset while
+-- preserving project-scoped watermark, RLS, and foreign-key prefix coverage.
+-- Rollback: CREATE INDEX IF NOT EXISTS idx_task_tombstones_project_id ON public.task_tombstones (project_id); CREATE INDEX IF NOT EXISTS idx_task_tombstones_project_deleted_desc ON public.task_tombstones (project_id, deleted_at DESC); DROP INDEX IF EXISTS public.idx_task_tombstones_project_deleted_task;
+
+SET LOCAL lock_timeout = '2s';
+SET LOCAL statement_timeout = '30s';
+
+CREATE INDEX IF NOT EXISTS idx_task_tombstones_project_deleted_task
+  ON public.task_tombstones (project_id, deleted_at, task_id);
+
+DO $task_tombstone_keyset_index$
+DECLARE
+  replacement_index REGCLASS;
+BEGIN
+  replacement_index := to_regclass('public.idx_task_tombstones_project_deleted_task');
+
+  IF replacement_index IS NULL
+    OR NOT EXISTS (
+      SELECT 1
+      FROM pg_index AS index_row
+      JOIN pg_class AS index_relation
+        ON index_relation.oid = index_row.indexrelid
+      JOIN pg_am AS access_method
+        ON access_method.oid = index_relation.relam
+      WHERE index_row.indexrelid = replacement_index
+        AND index_row.indrelid = 'public.task_tombstones'::regclass
+        AND index_row.indisvalid
+        AND index_row.indisready
+        AND index_row.indpred IS NULL
+        AND index_row.indexprs IS NULL
+        AND access_method.amname = 'btree'
+        AND index_row.indnkeyatts = 3
+        AND index_row.indnatts = 3
+        AND index_row.indoption[0] = 0
+        AND index_row.indoption[1] = 0
+        AND index_row.indoption[2] = 0
+        AND index_row.indkey[0] = (
+          SELECT attribute_row.attnum
+          FROM pg_attribute AS attribute_row
+          WHERE attribute_row.attrelid = index_row.indrelid
+            AND attribute_row.attname = 'project_id'
+            AND NOT attribute_row.attisdropped
+        )
+        AND index_row.indkey[1] = (
+          SELECT attribute_row.attnum
+          FROM pg_attribute AS attribute_row
+          WHERE attribute_row.attrelid = index_row.indrelid
+            AND attribute_row.attname = 'deleted_at'
+            AND NOT attribute_row.attisdropped
+        )
+        AND index_row.indkey[2] = (
+          SELECT attribute_row.attnum
+          FROM pg_attribute AS attribute_row
+          WHERE attribute_row.attrelid = index_row.indrelid
+            AND attribute_row.attname = 'task_id'
+            AND NOT attribute_row.attisdropped
+        )
+    )
+  THEN
+    RAISE EXCEPTION 'task tombstone keyset index is missing or invalid'
+      USING DETAIL = 'Expected a valid, ready, unconditional B-tree index with exactly three default-ASC non-expression key columns (project_id, deleted_at, task_id) and no INCLUDE columns';
+  END IF;
+END
+$task_tombstone_keyset_index$;
+
+DROP INDEX IF EXISTS public.idx_task_tombstones_project_deleted_desc;
+DROP INDEX IF EXISTS public.idx_task_tombstones_project_id;
+
+SET LOCAL statement_timeout = DEFAULT;
+SET LOCAL lock_timeout = DEFAULT;

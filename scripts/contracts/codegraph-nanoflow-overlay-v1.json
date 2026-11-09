@@ -1,0 +1,332 @@
+{
+  "schemaVersion": 1,
+  "schemaDigest": "5132af08c96287a8808840b6667fe2df8e0a4d6a57e471c9aada686d0f2e3250",
+  "digestDomain": "nanoflow-overlay-schema-v1",
+  "sourcePolicyDigest": "ca78ea5e17d32399faac676bcab26fc1d7f48186a89792774d37a6b8549d0ca3",
+  "encoding": {
+    "charset": "UTF-8",
+    "bom": false,
+    "indentSpaces": 2,
+    "finalLf": true,
+    "duplicateKeys": "reject",
+    "unknownKeys": "reject",
+    "rootDepth": 1,
+    "stringDenominator": "all object keys and scalar string values measured as decoded UTF-8 bytes",
+    "numberGrammar": "shortest JSON round-trip finite safe integer; reject negative zero, leading zero and alternate exponent or decimal spellings",
+    "objectKeyOrder": "one exact descriptor order variant",
+    "limitComparison": "inclusive less-than-or-equal"
+  },
+  "limits": {
+    "artifactBytes": 335544320,
+    "inputWindowBytes": 65536,
+    "decodedStringBytes": 201326592,
+    "valueTokens": 8000000,
+    "stringTokens": 10000000,
+    "depth": 20,
+    "encodedStringTokenBytes": 1572866,
+    "numericTokenBytes": 64,
+    "singleStringBytes": 262144,
+    "endpointIds": 200000,
+    "endpointIdBytes": 33554432,
+    "singleEndpointIdBytes": 16384,
+    "pathWitnesses": 100000,
+    "pathWitnessBytes": 16777216,
+    "singlePathBytes": 4096,
+    "defaultArray": 4096,
+    "graphNodes": 200000,
+    "graphEdges": 400000,
+    "typescriptImports": 50000,
+    "typescriptFunctions": 20000,
+    "typescriptExports": 15000,
+    "typescriptVariables": 10000
+  },
+  "topLevelKeys": [
+    "schemaVersion",
+    "generatedAt",
+    "project",
+    "coverageTargets",
+    "typescript",
+    "angular",
+    "supabase",
+    "android",
+    "agentRules",
+    "context7",
+    "graph"
+  ],
+  "coverageTargets": [
+    "Angular standalone component metadata",
+    "Angular standalone directive and pipe metadata",
+    "Angular injectable provider metadata",
+    "Angular standalone component imports/providers",
+    "Angular hostDirectives metadata",
+    "Angular templateUrl/styleUrl/styleUrls references",
+    "Angular inject() dependency edges",
+    "Angular constructor dependency edges",
+    "Angular application bootstrap provider edges",
+    "Angular input()/output()/model() and decorator IO edges",
+    "Angular viewChild()/viewChildren()/contentChild()/contentChildren()/signal()/computed()/effect() signal edges",
+    "Angular host binding/listener edges",
+    "Angular host metadata object attribute/binding/listener edges",
+    "Angular template binding references",
+    "Angular route component/loadComponent/loadChildren edges",
+    "Dynamic import() lazy-load edges",
+    "Same-directory and same-basename test mapping",
+    "Supabase Edge Function entries",
+    "Supabase Edge Function environment variable references",
+    "Supabase Edge Function source/helper import references",
+    "Supabase Edge Function route and HTTP method references",
+    "Supabase Edge Function test mappings",
+    "Supabase migration risk tags",
+    "Supabase migration table and policy anchors",
+    "Supabase migration privilege grant/revoke anchors",
+    "Supabase migration test references",
+    "Android Manifest component declarations",
+    "Android App Widget provider XML resources",
+    "Android Kotlin host classes",
+    "Android XML resource references",
+    "AGENTS.md hard-rule anchors",
+    "AGENTS.md sync-rule anchors",
+    "Context7 canonical docs catalog, retrieval routes, and source-map ownership links",
+    "Native JavaScript-family export/default/CommonJS object function members",
+    "Native TypeScript type literal members and call/construct/index signatures",
+    "Native TypeScript local class/interface/type/enum declarations",
+    "Native TypeScript type parameter constraint/default edges",
+    "Native TypeScript built-in utility/global type filtering with generic project references preserved",
+    "Native TypeScript standard-library global value filtering for initializer references"
+  ],
+  "errorCodes": [
+    "OVERLAY_SCHEMA_ALREADY_FINISHED",
+    "OVERLAY_SCHEMA_ARRAY_LIMIT",
+    "OVERLAY_SCHEMA_ARRAY_ORDER",
+    "OVERLAY_SCHEMA_ARTIFACT_LIMIT",
+    "OVERLAY_SCHEMA_BOM",
+    "OVERLAY_SCHEMA_CASE_COLLISION",
+    "OVERLAY_SCHEMA_DANGLING_EDGE",
+    "OVERLAY_SCHEMA_DEPTH_LIMIT",
+    "OVERLAY_SCHEMA_DIGEST_MISMATCH",
+    "OVERLAY_SCHEMA_DUPLICATE_ID",
+    "OVERLAY_SCHEMA_DUPLICATE_KEY",
+    "OVERLAY_SCHEMA_INVALID_ID",
+    "OVERLAY_SCHEMA_INVALID_PATH",
+    "OVERLAY_SCHEMA_INVALID_UTF8",
+    "OVERLAY_SCHEMA_LIMIT",
+    "OVERLAY_SCHEMA_MISSING_KEY",
+    "OVERLAY_SCHEMA_NON_CANONICAL_JSON",
+    "OVERLAY_SCHEMA_ORDERING_RUNTIME_MISMATCH",
+    "OVERLAY_SCHEMA_POISONED",
+    "OVERLAY_SCHEMA_PROFILE_MISMATCH",
+    "OVERLAY_SCHEMA_RELATION_KIND",
+    "OVERLAY_SCHEMA_SOURCE_POLICY_MISMATCH",
+    "OVERLAY_SCHEMA_STRING_LIMIT",
+    "OVERLAY_SCHEMA_TOKEN_LIMIT",
+    "OVERLAY_SCHEMA_TRUNCATED",
+    "OVERLAY_SCHEMA_TYPE",
+    "OVERLAY_SCHEMA_UNKNOWN_KEY",
+    "OVERLAY_SCHEMA_VALUE"
+  ],
+  "role": "schema-authority-predecessor",
+  "digestFraming": {
+    "algorithm": "SHA-256",
+    "domain": "nanoflow-overlay-schema-v1",
+    "version": 1,
+    "selfFieldExclusion": [
+      "schemaDigest"
+    ],
+    "frames": [
+      "contract",
+      "source-policy",
+      "typescript",
+      "angular-support",
+      "supabase-android",
+      "graph"
+    ],
+    "lengthPrefix": "decimal UTF-8 byte length followed by colon",
+    "separator": "NUL"
+  },
+  "descriptorDigests": {
+    "typescript": "cd2538e77f1abbe5aabe750e0a4ecda1807e006cecc2fc6acc03296dd7f2eabf",
+    "angular-support": "a68c9feed371bb4d107b7e458559431df0197a013e0434350f63285b38027bbc",
+    "supabase-android": "7deba66271dd9253c05ff74b2000a3a6124a793da35c2c490d0e7bb03ae16e9d",
+    "graph": "63f663485bdbcf3465ae17ba939589d0a8632ab1e29e2b9d3ec67ca85502498b"
+  },
+  "descriptorManifestDigest": "245dade46ea7b39cd068f2c6ce7c160a05c04238341d9d78e5e54fee9c64b2a5",
+  "authority": {
+    "generator": {
+      "sourcePath": "scripts/generate-codegraph-nanoflow-overlay.mjs",
+      "sha256": "e0a4b589a60f68b9ab5c9dd10cc0ff5d95c678ad1f46599fb5bb2936b197a25b"
+    },
+    "sourcePolicy": {
+      "sourcePath": "scripts/lib/codegraph-source-policy.cjs",
+      "sha256": "892d9aa9178db3196627d66f6d44d26665df2d8fb8dcc8bb0b5ce3d9bd2c3cfc"
+    },
+    "compatibilityArtifact": {
+      "sourcePath": ".codegraph/nanoflow-overlay.json",
+      "bytes": 250558329,
+      "sha256": "2508259e81e9c55b0e0e1058be219c0678564ceac685a72faf42c76d19abf420",
+      "generatedAt": "2026-07-28T03:42:41.894Z"
+    }
+  },
+  "compatibilityProfile": {
+    "objectPaths": 240,
+    "arrayPaths": 636,
+    "scalarPaths": 1897,
+    "valueTokens": 5648158,
+    "stringValues": 2598502,
+    "keyTokens": 4982808,
+    "stringTokens": 7581310,
+    "decodedStringBytes": 146989907,
+    "stringScanCodeUnits": 154120993,
+    "maxDepth": 13,
+    "maxStringBytes": 59769,
+    "graphNodes": 124072,
+    "graphEdges": 232845,
+    "nodeKinds": 17,
+    "edgeKinds": 12,
+    "relations": 160,
+    "nodeMetadataShapes": 124,
+    "edgeMetadataShapes": 147,
+    "nodeTieGroups": 8695,
+    "nodeTieExtraItems": 20488,
+    "nodeMaxTieGroup": 128,
+    "edgeTieGroups": 4861,
+    "edgeTieExtraItems": 11095,
+    "edgeMaxTieGroup": 102,
+    "endpointIdBytes": 13706255,
+    "pathWitnessBytes": 207662,
+    "pathWitnesses": 3560
+  },
+  "graphOrdering": {
+    "algorithm": "pinned-icu-collator-v1",
+    "locale": "zh-CN",
+    "options": {
+      "usage": "sort",
+      "sensitivity": "variant",
+      "ignorePunctuation": false,
+      "numeric": false,
+      "caseFirst": "false"
+    },
+    "resolvedOptions": {
+      "locale": "zh-CN",
+      "usage": "sort",
+      "sensitivity": "variant",
+      "ignorePunctuation": false,
+      "collation": "default",
+      "numeric": false,
+      "caseFirst": "false"
+    },
+    "producerDefaultLocale": "zh-CN",
+    "icuVersion": "77.1",
+    "nodes": {
+      "keys": [
+        "filePath",
+        "kind",
+        "name"
+      ],
+      "ties": "producer-stable and order-sensitive under expected artifact digest"
+    },
+    "edges": {
+      "keys": [
+        "kind",
+        "source",
+        "target"
+      ],
+      "ties": "producer-stable and order-sensitive under expected artifact digest"
+    }
+  },
+  "pathPolicy": {
+    "separator": "/",
+    "relativeRepositoryPaths": true,
+    "rejectAbsoluteDriveUncNtDeviceAdsDotSegmentsEmptySegmentsNul": true,
+    "caseCollisions": "reject",
+    "nodeIdFormat": "exact kind:filePath:declaredIdentity",
+    "repositoryFieldNames": [
+      "configPath", "docPath", "file", "filePath", "kotlinFile", "manifestFile",
+      "parentConfigPath", "resourcePath", "sourceFile", "sourceFiles", "sourcePath",
+      "sourcePaths", "styleUrls", "targetFile", "templateFile", "templateUrl", "tests"
+    ],
+    "directoryFieldNames": ["sourcePath", "sourcePaths"],
+    "graphRepositoryFileFields": [
+      "graph.edges[].metadata.configPath",
+      "graph.edges[].metadata.docPath",
+      "graph.edges[].metadata.manifestFile",
+      "graph.edges[].metadata.parentConfigPath",
+      "graph.edges[].metadata.sourceFile",
+      "graph.edges[].metadata.templateFile",
+      "graph.nodes[].metadata.configPath",
+      "graph.nodes[].metadata.parentConfigPath"
+    ],
+    "graphRepositoryDirectoryFields": [
+      "graph.edges[].metadata.sourcePath",
+      "graph.nodes[].metadata.sourcePath",
+      "graph.nodes[].metadata.sourcePaths[]"
+    ],
+    "graphRepositoryFileSelection": "canonical repository-file path with a shared bounded case-collision witness",
+    "graphWitnessField": "graph.nodes[].filePath",
+    "externalGraphFilePathFormats": ["https-url", "node-builtin", "bare-package-specifier", "npm-package-specifier"],
+    "projectRootComparison": "slash-normalized, trailing-slash-insensitive, ordinal case-sensitive"
+  },
+  "nodeIdentity": {
+    "generalBindings": [
+      "name",
+      "qualifiedName",
+      "qualifiedName with namespace separators mapped to member separators",
+      "relation-specific producer composite reconstructed from declared metadata and coordinates"
+    ],
+    "specialRelations": {
+      "context7-retrieval-route": ["@relation", "@index"],
+      "context7-source-map-route": ["@relation", "@index"],
+      "supabase-table-write": ["@relation", "table", "writeOperation"],
+      "supabase-realtime-remove-all-channels": ["@relation", "owner"],
+      "supabase-realtime-remove-channel": ["@relation", "owner", "@channelScope"],
+      "supabase-realtime-unsubscribe": ["@relation", "owner", "@channelScope"],
+      "supabase-realtime-status": ["@relation", "owner", "status"],
+      "supabase-realtime-postgres-change": [
+        "@relation", "owner", "channelName", "@schemaTable", "event", "@startLine"
+      ],
+      "supabase-incremental-predicate": [
+        "@relation", "table", "column", "operator", "@qualifiedOwner"
+      ],
+      "edge-function-header": ["@relation", "functionName", "normalizedHeader", "@startLine"],
+      "migration-rls": ["@relation", "table", "action", "@startLine"],
+      "migration-realtime-publication": [
+        "@relation", "publication", "action", "table", "@startLine"
+      ]
+    }
+  },
+  "coordinatePolicy": {
+    "lineMinimum": 1,
+    "columnMinimum": 0,
+    "linePaths": [
+      "graph.edges[].line",
+      "graph.edges[].metadata.bootstrapLine",
+      "graph.edges[].metadata.endLine",
+      "graph.nodes[].endLine",
+      "graph.nodes[].startLine"
+    ],
+    "columnPaths": [
+      "graph.edges[].column",
+      "graph.edges[].metadata.column",
+      "graph.nodes[].endColumn",
+      "graph.nodes[].metadata.column",
+      "graph.nodes[].startColumn"
+    ],
+    "maximum": "Number.MAX_SAFE_INTEGER"
+  },
+  "deferredAdoption": {
+    "runtime": {
+      "status": "deferred",
+      "ownerPaths": [
+        "scripts/lib/codegraph-overlay-current-receipt.cjs",
+        "scripts/query-codegraph-nanoflow-overlay.mjs",
+        "scripts/codegraph-nanoflow-mcp-stdio.cjs"
+      ]
+    },
+    "requiredGate": {
+      "status": "deferred",
+      "ownerPaths": [
+        "package.json",
+        "scripts/run-codegraph-adapter-gate.cjs"
+      ]
+    }
+  }
+}

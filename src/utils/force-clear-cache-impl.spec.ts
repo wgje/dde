@@ -64,6 +64,7 @@ describe('forceClearCacheImpl', () => {
 
   afterEach(() => {
     __resetForceClearGateForTests();
+    vi.restoreAllMocks();
     vi.useRealTimers();
   });
 
@@ -140,6 +141,20 @@ describe('forceClearCacheImpl', () => {
 
     expect(calls.replaceLocation).toHaveBeenCalledTimes(1);
     expect(calls.logError).toHaveBeenCalledWith('force-clear-cache:unregister-sw-timeout');
+  });
+
+  it('clears step timeout timer handle 0 after a successful async step', async () => {
+    const timeoutHandles = [42, 0, 43, 44];
+    vi.spyOn(globalThis, 'setTimeout')
+      .mockImplementation(() => timeoutHandles.shift() as unknown as ReturnType<typeof setTimeout>);
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout')
+      .mockImplementation(() => undefined);
+    const { deps } = buildDeps();
+
+    const result = await forceClearCacheImpl(deps);
+
+    expect(result).toBe('ok');
+    expect(clearTimeoutSpy).toHaveBeenCalledWith(0);
   });
 
   it('still navigates when clearApplicationCaches throws', async () => {

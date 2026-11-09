@@ -178,6 +178,149 @@ export function getDataIsolationId(authService: AuthService): string | null {
   return null;
 }
 
+type GuardLogger = ReturnType<LoggerService['category']>;
+
+interface RequireAuthGuardContext {
+  authService: AuthService;
+  logger: GuardLogger;
+  modalService: ModalService;
+  perfStart: number;
+  targetUrl: string;
+}
+
+interface AuthStateSnapshot {
+  isCheckingSession: boolean;
+  userId: string | null;
+}
+
+function createRequireAuthGuardContext(targetUrl: string): RequireAuthGuardContext {
+  const authService = inject(AuthService);
+  const loggerService = inject(LoggerService);
+  return {
+    authService,
+    logger: loggerService.category('Guard'),
+    modalService: inject(ModalService),
+    perfStart: performance.now(),
+    targetUrl,
+  };
+}
+
+function logGuardComplete(context: RequireAuthGuardContext, suffix = ''): void {
+  context.logger.debug(`⚡ 守卫检查完成${suffix}`, {
+    elapsed: performance.now() - context.perfStart,
+  });
+}
+
+function allowUnconfiguredOrLocalMode(context: RequireAuthGuardContext): boolean {
+  if (!context.authService.isConfigured) {
+    // Supabase 未配置时保留完整本地优先体验。
+    context.logger.debug('Supabase 未配置，允许离线模式访问');
+    logGuardComplete(context);
+    return true;
+  }
+
+  if (isLocalModeEnabled()) {
+    context.logger.debug('本地模式已启用，立即允许访问');
+    logGuardComplete(context);
+    return true;
+  }
+
+  return false;
+}
+
+async function handleUninitializedSession(
+  context: RequireAuthGuardContext,
+  authState: AuthStateSnapshot,
+): Promise<boolean> {
+  const localAuth = checkLocalAuthCache();
+  if (localAuth.userId || authState.userId) {
+    context.logger.debug('冷启动快速路径：本地缓存/userId 已存在，立即放行', {
+      localAuth: !!localAuth.userId,
+      userId: authState.userId,
+    });
+    triggerBackgroundSessionCheck(context.authService);
+    logGuardComplete(context, '（快速路径）');
+    return true;
+  }
+
+  if (FEATURE_FLAGS.AUTH_RUNTIME_GATE_V1) {
+    context.logger.debug('Auth runtime 已延后到 handoff 后，先允许壳层挂载', {
+      targetUrl: context.targetUrl,
+    });
+    return true;
+  }
+
+  context.logger.debug('会话初始化未完成，短时等待');
+  await waitForSessionCheck(context.authService, Math.min(GUARD_CONFIG.SESSION_CHECK_TIMEOUT, 500));
+  logSessionInitializationTimeout(context);
+  return false;
+}
+
+function triggerBackgroundSessionCheck(authService: AuthService): void {
+  void (authService as unknown as { checkSession?: () => Promise<unknown> })
+    .checkSession?.()?.catch(() => {});
+}
+
+function logSessionInitializationTimeout(context: RequireAuthGuardContext): void {
+  if (context.authService.sessionInitialized()) return;
+
+  const stillCheckingSession = context.authService.authState().isCheckingSession;
+  const payload = {
+    timeout: 500,
+    targetUrl: context.targetUrl,
+    stillCheckingSession,
+  };
+
+  if (stillCheckingSession) {
+    context.logger.debug('会话初始化仍在进行，先按未登录流程挂载壳层', payload);
+    return;
+  }
+
+  context.logger.warn('会话初始化超时，按未登录流程处理', payload);
+}
+
+function finishAuthGuard(context: RequireAuthGuardContext): boolean {
+  const userId = context.authService.currentUserId();
+  context.logger.debug(`检查用户ID`, { userId });
+
+  if (userId) {
+    saveAuthCache(userId);
+    context.logger.debug('用户已登录，允许访问');
+    return true;
+  }
+
+  const localAuth = checkLocalAuthCache();
+  context.logger.debug(`本地缓存认证`, { localAuth });
+  if (localAuth.userId) {
+    context.logger.debug('使用本地缓存认证，允许离线访问');
+    return true;
+  }
+
+  if (FEATURE_FLAGS.AUTH_RUNTIME_GATE_V1 && !context.authService.sessionInitialized()) {
+    context.logger.debug('Auth runtime 尚未完成，推迟登录提示到壳层 handoff 之后');
+    return true;
+  }
+
+  showLoginPrompt(context);
+  return true;
+}
+
+function showLoginPrompt(context: RequireAuthGuardContext): void {
+  context.logger.debug('需要登录，触发登录提示并允许挂载壳层（避免黑屏）');
+
+  try {
+    context.modalService.show('login', {
+      returnUrl: context.targetUrl,
+      message: '请登录以访问此页面',
+    });
+  } catch (error) {
+    context.logger.warn('登录模态框触发失败，降级为壳层登录提示', {
+      error,
+      targetUrl: context.targetUrl,
+    });
+  }
+}
+
 /**
  * 强制登录守卫
  * 用于保护需要明确用户身份的路由和功能
@@ -206,33 +349,17 @@ export function getDataIsolationId(authService: AuthService): string | null {
  * - 用户设置页面
  */
 export const requireAuthGuard: CanActivateFn = async (_route, state) => {
-  const perfStart = performance.now();
-  const authService = inject(AuthService);
-  const loggerService = inject(LoggerService);
-  const logger = loggerService.category('Guard');
-  const modalService = inject(ModalService);
+  const context = createRequireAuthGuardContext(state.url);
   
-  logger.debug(`requireAuthGuard 开始执行`, { targetUrl: state.url });
+  context.logger.debug(`requireAuthGuard 开始执行`, { targetUrl: state.url });
   
-  if (!authService.isConfigured) {
-    // Supabase 未配置，允许完全离线模式访问
-    // 数据存储在本地 IndexedDB，用户可以正常进行所有操作
-    // 这不是"限制功能"的降级模式，而是完整的本地优先体验
-    logger.debug('Supabase 未配置，允许离线模式访问');
-    logger.debug(`⚡ 守卫检查完成`, { elapsed: performance.now() - perfStart });
+  if (allowUnconfiguredOrLocalMode(context)) {
     return true;
   }
   
-  // 【性能优化 2026-01-26】本地模式立即放行，避免等待会话检查
-  if (isLocalModeEnabled()) {
-    logger.debug('本地模式已启用，立即允许访问');
-    logger.debug(`⚡ 守卫检查完成`, { elapsed: performance.now() - perfStart });
-    return true;
-  }
-  
-  const authState = authService.authState();
-  const initialized = authService.sessionInitialized();
-  logger.debug(`当前认证状态`, {
+  const authState = context.authService.authState();
+  const initialized = context.authService.sessionInitialized();
+  context.logger.debug(`当前认证状态`, {
     isCheckingSession: authState.isCheckingSession,
     sessionInitialized: initialized,
     userId: authState.userId
@@ -243,89 +370,13 @@ export const requireAuthGuard: CanActivateFn = async (_route, state) => {
   // 策略：先检查本地缓存 → 有缓存即放行 → 无缓存时仅触发会话检查（后台执行），立即放行。
   // 节省 PWA 冷启动 ~1-2s（原等待上限 SESSION_CHECK_TIMEOUT = 2000ms）。
   if (!initialized) {
-    // 先检查本地缓存的认证状态（离线快路径）
-    const localAuth = checkLocalAuthCache();
-    if (localAuth.userId || authState.userId) {
-      // 有本地缓存或已有 userId，直接放行，后台继续完成会话初始化
-      logger.debug('冷启动快速路径：本地缓存/userId 已存在，立即放行', {
-        localAuth: !!localAuth.userId, userId: authState.userId
-      });
-      // 【Bug 修复 2026-03-26】移除 saveAuthCache 调用：冷启动快速路径不应刷新 TTL。
-      // 原代码每次 guard 运行都重置过期时间，导致已失效账户的缓存永不过期。
-      // TTL 只在 doCheckSession/signIn 确认会话有效后才刷新（L295）。
-      // 非阻塞触发会话检查（不 await），确保后台完成 token 刷新
-      void (authService as unknown as { checkSession?: () => Promise<unknown> })
-        .checkSession?.()?.catch(() => {});
-      logger.debug(`⚡ 守卫检查完成（快速路径）`, { elapsed: performance.now() - perfStart });
+    // 【Bug 修复 2026-03-26】冷启动快速路径不刷新 TTL；
+    // TTL 只在 doCheckSession/signIn 确认会话有效后刷新。
+    if (await handleUninitializedSession(context, authState)) {
       return true;
     }
-
-    if (FEATURE_FLAGS.AUTH_RUNTIME_GATE_V1) {
-      // 安全说明：Guard 放行不等于跳过认证 — 下游 showLoginRequired computed
-      // 在 handoff 完成后仍会显式检查认证状态并展示登录 UI
-      logger.debug('Auth runtime 已延后到 handoff 后，先允许壳层挂载', {
-        targetUrl: state.url,
-      });
-      return true;
-    }
-
-    // 无本地缓存：短时等待（最多 500ms），给首次网络会话检查一个机会
-    logger.debug('会话初始化未完成，短时等待');
-    await waitForSessionCheck(authService, Math.min(GUARD_CONFIG.SESSION_CHECK_TIMEOUT, 500));
-    if (!authService.sessionInitialized()) {
-      const stillCheckingSession = authService.authState().isCheckingSession;
-      const payload = {
-        timeout: 500,
-        targetUrl: state.url,
-        stillCheckingSession
-      };
-      if (stillCheckingSession) {
-        logger.debug('会话初始化仍在进行，先按未登录流程挂载壳层', payload);
-      } else {
-        logger.warn('会话初始化超时，按未登录流程处理', payload);
-      }
-    }
-  }
-  
-  const userId = authService.currentUserId();
-  logger.debug(`检查用户ID`, { userId });
-  
-  if (userId) {
-    // 保存认证状态到本地缓存（用于离线模式）
-    saveAuthCache(userId);
-    logger.debug('用户已登录，允许访问');
-    return true;
-  }
-  
-  // 检查本地缓存的认证状态（离线模式支持）
-  // 这允许用户在网络恢复前继续使用应用的全部功能
-  const localAuth = checkLocalAuthCache();
-  logger.debug(`本地缓存认证`, { localAuth });
-  
-  if (localAuth.userId) {
-    logger.debug('使用本地缓存认证，允许离线访问');
-    return true;
-  }
-
-  if (FEATURE_FLAGS.AUTH_RUNTIME_GATE_V1 && !authService.sessionInitialized()) {
-    // 安全说明：同上 — handoff 完成后 showLoginRequired 会兜底显示登录界面
-    logger.debug('Auth runtime 尚未完成，推迟登录提示到壳层 handoff 之后');
-    return true;
-  }
-  
-  // 未登录且无本地缓存：
-  // 为避免“路由被守卫拦截 + 登录 UI 在受保护壳层内”导致黑屏，
-  // 这里触发登录提示但不阻断路由挂载。
-  logger.debug('需要登录，触发登录提示并允许挂载壳层（避免黑屏）');
-
-  try {
-    // 用户登录成功后会自动刷新当前路由
-    modalService.show('login', { returnUrl: state.url, message: '请登录以访问此页面' });
-  } catch (error) {
-    // 模态框失败时也不阻断渲染，壳层会展示 showLoginRequired 兜底界面
-    logger.warn('登录模态框触发失败，降级为壳层登录提示', { error, targetUrl: state.url });
   }
 
   // 关键：允许工作区壳层渲染登录兜底 UI，彻底避免空白/黑屏
-  return true;
+  return finishAuthGuard(context);
 };

@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://codex.local/codegraph-native-handle-authority-revision4.schema.json",
+  "title": "CodeGraph Exact15 Native Handle Authority Revision4",
+  "oneOf": [
+    { "$ref": "#/$defs/request" },
+    { "$ref": "#/$defs/manifest" }
+  ],
+  "$defs": {
+    "canonicalEncoding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bom", "characterEncoding", "digestPreimage", "finalLineEnding", "indent", "keyOrder", "safeIntegersOnly"],
+      "properties": {
+        "bom": { "const": false },
+        "characterEncoding": { "const": "UTF-8" },
+        "digestPreimage": { "const": "canonical UTF-8 JSON without final LF" },
+        "finalLineEnding": { "const": "LF" },
+        "indent": { "const": 2 },
+        "keyOrder": { "const": "recursive UTF-16 code-unit ascending" },
+        "safeIntegersOnly": { "const": true }
+      }
+    },
+    "sourceRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["row", "path", "sha256", "bytes"],
+      "properties": {
+        "row": { "type": "string" },
+        "path": { "type": "string" },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "bytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "frame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "phase", "protocol", "status"],
+      "properties": {
+        "kind": { "type": "string" },
+        "phase": { "type": "string" },
+        "protocol": { "const": "codegraph-native-handle-authority-v1" },
+        "status": { "type": "string" },
+        "sequence": { "type": "integer", "minimum": 1 },
+        "row": { "type": "string" },
+        "path": { "type": "string" },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "bytes": { "type": "integer", "minimum": 0 },
+        "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "approved": { "type": "boolean" },
+        "details": { "type": "string" },
+        "observedAt": { "type": "string" }
+      }
+    },
+    "trustAnchor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["required", "selfIssued", "status", "type"],
+      "properties": {
+        "required": { "const": true },
+        "selfIssued": { "const": false },
+        "status": { "type": "string" },
+        "type": { "const": "EXTERNAL" },
+        "fingerprint": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifactKind", "artifactRevision", "status", "normativeState", "canonicalEncoding", "protocol", "sourceRows", "frames", "trustAnchor", "receipt", "release", "packetDigest"],
+      "properties": {
+        "artifactKind": { "const": "CODEGRAPH_EXACT15_NATIVE_HANDLE_AUTHORITY_REQUEST" },
+        "artifactRevision": { "const": 4 },
+        "status": { "const": "PENDING_EXTERNAL_SIGNATURE" },
+        "normativeState": { "const": "PENDING_EXTERNAL_SIGNATURE" },
+        "canonicalEncoding": { "$ref": "#/$defs/canonicalEncoding" },
+        "protocol": { "const": "codegraph-native-handle-authority-v1" },
+        "sourceRows": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/sourceRow" } },
+        "frames": { "type": "array", "minItems": 6, "items": { "$ref": "#/$defs/frame" } },
+        "trustAnchor": { "$ref": "#/$defs/trustAnchor" },
+        "receipt": { "type": "null" },
+        "release": { "const": "HOLD_RELEASE" },
+        "packetDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifactKind", "binding", "manifestDigest"],
+      "properties": {
+        "artifactKind": { "const": "CODEGRAPH_EXTERNAL_REVIEW_MANIFEST" },
+        "binding": { "type": "object" },
+        "manifestDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    }
+  }
+}

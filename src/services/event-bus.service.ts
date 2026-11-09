@@ -63,9 +63,26 @@ export interface SessionRestoredEvent {
   readonly source: string;
 }
 
+/** 同步侧已进入会话过期冻结态，等待下一次确认过的 auth 恢复来解冻 */
+export interface SessionRecoveryRequiredEvent {
+  readonly type: 'session-recovery-required';
+  readonly source: string;
+}
+
 /** 后台刷新发现会话已失效（FastPath 乐观设置被推翻） */
 export interface SessionInvalidatedEvent {
   readonly type: 'session-invalidated';
+  readonly source: string;
+  readonly userId: string | null;
+}
+
+/**
+ * 用户主动登出事件。
+ * 与 session-invalidated 的区别：登出不是过期，订阅方不得设置 sessionExpired
+ * 或弹"登录已过期"提示，只应清理复用旧会话身份的缓存（如会话校验快照）。
+ */
+export interface SessionSignedOutEvent {
+  readonly type: 'session-signed-out';
   readonly source: string;
   readonly userId: string | null;
 }
@@ -78,8 +95,10 @@ export type AppEvent =
   | SyncStatusEvent
   | ForceSyncRequestEvent
   | TaskUpdateEvent
+  | SessionRecoveryRequiredEvent
   | SessionRestoredEvent
-  | SessionInvalidatedEvent;
+  | SessionInvalidatedEvent
+  | SessionSignedOutEvent;
 
 // ============================================
 // EventBusService
@@ -94,8 +113,10 @@ export class EventBusService {
   private readonly _syncStatus$ = new Subject<SyncStatusEvent>();
   private readonly _forceSyncRequest$ = new Subject<ForceSyncRequestEvent>();
   private readonly _taskUpdate$ = new Subject<TaskUpdateEvent>();
+  private readonly _sessionRecoveryRequired$ = new Subject<SessionRecoveryRequiredEvent>();
   private readonly _sessionRestored$ = new Subject<SessionRestoredEvent>();
   private readonly _sessionInvalidated$ = new Subject<SessionInvalidatedEvent>();
+  private readonly _sessionSignedOut$ = new Subject<SessionSignedOutEvent>();
   
   // 通用事件通道（用于扩展）
   private readonly _events$ = new Subject<AppEvent>();
@@ -123,11 +144,17 @@ export class EventBusService {
   /** 任务更新事件流 */
   readonly onTaskUpdate$: Observable<TaskUpdateEvent> = this._taskUpdate$.asObservable();
   
+  /** 会话恢复前置条件事件流（sync runtime 已冻结，等待下一次确认过的 auth 恢复） */
+  readonly onSessionRecoveryRequired$: Observable<SessionRecoveryRequiredEvent> = this._sessionRecoveryRequired$.asObservable();
+
   /** 会话恢复事件流 */
   readonly onSessionRestored$: Observable<SessionRestoredEvent> = this._sessionRestored$.asObservable();
   
   /** 会话失效事件流（后台刷新推翻 FastPath 乐观身份） */
   readonly onSessionInvalidated$: Observable<SessionInvalidatedEvent> = this._sessionInvalidated$.asObservable();
+  
+  /** 用户主动登出事件流（非过期；订阅方只做旧会话缓存清理） */
+  readonly onSessionSignedOut$: Observable<SessionSignedOutEvent> = this._sessionSignedOut$.asObservable();
   
   /** 所有事件流（调试/日志用） */
   readonly allEvents$: Observable<AppEvent> = this._events$.asObservable();
@@ -210,6 +237,17 @@ export class EventBusService {
     this._events$.next(event);
     this._lastEvent.set(event);
   }
+
+  /**
+   * 发布会话恢复前置条件事件。
+   * 订阅方只应 arm 一次性恢复资格，不得在这里直接恢复同步运行时。
+   */
+  publishSessionRecoveryRequired(source: string): void {
+    const event: SessionRecoveryRequiredEvent = { type: 'session-recovery-required', source };
+    this._sessionRecoveryRequired$.next(event);
+    this._events$.next(event);
+    this._lastEvent.set(event);
+  }
   
   /**
    * 发布会话恢复事件
@@ -230,6 +268,18 @@ export class EventBusService {
   publishSessionInvalidated(source: string, userId: string | null): void {
     const event: SessionInvalidatedEvent = { type: 'session-invalidated', source, userId };
     this._sessionInvalidated$.next(event);
+    this._events$.next(event);
+    this._lastEvent.set(event);
+  }
+
+  /**
+   * 发布用户主动登出事件（非过期）。
+   * 用于让 SessionManager 等订阅方丢弃复用旧会话身份的缓存（校验快照），
+   * 避免登出后 10s 内的 resume 快路仍按旧 userId 放行恢复链路。
+   */
+  publishSessionSignedOut(source: string, userId: string | null): void {
+    const event: SessionSignedOutEvent = { type: 'session-signed-out', source, userId };
+    this._sessionSignedOut$.next(event);
     this._events$.next(event);
     this._lastEvent.set(event);
   }

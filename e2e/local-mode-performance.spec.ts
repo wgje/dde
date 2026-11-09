@@ -43,11 +43,31 @@ async function seedLocalModeState(page: Page, options: SeedLocalModeOptions): Pr
   });
 }
 
+async function isLocalModeEnabled(page: Page): Promise<boolean> {
+  return page.evaluate((key) => localStorage.getItem(key) === 'true', LOCAL_MODE_KEY)
+    .catch(() => false);
+}
+
+async function isLocalWorkspaceReady(page: Page): Promise<boolean> {
+  const projectSelectorReady = await page.locator('[data-testid="project-selector"]').first()
+    .isVisible({ timeout: 500 })
+    .catch(() => false);
+  const addTaskReady = await page.locator('[data-testid="add-task-btn"]').first()
+    .isVisible({ timeout: 500 })
+    .catch(() => false);
+
+  return projectSelectorReady || addTaskReady;
+}
+
 async function openLocalModeEntry(page: Page): Promise<void> {
   await seedLocalModeState(page, { localModeEnabled: false });
 
   await page.goto('/');
   await waitForAppReady(page, { timeoutMs: 15_000 });
+
+  if ((await isLocalModeEnabled(page)) && (await isLocalWorkspaceReady(page))) {
+    return;
+  }
 
   const localModeButton = page.locator('[data-testid="local-mode-btn"]').first();
   if (await localModeButton.isVisible({ timeout: 800 }).catch(() => false)) {
@@ -61,7 +81,9 @@ async function openLocalModeEntry(page: Page): Promise<void> {
 async function enterLocalMode(page: Page): Promise<number> {
   await openLocalModeEntry(page);
   const startedAt = Date.now();
-  await page.locator('[data-testid="local-mode-btn"]').first().click({ force: true });
+  if (!(await isLocalModeEnabled(page))) {
+    await page.locator('[data-testid="local-mode-btn"]').first().click({ force: true });
+  }
   await expect
     .poll(async () => page.evaluate((key) => localStorage.getItem(key), LOCAL_MODE_KEY), { timeout: 10_000 })
     .toBe('true');

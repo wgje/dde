@@ -17,6 +17,41 @@
 
 import * as go from 'gojs';
 
+interface SegmentCollectionScope {
+  enclosingRect: go.Rect | null;
+  skipBounds: boolean;
+}
+
+interface GridlineAdjustmentBounds {
+  vertical: boolean;
+  maxLayer: number;
+  minColumn: number;
+  maxColumn: number;
+  minCoord: number;
+  maxCoord: number;
+}
+
+type SegmentAxis = 'x' | 'y';
+
+interface ColumnRange {
+  start: number;
+  end: number;
+}
+
+type EndpointRangeRelation =
+  | 'secondContainsFirst'
+  | 'firstContainsSecond'
+  | 'secondStartsBeforeFirst'
+  | 'firstStartsBeforeSecond'
+  | 'none';
+
+interface EndpointComparison {
+  relation: EndpointRangeRelation;
+  geo: number;
+  startEqual: boolean;
+  endEqual: boolean;
+}
+
 /**
  * A custom Router that will cause overlapping segments of Orthogonal or AvoidsNodes links to be routed in parallel,
  * while minimizing resulting crossings between links.
@@ -198,180 +233,285 @@ export class AvoidsLinksRouter extends go.Router {
   collectSegments(links: go.Set<go.Link>, coll: go.Diagram | go.Group): void {
     this._allsegs.clear();
     this._gridlines.clear();
-    let p: go.Point;
-    let q: go.Point;
-    let found: boolean;
-    let i: number;
-    let j: number;
-    let currentseg: _SegInfo = this._allocSegInfo();
+
+    const scope = this.collectRoutableLinkSegments(links, coll);
+    this.collectNearbyLinkSegments(links, scope);
+    this.buildGridlinesFromCollectedSegments();
+  }
+
+  private collectRoutableLinkSegments(
+    links: go.Set<go.Link>,
+    coll: go.Diagram | go.Group,
+  ): SegmentCollectionScope {
+    const skipBounds = coll instanceof go.Diagram && links.count === coll.links.count;
     let enclosingRect: go.Rect | null = null;
 
-    const skipBounds = coll instanceof go.Diagram && links.count === coll.links.count;
-
-    for (const l of links) {
-      if (!this.isRoutable(l, coll)) continue;
-      if (!skipBounds) {
-        if (enclosingRect === null) {
-          enclosingRect = l.getDocumentBounds();
-        } else {
-          enclosingRect.unionRect(l.getDocumentBounds());
-        }
-      }
-      i = this.nextOrthoBend(l, 0);
-      while (i < l.pointsCount - 1) {
-        j = this.nextOrthoBend(l, i);
-        if (j === l.pointsCount - 1) break;
-        p = l.getPoint(i);
-        q = l.getPoint(j);
-        const vertical = this.isApprox(p.x, q.x) && !this.isApprox(p.y, q.y);
-
-        const seginfo = this._allocSegInfo();
-        seginfo.indexStart = i;
-        seginfo.indexEnd = j;
-        seginfo.link = l;
-        seginfo.vertical = vertical;
-        seginfo._computeGeo();
-
-        found = false;
-        for (const line of this._allsegs) {
-          if (
-            Math.abs(this._coord(line.first()!) - this._coord(seginfo)) < this._epsilonDistance &&
-            line.first()!.vertical === vertical
-          ) {
-            found = true;
-            line.add(seginfo);
-            break;
-          }
-        }
-        if (!found) {
-          this._allsegs.add(new go.List([seginfo]));
-        }
-        i = j;
-      }
+    for (const link of links) {
+      if (!this.isRoutable(link, coll)) continue;
+      enclosingRect = this.expandEnclosingRect(enclosingRect, link, skipBounds);
+      this.collectPrimarySegmentsForLink(link);
     }
 
-    if (coll && enclosingRect !== null && !skipBounds) {
-      for (const l of this.diagram!.findPartsIn(enclosingRect, true)) {
-        if (!(l instanceof go.Link)) continue;
-        if (!l.isOrthogonal) continue;
-        if (links.has(l)) continue;
-        i = this.nextOrthoBend(l, 0);
-        while (i < l.pointsCount - 1) {
-          j = this.nextOrthoBend(l, i);
-          if (j === l.pointsCount - 1) break;
-          p = l.getPoint(i);
-          q = l.getPoint(j);
-          const vertical = this.isApprox(p.x, q.x) && !this.isApprox(p.y, q.y);
-          const coord = vertical ? p.x : p.y;
-          for (const line of this._allsegs) {
-            if (
-              Math.abs(this._coord(line.first()!) - coord) < this._epsilonDistance &&
-              line.first()!.vertical === vertical
-            ) {
-              const seginfo = this._allocSegInfo();
-              seginfo.indexStart = i;
-              seginfo.indexEnd = j;
-              seginfo.link = l;
-              seginfo.vertical = vertical;
-              seginfo._computeGeo();
-              line.add(seginfo);
-              break;
-            }
-          }
-          i = j;
-        }
-      }
+    return { enclosingRect, skipBounds };
+  }
+
+  private expandEnclosingRect(enclosingRect: go.Rect | null, link: go.Link, skipBounds: boolean): go.Rect | null {
+    if (skipBounds) return enclosingRect;
+    if (enclosingRect === null) return link.getDocumentBounds();
+    enclosingRect.unionRect(link.getDocumentBounds());
+    return enclosingRect;
+  }
+
+  private collectPrimarySegmentsForLink(link: go.Link): void {
+    let startIndex = this.nextOrthoBend(link, 0);
+    while (startIndex < link.pointsCount - 1) {
+      const endIndex = this.nextOrthoBend(link, startIndex);
+      if (endIndex === link.pointsCount - 1) break;
+
+      this.addSegmentToAllSegments(this.createSegmentInfo(link, startIndex, endIndex));
+      startIndex = endIndex;
+    }
+  }
+
+  private createSegmentInfo(link: go.Link, startIndex: number, endIndex: number): _SegInfo {
+    const startPoint = link.getPoint(startIndex);
+    const endPoint = link.getPoint(endIndex);
+    const seginfo = this._allocSegInfo();
+    seginfo.indexStart = startIndex;
+    seginfo.indexEnd = endIndex;
+    seginfo.link = link;
+    seginfo.vertical = this.isVerticalSegment(startPoint, endPoint);
+    seginfo._computeGeo();
+    return seginfo;
+  }
+
+  private isVerticalSegment(startPoint: go.Point, endPoint: go.Point): boolean {
+    return this.isApprox(startPoint.x, endPoint.x) && !this.isApprox(startPoint.y, endPoint.y);
+  }
+
+  private addSegmentToAllSegments(seginfo: _SegInfo): void {
+    const matchingLine = this.findMatchingSegmentLine(seginfo.vertical, this._coord(seginfo));
+    if (matchingLine) {
+      matchingLine.add(seginfo);
+      return;
     }
 
+    this._allsegs.add(new go.List([seginfo]));
+  }
+
+  private findMatchingSegmentLine(vertical: boolean, coord: number): go.List<_SegInfo> | null {
     for (const line of this._allsegs) {
-      while (line.count > 0) {
-        currentseg = line.pop()!;
-        const newline = new go.List([currentseg]);
-        found = true;
-        while (found) {
-          found = false;
-          for (const otherseg of newline) {
-            for (const seginfo of line) {
-              const minI = Math.min(this._columnStart(seginfo), this._columnEnd(seginfo));
-              const maxI = Math.max(this._columnStart(seginfo), this._columnEnd(seginfo));
-              const minJ = Math.min(this._columnStart(otherseg), this._columnEnd(otherseg));
-              const maxJ = Math.max(this._columnStart(otherseg), this._columnEnd(otherseg));
-              if (minJ <= maxI && minI <= maxJ && seginfo.link !== otherseg.link) {
-                line.remove(seginfo);
-                newline.push(seginfo);
-                found = true;
-                break;
-              }
-            }
-          }
-        }
-        this._gridlines.add(newline);
+      const firstSegment = line.first();
+      if (firstSegment && this.isMatchingSegmentLine(firstSegment, vertical, coord)) {
+        return line;
+      }
+    }
+    return null;
+  }
+
+  private isMatchingSegmentLine(firstSegment: _SegInfo, vertical: boolean, coord: number): boolean {
+    return firstSegment.vertical === vertical && Math.abs(this._coord(firstSegment) - coord) < this._epsilonDistance;
+  }
+
+  private collectNearbyLinkSegments(links: go.Set<go.Link>, scope: SegmentCollectionScope): void {
+    if (scope.enclosingRect === null || scope.skipBounds || this.diagram === null) return;
+
+    for (const part of this.diagram.findPartsIn(scope.enclosingRect, true)) {
+      if (this.shouldCollectNearbyLink(part, links)) {
+        this.collectTrackedNearbySegmentsForLink(part);
       }
     }
   }
 
-  /** @internal */
-  adjustOverlaps(positions: go.PositionArray | null): void {
-    const gridlines = this._gridlines;
-    for (const line of gridlines) {
-      if (line.count < 2) continue;
-      const gridline = line.toArray();
-      this.sortGridline(gridline);
-      const vertical = gridline[0].vertical;
-      const maxlayer = gridline.length - 1;
+  private shouldCollectNearbyLink(part: go.Part, links: go.Set<go.Link>): part is go.Link {
+    return part instanceof go.Link && part.isOrthogonal && !links.has(part);
+  }
 
-      let realSpacing = this._linkSpacing;
+  private collectTrackedNearbySegmentsForLink(link: go.Link): void {
+    let startIndex = this.nextOrthoBend(link, 0);
+    while (startIndex < link.pointsCount - 1) {
+      const endIndex = this.nextOrthoBend(link, startIndex);
+      if (endIndex === link.pointsCount - 1) break;
 
-      if (this._avoidsNodes && maxlayer > 0 && positions) {
-        let minColumn = Math.min(this._columnStart(gridline[0]), this._columnEnd(gridline[0]));
-        let maxColumn = Math.max(this._columnStart(gridline[0]), this._columnEnd(gridline[0]));
-        const minCoord = this._coord(gridline[0]) - (maxlayer * this._linkSpacing) / 2;
-        const maxCoord = this._coord(gridline[0]) + (maxlayer * this._linkSpacing) / 2;
-        for (let i = 1; i < gridline.length; i++) {
-          const seg = gridline[i];
-          minColumn = Math.min(minColumn, Math.min(this._columnStart(seg), this._columnEnd(seg)));
-          maxColumn = Math.max(maxColumn, Math.max(this._columnStart(seg), this._columnEnd(seg)));
-        }
+      this.addNearbySegmentIfTracked(link, startIndex, endIndex);
+      startIndex = endIndex;
+    }
+  }
 
-        if (vertical) {
-          if (!positions.isUnoccupied(minCoord, minColumn, maxCoord - minCoord, maxColumn - minColumn)) {
-            const availSpace = positions.maxAvoidsLinksSpaceV(
-              minColumn,
-              maxColumn,
-              this._coord(gridline[0]),
-              maxCoord - minCoord,
-            );
-            realSpacing = Math.min(this._linkSpacing, (2 * availSpace) / (1 + maxlayer));
-          }
-        } else {
-          if (!positions.isUnoccupied(minColumn, minCoord, maxColumn - minColumn, maxCoord - minCoord)) {
-            const availSpace = positions.maxAvoidsLinksSpaceH(
-              minColumn,
-              maxColumn,
-              this._coord(gridline[0]),
-              maxCoord - minCoord,
-            );
-            realSpacing = Math.min(this._linkSpacing, (2 * availSpace) / (1 + maxlayer));
-          }
-        }
-        if (realSpacing === 0) realSpacing = this._linkSpacing;
-      }
+  private addNearbySegmentIfTracked(link: go.Link, startIndex: number, endIndex: number): void {
+    const startPoint = link.getPoint(startIndex);
+    const endPoint = link.getPoint(endIndex);
+    const vertical = this.isVerticalSegment(startPoint, endPoint);
+    const coord = vertical ? startPoint.x : startPoint.y;
+    const matchingLine = this.findMatchingSegmentLine(vertical, coord);
+    if (matchingLine) {
+      matchingLine.add(this.createSegmentInfo(link, startIndex, endIndex));
+    }
+  }
 
-      for (let i = 0; i < gridline.length; i++) {
-        const seg = gridline[i];
-        if (seg.link === null) continue;
-        const newcoord = this._coord(seg) + (i - maxlayer / 2) * realSpacing;
-        seg.link.startRoute();
-        for (let j = seg.indexStart; j <= seg.indexEnd; j++) {
-          if (vertical) {
-            seg.link.setPoint(j, new go.Point(newcoord, seg.link.getPoint(j).y));
-          } else {
-            seg.link.setPoint(j, new go.Point(seg.link.getPoint(j).x, newcoord));
-          }
-        }
-        seg.link.commitRoute();
+  private buildGridlinesFromCollectedSegments(): void {
+    for (const line of this._allsegs) {
+      this.buildGridlinesFromSegmentLine(line);
+    }
+  }
+
+  private buildGridlinesFromSegmentLine(line: go.List<_SegInfo>): void {
+    while (line.count > 0) {
+      const newline = new go.List([line.pop()!]);
+      this.expandGridline(line, newline);
+      this._gridlines.add(newline);
+    }
+  }
+
+  private expandGridline(line: go.List<_SegInfo>, newline: go.List<_SegInfo>): void {
+    let found = true;
+    while (found) {
+      found = false;
+      for (const otherseg of newline) {
+        const overlappingSegment = this.findOverlappingSegment(line, otherseg);
+        if (!overlappingSegment) continue;
+
+        line.remove(overlappingSegment);
+        newline.push(overlappingSegment);
+        found = true;
+        break;
       }
     }
+  }
+
+  private findOverlappingSegment(line: go.List<_SegInfo>, otherseg: _SegInfo): _SegInfo | null {
+    for (const seginfo of line) {
+      if (seginfo.link !== otherseg.link && this.segmentsOverlapInColumn(seginfo, otherseg)) {
+        return seginfo;
+      }
+    }
+    return null;
+  }
+
+  private segmentsOverlapInColumn(seginfo: _SegInfo, otherseg: _SegInfo): boolean {
+    const minI = Math.min(this._columnStart(seginfo), this._columnEnd(seginfo));
+    const maxI = Math.max(this._columnStart(seginfo), this._columnEnd(seginfo));
+    const minJ = Math.min(this._columnStart(otherseg), this._columnEnd(otherseg));
+    const maxJ = Math.max(this._columnStart(otherseg), this._columnEnd(otherseg));
+    return minJ <= maxI && minI <= maxJ;
+  }
+
+  /** @internal */
+  adjustOverlaps(positions: go.PositionArray | null): void {
+    for (const line of this._gridlines) {
+      const gridline = this.prepareGridlineForAdjustment(line);
+      if (!gridline) continue;
+
+      const bounds = this.createGridlineAdjustmentBounds(gridline);
+      const realSpacing = this.resolveGridlineSpacing(bounds, positions);
+      this.applyGridlineSpacing(gridline, bounds, realSpacing);
+    }
+  }
+
+  private prepareGridlineForAdjustment(line: go.List<_SegInfo>): _SegInfo[] | null {
+    if (line.count < 2) return null;
+    const gridline = line.toArray();
+    this.sortGridline(gridline);
+    return gridline;
+  }
+
+  private createGridlineAdjustmentBounds(gridline: _SegInfo[]): GridlineAdjustmentBounds {
+    const firstSegment = gridline[0];
+    const maxLayer = gridline.length - 1;
+    const firstRange = this.getColumnRange(firstSegment);
+    let minColumn = firstRange.start;
+    let maxColumn = firstRange.end;
+
+    for (let i = 1; i < gridline.length; i++) {
+      const range = this.getColumnRange(gridline[i]);
+      minColumn = Math.min(minColumn, range.start);
+      maxColumn = Math.max(maxColumn, range.end);
+    }
+
+    const coord = this._coord(firstSegment);
+    return {
+      vertical: firstSegment.vertical,
+      maxLayer,
+      minColumn,
+      maxColumn,
+      minCoord: coord - (maxLayer * this._linkSpacing) / 2,
+      maxCoord: coord + (maxLayer * this._linkSpacing) / 2,
+    };
+  }
+
+  private resolveGridlineSpacing(bounds: GridlineAdjustmentBounds, positions: go.PositionArray | null): number {
+    if (!this._avoidsNodes || bounds.maxLayer <= 0 || !positions) {
+      return this._linkSpacing;
+    }
+
+    const realSpacing = bounds.vertical
+      ? this.resolveVerticalGridlineSpacing(bounds, positions)
+      : this.resolveHorizontalGridlineSpacing(bounds, positions);
+    return realSpacing === 0 ? this._linkSpacing : realSpacing;
+  }
+
+  private resolveVerticalGridlineSpacing(bounds: GridlineAdjustmentBounds, positions: go.PositionArray): number {
+    if (positions.isUnoccupied(
+      bounds.minCoord,
+      bounds.minColumn,
+      bounds.maxCoord - bounds.minCoord,
+      bounds.maxColumn - bounds.minColumn,
+    )) {
+      return this._linkSpacing;
+    }
+
+    const availSpace = positions.maxAvoidsLinksSpaceV(
+      bounds.minColumn,
+      bounds.maxColumn,
+      (bounds.minCoord + bounds.maxCoord) / 2,
+      bounds.maxCoord - bounds.minCoord,
+    );
+    return Math.min(this._linkSpacing, (2 * availSpace) / (1 + bounds.maxLayer));
+  }
+
+  private resolveHorizontalGridlineSpacing(bounds: GridlineAdjustmentBounds, positions: go.PositionArray): number {
+    if (positions.isUnoccupied(
+      bounds.minColumn,
+      bounds.minCoord,
+      bounds.maxColumn - bounds.minColumn,
+      bounds.maxCoord - bounds.minCoord,
+    )) {
+      return this._linkSpacing;
+    }
+
+    const availSpace = positions.maxAvoidsLinksSpaceH(
+      bounds.minColumn,
+      bounds.maxColumn,
+      (bounds.minCoord + bounds.maxCoord) / 2,
+      bounds.maxCoord - bounds.minCoord,
+    );
+    return Math.min(this._linkSpacing, (2 * availSpace) / (1 + bounds.maxLayer));
+  }
+
+  private applyGridlineSpacing(
+    gridline: _SegInfo[],
+    bounds: GridlineAdjustmentBounds,
+    realSpacing: number,
+  ): void {
+    for (let i = 0; i < gridline.length; i++) {
+      const seg = gridline[i];
+      if (seg.link === null) continue;
+
+      const newcoord = this._coord(seg) + (i - bounds.maxLayer / 2) * realSpacing;
+      this.updateSegmentRoutePoints(seg, bounds.vertical, newcoord);
+    }
+  }
+
+  private updateSegmentRoutePoints(seg: _SegInfo, vertical: boolean, newcoord: number): void {
+    const link = seg.link;
+    if (link === null) return;
+
+    link.startRoute();
+    for (let j = seg.indexStart; j <= seg.indexEnd; j++) {
+      const point = link.getPoint(j);
+      link.setPoint(j, vertical ? new go.Point(newcoord, point.y) : new go.Point(point.x, newcoord));
+    }
+    link.commitRoute();
   }
 
   /** @internal */
@@ -386,40 +526,86 @@ export class AvoidsLinksRouter extends go.Router {
 
   /** @internal */
   endpointComparer(seg1: _SegInfo, seg2: _SegInfo): number {
-    const start1 = Math.min(this._columnStart(seg1), this._columnEnd(seg1));
-    const end1 = Math.max(this._columnStart(seg1), this._columnEnd(seg1));
-    const start2 = Math.min(this._columnStart(seg2), this._columnEnd(seg2));
-    const end2 = Math.max(this._columnStart(seg2), this._columnEnd(seg2));
+    const range1 = this.getColumnRange(seg1);
+    const range2 = this.getColumnRange(seg2);
+    return this.compareEndpointRanges({
+      relation: this.resolveEndpointRangeRelation(range1, range2),
+      geo: seg1.geo,
+      startEqual: this.isApprox(range1.start, range2.start),
+      endEqual: this.isApprox(range1.end, range2.end),
+    });
+  }
 
-    const startEqual = this.isApprox(start1, start2);
-    const endEqual = this.isApprox(end1, end2);
+  private getColumnRange(seg: _SegInfo): ColumnRange {
+    return {
+      start: Math.min(this._columnStart(seg), this._columnEnd(seg)),
+      end: Math.max(this._columnStart(seg), this._columnEnd(seg)),
+    };
+  }
 
-    const geo = seg1.geo;
+  private resolveEndpointRangeRelation(range1: ColumnRange, range2: ColumnRange): EndpointRangeRelation {
+    if (range2.start <= range1.start && range1.end <= range2.end) return 'secondContainsFirst';
+    if (range1.start <= range2.start && range2.end <= range1.end) return 'firstContainsSecond';
+    if (range2.start <= range1.start && range2.end <= range1.end) return 'secondStartsBeforeFirst';
+    if (range1.start <= range2.start && range1.end <= range2.end) return 'firstStartsBeforeSecond';
+    return 'none';
+  }
 
-    let result = 0;
-
-    if (start2 <= start1 && end1 <= end2) {
-      if (geo === 0 && startEqual) result = 1;
-      else if (geo === 0 && endEqual) result = -1;
-      else if (geo === 1 && startEqual) result = -1;
-      else if (geo === 1 && endEqual) result = 1;
-      else if (geo === 2) result = 1;
-      else if (geo === 3) result = -1;
-    } else if (start1 <= start2 && end2 <= end1) {
-      if (geo === 0 && startEqual) result = -1;
-      else if (geo === 0 && endEqual) result = 1;
-      else if (geo === 1 && startEqual) result = 1;
-      else if (geo === 1 && endEqual) result = -1;
-      else if (geo === 2) result = -1;
-      else if (geo === 3) result = 1;
-    } else if (start2 <= start1 && end2 <= end1) {
-      if (geo === 0) result = -1;
-      else if (geo === 1) result = 1;
-    } else if (start1 <= start2 && end1 <= end2) {
-      if (geo === 0) result = 1;
-      else if (geo === 1) result = -1;
+  private compareEndpointRanges(input: EndpointComparison): number {
+    switch (input.relation) {
+      case 'secondContainsFirst':
+        return this.compareWhenSecondContainsFirst(input);
+      case 'firstContainsSecond':
+        return this.compareWhenFirstContainsSecond(input);
+      case 'secondStartsBeforeFirst':
+        return this.compareStaggeredEndpoint(input.geo, -1, 1);
+      case 'firstStartsBeforeSecond':
+        return this.compareStaggeredEndpoint(input.geo, 1, -1);
+      default:
+        return 0;
     }
-    return result;
+  }
+
+  private compareWhenSecondContainsFirst(input: EndpointComparison): number {
+    switch (input.geo) {
+      case 0:
+        return this.compareEqualEndpoint(input, 1, -1);
+      case 1:
+        return this.compareEqualEndpoint(input, -1, 1);
+      case 2:
+        return 1;
+      case 3:
+        return -1;
+      default:
+        return 0;
+    }
+  }
+
+  private compareWhenFirstContainsSecond(input: EndpointComparison): number {
+    switch (input.geo) {
+      case 0:
+        return this.compareEqualEndpoint(input, -1, 1);
+      case 1:
+        return this.compareEqualEndpoint(input, 1, -1);
+      case 2:
+        return -1;
+      case 3:
+        return 1;
+      default:
+        return 0;
+    }
+  }
+
+  private compareEqualEndpoint(input: EndpointComparison, startResult: number, endResult: number): number {
+    if (input.startEqual) return startResult;
+    if (input.endEqual) return endResult;
+    return 0;
+  }
+
+  private compareStaggeredEndpoint(geo: number, geo0Result: number, geo1Result: number): number {
+    if (geo === 0) return geo0Result;
+    if (geo === 1) return geo1Result;
+    return 0;
   }
 
   /** @internal */
@@ -496,62 +682,67 @@ class _SegInfo {
 
   _computeGeoH(): void {
     if (this.link === null) return;
-    let j1 = this.indexStart - 1;
-    let j2 = this.indexEnd + 1;
-    while (j1 > 0 && Math.abs(this.link.getPoint(j1).x - this.link.getPoint(j1 - 1).x) < 0.5) j1--;
-    while (
-      j2 < this.link.pointsCount - 1 &&
-      Math.abs(this.link.getPoint(j2).x - this.link.getPoint(j2 + 1).x) < 0.5
-    ) {
-      j2++;
-    }
-
-    const y1 = this.link.getPoint(j1).y;
-    const y2 = this.link.getPoint(j2).y;
-    const coord = this.link.getPoint(this.indexStart).y;
-    const columnStart = this.link.getPoint(this.indexStart).x;
-    const columnEnd = this.link.getPoint(this.indexEnd + 1).x;
-
-    if (columnStart < columnEnd) {
-      if (y1 < coord && y2 > coord) this.geo = 0;
-      else if (y1 > coord && y2 < coord) this.geo = 1;
-      else if (y1 > coord && y2 > coord) this.geo = 2;
-      else if (y1 < coord && y2 < coord) this.geo = 3;
-    } else {
-      if (y2 < coord && y1 > coord) this.geo = 0;
-      else if (y2 > coord && y1 < coord) this.geo = 1;
-      else if (y2 > coord && y1 > coord) this.geo = 2;
-      else if (y2 < coord && y1 < coord) this.geo = 3;
-    }
+    this.computeGeoForAxes('x', 'y');
   }
 
   _computeGeoV(): void {
     if (this.link === null) return;
+    this.computeGeoForAxes('y', 'x');
+  }
+
+  private computeGeoForAxes(columnAxis: SegmentAxis, coordAxis: SegmentAxis): void {
+    const link = this.link;
+    if (link === null) return;
+
+    const j1 = this.findPreviousAxisBend(columnAxis);
+    const j2 = this.findNextAxisBend(columnAxis);
+    const value1 = link.getPoint(j1)[coordAxis];
+    const value2 = link.getPoint(j2)[coordAxis];
+    const coord = link.getPoint(this.indexStart)[coordAxis];
+    const columnStart = link.getPoint(this.indexStart)[columnAxis];
+    const columnEnd = link.getPoint(this.indexEnd + 1)[columnAxis];
+
+    this.geo = columnStart < columnEnd
+      ? this.resolveForwardGeo(value1, value2, coord)
+      : this.resolveReverseGeo(value1, value2, coord);
+  }
+
+  private findPreviousAxisBend(axis: SegmentAxis): number {
+    if (this.link === null) return this.indexStart - 1;
+
     let j1 = this.indexStart - 1;
+    while (j1 > 0 && Math.abs(this.link.getPoint(j1)[axis] - this.link.getPoint(j1 - 1)[axis]) < 0.5) {
+      j1--;
+    }
+    return j1;
+  }
+
+  private findNextAxisBend(axis: SegmentAxis): number {
+    if (this.link === null) return this.indexEnd + 1;
+
     let j2 = this.indexEnd + 1;
-    while (j1 > 0 && Math.abs(this.link.getPoint(j1).y - this.link.getPoint(j1 - 1).y) < 0.5) j1--;
     while (
       j2 < this.link.pointsCount - 1 &&
-      Math.abs(this.link.getPoint(j2).y - this.link.getPoint(j2 + 1).y) < 0.5
+      Math.abs(this.link.getPoint(j2)[axis] - this.link.getPoint(j2 + 1)[axis]) < 0.5
     ) {
       j2++;
     }
-    const x1 = this.link.getPoint(j1).x;
-    const x2 = this.link.getPoint(j2).x;
-    const coord = this.link.getPoint(this.indexStart).x;
-    const columnStart = this.link.getPoint(this.indexStart).y;
-    const columnEnd = this.link.getPoint(this.indexEnd + 1).y;
+    return j2;
+  }
 
-    if (columnStart < columnEnd) {
-      if (x1 < coord && x2 > coord) this.geo = 0;
-      else if (x1 > coord && x2 < coord) this.geo = 1;
-      else if (x1 > coord && x2 > coord) this.geo = 2;
-      else if (x1 < coord && x2 < coord) this.geo = 3;
-    } else {
-      if (x2 < coord && x1 > coord) this.geo = 0;
-      else if (x2 > coord && x1 < coord) this.geo = 1;
-      else if (x2 > coord && x1 > coord) this.geo = 2;
-      else if (x2 < coord && x1 < coord) this.geo = 3;
-    }
+  private resolveForwardGeo(value1: number, value2: number, coord: number): number {
+    if (value1 < coord && value2 > coord) return 0;
+    if (value1 > coord && value2 < coord) return 1;
+    if (value1 > coord && value2 > coord) return 2;
+    if (value1 < coord && value2 < coord) return 3;
+    return this.geo;
+  }
+
+  private resolveReverseGeo(value1: number, value2: number, coord: number): number {
+    if (value2 < coord && value1 > coord) return 0;
+    if (value2 > coord && value1 < coord) return 1;
+    if (value2 > coord && value1 > coord) return 2;
+    if (value2 < coord && value1 < coord) return 3;
+    return this.geo;
   }
 }

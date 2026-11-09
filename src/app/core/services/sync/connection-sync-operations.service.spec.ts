@@ -14,32 +14,34 @@ import { RetryQueueService } from './retry-queue.service';
 import { SyncStateService } from './sync-state.service';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 import { TombstoneService } from './tombstone.service';
-import { SyncRpcClientService, type SyncRpcResult } from '../../../../services/sync-rpc-client.service';
+import { SyncRpcClientService } from '../../../../services/sync-rpc-client.service';
+import { DataSafetyAuditPersistence } from '../../../../services/data-safety-audit-persistence';
+import { ConflictStorageService } from '../../../../services/conflict-storage.service';
 import type { Connection } from '../../../../models';
 import { PermanentFailureError } from '../../../../utils/permanent-failure-error';
+import { resetBrowserNetworkSuspensionTrackingForTests } from '../../../../utils/browser-network-suspension';
+import { buildConnectionUpsertQuery, createMockSyncRpcClient, expectConnectionRetryEnqueued, resetMockSyncRpcClient, setVisibilityState, type ConnectionEndpointTombstoneResult, type ConnectionFreshnessResult, type ConnectionTombstoneResult, type ConnectionWriteResult, type EndpointDedupResponse, type LegacyConnectionTombstoneResult, type ProjectConnectionState, type TaskExistenceResult } from './connection-sync-operations.test-harness';
 import {
-  createBrowserNetworkSuspendedError,
-  resetBrowserNetworkSuspensionTrackingForTests,
-} from '../../../../utils/browser-network-suspension';
-
-function setVisibilityState(state: DocumentVisibilityState): void {
-  Object.defineProperty(document, 'visibilityState', {
-    configurable: true,
-    value: state,
-  });
-}
-
-function createSyncRpcResult(overrides: Partial<SyncRpcResult> = {}): SyncRpcResult {
-  return {
-    status: 'applied',
-    raw: {},
-    ...overrides,
-  };
-}
-
-const upsertConnectionRpcMock = vi.fn<SyncRpcClientService['upsertConnection']>();
-const isConnectionSyncRpcFeatureEnabledMock = vi.fn(() => false);
-const isConnectionSyncRpcClientRejectedMock = vi.fn(() => false);
+  registerConnectionSyncCanonicalRecoverySpecs,
+  type ConnectionSyncCanonicalRecoverySpecContext,
+} from './connection-sync-canonical-recovery.spec-helpers';
+import {
+  registerConnectionSyncCanonicalTombstoneSpecs,
+  type ConnectionSyncCanonicalTombstoneSpecContext,
+} from './connection-sync-canonical-tombstone.spec-helpers';
+import {
+  registerConnectionSyncSessionRecoverySpecs,
+  type ConnectionSyncSessionRecoverySpecContext,
+} from './connection-sync-session-recovery.spec-helpers';
+import {
+  registerConnectionSyncTerminalRejectionSpecs,
+  type ConnectionSyncTerminalRejectionSpecContext,
+} from './connection-sync-terminal-rejection.spec-helpers';
+import {
+  registerConnectionSyncRpcUpsertSpecs,
+  type ConnectionSyncRpcUpsertSpecContext,
+} from './connection-sync-rpc-upsert.spec-helpers';
+import { registerConnectionSyncActionQueueReplaySpecs } from './connection-sync-action-queue-replay.spec-helpers';
 
 describe('ConnectionSyncOperationsService', () => {
   let service: ConnectionSyncOperationsService;
@@ -50,23 +52,18 @@ describe('ConnectionSyncOperationsService', () => {
     warn: vi.fn(),
     error: vi.fn(),
   };
+  const mockRetryWithBackoff = vi.fn(async (fn: () => Promise<void>) => await fn());
 
   const mockRetryQueue = {
     checkCircuitBreaker: vi.fn(() => true),
     add: vi.fn(() => true),
+    addDurably: vi.fn(async () => true),
+    commitConnectionReplay: vi.fn(async () => ({ status: 'committed' as const })),
     recordCircuitFailure: vi.fn(),
     recordCircuitSuccess: vi.fn(),
     length: 0,
   };
-  const mockSyncRpcClient: {
-    isFeatureEnabled: typeof isConnectionSyncRpcFeatureEnabledMock;
-    isClientRejected: typeof isConnectionSyncRpcClientRejectedMock;
-    upsertConnection: typeof upsertConnectionRpcMock;
-  } = {
-    isFeatureEnabled: isConnectionSyncRpcFeatureEnabledMock,
-    isClientRejected: isConnectionSyncRpcClientRejectedMock,
-    upsertConnection: upsertConnectionRpcMock,
-  };
+  const mockSyncRpcClient = createMockSyncRpcClient();
 
   const mockSessionManager = {
     tryRefreshSession: vi.fn(async () => false),
@@ -82,51 +79,34 @@ describe('ConnectionSyncOperationsService', () => {
     updateConnectionTombstoneCache: vi.fn(),
   };
 
-  let connectionTombstoneResult: { data: { connection_id: string } | null; error: unknown | null };
-  let connectionEndpointTombstoneResult: { data: { deleted_at: string } | null; error: unknown | null };
-  let legacyConnectionTombstoneResult: { data: { deleted_at: string; source_id: string | null; target_id: string | null } | null; error: unknown | null };
-  let taskExistenceResult: { data: Array<{ id: string }>; error: unknown | null };
-  let endpointDedupResponses: Array<{ data: Array<{ id: string; deleted_at: string | null; updated_at?: string | null; title?: string | null; description?: string | null }>; error: unknown | null }>;
-  let connectionFreshnessResult: { data: { id: string; updated_at: string | null; deleted_at: string | null } | null; error: unknown | null };
+  let connectionTombstoneResult: ConnectionTombstoneResult;
+  let connectionEndpointTombstoneResult: ConnectionEndpointTombstoneResult;
+  let legacyConnectionTombstoneResult: LegacyConnectionTombstoneResult;
+  let taskExistenceResult: TaskExistenceResult;
+  let endpointDedupResponses: EndpointDedupResponse[];
+  let connectionFreshnessResult: ConnectionFreshnessResult;
   let connectionReadbackQueryCount: number;
-  let connectionUpsertResult: { data: { updated_at: string } | null; error: unknown | null };
-  let connectionUpdateResult: { data: { updated_at: string } | null; error: unknown | null };
+  let connectionUpsertResult: ConnectionWriteResult;
+  let connectionUpdateResult: ConnectionWriteResult;
+  let syncStateSnapshot: { lastSyncTime: string | null; pendingCount: number };
   const mockConnectionsUpsert = vi.fn();
-  let mockProjects: Array<{ id: string; connections: Connection[]; tasks: unknown[] }>;
-
-  function buildUpsertQuery(
-    rawResult: unknown,
-  ): { select: ReturnType<typeof vi.fn> } {
-    if (
-      rawResult
-      && typeof rawResult === 'object'
-      && 'select' in rawResult
-      && typeof (rawResult as { select?: unknown }).select === 'function'
-    ) {
-      return rawResult as { select: ReturnType<typeof vi.fn> };
-    }
-
-    return {
-      select: vi.fn(() => ({
-        maybeSingle: vi.fn(async () => {
-          const resolved = await Promise.resolve(rawResult);
-          return (resolved ?? { data: null, error: null }) as {
-            data: { updated_at: string } | null;
-            error: unknown | null;
-          };
-        }),
-      })),
-    };
-  }
+  let mockProjects: ProjectConnectionState[];
 
   const mockProjectState = {
-    updateProjects: vi.fn((updater: (projects: Array<{ id: string; connections: Connection[]; tasks: unknown[] }>) => Array<{ id: string; connections: Connection[]; tasks: unknown[] }>) => {
+    getProject: vi.fn((projectId: string) => mockProjects.find(project => project.id === projectId)),
+    getProjectWithCurrentData: vi.fn((projectId: string) => mockProjects.find(project => project.id === projectId)),
+    updateProjects: vi.fn((updater: (projects: ProjectConnectionState[]) => ProjectConnectionState[]) => {
       mockProjects = updater(mockProjects);
     }),
   };
 
+  const mockConflictStorage = {
+    saveConflict: vi.fn(async () => true),
+  };
+
   const mockSyncState = {
     isSessionExpired: vi.fn(() => false),
+    syncState: vi.fn(() => syncStateSnapshot),
     setPendingCount: vi.fn(),
     setSyncError: vi.fn(),
     setSessionExpired: vi.fn(),
@@ -140,22 +120,6 @@ describe('ConnectionSyncOperationsService', () => {
       if (table === 'connection_tombstones') {
         return {
           select: vi.fn((columns: string) => {
-            if (columns === 'deleted_at,source_id,target_id') {
-              return {
-                eq: vi.fn(() => ({
-                  is: vi.fn(() => ({
-                    is: vi.fn(() => ({
-                      order: vi.fn(() => ({
-                        limit: vi.fn(() => ({
-                          maybeSingle: vi.fn(async () => legacyConnectionTombstoneResult),
-                        })),
-                      })),
-                    })),
-                  })),
-                })),
-              };
-            }
-
             if (columns === 'deleted_at') {
               return {
                 eq: vi.fn(() => ({
@@ -164,6 +128,15 @@ describe('ConnectionSyncOperationsService', () => {
                       order: vi.fn(() => ({
                         limit: vi.fn(() => ({
                           maybeSingle: vi.fn(async () => connectionEndpointTombstoneResult),
+                        })),
+                      })),
+                    })),
+                  })),
+                  is: vi.fn(() => ({
+                    is: vi.fn(() => ({
+                      order: vi.fn(() => ({
+                        limit: vi.fn(() => ({
+                          maybeSingle: vi.fn(async () => legacyConnectionTombstoneResult),
                         })),
                       })),
                     })),
@@ -231,7 +204,7 @@ describe('ConnectionSyncOperationsService', () => {
           }),
           insert: (payload: unknown) => {
             const rawResult = mockConnectionsUpsert(payload, { onConflict: 'id', ignoreDuplicates: false });
-            return buildUpsertQuery(rawResult === undefined ? connectionUpsertResult : rawResult);
+            return buildConnectionUpsertQuery(rawResult === undefined ? connectionUpsertResult : rawResult);
           },
           update: (payload: unknown) => {
             const rawResult = mockConnectionsUpsert(payload, { mode: 'cas-update' });
@@ -242,10 +215,7 @@ describe('ConnectionSyncOperationsService', () => {
                     select: vi.fn(() => ({
                       maybeSingle: vi.fn(async () => {
                         const resolved = await Promise.resolve(rawResult);
-                        return (resolved === undefined ? connectionUpdateResult : resolved) as {
-                          data: { updated_at: string } | null;
-                          error: unknown | null;
-                        };
+                        return (resolved === undefined ? connectionUpdateResult : resolved) as ConnectionWriteResult;
                       }),
                     })),
                   })),
@@ -262,12 +232,11 @@ describe('ConnectionSyncOperationsService', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    localStorage.clear();
     resetBrowserNetworkSuspensionTrackingForTests();
     setVisibilityState('visible');
-    mockSyncRpcClient.isFeatureEnabled.mockReturnValue(false);
-    mockSyncRpcClient.isClientRejected.mockReturnValue(false);
-    const defaultUpsertConnectionRpcResult: SyncRpcResult = createSyncRpcResult({ entityId: 'connection-1' });
-    mockSyncRpcClient.upsertConnection.mockImplementation(async () => defaultUpsertConnectionRpcResult);
+    resetMockSyncRpcClient(mockSyncRpcClient);
+    syncStateSnapshot = { lastSyncTime: null, pendingCount: 0 };
     connectionTombstoneResult = { data: null, error: null };
     connectionEndpointTombstoneResult = { data: null, error: null };
     legacyConnectionTombstoneResult = { data: null, error: null };
@@ -286,7 +255,11 @@ describe('ConnectionSyncOperationsService', () => {
       data: { updated_at: '2026-04-11T00:01:00.000Z' },
       error: null,
     };
+    mockClient.auth.getSession.mockResolvedValue({ data: { session: { user: { id: 'user-1' } } } });
     mockConnectionsUpsert.mockImplementation(() => undefined);
+    mockConflictStorage.saveConflict.mockResolvedValue(true);
+    mockRetryQueue.commitConnectionReplay.mockReset();
+    mockRetryQueue.commitConnectionReplay.mockResolvedValue({ status: 'committed' });
     mockProjects = [{ id: 'project-1', connections: [], tasks: [] }];
 
     TestBed.configureTestingModule({
@@ -322,7 +295,7 @@ describe('ConnectionSyncOperationsService', () => {
           },
         },
         { provide: ProjectStateService, useValue: mockProjectState },
-        { provide: SyncOperationHelperService, useValue: { retryWithBackoff: vi.fn(async (fn: () => Promise<void>) => await fn()) } },
+        { provide: SyncOperationHelperService, useValue: { retryWithBackoff: mockRetryWithBackoff } },
         {
           provide: SessionManagerService,
           useValue: mockSessionManager,
@@ -331,6 +304,7 @@ describe('ConnectionSyncOperationsService', () => {
         { provide: SyncRpcClientService, useValue: mockSyncRpcClient },
         { provide: SyncStateService, useValue: mockSyncState },
         { provide: TombstoneService, useValue: mockTombstoneService },
+        { provide: ConflictStorageService, useValue: mockConflictStorage },
         {
           provide: SentryLazyLoaderService,
           useValue: {
@@ -342,6 +316,133 @@ describe('ConnectionSyncOperationsService', () => {
     });
 
     service = TestBed.inject(ConnectionSyncOperationsService);
+  });
+
+  function loadDataSafetyAudit(ownerUserId: string) {
+    return new DataSafetyAuditPersistence().load(ownerUserId);
+  }
+
+  function getCanonicalRecoverySpecContext(): ConnectionSyncCanonicalRecoverySpecContext {
+    return {
+      service,
+      mockClient,
+      mockConnectionsUpsert,
+      mockRetryQueue,
+      setTaskExistenceResult: (result: TaskExistenceResult) => {
+        taskExistenceResult = result;
+      },
+    };
+  }
+
+  function getCanonicalTombstoneSpecContext(): ConnectionSyncCanonicalTombstoneSpecContext {
+    return {
+      service,
+      mockSyncRpcClient,
+      mockRetryQueue,
+      setEndpointDedupResponses: (responses: EndpointDedupResponse[]) => {
+        endpointDedupResponses = responses;
+      },
+      setMockProjects: (projects: ProjectConnectionState[]) => {
+        mockProjects = projects;
+      },
+      getMockProjects: () => mockProjects,
+      setConnectionTombstoneResult: (result: ConnectionTombstoneResult) => {
+        connectionTombstoneResult = result;
+      },
+      setConnectionEndpointTombstoneResult: (result: ConnectionEndpointTombstoneResult) => {
+        connectionEndpointTombstoneResult = result;
+      },
+      setLegacyConnectionTombstoneResult: (result: LegacyConnectionTombstoneResult) => {
+        legacyConnectionTombstoneResult = result;
+      },
+    };
+  }
+
+  function getSessionRecoverySpecContext(): ConnectionSyncSessionRecoverySpecContext {
+    return {
+      service,
+      mockClient,
+      mockRetryQueue,
+      mockSessionManager,
+      mockSyncRpcClient,
+      mockSyncState,
+    };
+  }
+
+  function getTerminalRejectionSpecContext(): ConnectionSyncTerminalRejectionSpecContext {
+    return {
+      service,
+      mockSyncRpcClient,
+      mockConnectionsUpsert,
+      mockRetryQueue,
+      mockTombstoneService,
+      mockSyncState,
+      getMockProjects: () => mockProjects,
+      setMockProjects: (projects: ProjectConnectionState[]) => {
+        mockProjects = projects;
+      },
+      setTaskExistenceResult: (result: TaskExistenceResult) => {
+        taskExistenceResult = result;
+      },
+      getSentryCaptureMessage: () => (
+        TestBed.inject(SentryLazyLoaderService) as unknown as {
+          captureMessage: ReturnType<typeof vi.fn>;
+        }
+      ).captureMessage,
+    };
+  }
+
+  function getRpcUpsertSpecContext(): ConnectionSyncRpcUpsertSpecContext {
+    return {
+      service,
+      mockSyncRpcClient,
+      mockConnectionsUpsert,
+      mockRetryQueue,
+      mockConflictStorage,
+      loadDataSafetyAudit,
+      setMockProjects: projects => {
+        mockProjects = projects;
+      },
+      getMockProjects: () => mockProjects,
+    };
+  }
+
+  registerConnectionSyncRpcUpsertSpecs(getRpcUpsertSpecContext);
+  registerConnectionSyncActionQueueReplaySpecs(() => ({
+    service,
+    mockClient,
+    mockRetryQueue,
+    mockSessionManager,
+    mockSyncState,
+    mockSyncRpcClient,
+    setEndpointDedupResponses: responses => {
+      endpointDedupResponses = responses;
+    },
+  }));
+
+  it('sync RPC 不可用的 RetryQueue 回放应通过 retry helper 保留原队列项', async () => {
+    mockSyncRpcClient.isFeatureEnabled.mockReturnValue(false);
+    const operationId = '00000000-0000-4000-8000-000000000303';
+    const connection: Connection = {
+      id: 'connection-rpc-unavailable-retry-helper',
+      source: 'task-a',
+      target: 'task-b',
+      updatedAt: '2026-07-15T00:00:00.000Z',
+    };
+
+    await expect(service.pushConnection(
+      connection,
+      'project-1',
+      true,
+      true,
+      true,
+      'user-1',
+      operationId,
+    )).rejects.toMatchObject({ isRetryDeferred: true });
+
+    expect(mockRetryWithBackoff).toHaveBeenCalledTimes(1);
+    expect(mockRetryQueue.addDurably).not.toHaveBeenCalled();
+    expect(mockRetryQueue.add).not.toHaveBeenCalled();
   });
 
   it('sourceUserId 与当前会话不匹配时应拒绝写云端并按原 owner 入队', async () => {
@@ -357,7 +458,7 @@ describe('ConnectionSyncOperationsService', () => {
     const result = await service.pushConnection(connection, 'project-1', false, false, false, 'user-1');
 
     expect(result).toBe(false);
-    expect(mockRetryQueue.add).toHaveBeenCalledWith('connection', 'upsert', connection, 'project-1', 'user-1');
+    expectConnectionRetryEnqueued(mockRetryQueue, connection);
   });
 
   it('getConnectionTombstoneIds 在浏览器网络挂起时应延后且不告警', async () => {
@@ -370,246 +471,14 @@ describe('ConnectionSyncOperationsService', () => {
     expect(mockLogger.warn).not.toHaveBeenCalled();
   });
 
-  it('pushConnection 在 sync RPC flag 开启时应走 RPC/CAS 而不是直接 table upsert', async () => {
-    mockSyncRpcClient.isFeatureEnabled.mockReturnValue(true);
-    const rpcResult: SyncRpcResult = createSyncRpcResult({
-      entityId: 'connection-rpc',
-      serverUpdatedAt: '2026-04-30T00:02:00.000Z',
-    });
-    mockSyncRpcClient.upsertConnection.mockImplementationOnce(async () => rpcResult);
-    const connection: Connection = {
-      id: 'connection-rpc',
-      source: 'task-a',
-      target: 'task-b',
-      updatedAt: '2026-04-30T00:00:00.000Z',
-    };
+  registerConnectionSyncTerminalRejectionSpecs(getTerminalRejectionSpecContext);
 
-    const result = await service.pushConnection(connection, 'project-1', false, false, false, 'user-1');
-
-    expect(result).toBe(true);
-    expect(mockSyncRpcClient.upsertConnection).toHaveBeenCalledWith(expect.objectContaining({
-      operationId: expect.any(String),
-      connection,
-      projectId: 'project-1',
-      baseUpdatedAt: '2026-04-30T00:00:00.000Z',
-    }));
-    expect(mockConnectionsUpsert).not.toHaveBeenCalled();
-    expect(mockRetryQueue.recordCircuitSuccess).toHaveBeenCalled();
-    expect(connection.updatedAt).toBe('2026-04-30T00:02:00.000Z');
-  });
-
-  it('pushConnection sync RPC 遇到 remote-newer 时应保留本地意图并阻止直接 table upsert', async () => {
-    mockSyncRpcClient.isFeatureEnabled.mockReturnValue(true);
-    const rpcResult: SyncRpcResult = createSyncRpcResult({
-      status: 'remote-newer',
-      remoteUpdatedAt: '2026-04-30T00:01:00.000Z',
-    });
-    mockSyncRpcClient.upsertConnection.mockImplementationOnce(async () => rpcResult);
-    const connection: Connection = {
-      id: 'connection-rpc-remote-newer',
-      source: 'task-a',
-      target: 'task-b',
-      updatedAt: '2026-04-30T00:00:00.000Z',
-    };
-
-    const result = await service.pushConnection(connection, 'project-1', false, false, false, 'user-1');
-
-    expect(result).toBe(false);
-    expect(mockConnectionsUpsert).not.toHaveBeenCalled();
-    expect(mockRetryQueue.add).toHaveBeenCalledWith('connection', 'upsert', connection, 'project-1', 'user-1');
-    expect(mockRetryQueue.recordCircuitSuccess).not.toHaveBeenCalled();
-  });
-
-  // ============ 2026-05-15 B1 根因修复：终态拒绝就地软删 ============
-
-  it.each([
-    ['connection_endpoint_not_in_project'],
-    ['connection_owned_by_other_project'],
-    ['endpoint_tombstone'],
-    ['legacy_endpointless_tombstone'],
-  ])('B1：sync RPC 终态拒绝 reason=%s 时应就地软删且不入 RetryQueue', async (reason) => {
-    mockSyncRpcClient.isFeatureEnabled.mockReturnValue(true);
-    const rpcResult: SyncRpcResult = createSyncRpcResult({
-      status: 'unauthorized',
-      reason,
-    });
-    mockSyncRpcClient.upsertConnection.mockImplementationOnce(async () => rpcResult);
-
-    const connection: Connection = {
-      id: 'connection-terminal-reject',
-      source: 'task-a',
-      target: 'task-b',
-      updatedAt: '2026-04-30T00:00:00.000Z',
-    };
-    mockProjects = [{
-      id: 'project-1',
-      connections: [connection],
-      tasks: [],
-    }];
-
-    const result = await service.pushConnection(connection, 'project-1', false, false, false, 'user-1');
-
-    expect(result).toBe(false);
-    // 根因不变量 1：禁止入 RetryQueue（否则陷入「重试超限 → 移除 → 下次再入队」循环）
-    expect(mockRetryQueue.add).not.toHaveBeenCalled();
-    // 根因不变量 2：本地 connection 已被打上 deletedAt
-    const local = mockProjects[0].connections.find(c => c.id === 'connection-terminal-reject');
-    expect(local?.deletedAt).toBeTruthy();
-    // 根因不变量 3：Sentry 上报为 info 级（已知可自愈，非 warning）
-    const sentry = TestBed.inject(SentryLazyLoaderService) as unknown as {
-      captureMessage: ReturnType<typeof vi.fn>;
-    };
-    const infoCalls = sentry.captureMessage.mock.calls.filter(call => call[0] === 'connection_discarded_terminal_rejection');
-    expect(infoCalls.length).toBe(1);
-    expect(infoCalls[0][1]).toEqual(expect.objectContaining({
-      level: 'info',
-      tags: expect.objectContaining({ reason }),
-    }));
-    // 根因不变量 4：不该污染 syncError（这是正常自愈，非错误）
-    expect(mockSyncState.setSyncError).not.toHaveBeenCalled();
-  });
-
-  it('B1：非终态 unauthorized reason（如 project_not_owned）仍走原入队路径', async () => {
-    mockSyncRpcClient.isFeatureEnabled.mockReturnValue(true);
-    const rpcResult: SyncRpcResult = createSyncRpcResult({
-      status: 'unauthorized',
-      reason: 'project_not_owned',
-    });
-    mockSyncRpcClient.upsertConnection.mockImplementationOnce(async () => rpcResult);
-
-    const connection: Connection = {
-      id: 'connection-non-terminal',
-      source: 'task-a',
-      target: 'task-b',
-      updatedAt: '2026-04-30T00:00:00.000Z',
-    };
-    mockProjects = [{
-      id: 'project-1',
-      connections: [connection],
-      tasks: [],
-    }];
-
-    const result = await service.pushConnection(connection, 'project-1', false, false, false, 'user-1');
-
-    expect(result).toBe(false);
-    // 非终态：保留原行为（入队 + warning）
-    expect(mockRetryQueue.add).toHaveBeenCalledWith('connection', 'upsert', connection, 'project-1', 'user-1');
-    // 本地 connection 不应被软删
-    const local = mockProjects[0].connections.find(c => c.id === 'connection-non-terminal');
-    expect(local?.deletedAt).toBeFalsy();
-  });
-
-  it('B2：validateTasksExist 命中 referencesDeletedTask 时应主动就地软删', async () => {
-    // 模拟 task-a 在本地 tombstone 中
-    mockTombstoneService.getLocalTombstones.mockReturnValueOnce(new Set(['task-a']));
-    // 让任务存在性查询返回 task-b 但不返回 task-a
-    taskExistenceResult = { data: [{ id: 'task-b' }], error: null };
-
-    const connection: Connection = {
-      id: 'connection-references-deleted-task',
-      source: 'task-a',
-      target: 'task-b',
-      updatedAt: '2026-04-30T00:00:00.000Z',
-    };
-    mockProjects = [{
-      id: 'project-1',
-      connections: [connection],
-      tasks: [],
-    }];
-
-    const result = await service.pushConnection(connection, 'project-1', false, false, false, 'user-1');
-
-    expect(result).toBe(false);
-    // 不该入队
-    expect(mockRetryQueue.add).not.toHaveBeenCalled();
-    // 本地已被软删
-    const local = mockProjects[0].connections.find(c => c.id === 'connection-references-deleted-task');
-    expect(local?.deletedAt).toBeTruthy();
-    // Sentry info 上报
-    const sentry = TestBed.inject(SentryLazyLoaderService) as unknown as {
-      captureMessage: ReturnType<typeof vi.fn>;
-    };
-    const infoCalls = sentry.captureMessage.mock.calls.filter(call => call[0] === 'connection_discarded_terminal_rejection');
-    expect(infoCalls.length).toBe(1);
-  });
-
-  it('pushConnection 直接 upsert 前若远端连接更新更晚则应抛出版本冲突并阻止覆盖', async () => {
-    connectionFreshnessResult = {
-      data: {
-        id: 'connection-direct-conflict',
-        updated_at: '2026-04-30T00:02:00.000Z',
-        deleted_at: null,
-      },
-      error: null,
-    };
-
-    const connection: Connection = {
-      id: 'connection-direct-conflict',
-      source: 'task-a',
-      target: 'task-b',
-      updatedAt: '2026-04-30T00:00:00.000Z',
-    };
-
-    await expect(service.pushConnection(connection, 'project-1', false, false, false, 'user-1'))
-      .rejects.toBeInstanceOf(PermanentFailureError);
-
-    expect(mockConnectionsUpsert).not.toHaveBeenCalled();
-    expect(mockRetryQueue.add).not.toHaveBeenCalled();
-    expect(mockRetryQueue.recordCircuitSuccess).not.toHaveBeenCalled();
-  });
-
-  it('pushConnection 直接写入在 preflight 后被并发更新抢先时应抛出版本冲突', async () => {
-    connectionFreshnessResult = {
-      data: {
-        id: 'connection-direct-cas-miss',
-        updated_at: '2026-04-30T00:02:00.000Z',
-        deleted_at: null,
-      },
-      error: null,
-    };
-    connectionUpdateResult = {
-      data: null,
-      error: null,
-    };
-
-    const connection: Connection = {
-      id: 'connection-direct-cas-miss',
-      source: 'task-a',
-      target: 'task-b',
-      updatedAt: '2026-04-30T00:02:00.000Z',
-    };
-
-    await expect(service.pushConnection(connection, 'project-1', false, false, false, 'user-1'))
-      .rejects.toBeInstanceOf(PermanentFailureError);
-
-    expect(mockRetryQueue.add).not.toHaveBeenCalled();
-    expect(mockRetryQueue.recordCircuitSuccess).not.toHaveBeenCalled();
-  });
-
-  it('pushConnection 直接 insert 在写回未返回行时应以版本冲突失败收口，避免 406 冒泡', async () => {
-    connectionFreshnessResult = {
-      data: null,
-      error: null,
-    };
-    connectionUpsertResult = {
-      data: null,
-      error: null,
-    };
-
-    const connection: Connection = {
-      id: 'connection-direct-insert-empty',
-      source: 'task-a',
-      target: 'task-b',
-      updatedAt: '2026-04-30T00:00:00.000Z',
-    };
-
-    await expect(service.pushConnection(connection, 'project-1', false, false, false, 'user-1'))
-      .rejects.toBeInstanceOf(PermanentFailureError);
-
-    expect(mockConnectionsUpsert).toHaveBeenCalled();
-    expect(mockRetryQueue.add).not.toHaveBeenCalled();
-    expect(mockRetryQueue.recordCircuitSuccess).not.toHaveBeenCalled();
-  });
+  function pushConnectionFromRetryQueue(
+    connection: Connection,
+    operationId = '00000000-0000-4000-8000-000000000501',
+  ): Promise<boolean> {
+    return service.pushConnection(connection, 'project-1', false, false, true, 'user-1', operationId);
+  }
 
   it('引用已本地删除任务的连接不应继续入队', async () => {
     const connection: Connection = {
@@ -660,7 +529,26 @@ describe('ConnectionSyncOperationsService', () => {
     const result = await service.pushConnection(connection, 'project-1', false, false, false, 'user-1');
 
     expect(result).toBe(false);
-    expect(mockRetryQueue.add).toHaveBeenCalledWith('connection', 'upsert', connection, 'project-1', 'user-1');
+    expectConnectionRetryEnqueued(mockRetryQueue, connection);
+    expect(mockConnectionsUpsert).not.toHaveBeenCalled();
+  });
+
+  it('重试队列回放 connection upsert 遇到可重试基础设施故障时应抛回延后通道而不是消耗重试预算', async () => {
+    // P0 回归：回放中的 503/超时/断网类失败被吞成 false 会计入 retryCount，
+    // 弱网 flap 数轮即把队列项烧进隔离区；必须抛出让 runner 按 server-pressure 延后。
+    const connection: Connection = {
+      id: 'connection-replay-infra-defer',
+      source: 'task-a',
+      target: 'task-b',
+    };
+    connectionTombstoneResult = {
+      data: null,
+      error: { code: '503', message: 'Service unavailable' },
+    };
+
+    await expect(pushConnectionFromRetryQueue(connection))
+      .rejects.toMatchObject({ isRetryable: true });
+    expect(mockRetryQueue.add).not.toHaveBeenCalled();
     expect(mockConnectionsUpsert).not.toHaveBeenCalled();
   });
 
@@ -684,22 +572,6 @@ describe('ConnectionSyncOperationsService', () => {
     expect(mockConnectionsUpsert).not.toHaveBeenCalled();
   });
 
-  it('session 在浏览器网络挂起窗口内暂不可用时应延后连接同步而非标记过期', async () => {
-    const connection: Connection = {
-      id: 'connection-browser-suspended-session',
-      source: 'task-a',
-      target: 'task-b',
-    };
-    setVisibilityState('hidden');
-    mockClient.auth.getSession.mockResolvedValueOnce({ data: { session: null as any } });
-
-    const result = await service.pushConnection(connection, 'project-1', false, false, false, 'user-1');
-
-    expect(result).toBe(false);
-    expect(mockSyncState.setSessionExpired).not.toHaveBeenCalled();
-    expect(mockRetryQueue.add).toHaveBeenCalledWith('connection', 'upsert', connection, 'project-1', 'user-1');
-  });
-
   it('self-link 连接不应写入云端或进入重试队列', async () => {
     const connection: Connection = {
       id: 'connection-self-link',
@@ -714,815 +586,9 @@ describe('ConnectionSyncOperationsService', () => {
     expect(mockConnectionsUpsert).not.toHaveBeenCalled();
   });
 
-  it('首次缺少 session 时应先尝试 refresh，再继续连接同步', async () => {
-    const connection: Connection = {
-      id: 'connection-refresh-before-expire',
-      source: 'task-a',
-      target: 'task-b',
-    };
-    mockSessionManager.tryRefreshSession.mockResolvedValueOnce(true);
-    mockClient.auth.getSession
-      .mockResolvedValueOnce({ data: { session: null as any } })
-      .mockResolvedValueOnce({ data: { session: { user: { id: 'user-1' } } } });
+  registerConnectionSyncCanonicalTombstoneSpecs(getCanonicalTombstoneSpecContext);
 
-    const result = await service.pushConnection(connection, 'project-1', false, false, false, 'user-1');
+  registerConnectionSyncCanonicalRecoverySpecs(getCanonicalRecoverySpecContext);
 
-    expect(result).toBe(true);
-    expect(mockSessionManager.tryRefreshSession).toHaveBeenCalledWith('pushConnection.getSession');
-    expect(mockSyncState.setSessionExpired).not.toHaveBeenCalled();
-  });
-
-  it('成功同步后应直接使用 upsert 返回的 updated_at 归一本地连接时间戳，不再额外回读', async () => {
-    const connection: Connection = {
-      id: 'connection-normalize-updated-at',
-      source: 'task-a',
-      target: 'task-b',
-      updatedAt: '2036-04-11T00:00:00.000Z',
-    };
-    mockProjects = [{
-      id: 'project-1',
-      tasks: [],
-      connections: [{ ...connection }],
-    }];
-    connectionUpsertResult = {
-      data: { updated_at: '2026-04-11T00:01:00.000Z' },
-      error: null,
-    };
-
-    const result = await service.pushConnection(connection, 'project-1', false, false, false, 'user-1');
-
-    expect(result).toBe(true);
-    expect(connection.updatedAt).toBe('2026-04-11T00:01:00.000Z');
-    expect(mockProjects[0].connections[0].updatedAt).toBe('2026-04-11T00:01:00.000Z');
-    expect(connectionReadbackQueryCount).toBe(0);
-    expect(mockProjectState.updateProjects).toHaveBeenCalled();
-  });
-
-  it('远端仅存在软删同端点连接时应复用其 id 执行恢复', async () => {
-    const connection: Connection = {
-      id: 'connection-local-revive',
-      source: 'task-a',
-      target: 'task-b',
-      updatedAt: '2036-04-11T00:00:00.000Z',
-    };
-    endpointDedupResponses = [{
-      data: [{
-        id: 'connection-remote-soft-deleted',
-        deleted_at: '2026-04-10T00:00:00.000Z',
-      }],
-      error: null,
-    }];
-    mockProjects = [{
-      id: 'project-1',
-      tasks: [],
-      connections: [{ ...connection }],
-    }];
-
-    const result = await service.pushConnection(connection, 'project-1', false, false, false, 'user-1');
-
-    expect(result).toBe(true);
-    expect(mockConnectionsUpsert).toHaveBeenCalledWith(
-      expect.objectContaining({
-        id: 'connection-remote-soft-deleted',
-      }),
-      expect.any(Object)
-    );
-    expect(mockProjects[0].connections[0].id).toBe('connection-remote-soft-deleted');
-  });
-
-  it('本地活跃连接遇到远端 active+deleted 混排时应优先复用 active id', async () => {
-    const connection: Connection = {
-      id: 'connection-local-active',
-      source: 'task-a',
-      target: 'task-b',
-      updatedAt: '2036-04-11T00:00:00.000Z',
-    };
-    endpointDedupResponses = [{
-      data: [
-        {
-          id: 'connection-remote-deleted',
-          deleted_at: '2026-04-10T00:00:00.000Z',
-          updated_at: '2026-04-10T00:00:00.000Z',
-        },
-        {
-          id: 'connection-remote-active',
-          deleted_at: null,
-          updated_at: '2026-04-11T00:00:00.000Z',
-        },
-      ],
-      error: null,
-    }];
-    mockProjects = [{
-      id: 'project-1',
-      tasks: [],
-      connections: [{ ...connection }],
-    }];
-
-    const result = await service.pushConnection(connection, 'project-1', false, false, false, 'user-1');
-
-    expect(result).toBe(true);
-    expect(mockConnectionsUpsert).toHaveBeenCalledWith(
-      expect.objectContaining({
-        id: 'connection-remote-active',
-      }),
-      expect.any(Object)
-    );
-    expect(mockProjects[0].connections[0].id).toBe('connection-remote-active');
-  });
-
-  it('本地软删连接遇到远端 active 同端点连接时应复用远端 id 完成删除', async () => {
-    const connection: Connection = {
-      id: 'connection-local-delete',
-      source: 'task-a',
-      target: 'task-b',
-      deletedAt: '2026-04-11T00:02:00.000Z',
-      updatedAt: '2036-04-11T00:00:00.000Z',
-    };
-    endpointDedupResponses = [{
-      data: [{
-        id: 'connection-remote-active',
-        deleted_at: null,
-      }],
-      error: null,
-    }];
-    mockProjects = [{
-      id: 'project-1',
-      tasks: [],
-      connections: [{ ...connection }],
-    }];
-
-    const result = await service.pushConnection(connection, 'project-1', false, false, false, 'user-1');
-
-    expect(result).toBe(true);
-    expect(mockConnectionsUpsert).toHaveBeenCalledWith(
-      expect.objectContaining({
-        id: 'connection-remote-active',
-        deleted_at: '2026-04-11T00:02:00.000Z',
-      }),
-      expect.any(Object)
-    );
-    expect(mockProjects[0].connections[0].id).toBe('connection-remote-active');
-  });
-
-  it('同 id 时若服务端 deleted 状态更新更晚则不应被本地旧 active 状态覆盖', async () => {
-    const connection: Connection = {
-      id: 'connection-same-id-stale-active',
-      source: 'task-a',
-      target: 'task-b',
-      title: 'local title',
-      description: 'local description',
-      updatedAt: '2026-04-11T00:00:00.000Z',
-    };
-    endpointDedupResponses = [{
-      data: [{
-        id: 'connection-same-id-stale-active',
-        deleted_at: '2026-04-11T00:03:00.000Z',
-        updated_at: '2026-04-11T00:03:00.000Z',
-        title: 'server title',
-        description: 'server description',
-      }],
-      error: null,
-    }];
-    mockProjects = [{
-      id: 'project-1',
-      tasks: [],
-      connections: [{ ...connection }],
-    }];
-
-    const result = await service.pushConnection(connection, 'project-1', false, false, false, 'user-1');
-
-    expect(result).toBe(true);
-    expect(mockConnectionsUpsert).toHaveBeenCalledWith(
-      expect.objectContaining({
-        id: 'connection-same-id-stale-active',
-        deleted_at: '2026-04-11T00:03:00.000Z',
-        title: 'server title',
-        description: 'server description',
-      }),
-      expect.any(Object)
-    );
-    expect(mockProjects[0].connections[0]).toEqual(expect.objectContaining({
-      id: 'connection-same-id-stale-active',
-      deletedAt: '2026-04-11T00:03:00.000Z',
-      title: 'server title',
-      description: 'server description',
-    }));
-  });
-
-  it('同 id 时若服务端 active 行更晚且明确清空字段则不应继承本地旧 deletedAt 或 metadata', async () => {
-    const connection: Connection = {
-      id: 'connection-same-id-stale-deleted',
-      source: 'task-a',
-      target: 'task-b',
-      title: 'old title',
-      description: 'old description',
-      deletedAt: '2026-04-11T00:00:00.000Z',
-      updatedAt: '2026-04-11T00:00:00.000Z',
-    };
-    endpointDedupResponses = [{
-      data: [{
-        id: 'connection-same-id-stale-deleted',
-        deleted_at: null,
-        updated_at: '2026-04-11T00:05:00.000Z',
-        title: null,
-        description: null,
-      }],
-      error: null,
-    }];
-
-    const result = await service.pushConnection(connection, 'project-1', false, false, false, 'user-1');
-
-    expect(result).toBe(true);
-    expect(mockConnectionsUpsert).toHaveBeenCalledWith(
-      expect.objectContaining({
-        id: 'connection-same-id-stale-deleted',
-        deleted_at: null,
-        title: null,
-        description: null,
-      }),
-      expect.any(Object)
-    );
-  });
-
-  it('canonical id 重绑到本地已存在记录时应合并为单条连接', async () => {
-    const connection: Connection = {
-      id: 'connection-local-revived',
-      source: 'task-a',
-      target: 'task-b',
-      updatedAt: '2036-04-11T00:00:00.000Z',
-    };
-    endpointDedupResponses = [{
-      data: [{
-        id: 'connection-canonical',
-        deleted_at: '2026-04-10T00:00:00.000Z',
-        updated_at: '2026-04-10T00:00:00.000Z',
-      }],
-      error: null,
-    }];
-    mockProjects = [{
-      id: 'project-1',
-      tasks: [],
-      connections: [
-        { ...connection },
-        {
-          id: 'connection-canonical',
-          source: 'task-a',
-          target: 'task-b',
-          title: 'canonical title',
-          description: 'canonical description',
-          deletedAt: '2026-04-10T00:00:00.000Z',
-          updatedAt: '2026-04-10T00:00:00.000Z',
-        },
-      ],
-    }];
-
-    const result = await service.pushConnection(connection, 'project-1', false, false, false, 'user-1');
-
-    expect(result).toBe(true);
-    expect(mockProjects[0].connections.filter(item => item.id === 'connection-canonical')).toHaveLength(1);
-    expect(mockProjects[0].connections[0]).toEqual(expect.objectContaining({
-      id: 'connection-canonical',
-      deletedAt: undefined,
-      title: 'canonical title',
-      description: 'canonical description',
-    }));
-  });
-
-  it('canonical rebinding 应保留比 old-id 更晚的本地 canonical 删除状态', async () => {
-    const connection: Connection = {
-      id: 'connection-old-id-stale-active',
-      source: 'task-a',
-      target: 'task-b',
-      updatedAt: '2026-04-11T00:00:00.000Z',
-    };
-    endpointDedupResponses = [{
-      data: [{
-        id: 'connection-canonical-fresher-local-delete',
-        deleted_at: '2026-04-12T00:00:00.000Z',
-        updated_at: '2026-04-12T00:00:00.000Z',
-        title: 'server title',
-        description: 'server description',
-      }],
-      error: null,
-    }];
-    mockProjects = [{
-      id: 'project-1',
-      tasks: [],
-      connections: [
-        { ...connection },
-        {
-          id: 'connection-canonical-fresher-local-delete',
-          source: 'task-a',
-          target: 'task-b',
-          title: 'local canonical title',
-          description: 'local canonical description',
-          deletedAt: '2026-04-12T00:00:00.000Z',
-          updatedAt: '2026-04-12T00:00:00.000Z',
-        },
-      ],
-    }];
-
-    const result = await service.pushConnection(connection, 'project-1', false, false, false, 'user-1');
-
-    expect(result).toBe(true);
-    expect(mockConnectionsUpsert).toHaveBeenCalledWith(
-      expect.objectContaining({
-        id: 'connection-canonical-fresher-local-delete',
-        deleted_at: '2026-04-12T00:00:00.000Z',
-        title: 'server title',
-        description: 'server description',
-      }),
-      expect.any(Object)
-    );
-  });
-
-  it('precheck canonical row 若服务端删除时间更晚则不应被本地旧 active 状态复活', async () => {
-    const connection: Connection = {
-      id: 'connection-local-stale-active',
-      source: 'task-a',
-      target: 'task-b',
-      updatedAt: '2026-04-11T00:00:00.000Z',
-    };
-    endpointDedupResponses = [{
-      data: [{
-        id: 'connection-canonical-deleted-newer',
-        deleted_at: '2026-04-11T00:02:00.000Z',
-        updated_at: '2026-04-11T00:02:00.000Z',
-        title: 'server title',
-        description: 'server description',
-      }],
-      error: null,
-    }];
-    mockProjects = [{
-      id: 'project-1',
-      tasks: [],
-      connections: [
-        { ...connection },
-        {
-          id: 'connection-canonical-deleted-newer',
-          source: 'task-a',
-          target: 'task-b',
-          title: 'old local title',
-          description: 'old local description',
-          updatedAt: '2026-04-11T00:00:00.000Z',
-        },
-      ],
-    }];
-
-    const result = await service.pushConnection(connection, 'project-1', false, false, false, 'user-1');
-
-    expect(result).toBe(true);
-    expect(mockConnectionsUpsert).toHaveBeenCalledWith(
-      expect.objectContaining({
-        id: 'connection-canonical-deleted-newer',
-        deleted_at: '2026-04-11T00:02:00.000Z',
-        title: 'server title',
-        description: 'server description',
-      }),
-      expect.any(Object)
-    );
-    expect(mockProjects[0].connections.find(item => item.id === 'connection-canonical-deleted-newer')).toEqual(
-      expect.objectContaining({
-        deletedAt: '2026-04-11T00:02:00.000Z',
-        title: 'server title',
-        description: 'server description',
-      })
-    );
-  });
-
-  it('stale replay 在旧 id 已不在本地时也应从 canonical row 回填 metadata', async () => {
-    const connection: Connection = {
-      id: 'connection-stale-replay-old-id',
-      source: 'task-a',
-      target: 'task-b',
-    };
-    endpointDedupResponses = [{
-      data: [{
-        id: 'connection-canonical-only',
-        deleted_at: null,
-        updated_at: '2026-04-11T00:00:00.000Z',
-      }],
-      error: null,
-    }];
-    mockProjects = [{
-      id: 'project-1',
-      tasks: [],
-      connections: [{
-        id: 'connection-canonical-only',
-        source: 'task-a',
-        target: 'task-b',
-        title: 'canonical title',
-        description: 'canonical description',
-        updatedAt: '2026-04-11T00:00:00.000Z',
-      }],
-    }];
-
-    const result = await service.pushConnection(connection, 'project-1', false, false, false, 'user-1');
-
-    expect(result).toBe(true);
-    expect(mockConnectionsUpsert).toHaveBeenCalledWith(
-      expect.objectContaining({
-        id: 'connection-canonical-only',
-        title: 'canonical title',
-        description: 'canonical description',
-      }),
-      expect.any(Object)
-    );
-  });
-
-  it('stale replay 在本地 canonical row 缺失且本地内容更新更晚时不应被远端旧空内容覆盖', async () => {
-    const connection: Connection = {
-      id: 'connection-stale-replay-local-newer-content',
-      source: 'task-a',
-      target: 'task-b',
-      title: 'fresh title',
-      description: 'fresh description',
-      updatedAt: '2026-04-11T00:03:00.000Z',
-    };
-    endpointDedupResponses = [{
-      data: [{
-        id: 'connection-canonical-older-empty',
-        deleted_at: null,
-        updated_at: '2026-04-11T00:00:00.000Z',
-        title: null,
-        description: null,
-      }],
-      error: null,
-    }];
-    mockProjects = [{
-      id: 'project-1',
-      tasks: [],
-      connections: [],
-    }];
-
-    const result = await service.pushConnection(connection, 'project-1', false, false, false, 'user-1');
-
-    expect(result).toBe(true);
-    expect(mockConnectionsUpsert).toHaveBeenCalledWith(
-      expect.objectContaining({
-        id: 'connection-canonical-older-empty',
-        title: 'fresh title',
-        description: 'fresh description',
-      }),
-      expect.any(Object)
-    );
-  });
-
-  it('stale replay 在旧 id 已不在本地时不应清空 canonical row 的 deletedAt', async () => {
-    const connection: Connection = {
-      id: 'connection-stale-replay-delete-old-id',
-      source: 'task-a',
-      target: 'task-b',
-    };
-    endpointDedupResponses = [{
-      data: [{
-        id: 'connection-canonical-deleted',
-        deleted_at: '2026-04-11T00:02:00.000Z',
-        updated_at: '2026-04-11T00:02:00.000Z',
-      }],
-      error: null,
-    }];
-    mockProjects = [{
-      id: 'project-1',
-      tasks: [],
-      connections: [{
-        id: 'connection-canonical-deleted',
-        source: 'task-a',
-        target: 'task-b',
-        deletedAt: '2026-04-11T00:02:00.000Z',
-        updatedAt: '2026-04-11T00:02:00.000Z',
-      }],
-    }];
-
-    const result = await service.pushConnection(connection, 'project-1', false, false, false, 'user-1');
-
-    expect(result).toBe(true);
-    expect(mockConnectionsUpsert).toHaveBeenCalledWith(
-      expect.objectContaining({
-        id: 'connection-canonical-deleted',
-        deleted_at: '2026-04-11T00:02:00.000Z',
-      }),
-      expect.any(Object)
-    );
-  });
-
-  it('不同 id 的旧连接重放遇到更新的端点 tombstone 时不应复活已删连接', async () => {
-    const connection: Connection = {
-      id: 'connection-stale-different-id',
-      source: 'task-a',
-      target: 'task-b',
-      updatedAt: '2026-04-11T00:00:00.000Z',
-    };
-    connectionEndpointTombstoneResult = {
-      data: { deleted_at: '2026-04-11T00:02:00.000Z' },
-      error: null,
-    };
-
-    const result = await service.pushConnection(connection, 'project-1', false, false, false, 'user-1');
-
-    expect(result).toBe(false);
-    expect(mockConnectionsUpsert).not.toHaveBeenCalled();
-    expect(mockRetryQueue.add).not.toHaveBeenCalled();
-  });
-
-  it('历史 endpoint-less tombstone 更晚时应 fail closed，避免 fresh-id replay 复活旧连接', async () => {
-    const connection: Connection = {
-      id: 'connection-legacy-tombstone-replay',
-      source: 'task-a',
-      target: 'task-b',
-      updatedAt: '2026-04-11T00:00:00.000Z',
-    };
-    legacyConnectionTombstoneResult = {
-      data: {
-        deleted_at: '2026-04-11T00:04:00.000Z',
-        source_id: null,
-        target_id: null,
-      },
-      error: null,
-    };
-
-    const result = await service.pushConnection(connection, 'project-1', false, false, false, 'user-1');
-
-    expect(result).toBe(false);
-    expect(mockConnectionsUpsert).not.toHaveBeenCalled();
-  });
-
-  it('端点 tombstone 新旧比较应考虑 local deletedAt，避免误丢更晚的删除重放', async () => {
-    const connection: Connection = {
-      id: 'connection-delete-without-updated-at',
-      source: 'task-a',
-      target: 'task-b',
-      deletedAt: '2026-04-11T00:03:00.000Z',
-    };
-    connectionEndpointTombstoneResult = {
-      data: { deleted_at: '2026-04-11T00:02:00.000Z' },
-      error: null,
-    };
-
-    const result = await service.pushConnection(connection, 'project-1', false, false, false, 'user-1');
-
-    expect(result).toBe(true);
-    expect(mockConnectionsUpsert).toHaveBeenCalledWith(
-      expect.objectContaining({
-        id: 'connection-delete-without-updated-at',
-        deleted_at: '2026-04-11T00:03:00.000Z',
-      }),
-      expect.any(Object)
-    );
-  });
-
-  it('local canonical row 缺失时应使用服务端 canonical metadata 避免清空远端状态', async () => {
-    const connection: Connection = {
-      id: 'connection-server-only-canonical-old-id',
-      source: 'task-a',
-      target: 'task-b',
-    };
-    endpointDedupResponses = [{
-      data: [{
-        id: 'connection-server-only-canonical',
-        deleted_at: '2026-04-11T00:02:00.000Z',
-        updated_at: '2026-04-11T00:02:00.000Z',
-        title: 'server title',
-        description: 'server description',
-      }],
-      error: null,
-    }];
-    mockProjects = [{
-      id: 'project-1',
-      tasks: [],
-      connections: [],
-    }];
-
-    const result = await service.pushConnection(connection, 'project-1', false, false, false, 'user-1');
-
-    expect(result).toBe(true);
-    expect(mockConnectionsUpsert).toHaveBeenCalledWith(
-      expect.objectContaining({
-        id: 'connection-server-only-canonical',
-        deleted_at: '2026-04-11T00:02:00.000Z',
-        title: 'server title',
-        description: 'server description',
-      }),
-      expect.any(Object)
-    );
-  });
-
-  it('precheck miss 后遇到 23505 时应重绑 canonical id 并重试 upsert 当前变更', async () => {
-    const connection: Connection = {
-      id: 'connection-local-delete-race',
-      source: 'task-a',
-      target: 'task-b',
-      deletedAt: '2026-04-11T00:02:00.000Z',
-      updatedAt: '2036-04-11T00:00:00.000Z',
-    };
-    endpointDedupResponses = [
-      { data: [], error: null },
-      {
-        data: [{
-          id: 'connection-raced-canonical',
-          deleted_at: null,
-          updated_at: '2026-04-11T00:00:00.000Z',
-        }],
-        error: null,
-      },
-    ];
-    mockConnectionsUpsert
-      .mockResolvedValueOnce({
-        error: {
-          code: '23505',
-          message: 'duplicate key value violates unique constraint "uq_connections_project_source_target_active"',
-        },
-      })
-      .mockResolvedValueOnce({ data: { updated_at: '2036-04-11T00:00:00.000Z' }, error: null });
-    mockProjects = [{
-      id: 'project-1',
-      tasks: [],
-      connections: [{ ...connection }],
-    }];
-
-    const result = await service.pushConnection(connection, 'project-1', false, false, false, 'user-1');
-
-    expect(result).toBe(true);
-    expect(mockConnectionsUpsert).toHaveBeenCalledTimes(2);
-    expect(mockConnectionsUpsert).toHaveBeenNthCalledWith(
-      2,
-      expect.objectContaining({
-        id: 'connection-raced-canonical',
-        deleted_at: '2026-04-11T00:02:00.000Z',
-      }),
-      expect.any(Object)
-    );
-    expect(mockProjects[0].connections).toEqual([
-      expect.objectContaining({
-        id: 'connection-raced-canonical',
-        deletedAt: '2026-04-11T00:02:00.000Z',
-      }),
-    ]);
-  });
-
-  it('23505 恢复时旧 id 已不在本地也应从 canonical row 回填 metadata 再重试', async () => {
-    const connection: Connection = {
-      id: 'connection-stale-race-old-id',
-      source: 'task-a',
-      target: 'task-b',
-    };
-    endpointDedupResponses = [
-      { data: [], error: null },
-      {
-        data: [{
-          id: 'connection-raced-canonical-metadata',
-          deleted_at: null,
-          updated_at: '2026-04-11T00:00:00.000Z',
-        }],
-        error: null,
-      },
-    ];
-    mockConnectionsUpsert
-      .mockResolvedValueOnce({
-        error: {
-          code: '23505',
-          message: 'duplicate key value violates unique constraint "uq_connections_project_source_target_active"',
-        },
-      })
-      .mockResolvedValueOnce({ data: { updated_at: '2026-04-11T00:01:00.000Z' }, error: null });
-    mockProjects = [{
-      id: 'project-1',
-      tasks: [],
-      connections: [{
-        id: 'connection-raced-canonical-metadata',
-        source: 'task-a',
-        target: 'task-b',
-        title: 'canonical title',
-        description: 'canonical description',
-        updatedAt: '2026-04-11T00:00:00.000Z',
-      }],
-    }];
-
-    const result = await service.pushConnection(connection, 'project-1', false, false, false, 'user-1');
-
-    expect(result).toBe(true);
-    expect(mockConnectionsUpsert).toHaveBeenNthCalledWith(
-      2,
-      expect.objectContaining({
-        id: 'connection-raced-canonical-metadata',
-        title: 'canonical title',
-        description: 'canonical description',
-      }),
-      expect.any(Object)
-    );
-  });
-
-  it('23505 恢复时若服务端 canonical 已删除且更新更晚则不应被本地旧 active 状态复活', async () => {
-    const connection: Connection = {
-      id: 'connection-stale-race-local-active',
-      source: 'task-a',
-      target: 'task-b',
-      updatedAt: '2026-04-11T00:00:00.000Z',
-    };
-    endpointDedupResponses = [
-      { data: [], error: null },
-      {
-        data: [{
-          id: 'connection-raced-canonical-deleted',
-          deleted_at: '2026-04-11T00:03:00.000Z',
-          updated_at: '2026-04-11T00:03:00.000Z',
-          title: 'server title',
-          description: 'server description',
-        }],
-        error: null,
-      },
-    ];
-    mockConnectionsUpsert
-      .mockResolvedValueOnce({
-        error: {
-          code: '23505',
-          message: 'duplicate key value violates unique constraint "uq_connections_project_source_target_active"',
-        },
-      })
-      .mockResolvedValueOnce({ data: { updated_at: '2026-04-11T00:03:00.000Z' }, error: null });
-    mockProjects = [{
-      id: 'project-1',
-      tasks: [],
-      connections: [
-        { ...connection },
-        {
-          id: 'connection-raced-canonical-deleted',
-          source: 'task-a',
-          target: 'task-b',
-          title: 'old local title',
-          description: 'old local description',
-          updatedAt: '2026-04-11T00:00:00.000Z',
-        },
-      ],
-    }];
-
-    const result = await service.pushConnection(connection, 'project-1', false, false, false, 'user-1');
-
-    expect(result).toBe(true);
-    expect(mockConnectionsUpsert).toHaveBeenNthCalledWith(
-      2,
-      expect.objectContaining({
-        id: 'connection-raced-canonical-deleted',
-        deleted_at: '2026-04-11T00:03:00.000Z',
-        title: 'server title',
-        description: 'server description',
-      }),
-      expect.any(Object)
-    );
-  });
-
-  it('23505 后重新查询仍拿不到 canonical row 时应按失败入队而不是伪成功', async () => {
-    const connection: Connection = {
-      id: 'connection-local-delete-race-miss',
-      source: 'task-a',
-      target: 'task-b',
-      deletedAt: '2026-04-11T00:02:00.000Z',
-      updatedAt: '2036-04-11T00:00:00.000Z',
-    };
-    endpointDedupResponses = [
-      { data: [], error: null },
-      { data: [], error: null },
-    ];
-    mockConnectionsUpsert.mockResolvedValueOnce({
-      error: {
-        code: '23505',
-        message: 'duplicate key value violates unique constraint "uq_connections_project_source_target_active"',
-      },
-    });
-
-    const result = await service.pushConnection(connection, 'project-1', false, false, false, 'user-1');
-
-    expect(result).toBe(false);
-    expect(mockRetryQueue.add).toHaveBeenCalledWith('connection', 'upsert', connection, 'project-1', 'user-1');
-  });
-
-  it('重试队列回放连接遇到浏览器网络挂起时应抛出延后错误，避免消耗 retry budget', async () => {
-    const connection: Connection = {
-      id: 'connection-browser-suspended-replay',
-      source: 'task-a',
-      target: 'task-b',
-    };
-    mockClient.auth.getSession.mockRejectedValueOnce(createBrowserNetworkSuspendedError());
-
-    await expect(service.pushConnection(connection, 'project-1', false, false, true, 'user-1'))
-      .rejects.toMatchObject({ name: 'BrowserNetworkSuspendedError' });
-    expect(mockRetryQueue.add).not.toHaveBeenCalled();
-  });
-
-  it('重试队列回放连接在任务存在性查询遇到浏览器网络挂起时应抛出延后错误', async () => {
-    const connection: Connection = {
-      id: 'connection-browser-suspended-validation',
-      source: 'task-a',
-      target: 'task-b',
-    };
-    taskExistenceResult = {
-      data: [],
-      error: createBrowserNetworkSuspendedError(),
-    };
-
-    await expect(service.pushConnection(connection, 'project-1', false, false, true, 'user-1'))
-      .rejects.toMatchObject({ name: 'BrowserNetworkSuspendedError' });
-    expect(mockRetryQueue.add).not.toHaveBeenCalled();
-    expect(mockConnectionsUpsert).not.toHaveBeenCalled();
-  });
+  registerConnectionSyncSessionRecoverySpecs(getSessionRecoverySpecContext);
 });

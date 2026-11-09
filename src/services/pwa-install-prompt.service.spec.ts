@@ -18,6 +18,7 @@ describe('PwaInstallPromptService', () => {
   const originalFlag = FEATURE_FLAGS.PWA_INSTALL_PROMPT_V1;
   const originalNativeFlag = FEATURE_FLAGS.PWA_NATIVE_INSTALL_PROMPT_V1;
   let matchMediaMatches: boolean;
+  let matchMediaList: MediaQueryList;
 
   const mockDestroyRef: Pick<DestroyRef, 'onDestroy'> = {
     onDestroy: (cb: () => void) => {
@@ -40,15 +41,21 @@ describe('PwaInstallPromptService', () => {
     }),
   };
 
-  function createService(): PwaInstallPromptService {
+  function createService(
+    loggerProvider: Pick<LoggerService, 'category'> = mockLogger as unknown as Pick<LoggerService, 'category'>,
+  ): PwaInstallPromptService {
     const injector = Injector.create({
       providers: [
         { provide: PwaInstallPromptService, useClass: PwaInstallPromptService },
-        { provide: LoggerService, useValue: mockLogger },
+        { provide: LoggerService, useValue: loggerProvider },
         { provide: DestroyRef, useValue: mockDestroyRef },
       ],
     });
     return runInInjectionContext(injector, () => injector.get(PwaInstallPromptService));
+  }
+
+  function cleanupService(target = service): void {
+    (target as unknown as { cleanup: () => void }).cleanup();
   }
 
   function emitBeforeInstallPrompt(
@@ -79,15 +86,15 @@ describe('PwaInstallPromptService', () => {
     destroyCallbacks.length = 0;
     localStorage.removeItem(DISMISSED_KEY);
     matchMediaMatches = false;
+    matchMediaList = {
+      get matches() { return matchMediaMatches; },
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    } as unknown as MediaQueryList;
 
     // 模拟 matchMedia
     vi.spyOn(window, 'matchMedia').mockImplementation(
-      () =>
-        ({
-          matches: matchMediaMatches,
-          addEventListener: vi.fn(),
-          removeEventListener: vi.fn(),
-        }) as unknown as MediaQueryList,
+      () => matchMediaList,
     );
 
     (FEATURE_FLAGS as unknown as Record<string, boolean>).PWA_INSTALL_PROMPT_V1 = true;
@@ -97,6 +104,7 @@ describe('PwaInstallPromptService', () => {
 
   afterEach(() => {
     // 先触发清理回调（移除事件监听器），避免 PollutionGuard 警告
+    cleanupService();
     destroyCallbacks.forEach((cb) => cb());
     destroyCallbacks.length = 0;
     localStorage.removeItem(DISMISSED_KEY);
@@ -122,6 +130,29 @@ describe('PwaInstallPromptService', () => {
 
     const beforeInstallCalls = addSpy.mock.calls.filter((c) => c[0] === 'beforeinstallprompt');
     expect(beforeInstallCalls.length).toBe(1);
+  });
+
+  it('display-mode 监听注册失败时应回滚窗口监听并允许重试初始化', () => {
+    const addSpy = vi.spyOn(window, 'addEventListener');
+    const removeSpy = vi.spyOn(window, 'removeEventListener');
+    vi.mocked(matchMediaList.addEventListener)
+      .mockImplementationOnce(() => {
+        throw new Error('display mode listener registration failed');
+      })
+      .mockImplementationOnce(() => undefined);
+
+    expect(() => service.initialize()).toThrow('display mode listener registration failed');
+
+    expect(removeSpy).toHaveBeenCalledWith('beforeinstallprompt', expect.any(Function));
+    expect(removeSpy).toHaveBeenCalledWith('appinstalled', expect.any(Function));
+    expect((service as unknown as { beforeInstallPromptHandler: unknown }).beforeInstallPromptHandler).toBeNull();
+    expect((service as unknown as { appInstalledHandler: unknown }).appInstalledHandler).toBeNull();
+    expect((service as unknown as { displayModeHandler: unknown }).displayModeHandler).toBeNull();
+    expect((service as unknown as { initialized: boolean }).initialized).toBe(false);
+
+    expect(() => service.initialize()).not.toThrow();
+    expect(addSpy.mock.calls.filter(call => call[0] === 'beforeinstallprompt')).toHaveLength(2);
+    expect(addSpy.mock.calls.filter(call => call[0] === 'appinstalled')).toHaveLength(2);
   });
 
   // --- beforeinstallprompt 事件 ---
@@ -194,6 +225,46 @@ describe('PwaInstallPromptService', () => {
     expect(result).toBe(false);
   });
 
+  it('prompt 抛出且 warn 日志失败时 promptInstall 仍应返回 false', async () => {
+    cleanupService();
+    const loggerMethods = {
+      info: vi.fn(),
+      warn: vi.fn(() => {
+        throw new Error('logger unavailable');
+      }),
+      error: vi.fn(),
+      debug: vi.fn(),
+    };
+    service = createService({ category: () => loggerMethods } as unknown as Pick<LoggerService, 'category'>);
+    emitBeforeInstallPrompt({
+      prompt: vi.fn().mockRejectedValue(new Error('prompt failed')),
+      userChoice: Promise.resolve({ outcome: 'dismissed', platform: '' }),
+    });
+
+    await expect(service.promptInstall()).resolves.toBe(false);
+    expect(loggerMethods.warn).toHaveBeenCalledWith('安装提示调用失败', expect.any(Error));
+  });
+
+  it('promptInstall 过程中 appinstalled 清空全局 deferredPrompt 时仍应按当前事件结果完成', async () => {
+    let resolvePrompt!: () => void;
+    const promptPromise = new Promise<void>((resolve) => {
+      resolvePrompt = resolve;
+    });
+    const promptFn = vi.fn().mockReturnValue(promptPromise);
+    emitBeforeInstallPrompt({
+      prompt: promptFn,
+      userChoice: Promise.resolve({ outcome: 'accepted', platform: 'web' }),
+    });
+
+    const resultPromise = service.promptInstall();
+    window.dispatchEvent(new Event('appinstalled'));
+    resolvePrompt();
+
+    await expect(resultPromise).resolves.toBe(true);
+    expect(promptFn).toHaveBeenCalledTimes(1);
+    expect(service.canInstall()).toBe(false);
+  });
+
   // --- dismissPrompt / resetDismissedPrompt ---
 
   it('dismissPrompt 应写入 localStorage 并更新 dismissedSignal', () => {
@@ -258,13 +329,36 @@ describe('PwaInstallPromptService', () => {
     expect(localStorage.getItem(DISMISSED_KEY)).toBe('true');
   });
 
+  it('appinstalled 日志失败时仍应清除安装状态并写入 dismissed 标记', () => {
+    cleanupService();
+    const loggerMethods = {
+      info: vi.fn()
+        .mockImplementationOnce(() => undefined)
+        .mockImplementationOnce(() => {
+          throw new Error('logger unavailable');
+        }),
+      warn: vi.fn(),
+      error: vi.fn(),
+      debug: vi.fn(),
+    };
+    service = createService({ category: () => loggerMethods } as unknown as Pick<LoggerService, 'category'>);
+    emitBeforeInstallPrompt();
+    expect(service.canInstall()).toBe(true);
+
+    expect(() => window.dispatchEvent(new Event('appinstalled'))).not.toThrow();
+
+    expect(loggerMethods.info).toHaveBeenCalledWith('PWA 安装完成');
+    expect(service.canInstall()).toBe(false);
+    expect(service.isStandaloneMode()).toBe(true);
+    expect(localStorage.getItem(DISMISSED_KEY)).toBe('true');
+  });
+
   // --- cleanup ---
 
   it('cleanup 后应可安全再次 initialize', () => {
     service.initialize();
 
-    // 触发 destroy
-    destroyCallbacks.forEach((cb) => cb());
+    cleanupService();
 
     // 重新初始化应不抛异常，说明清理已正确重置状态
     expect(() => service.initialize()).not.toThrow();
@@ -275,9 +369,66 @@ describe('PwaInstallPromptService', () => {
     expect(service.canInstall()).toBe(true);
 
     // 清理
-    destroyCallbacks.forEach((cb) => cb());
+    cleanupService();
 
     // 旧服务状态不影响新行为
+    expect(() => service.initialize()).not.toThrow();
+  });
+
+  it('cleanup 应移除窗口和 display-mode 监听器，后续事件不再更新状态', () => {
+    const windowRemoveSpy = vi.spyOn(window, 'removeEventListener');
+    service.initialize();
+
+    cleanupService();
+
+    expect(windowRemoveSpy).toHaveBeenCalledWith('beforeinstallprompt', expect.any(Function));
+    expect(windowRemoveSpy).toHaveBeenCalledWith('appinstalled', expect.any(Function));
+    expect(matchMediaList.removeEventListener).toHaveBeenCalledWith('change', expect.any(Function));
+
+    const event = new Event('beforeinstallprompt');
+    Object.assign(event, {
+      prompt: vi.fn().mockResolvedValue(undefined),
+      userChoice: Promise.resolve({ outcome: 'dismissed', platform: 'web' }),
+    });
+    window.dispatchEvent(event);
+    window.dispatchEvent(new Event('appinstalled'));
+
+    expect(service.canInstall()).toBe(false);
+    expect(service.isStandaloneMode()).toBe(false);
+    expect(localStorage.getItem(DISMISSED_KEY)).toBeNull();
+  });
+
+  it('cleanup 移除单个监听失败时仍应移除其余监听并允许重新初始化', () => {
+    const originalRemoveEventListener = window.removeEventListener.bind(window);
+    const windowRemoveSpy = vi.spyOn(window, 'removeEventListener')
+      .mockImplementationOnce(() => {
+        throw new Error('remove listener failed');
+      })
+      .mockImplementation((...args: Parameters<typeof window.removeEventListener>) => {
+        originalRemoveEventListener(...args);
+      });
+    service.initialize();
+
+    expect(() => cleanupService()).not.toThrow();
+
+    expect(windowRemoveSpy).toHaveBeenCalledWith('beforeinstallprompt', expect.any(Function));
+    expect(windowRemoveSpy).toHaveBeenCalledWith('appinstalled', expect.any(Function));
+    expect(matchMediaList.removeEventListener).toHaveBeenCalledWith('change', expect.any(Function));
+    expect((service as unknown as { beforeInstallPromptHandler: unknown }).beforeInstallPromptHandler).toBeNull();
+    expect((service as unknown as { appInstalledHandler: unknown }).appInstalledHandler).toBeNull();
+    expect((service as unknown as { displayModeHandler: unknown }).displayModeHandler).toBeNull();
+
+    const event = new Event('beforeinstallprompt');
+    Object.assign(event, {
+      prompt: vi.fn().mockResolvedValue(undefined),
+      userChoice: Promise.resolve({ outcome: 'dismissed', platform: 'web' }),
+    });
+    window.dispatchEvent(event);
+    window.dispatchEvent(new Event('appinstalled'));
+
+    expect(service.canInstall()).toBe(false);
+    expect(service.isStandaloneMode()).toBe(false);
+    expect(localStorage.getItem(DISMISSED_KEY)).toBeNull();
     expect(() => service.initialize()).not.toThrow();
   });
 

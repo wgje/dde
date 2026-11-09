@@ -1,5 +1,3 @@
-import 'jsr:@supabase/functions-js/edge-runtime.d.ts';
-
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.93.2';
 
 /**
@@ -11,10 +9,9 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.93.2';
  * - 小组件侧用 widget token 作 Authorization: Bearer，本入口用与 widget-summary 相同的
  *   token_hash / secret_hash 二段校验一次性认证。为避免跨函数 shared 依赖在部署期的解析
  *   问题，这里把需要的 5 个最小辅助函数全部内联，保持单文件可部署。
- * - 验证通过后以 service-role client 直接 PATCH `black_box_entries` 行的
- *   `is_read` 或 `is_completed` 字段；BEFORE UPDATE 触发器会盖章权威 `updated_at`，
- *   LWW 同步把变更广播到其它端（网页 / TWA）。`read` 只启动短时缄默，
- *   未完成条目会在 widget-summary 的 read cooldown 到期后再次进入 Gate。
+ * - 验证通过后只调用 service-role RPC；RPC 在同一事务内锁定设备绑定、查收据并更新
+ *   `black_box_entries`。带 operationId 的重试返回首次 canonical response，不刷新
+ *   `updated_at` / cooldown / `completed_at`；无 operationId 请求保留旧的非幂等行为。
  * - 响应只返回 `{ ok: true, entryId, action }`，由小组件侧做乐观缓存 + 下一次
  *   widget-summary 回环校正。失败时返回 `{ ok: false, code, error }`，小组件侧
  *   可选择回退到深链方案。
@@ -39,6 +36,8 @@ interface WidgetTokenPayload {
 interface RequestBody {
   entryId?: string;
   action?: string;
+  operationId?: string;
+  originBindingGeneration?: number;
 }
 
 type ActionKind = 'read' | 'complete';
@@ -51,7 +50,7 @@ const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '
 
 const ALLOWED_ORIGINS: string[] = (() => {
   const envOrigins = Deno.env.get('ALLOWED_ORIGINS');
-  if (envOrigins) {
+  if (typeof envOrigins === 'string' && envOrigins.length > 0) {
     return envOrigins.split(',').map((origin) => origin.trim()).filter(Boolean);
   }
   return [
@@ -64,12 +63,14 @@ const ALLOWED_ORIGINS: string[] = (() => {
   ];
 })();
 const VERCEL_PREVIEW_PREFIX = 'dde-';
+const ALLOW_PREVIEW_ORIGINS = Deno.env.get('ALLOW_PREVIEW_ORIGINS') === 'true';
 
 const PRIVATE_NO_STORE_HEADERS = {
   'Cache-Control': 'private, no-store, max-age=0',
   'Pragma': 'no-cache',
   'Vary': 'Origin, Authorization',
 } as const;
+const MAX_WIDGET_REQUEST_BODY_BYTES = 1024 * 1024;
 
 // ---- 内联辅助（与 _shared/widget-common.ts 的同名实现等价）----
 
@@ -96,12 +97,14 @@ function getCorsHeaders(origin: string | null): Record<string, string> {
       try {
         const parsed = new URL(origin);
         // Vercel 预览
-        if (parsed.hostname.startsWith(VERCEL_PREVIEW_PREFIX)
+        if (ALLOW_PREVIEW_ORIGINS
+          && parsed.protocol === 'https:'
+          && parsed.hostname.startsWith(VERCEL_PREVIEW_PREFIX)
           && parsed.hostname.endsWith('.vercel.app')) {
           isAllowed = true;
         }
         // Cloudflare Pages PR preview：*.nanoflow.pages.dev
-        if (!isAllowed && parsed.protocol === 'https:'
+        if (!isAllowed && ALLOW_PREVIEW_ORIGINS && parsed.protocol === 'https:'
           && parsed.hostname.endsWith('.nanoflow.pages.dev')) {
           isAllowed = true;
         }
@@ -152,9 +155,64 @@ async function sha256Hex(value: string): Promise<string> {
     .join('');
 }
 
-function redactId(value: string | null | undefined): string {
-  if (!value) return 'unknown';
-  return value.length <= 8 ? value : `${value.slice(0, 8)}...`;
+class RequestBodyTooLargeError extends Error {
+  constructor() {
+    super(`Widget request body exceeds ${MAX_WIDGET_REQUEST_BODY_BYTES} bytes`);
+    this.name = 'RequestBodyTooLargeError';
+  }
+}
+
+function getContentLengthBytes(req: Request): number | null {
+  const contentLength = req.headers.get('content-length');
+  if (!contentLength) return null;
+
+  const bytes = Number.parseInt(contentLength, 10);
+  return Number.isFinite(bytes) && bytes >= 0 ? bytes : null;
+}
+
+async function readRequestTextWithLimit(req: Request): Promise<string> {
+  const contentLengthBytes = getContentLengthBytes(req);
+  if (contentLengthBytes !== null && contentLengthBytes > MAX_WIDGET_REQUEST_BODY_BYTES) {
+    throw new RequestBodyTooLargeError();
+  }
+
+  if (!req.body) {
+    return '';
+  }
+
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+
+      totalBytes += value.byteLength;
+      if (totalBytes > MAX_WIDGET_REQUEST_BODY_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        throw new RequestBodyTooLargeError();
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const combined = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    combined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+
+  return new TextDecoder().decode(combined);
+}
+
+async function readRequestJsonWithLimit<T>(req: Request): Promise<T> {
+  return JSON.parse(await readRequestTextWithLimit(req)) as T;
 }
 
 function parseWidgetToken(token: string | null): WidgetTokenPayload | null {
@@ -204,13 +262,59 @@ function parseWidgetToken(token: string | null): WidgetTokenPayload | null {
   }
 }
 
-type SupabaseAdminClient = ReturnType<typeof createClient>;
+type SupabaseErrorLike = { message: string; code?: string };
+
+interface SupabaseQueryResult<TData = unknown> {
+  data: TData | null;
+  error: SupabaseErrorLike | null;
+}
+
+interface SupabaseQueryBuilder<TData = unknown> extends PromiseLike<SupabaseQueryResult<TData>> {
+  select<TSelected = unknown[]>(columns: string): SupabaseQueryBuilder<TSelected>;
+  eq(column: string, value: unknown): SupabaseQueryBuilder<TData>;
+  maybeSingle<TRow = unknown>(): Promise<SupabaseQueryResult<TRow>>;
+}
+
+interface SupabaseAdminClient {
+  from(table: string): SupabaseQueryBuilder;
+  rpc<TData = unknown>(
+    functionName: string,
+    parameters: Record<string, unknown>,
+  ): Promise<SupabaseQueryResult<TData>>;
+}
+
+interface WidgetBlackBoxActionRpcResult {
+  ok: boolean;
+  status?: number;
+  code?: string;
+  error?: string;
+  entryId?: string;
+  action?: ActionKind;
+  isRead?: boolean | null;
+  isCompleted?: boolean | null;
+  completedAt?: string | null;
+  snoozeUntil?: string | null;
+  updatedAt?: string | null;
+}
 
 function createServiceRoleClient(): SupabaseAdminClient {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
     throw new Error('Supabase service role environment is not configured');
   }
-  return createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+  return createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+    auth: { autoRefreshToken: false, persistSession: false },
+  }) as unknown as SupabaseAdminClient;
+}
+
+function hasServiceRoleConfig(): boolean {
+  return Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY);
+}
+
+function serviceNotConfiguredPayload(): { error: string; code: 'SERVICE_NOT_CONFIGURED' } {
+  return {
+    error: 'Supabase service configuration is not configured',
+    code: 'SERVICE_NOT_CONFIGURED',
+  };
 }
 
 // ---- 业务入口 ----
@@ -237,7 +341,7 @@ async function loadDevice(
   if (byHash.error) {
     throw new Error(`load widget device by token_hash failed: ${byHash.error.message}`);
   }
-  if (byHash.data) return byHash.data as WidgetDeviceRow;
+  if (byHash.data) return byHash.data as unknown as WidgetDeviceRow;
 
   const parsed = parseWidgetToken(rawToken);
   if (!parsed) return null;
@@ -250,7 +354,7 @@ async function loadDevice(
   if (byId.error) {
     throw new Error(`load widget device by id failed: ${byId.error.message}`);
   }
-  const row = byId.data as WidgetDeviceRow | null;
+  const row = byId.data as unknown as WidgetDeviceRow | null;
   if (!row) return null;
   if (row.token_hash) return null;
 
@@ -279,8 +383,12 @@ async function handleRequest(req: Request): Promise<Response> {
 
   let body: RequestBody;
   try {
-    body = (await req.json()) as RequestBody;
-  } catch {
+    body = await readRequestJsonWithLimit<RequestBody>(req);
+  } catch (error) {
+    if (error instanceof RequestBodyTooLargeError) {
+      return errorResponse(responseHeaders, 413, 'REQUEST_BODY_TOO_LARGE', 'Request body too large');
+    }
+
     return errorResponse(responseHeaders, 400, 'INVALID_BODY', 'Request body must be valid JSON');
   }
 
@@ -293,6 +401,27 @@ async function handleRequest(req: Request): Promise<Response> {
     return errorResponse(responseHeaders, 400, 'INVALID_ACTION', "action must be 'read' or 'complete'");
   }
   const action: ActionKind = rawAction;
+  const operationId = body.operationId ?? null;
+  if (operationId !== null && !isUuid(operationId)) {
+    return errorResponse(responseHeaders, 400, 'INVALID_OPERATION_ID', 'operationId must be a UUID');
+  }
+  const requestedOriginBindingGeneration = body.originBindingGeneration;
+  if (operationId !== null && (
+    typeof requestedOriginBindingGeneration !== 'number'
+    || !Number.isInteger(requestedOriginBindingGeneration)
+    || requestedOriginBindingGeneration < 1
+  )) {
+    return errorResponse(
+      responseHeaders,
+      400,
+      'INVALID_BINDING_GENERATION',
+      'originBindingGeneration must be a positive integer when operationId is provided',
+    );
+  }
+
+  if (!hasServiceRoleConfig()) {
+    return jsonResponse({ ok: false, ...serviceNotConfiguredPayload() }, responseHeaders, 503);
+  }
 
   const client = createServiceRoleClient();
 
@@ -314,54 +443,38 @@ async function handleRequest(req: Request): Promise<Response> {
     return errorResponse(responseHeaders, 401, 'TOKEN_EXPIRED', 'Widget token has expired');
   }
 
-  // 2026-05-01 与桌面大门语义对齐：
-  //   * `read`     → 设 `is_read=true` 并刷新 updated_at，未完成条目缄默 30 分钟后可再次出现。
-  //   * `complete` → 设 `is_completed=true`，条目从大门队列移除，并进入项目历史回顾。
-  const patch: Record<string, unknown> = action === 'read'
-    ? { is_read: true }
-    : { is_completed: true, completed_at: new Date().toISOString() };
+  const originBindingGeneration = operationId === null
+    ? device.binding_generation
+    : requestedOriginBindingGeneration!;
+  const rpcResult = await client.rpc<WidgetBlackBoxActionRpcResult>('apply_widget_black_box_action', {
+    p_user_id: device.user_id,
+    p_device_id: device.id,
+    p_entry_id: entryId,
+    p_action: action,
+    p_origin_binding_generation: originBindingGeneration,
+    p_operation_id: operationId,
+  });
 
-  const update = await client
-    .from('black_box_entries')
-    .update(patch)
-    .eq('id', entryId)
-    .eq('user_id', device.user_id)
-    .is('deleted_at', null)
-    .select('id,is_read,is_completed,snooze_until,updated_at,completed_at')
-    .maybeSingle();
-
-  if (update.error) {
-    console.error('[widget-black-box-action] update failed', update.error);
-    return errorResponse(responseHeaders, 500, 'UPDATE_FAILED', 'Failed to update black box entry');
-  }
-  if (!update.data) {
-    return errorResponse(responseHeaders, 404, 'ENTRY_NOT_FOUND', 'Black box entry not found for user');
+  if (rpcResult.error) {
+    console.error('[widget-black-box-action] action RPC failed', rpcResult.error);
+    return errorResponse(responseHeaders, 500, 'ACTION_RPC_FAILED', 'Failed to apply black box action');
   }
 
-  console.log('[widget-black-box-action]', JSON.stringify({
-    event: 'widget_black_box_action_success',
-    action,
-    deviceId: redactId(device.id),
-    userId: redactId(device.user_id),
-    entryId: redactId(entryId),
-    snoozeUntil: update.data.snooze_until ?? null,
-    updatedAt: update.data.updated_at,
-  }));
+  const result = rpcResult.data;
+  if (!result || typeof result.ok !== 'boolean') {
+    return errorResponse(responseHeaders, 500, 'INVALID_RPC_RESPONSE', 'Black box action RPC returned invalid data');
+  }
+  if (!result.ok) {
+    const status = Number.isInteger(result.status) ? result.status! : 500;
+    return errorResponse(
+      responseHeaders,
+      status,
+      result.code ?? 'ACTION_REJECTED',
+      result.error ?? 'Black box action was rejected',
+    );
+  }
 
-  return jsonResponse(
-    {
-      ok: true,
-      entryId,
-      action,
-      isRead: update.data.is_read,
-      isCompleted: update.data.is_completed,
-      completedAt: update.data.completed_at ?? null,
-      snoozeUntil: update.data.snooze_until ?? null,
-      updatedAt: update.data.updated_at,
-    },
-    responseHeaders,
-    200,
-  );
+  return jsonResponse(result, responseHeaders, 200);
 }
 
 Deno.serve(async (req) => {

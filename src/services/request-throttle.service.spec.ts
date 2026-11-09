@@ -13,6 +13,7 @@ import { DestroyRef, Injector, runInInjectionContext } from '@angular/core';
 import { RequestThrottleService } from './request-throttle.service';
 import { LoggerService } from './logger.service';
 import { REQUEST_THROTTLE_CONFIG } from '../config';
+import { SessionRuntimeResetRegistry } from './session-runtime-reset.service';
 import {
   ensureBrowserNetworkSuspensionTracking,
   resetBrowserNetworkSuspensionTrackingForTests,
@@ -39,8 +40,9 @@ function setVisibilityState(state: DocumentVisibilityState): void {
 
 describe('RequestThrottleService', () => {
   let service: RequestThrottleService;
-  let mockLogger: any;
+  let mockLogger: { category: ReturnType<typeof vi.fn> };
   let destroyCallbacks: Array<() => void>;
+  let sessionRuntimeReset: SessionRuntimeResetRegistry;
   let originalVisibilityState: PropertyDescriptor | undefined;
 
   beforeEach(() => {
@@ -70,10 +72,15 @@ describe('RequestThrottleService', () => {
       providers: [
         { provide: LoggerService, useValue: mockLogger },
         { provide: DestroyRef, useValue: destroyRef },
+        SessionRuntimeResetRegistry,
       ],
     });
 
     service = runInInjectionContext(injector, () => new RequestThrottleService());
+    sessionRuntimeReset = runInInjectionContext(
+      injector,
+      () => injector.get(SessionRuntimeResetRegistry),
+    );
   });
 
   afterEach(() => {
@@ -108,6 +115,42 @@ describe('RequestThrottleService', () => {
       await service.execute('test-key', executor);
       
       expect(service.activeRequests()).toBe(0);
+    });
+  });
+
+  describe('会话运行时重置', () => {
+    it('reset 时取消活跃 executor、排队请求和 dedupe 状态', async () => {
+      let activeSignal: AbortSignal | undefined;
+      const active = service.execute(
+        'old-session-active',
+        signal => new Promise<string>(() => { activeSignal = signal; }),
+        { deduplicate: true },
+      );
+      const queued = Array.from({ length: REQUEST_THROTTLE_CONFIG.MAX_CONCURRENT }, (_, index) =>
+        service.execute(`old-session-queued-${index}`, () => new Promise<string>(() => {})),
+      );
+      const settlements = [active, ...queued].map(request => request.then(
+        value => ({ value }),
+        error => ({ error }),
+      ));
+
+      try {
+        await vi.waitFor(() => expect(activeSignal).toBeDefined());
+        sessionRuntimeReset.resetAll('owner-change');
+
+        expect(activeSignal?.aborted).toBe(true);
+        const results = await Promise.all(settlements);
+        expect(results.every(result => 'error' in result && result.error instanceof Error)).toBe(true);
+        await Promise.resolve();
+        expect(service.getStatus()).toEqual({
+          activeCount: 0,
+          queueLength: 0,
+          dedupeCacheSize: 0,
+        });
+      } finally {
+        service.clearAll();
+        await Promise.all(settlements);
+      }
     });
   });
 
@@ -235,6 +278,33 @@ describe('RequestThrottleService', () => {
     });
   });
 
+  describe('批量执行', () => {
+    it('executeAll 应严格遵守传入的 concurrency 上限', async () => {
+      vi.useFakeTimers();
+      let active = 0;
+      let maxActive = 0;
+      const requests = Array.from({ length: 4 }, (_, index) => ({
+        key: `batch-${index}`,
+        executor: async () => {
+          active++;
+          maxActive = Math.max(maxActive, active);
+          await new Promise(resolve => setTimeout(resolve, 10));
+          active--;
+          return index;
+        },
+      }));
+
+      const resultPromise = service.executeAll(requests, 1);
+
+      await vi.advanceTimersByTimeAsync(100);
+      const results = await resultPromise;
+
+      expect(results).toHaveLength(4);
+      expect(results).toEqual(expect.arrayContaining([0, 1, 2, 3]));
+      expect(maxActive).toBe(1);
+    });
+  });
+
   describe('超时保护', () => {
     it('应该在超时后拒绝请求', async () => {
       vi.useFakeTimers();
@@ -320,24 +390,193 @@ describe('RequestThrottleService', () => {
       expect(businessError).toHaveBeenCalledTimes(1);
     });
 
+    it('请求超时后应 abort 底层执行器信号，终止幽灵请求', async () => {
+      // 超时只拒绝 promise 而不杀底层 fetch 的话，幽灵请求会继续跑到全局
+      // 120s 上限；30s 后在服务端 applied 的写入会把用户随后的编辑打成假版本冲突
+      vi.useFakeTimers();
+      try {
+        let capturedSignal: AbortSignal | undefined;
+        const hungExecutor = vi.fn((signal?: AbortSignal) => {
+          capturedSignal = signal;
+          return new Promise<never>(() => {});
+        });
+
+        const resultPromise = service.execute('abort-on-timeout', hungExecutor, {
+          timeout: 5,
+          retries: 0,
+        }).catch((error: Error) => error.name);
+
+        await vi.advanceTimersByTimeAsync(6);
+
+        await expect(resultPromise).resolves.toBe('TimeoutError');
+        expect(capturedSignal).toBeDefined();
+        expect(capturedSignal!.aborted).toBe(true);
+      } finally {
+        service.clearAll();
+        vi.useRealTimers();
+      }
+    });
+
+    it('PostgreSQL RAISE EXCEPTION(P0001) 业务拒绝不应触发传输层重试', async () => {
+      // 版本回归等 RPC 业务拒绝是确定性的：重试只会用相同参数再被拒一次，
+      // 白耗弱网带宽并把真实冲突处理推迟数秒
+      const businessRejection = vi.fn().mockRejectedValue(
+        Object.assign(new Error('version regression not allowed'), { code: 'P0001' }),
+      );
+
+      await expect(
+        service.execute('p0001-rejection', businessRejection, { retries: 2 })
+      ).rejects.toThrow('version regression not allowed');
+
+      expect(businessRejection).toHaveBeenCalledTimes(1);
+    });
+
     it('超过最大重试次数后应该失败', async () => {
-      // 此测试使用真实计时器，因为 fake timers 与 mockRejectedValue 交互有问题
-      // 但通过 mock 较短延迟来加速
-      const originalCalculateRetryDelay = (service as unknown as {calculateRetryDelay: (n: number) => number}).calculateRetryDelay;
+      vi.useFakeTimers();
       vi.spyOn(service as unknown as {calculateRetryDelay: (n: number) => number}, 'calculateRetryDelay')
         .mockReturnValue(10); // 10ms instead of 1000ms+
       
       const alwaysFails = vi.fn().mockRejectedValue(new Error('network error'));
 
-      await expect(
-        service.execute('always-fails', alwaysFails, { retries: 1 })
-      ).rejects.toThrow('network error');
+      const resultPromise = service.execute('always-fails', alwaysFails, { retries: 1 });
+      const rejection = expect(resultPromise).rejects.toThrow('network error');
+
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(10);
+      await rejection;
 
       // 原始调用 + 1 次重试 = 2 次
       expect(alwaysFails).toHaveBeenCalledTimes(2);
       
       // 恢复原始方法
       vi.restoreAllMocks();
+    });
+
+    it('clearAll 后已安排的重试 timer 不应重新入队执行', async () => {
+      vi.useFakeTimers();
+      vi.spyOn(service as unknown as {calculateRetryDelay: (n: number) => number}, 'calculateRetryDelay')
+        .mockReturnValue(10);
+      const retryable = vi.fn()
+        .mockRejectedValueOnce(new Error('network error'))
+        .mockResolvedValueOnce('late-success');
+
+      const resultPromise = service.execute('retry-after-clear', retryable, { retries: 1 })
+        .then(result => `resolved:${result}`)
+        .catch((error: Error) => error.message);
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      service.clearAll();
+      await vi.advanceTimersByTimeAsync(10);
+
+      await expect(resultPromise).resolves.toBe('请求被取消');
+      expect(retryable).toHaveBeenCalledTimes(1);
+      expect(service.queueLength()).toBe(0);
+      expect(service.activeRequests()).toBe(0);
+    });
+
+    it('超时重试不应在原 executor settle 前重叠执行同 key', async () => {
+      vi.useFakeTimers();
+      vi.spyOn(service as unknown as { calculateRetryDelay: (n: number) => number }, 'calculateRetryDelay')
+        .mockReturnValue(10);
+
+      let resolveOriginal!: () => void;
+      const original = new Promise<string>(resolve => {
+        resolveOriginal = () => resolve('late-success');
+      });
+      const executor = vi.fn()
+        .mockReturnValueOnce(original)
+        .mockResolvedValueOnce('retry-success');
+      const otherExecutor = vi.fn().mockResolvedValue('other-success');
+
+      const resultPromise = service.execute('same-write-key', executor, { timeout: 5, retries: 1 })
+        .catch(() => undefined);
+
+      await vi.advanceTimersByTimeAsync(6);
+      await vi.advanceTimersByTimeAsync(10);
+
+      expect(executor).toHaveBeenCalledTimes(1);
+      await expect(service.execute('other-key', otherExecutor)).resolves.toBe('other-success');
+      expect(otherExecutor).toHaveBeenCalledTimes(1);
+
+      service.clearAll();
+      resolveOriginal();
+      await resultPromise;
+    });
+
+    it('同 key 请求超时后不应永久阻塞后续请求', async () => {
+      vi.useFakeTimers();
+
+      const hungExecutor = vi.fn().mockImplementation(() => new Promise(() => {}));
+      const followupExecutor = vi.fn().mockResolvedValue('followup-success');
+
+      const firstPromise = service.execute('same-timeout-key', hungExecutor, {
+        timeout: 5,
+        retries: 0,
+      }).catch((error: Error) => error.name);
+
+      await vi.advanceTimersByTimeAsync(6);
+      await expect(firstPromise).resolves.toBe('TimeoutError');
+
+      const followupPromise = service.execute('same-timeout-key', followupExecutor, {
+        timeout: 20,
+        retries: 0,
+      });
+
+      await vi.advanceTimersByTimeAsync(1);
+
+      await expect(followupPromise).resolves.toBe('followup-success');
+      expect(followupExecutor).toHaveBeenCalledTimes(1);
+    });
+
+    it('超时 executor 迟到 settle 不应释放新的同 key executor', async () => {
+      vi.useFakeTimers();
+
+      let resolveOriginal!: () => void;
+      const originalPromise = new Promise<string>(resolve => {
+        resolveOriginal = () => resolve('late-original');
+      });
+      const firstExecutor = vi.fn().mockReturnValue(originalPromise);
+
+      const firstPromise = service.execute('same-timeout-late-settle-key', firstExecutor, {
+        timeout: 5,
+        retries: 0,
+      }).catch((error: Error) => error.name);
+
+      await vi.advanceTimersByTimeAsync(6);
+      await expect(firstPromise).resolves.toBe('TimeoutError');
+
+      let resolveFollowup!: () => void;
+      const followupPromiseBody = new Promise<string>(resolve => {
+        resolveFollowup = () => resolve('followup-success');
+      });
+      const followupExecutor = vi.fn().mockReturnValue(followupPromiseBody);
+      const queuedExecutor = vi.fn().mockResolvedValue('queued-success');
+
+      const followupPromise = service.execute('same-timeout-late-settle-key', followupExecutor, {
+        timeout: 100,
+        retries: 0,
+      });
+      await Promise.resolve();
+      expect(followupExecutor).toHaveBeenCalledTimes(1);
+
+      resolveOriginal();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      const queuedPromise = service.execute('same-timeout-late-settle-key', queuedExecutor, {
+        timeout: 100,
+        retries: 0,
+      });
+      await Promise.resolve();
+
+      expect(queuedExecutor).not.toHaveBeenCalled();
+
+      resolveFollowup();
+      await expect(followupPromise).resolves.toBe('followup-success');
+      await expect(queuedPromise).resolves.toBe('queued-success');
+      expect(queuedExecutor).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -369,6 +608,43 @@ describe('RequestThrottleService', () => {
       expect(results.some(r => r === 'cancelled')).toBe(true);
       
       vi.useRealTimers();
+    });
+
+    it('clearAll 应该取消正在执行的请求并释放同 key 限流槽', async () => {
+      vi.useFakeTimers();
+
+      const neverResolves = vi.fn().mockImplementation(() => new Promise(() => {}));
+      const activePromise = service.execute('active-clear-key', neverResolves, {
+        timeout: 1000,
+        retries: 0,
+      }).then(
+        result => `resolved:${result}`,
+        (error: Error) => error.message,
+      );
+
+      await Promise.resolve();
+      expect(service.activeRequests()).toBe(1);
+
+      service.clearAll();
+      const settledRace = Promise.race([
+        activePromise,
+        new Promise<string>(resolve => setTimeout(() => resolve('not-settled'), 0)),
+      ]);
+      await vi.advanceTimersByTimeAsync(0);
+
+      await expect(settledRace).resolves.toBe('请求被取消');
+      expect(service.activeRequests()).toBe(0);
+
+      const followupExecutor = vi.fn().mockResolvedValue('followup-success');
+      const followupPromise = service.execute('active-clear-key', followupExecutor, {
+        timeout: 1000,
+        retries: 0,
+      });
+
+      await Promise.resolve();
+
+      expect(followupExecutor).toHaveBeenCalledTimes(1);
+      await expect(followupPromise).resolves.toBe('followup-success');
     });
 
     it('getStatus 应该返回正确的状态', async () => {
@@ -451,6 +727,112 @@ describe('RequestThrottleService', () => {
 
       expect(highPriorityExecutor).toHaveBeenCalledTimes(1);
       expect(results).toContain('被更高优先级请求抢占');
+      expect(results).toContain('high-result');
+    });
+    it('队列满且无低优先级请求时 normal 请求不能突破硬上限', async () => {
+      vi.useFakeTimers();
+
+      const blockers: Array<() => void> = [];
+      const blockingRequests = Array.from(
+        { length: REQUEST_THROTTLE_CONFIG.MAX_CONCURRENT + REQUEST_THROTTLE_CONFIG.MAX_QUEUE_SIZE },
+        (_, i) => {
+          const block = new Promise<void>((resolve) => {
+            blockers.push(resolve);
+          });
+
+          return service.execute(`normal-${i}`, async () => {
+            await block;
+            return i;
+          });
+        }
+      );
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(service.getStatus()).toMatchObject({
+        activeCount: REQUEST_THROTTLE_CONFIG.MAX_CONCURRENT,
+        queueLength: REQUEST_THROTTLE_CONFIG.MAX_QUEUE_SIZE,
+      });
+
+      const overflow = service.execute('overflow-normal', async () => 'normal-result');
+      expect(service.getStatus().queueLength).toBe(REQUEST_THROTTLE_CONFIG.MAX_QUEUE_SIZE);
+      await expect(overflow).rejects.toThrow(/队列已满/);
+
+      blockers.forEach((resolve) => resolve());
+      await Promise.allSettled(blockingRequests);
+    });
+
+    it('队列满且无低优先级请求时 high 请求不能突破硬上限', async () => {
+      vi.useFakeTimers();
+
+      const blockers: Array<() => void> = [];
+      const blockingRequests = Array.from(
+        { length: REQUEST_THROTTLE_CONFIG.MAX_CONCURRENT + REQUEST_THROTTLE_CONFIG.MAX_QUEUE_SIZE },
+        (_, i) => {
+          const block = new Promise<void>((resolve) => {
+            blockers.push(resolve);
+          });
+
+          return service.execute(`normal-${i}`, async () => {
+            await block;
+            return i;
+          });
+        }
+      );
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(service.getStatus()).toMatchObject({
+        activeCount: REQUEST_THROTTLE_CONFIG.MAX_CONCURRENT,
+        queueLength: REQUEST_THROTTLE_CONFIG.MAX_QUEUE_SIZE,
+      });
+
+      const overflow = service.execute('overflow-high', async () => 'high-result', { priority: 'high' });
+      expect(service.getStatus().queueLength).toBe(REQUEST_THROTTLE_CONFIG.MAX_QUEUE_SIZE);
+      await expect(overflow).rejects.toThrow(/队列已满/);
+
+      blockers.forEach((resolve) => resolve());
+      await Promise.allSettled(blockingRequests);
+    });
+
+    it('队列满时只有低优先级请求会被 high 请求抢占', async () => {
+      vi.useFakeTimers();
+
+      const blockers: Array<() => void> = [];
+      const queuePriorities: Array<'low' | 'normal'> = Array.from(
+        { length: REQUEST_THROTTLE_CONFIG.MAX_QUEUE_SIZE },
+        (_, index) => index === 0 ? 'low' : 'normal',
+      );
+      const blockingRequests = Array.from(
+        { length: REQUEST_THROTTLE_CONFIG.MAX_CONCURRENT + REQUEST_THROTTLE_CONFIG.MAX_QUEUE_SIZE },
+        (_, i) => {
+          const block = new Promise<void>((resolve) => {
+            blockers.push(resolve);
+          });
+          const priority = i < REQUEST_THROTTLE_CONFIG.MAX_CONCURRENT
+            ? 'normal'
+            : queuePriorities[i - REQUEST_THROTTLE_CONFIG.MAX_CONCURRENT];
+
+          return service.execute(`mixed-${i}`, async () => {
+            await block;
+            return i;
+          }, { priority })
+            .then(() => 'completed')
+            .catch((error: Error) => error.message);
+        }
+      );
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(service.getStatus().queueLength).toBe(REQUEST_THROTTLE_CONFIG.MAX_QUEUE_SIZE);
+
+      const highPriorityPromise = service.execute('high-mixed', async () => 'high-result', {
+        priority: 'high',
+      });
+      await Promise.resolve();
+      expect(service.getStatus().queueLength).toBe(REQUEST_THROTTLE_CONFIG.MAX_QUEUE_SIZE);
+
+      blockers.forEach((resolve) => resolve());
+      const results = await Promise.all([...blockingRequests, highPriorityPromise]);
+
+      expect(results.filter((result) => result === '被更高优先级请求抢占')).toHaveLength(1);
       expect(results).toContain('high-result');
     });
   });

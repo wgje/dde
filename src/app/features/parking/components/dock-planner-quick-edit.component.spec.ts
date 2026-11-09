@@ -20,6 +20,7 @@ describe('DockPlannerQuickEditComponent', () => {
   });
 
   afterEach(() => {
+    fixture?.destroy();
     vi.runOnlyPendingTimers();
     vi.useRealTimers();
   });
@@ -89,5 +90,15 @@ describe('DockPlannerQuickEditComponent', () => {
     const trigger = fixture.debugElement.query(By.css('[data-testid="dock-v3-planner-toggle"]')).nativeElement as HTMLButtonElement;
 
     expect(trigger.getAttribute('style')).toContain('min-height: 44px');
+  });
+
+  it('should clear pending-open timer when destroyed', () => {
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+
+    component.onToggle();
+    fixture.destroy();
+
+    expect(clearTimeoutSpy).toHaveBeenCalled();
+    clearTimeoutSpy.mockRestore();
   });
 });

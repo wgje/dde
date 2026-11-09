@@ -1,353 +1,268 @@
-/**
- * SpeechToText 服务单元测试
- */
-
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import { SpeechToTextService } from './speech-to-text.service';
-import { LoggerService } from './logger.service';
-import { ToastService } from './toast.service';
-import { SupabaseClientService } from './supabase-client.service';
-import { NetworkAwarenessService } from './network-awareness.service';
-import { AuthService } from './auth.service';
-import { BlackBoxService } from './black-box.service';
-import { SessionManagerService } from '../app/core/services/sync/session-manager.service';
-import { EventBusService } from './event-bus.service';
-import { signal } from '@angular/core';
-import { isRecording, isTranscribing } from '../state/focus-stores';
-import { Subject } from 'rxjs';
-
-const expectDeferredCallback = <TArgs extends unknown[], TResult = void>(
-  callback: ((...args: TArgs) => TResult) | null | undefined,
-  label: string
-): ((...args: TArgs) => TResult) => {
-  if (!callback) {
-    throw new Error(`${label} should be assigned before invocation`);
-  }
-
-  return callback;
+import { SpeechToTextStaleAuthorityError } from './speech-to-text-transcriber';
+import { registerSpeechToTextOfflineReplaySpecs } from './speech-to-text-offline-replay.spec-helpers';
+import { registerSpeechToTextRecordingStartSpecs } from './speech-to-text-recording-start.spec-helpers';
+import { registerSpeechToTextTranscribeSpecs } from './speech-to-text-transcribe.spec-helpers';
+import { isRecording, isTranscribing, remainingQuota } from '../state/focus-stores';
+import {
+  cleanupSpeechToTextServiceSpecContext,
+  createSpeechToTextServiceSpecContext,
+  expectDeferredCallback,
+  type SpeechToTextServiceSpecContext,
+} from './speech-to-text.service.spec-helpers';
+type OfflineCacheSaveResult = {
+  id: string;
+  state: 'owned' | 'quarantined';
 };
+type TranscriberProbe = {
+  transcribe: (blob: Blob, ownerUserId: string | null) => Promise<string>;
+};
+type CanonicalTestSession = {
+  access_token: string;
+  expires_at: number;
+  user: { id: string };
+};
+type RefreshResult = { refreshed: boolean; reason?: string; session?: CanonicalTestSession | null };
+
+const getTranscriber = (service: SpeechToTextService): TranscriberProbe =>
+  (service as unknown as { transcriber: TranscriberProbe }).transcriber;
 
 describe('SpeechToTextService', () => {
   let service: SpeechToTextService;
-  let originalMediaDevices: MediaDevices | undefined;
-  let mockLoggerService: {
-    debug: ReturnType<typeof vi.fn>;
-    info: ReturnType<typeof vi.fn>;
-    error: ReturnType<typeof vi.fn>;
-    warn: ReturnType<typeof vi.fn>;
-    category: ReturnType<typeof vi.fn>;
-  };
-  let mockToastService: {
-    success: ReturnType<typeof vi.fn>;
-    error: ReturnType<typeof vi.fn>;
-    warning: ReturnType<typeof vi.fn>;
-    info: ReturnType<typeof vi.fn>;
-  };
-  let mockSupabaseClient: {
-    client: ReturnType<typeof vi.fn>;
-    clientAsync: ReturnType<typeof vi.fn>;
-  };
-  let mockAuthService: {
-    currentUserId: ReturnType<typeof signal<string | null>>;
-    isConfigured: boolean;
-    ensureRuntimeAuthReady: ReturnType<typeof vi.fn>;
-  };
-  let mockBlackBoxService: {
-    create: ReturnType<typeof vi.fn>;
-  };
-  let mockSessionManager: {
-    tryRefreshSessionWithReason: ReturnType<typeof vi.fn>;
-    tryRefreshSessionWithSession: ReturnType<typeof vi.fn>;
-  };
-  let mockEventBus: {
-    onSessionRestored$: Subject<{ type: 'session-restored'; userId: string; source: string }>;
-    onSessionInvalidated$: Subject<{ type: 'session-invalidated'; userId: string | null; source: string }>;
-  };
-  let mockNetworkAwareness: {
-    isOnline: ReturnType<typeof signal<boolean>>;
-    networkQuality: ReturnType<typeof signal<string>>;
-  };
-  let mockAuthApi: {
-    getSession: ReturnType<typeof vi.fn>;
-  };
-
-  const setMediaDevices = (value: MediaDevices | undefined) => {
-    Object.defineProperty(navigator, 'mediaDevices', {
-      value,
-      configurable: true,
-      writable: true
-    });
-  };
-
-  const attachRecordedAudio = () => {
-    const recorder = {
-      state: 'recording',
-      mimeType: 'audio/webm',
-      onstop: null as null | (() => void | Promise<void>),
-      stop: vi.fn(function(this: { onstop: null | (() => void | Promise<void>) }) {
-        void this.onstop?.();
-      }),
-      stream: {
-        getTracks: () => [] as MediaStreamTrack[]
-      }
-    };
-
-    (service as unknown as {
-      mediaRecorder: typeof recorder;
-      audioChunks: Blob[];
-    }).mediaRecorder = recorder;
-    (service as unknown as {
-      mediaRecorder: typeof recorder;
-      audioChunks: Blob[];
-    }).audioChunks = [new Blob([new Uint8Array(1600)], { type: 'audio/webm' })];
-
-    return recorder;
-  };
+  let context: SpeechToTextServiceSpecContext;
+  let mockLoggerService: SpeechToTextServiceSpecContext['mockLoggerService'];
+  let mockToastService: SpeechToTextServiceSpecContext['mockToastService'];
+  let mockSupabaseClient: SpeechToTextServiceSpecContext['mockSupabaseClient'];
+  let mockAuthService: SpeechToTextServiceSpecContext['mockAuthService'];
+  let mockBlackBoxService: SpeechToTextServiceSpecContext['mockBlackBoxService'];
+  let mockSessionManager: SpeechToTextServiceSpecContext['mockSessionManager'];
+  let mockEventBus: SpeechToTextServiceSpecContext['mockEventBus'];
+  let mockNetworkAwareness: SpeechToTextServiceSpecContext['mockNetworkAwareness'];
+  let mockAuthApi: SpeechToTextServiceSpecContext['mockAuthApi'];
+  let attachRecordedAudio: SpeechToTextServiceSpecContext['attachRecordedAudio'];
+  let attachRecordedAudioWithTracks:
+    SpeechToTextServiceSpecContext['attachRecordedAudioWithTracks'];
 
   beforeEach(() => {
-    vi.useRealTimers();
-    originalMediaDevices = navigator.mediaDevices;
-
-    // 重置 signals
-    isRecording.set(false);
-    isTranscribing.set(false);
-    
-    // 创建子 logger mock
-    const categoryLogger = {
-      debug: vi.fn(),
-      info: vi.fn(),
-      error: vi.fn(),
-      warn: vi.fn()
+    context = createSpeechToTextServiceSpecContext();
+    ({
+      attachRecordedAudio,
+      attachRecordedAudioWithTracks,
+      mockAuthApi,
+      mockAuthService,
+      mockBlackBoxService,
+      mockEventBus,
+      mockLoggerService,
+      mockNetworkAwareness,
+      mockSessionManager,
+      mockSupabaseClient,
+      mockToastService,
+      service,
+    } = context);
+    let canonicalSession: CanonicalTestSession = {
+      access_token: 'test-token',
+      expires_at: Math.floor(Date.now() / 1000) + 3600,
+      user: { id: 'local-user' },
     };
-
-    mockLoggerService = {
-      debug: vi.fn(),
-      info: vi.fn(),
-      error: vi.fn(),
-      warn: vi.fn(),
-      category: vi.fn().mockReturnValue(categoryLogger)
+    const sdkGetSession = mockAuthApi.getSession;
+    const enqueueSession = sdkGetSession.mockImplementationOnce.bind(sdkGetSession);
+    const setSessionDefault = sdkGetSession.mockImplementation.bind(sdkGetSession);
+    const resolveSession = async (result: { data: { session: CanonicalTestSession | null }; error: unknown }) => {
+      if (result.data.session) canonicalSession = result.data.session;
+      const currentUserId = mockAuthService.currentUserId();
+      if (!result.data.session && currentUserId && canonicalSession.user.id !== currentUserId) {
+        canonicalSession = { ...canonicalSession, user: { id: currentUserId } };
+      }
+      return result;
     };
-
-    mockToastService = {
-      success: vi.fn(),
-      error: vi.fn(),
-      warning: vi.fn(),
-      info: vi.fn()
-    };
-
-    mockAuthApi = {
-      getSession: vi.fn().mockResolvedValue({
-        data: {
-          session: {
-            access_token: 'test-token',
-            expires_at: Math.floor(Date.now() / 1000) + 3600,
-            user: { id: 'local-user' }
-          }
-        },
-        error: null,
-      })
-    };
-
-    const client = {
-      auth: mockAuthApi,
-    };
-
-    mockSupabaseClient = {
-      client: vi.fn().mockReturnValue(client),
-      clientAsync: vi.fn().mockResolvedValue(client)
-    };
-
-    mockAuthService = {
-      currentUserId: signal('local-user'),
-      isConfigured: false,
-      ensureRuntimeAuthReady: vi.fn().mockResolvedValue(undefined),
-    };
-
-    mockBlackBoxService = {
-      create: vi.fn().mockReturnValue({ ok: true, value: { id: 'bb-1' } }),
-    };
-
-    mockSessionManager = {
-      tryRefreshSessionWithReason: vi.fn().mockResolvedValue({ refreshed: true }),
-      tryRefreshSessionWithSession: vi.fn().mockResolvedValue({
-        refreshed: true,
-        session: {
-          access_token: 'fresh-session-token',
-          expires_at: Math.floor(Date.now() / 1000) + 3600,
-          user: { id: 'local-user' }
-        }
-      }),
-    };
-
-    mockEventBus = {
-      onSessionRestored$: new Subject(),
-      onSessionInvalidated$: new Subject(),
-    };
-
-    mockNetworkAwareness = {
-      isOnline: signal(true),
-      networkQuality: signal('high')
-    };
-
-    TestBed.configureTestingModule({
-      providers: [
-        SpeechToTextService,
-        { provide: LoggerService, useValue: mockLoggerService },
-        { provide: ToastService, useValue: mockToastService },
-        { provide: SupabaseClientService, useValue: mockSupabaseClient },
-        { provide: AuthService, useValue: mockAuthService },
-        { provide: BlackBoxService, useValue: mockBlackBoxService },
-        { provide: SessionManagerService, useValue: mockSessionManager },
-        { provide: EventBusService, useValue: mockEventBus },
-        { provide: NetworkAwarenessService, useValue: mockNetworkAwareness },
-      ]
+    sdkGetSession.mockResolvedValueOnce = ((result: Parameters<typeof resolveSession>[0]) => {
+      void resolveSession(result);
+      return enqueueSession(() => resolveSession(result));
+    }) as typeof sdkGetSession.mockResolvedValueOnce;
+    sdkGetSession.mockResolvedValue = ((result: Parameters<typeof resolveSession>[0]) => {
+      void resolveSession(result);
+      return setSessionDefault(() => resolveSession(result));
+    }) as typeof sdkGetSession.mockResolvedValue;
+    Object.assign(mockSupabaseClient, {
+      getStorageKey: vi.fn(() => 'sb-project-auth-token'),
     });
-
-    service = TestBed.inject(SpeechToTextService);
+    const refresh = mockSessionManager.tryRefreshSessionWithSession;
+    const enqueueRefresh = refresh.mockImplementationOnce.bind(refresh);
+    refresh.mockResolvedValueOnce = ((result: RefreshResult) => enqueueRefresh(async () => {
+      if (result.refreshed && result.session) canonicalSession = result.session;
+      return result;
+    })) as typeof refresh.mockResolvedValueOnce;
+    Object.defineProperty(globalThis, '__NANOFLOW_AUTH_CANONICAL_STORAGE__', {
+      configurable: true,
+      value: {
+        compareAndSwap: vi.fn(),
+        createGeneration: vi.fn(),
+        readBundle: vi.fn(),
+        startSessionPrewarm: vi.fn(),
+        peekBundle: vi.fn(() => ({
+          session: JSON.stringify(canonicalSession),
+          codeVerifier: 'service-spec-verifier',
+          user: JSON.stringify(canonicalSession.user),
+        })),
+      },
+    });
+    const transcriber = getTranscriber(service);
+    const directTranscribe = transcriber.transcribe.bind(transcriber);
+    Object.defineProperty(service, 'transcribeBlob', {
+      configurable: true,
+      value: (blob: Blob, owner = mockAuthService.currentUserId()) => directTranscribe(blob, owner),
+    });
+    transcriber.transcribe = (blob, owner) =>
+      (service as unknown as { transcribeBlob: TranscriberProbe['transcribe'] }).transcribeBlob(blob, owner);
   });
 
   afterEach(() => {
-    if (typeof vi.isFakeTimers === 'function' && vi.isFakeTimers()) {
-      vi.useRealTimers();
-    }
-    vi.restoreAllMocks();
-    vi.unstubAllGlobals();
-    mockEventBus.onSessionRestored$.complete();
-    mockEventBus.onSessionInvalidated$.complete();
-    setMediaDevices(originalMediaDevices);
+    Reflect.deleteProperty(globalThis, '__NANOFLOW_AUTH_CANONICAL_STORAGE__');
+    cleanupSpeechToTextServiceSpecContext(context);
   });
 
-  describe('isRecording', () => {
-    it('初始状态应该不在录音', () => {
-      expect(service.isRecording()).toBe(false);
-    });
-  });
+  registerSpeechToTextRecordingStartSpecs(() => context);
 
-  describe('isTranscribing', () => {
-    it('初始状态应该不在转录', () => {
+  describe('transcribing state coordination', () => {
+    it('取消录音不应清空其他任务持有的转写状态', () => {
+      const transcribingState = (service as unknown as {
+        transcribingState: { begin: () => () => void };
+      }).transcribingState;
+      const releaseTranscribing = transcribingState.begin();
+      service.cancelRecording();
+      expect(service.isTranscribing()).toBe(true);
+      releaseTranscribing();
       expect(service.isTranscribing()).toBe(false);
     });
-  });
 
-  describe('getRecordingDuration', () => {
-    it('未录音时应该返回 0', () => {
-      expect(service.getRecordingDuration()).toBe(0);
+    it('后台离线回放未接管转写时不应清除已有转写状态', async () => {
+      mockAuthService.currentUserId.set('local-user');
+      isTranscribing.set(true);
+      vi.spyOn(service as unknown as { updateOfflinePendingCount: () => Promise<void> }, 'updateOfflinePendingCount')
+        .mockResolvedValueOnce();
+      const request: {
+        result: unknown[];
+        onsuccess: (() => void) | null;
+        onerror: (() => void) | null;
+        error: unknown;
+      } = {
+        result: [],
+        onsuccess: null,
+        onerror: null,
+        error: null,
+      };
+      const store = {
+        getAll: vi.fn(() => request),
+      };
+      const tx = {
+        objectStore: vi.fn(() => store),
+      };
+      (service as unknown as { db: { transaction: (name: string, mode: string) => unknown } }).db = {
+        transaction: vi.fn(() => tx),
+      };
+      const processing = service.processOfflineCache();
+      request.onsuccess?.();
+      await processing;
+      expect(service.isTranscribing()).toBe(true);
     });
-  });
 
-  describe('isSupported', () => {
-    it('应该检测浏览器是否支持录音', () => {
-      const result = service.isSupported();
-      expect(typeof result).toBe('boolean');
-    });
-  });
-
-  describe('getFallbackMessage', () => {
-    it('应该返回提示消息', () => {
-      const message = service.getFallbackMessage();
-      expect(typeof message).toBe('string');
-    });
-  });
-
-  describe('checkMicrophoneAvailability', () => {
-    it('当没有音频输入设备时应该返回 false', async () => {
-      const mockEnumerateDevices = vi.fn().mockResolvedValue([
-        { kind: 'videoinput', deviceId: 'test1' }
+    it('后台离线回放完成时不应清除仍在进行的手动转写状态', async () => {
+      mockAuthService.currentUserId.set('local-user');
+      vi.spyOn(service as unknown as { updateOfflinePendingCount: () => Promise<void> }, 'updateOfflinePendingCount')
+        .mockResolvedValue(undefined);
+      const request: {
+        result: unknown[];
+        onsuccess: (() => void) | null;
+        onerror: (() => void) | null;
+        error: unknown;
+      } = {
+        result: [
+          {
+            id: 'offline-active',
+            ownerUserId: 'local-user',
+            blob: new Blob([new Uint8Array(1600)], { type: 'audio/webm' }),
+            createdAt: new Date().toISOString(),
+            mimeType: 'audio/webm',
+          },
+        ],
+        onsuccess: null,
+        onerror: null,
+        error: null,
+      };
+      let deleteTx!: {
+        objectStore: ReturnType<typeof vi.fn>;
+        oncomplete: (() => void) | null;
+        onerror: (() => void) | null;
+        onabort: (() => void) | null;
+        error: unknown;
+      };
+      const store = {
+        getAll: vi.fn(() => request),
+        delete: vi.fn(() => {
+          const deleteRequest: {
+            onsuccess: (() => void) | null;
+            onerror: (() => void) | null;
+            error: unknown;
+          } = {
+            onsuccess: null,
+            onerror: null,
+            error: null,
+          };
+          queueMicrotask(() => {
+            deleteRequest.onsuccess?.();
+            deleteTx.oncomplete?.();
+          });
+          return deleteRequest;
+        }),
+      };
+      const readTx = {
+        objectStore: vi.fn(() => store),
+      };
+      deleteTx = {
+        objectStore: vi.fn(() => store),
+        oncomplete: null,
+        onerror: null,
+        onabort: null,
+        error: null,
+      };
+      (service as unknown as { db: { transaction: ReturnType<typeof vi.fn> } }).db = {
+        transaction: vi.fn()
+          .mockReturnValueOnce(readTx)
+          .mockReturnValueOnce(deleteTx),
+      };
+      let resolveOfflineTranscribe!: (text: string) => void;
+      let resolveManualTranscribe!: (text: string) => void;
+      vi.spyOn(getTranscriber(service), 'transcribe')
+        .mockImplementationOnce(() => new Promise(resolve => {
+          resolveOfflineTranscribe = resolve;
+        }))
+        .mockImplementationOnce(() => new Promise(resolve => {
+          resolveManualTranscribe = resolve;
+        }));
+      vi.spyOn(
+        service as unknown as { saveToOfflineCache: (blob: Blob, owner?: string | null) => Promise<OfflineCacheSaveResult> },
+        'saveToOfflineCache',
+      ).mockResolvedValueOnce({ id: 'manual-write-ahead', state: 'owned' });
+      vi.spyOn(
+        service as unknown as { deleteFromCache: (id: string) => Promise<void> },
+        'deleteFromCache',
+      ).mockResolvedValueOnce();
+      const offlineReplay = service.processOfflineCache();
+      request.onsuccess?.();
+      await Promise.resolve();
+      attachRecordedAudioWithTracks([
+        new Blob([new Uint8Array(1600)], { type: 'audio/webm' }),
       ]);
-      
-      setMediaDevices({
-        enumerateDevices: mockEnumerateDevices,
-        getUserMedia: vi.fn()
-      } as unknown as MediaDevices);
-
-      const result = await service.checkMicrophoneAvailability();
-      expect(result).toBe(false);
-    });
-
-    it('当有音频输入设备时应该返回 true', async () => {
-      const mockEnumerateDevices = vi.fn().mockResolvedValue([
-        { kind: 'audioinput', deviceId: 'test1' },
-        { kind: 'videoinput', deviceId: 'test2' }
-      ]);
-      
-      setMediaDevices({
-        enumerateDevices: mockEnumerateDevices,
-        getUserMedia: vi.fn()
-      } as unknown as MediaDevices);
-
-      const result = await service.checkMicrophoneAvailability();
-      expect(result).toBe(true);
-    });
-
-    it('当 mediaDevices API 不可用时应该返回 false', async () => {
-      setMediaDevices(undefined);
-
-      const result = await service.checkMicrophoneAvailability();
-      expect(result).toBe(false);
-    });
-  });
-
-  describe('startRecording', () => {
-    it('设备不可用时应该优雅返回而不抛出错误', async () => {
-      // Mock checkMicrophoneAvailability 返回 false
-      vi.spyOn(service, 'checkMicrophoneAvailability').mockResolvedValue(false);
-
-      // 不应该抛出错误
-      await expect(service.startRecording()).resolves.toBeUndefined();
-    });
-
-    it('浏览器不支持时应该优雅返回', async () => {
-      setMediaDevices(undefined);
-
-      // 不应该抛出错误
-      await expect(service.startRecording()).resolves.toBeUndefined();
-    });
-
-    it('并发触发开始录音时只创建一个 MediaRecorder', async () => {
-      const getUserMedia = vi.fn().mockResolvedValue({
-        getTracks: () => [] as MediaStreamTrack[],
-      });
-      const enumerateDevices = vi.fn().mockResolvedValue([
-        { kind: 'audioinput', deviceId: 'test1' },
-      ]);
-      const start = vi.fn();
-      const mediaRecorderInstances: unknown[] = [];
-      class MockMediaRecorder {
-        static isTypeSupported = vi.fn(() => true);
-        state = 'recording';
-        mimeType = 'audio/webm';
-        ondataavailable: null = null;
-        onstop: null = null;
-
-        constructor(readonly stream: MediaStream) {
-          mediaRecorderInstances.push(this);
-        }
-
-        start = start;
-        stop = vi.fn();
-      }
-      vi.stubGlobal('MediaRecorder', MockMediaRecorder);
-      setMediaDevices({
-        enumerateDevices,
-        getUserMedia,
-      } as unknown as MediaDevices);
-
-      await Promise.all([
-        service.startRecording(),
-        service.startRecording(),
-      ]);
-
-      expect(getUserMedia).toHaveBeenCalledTimes(1);
-      expect(mediaRecorderInstances).toHaveLength(1);
-      expect(start).toHaveBeenCalledTimes(1);
-      service.cancelRecording();
-    });
-  });
-
-  describe('stopRecording', () => {
-    it('未录音时调用不应该抛出错误', () => {
-      expect(() => service.stopRecording()).not.toThrow();
+      const manualTranscribe = service.stopAndTranscribe();
+      await Promise.resolve();
+      resolveOfflineTranscribe('offline done');
+      await offlineReplay;
+      expect(service.isTranscribing()).toBe(true);
+      resolveManualTranscribe('manual done');
+      await expect(manualTranscribe).resolves.toBe('manual done');
+      expect(service.isTranscribing()).toBe(false);
     });
   });
 
@@ -355,201 +270,205 @@ describe('SpeechToTextService', () => {
     it('未录音时应该 reject', async () => {
       await expect(service.stopAndTranscribe()).rejects.toThrow('未开始录音');
     });
+
+    it('同一 recorder 重复停止转写时应复用单一操作且仅调用一次 stop', async () => {
+      const recorder = {
+        state: 'recording',
+        mimeType: 'audio/webm',
+        ondataavailable: null as ((event: BlobEvent) => void) | null,
+        onstop: null as (() => void | Promise<void>) | null,
+        stop: vi.fn(),
+        stream: {
+          getTracks: () => [] as MediaStreamTrack[],
+        },
+      };
+      const recorderState = service as unknown as {
+        mediaRecorder: typeof recorder;
+        audioChunks: Blob[];
+        recordingOwnerUserId: string | null;
+      };
+      recorderState.mediaRecorder = recorder;
+      recorderState.audioChunks = [new Blob([new Uint8Array(1600)], { type: 'audio/webm' })];
+      recorderState.recordingOwnerUserId = 'local-user';
+      const transcribeSpy = vi.spyOn(
+        service as unknown as {
+          transcribeOrCacheRecording: (blob: Blob, ownerUserId: string | null) => Promise<string>;
+        },
+        'transcribeOrCacheRecording',
+      ).mockResolvedValueOnce('single stop result');
+      const first = service.stopAndTranscribe();
+      const second = service.stopAndTranscribe();
+      expect(recorder.stop).toHaveBeenCalledTimes(1);
+      await recorder.onstop?.();
+      await expect(first).resolves.toBe('single stop result');
+      await expect(second).resolves.toBe('single stop result');
+      expect(transcribeSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('stop 事件未开始处理前取消应结算等待中操作且不重复 stop', async () => {
+      const stopTrack = vi.fn();
+      const recorder = {
+        state: 'recording',
+        mimeType: 'audio/webm',
+        ondataavailable: null as ((event: BlobEvent) => void) | null,
+        onstop: null as (() => void | Promise<void>) | null,
+        stop: vi.fn(),
+        stream: {
+          getTracks: () => [{ stop: stopTrack }] as unknown as MediaStreamTrack[],
+        },
+      };
+      const recorderState = service as unknown as {
+        mediaRecorder: typeof recorder;
+        audioChunks: Blob[];
+        recordingOwnerUserId: string | null;
+      };
+      recorderState.mediaRecorder = recorder;
+      recorderState.audioChunks = [new Blob([new Uint8Array(1600)], { type: 'audio/webm' })];
+      recorderState.recordingOwnerUserId = 'local-user';
+      const transcribeSpy = vi.spyOn(
+        service as unknown as {
+          transcribeOrCacheRecording: (blob: Blob, ownerUserId: string | null) => Promise<string>;
+        },
+        'transcribeOrCacheRecording',
+      );
+      const result = service.stopAndTranscribe();
+      service.cancelRecording();
+      expect(recorder.stop).toHaveBeenCalledTimes(1);
+      await expect(result).resolves.toBe('');
+      expect(transcribeSpy).not.toHaveBeenCalled();
+      expect(stopTrack).toHaveBeenCalledTimes(1);
+    });
+
+    it('离线缓存写入失败时应显式 reject，避免提示录音已可靠排队', async () => {
+      mockNetworkAwareness.isOnline.set(false);
+      attachRecordedAudio();
+      const cacheSpy = vi.spyOn(service as unknown as { saveToOfflineCache: (blob: Blob) => Promise<OfflineCacheSaveResult> }, 'saveToOfflineCache')
+        .mockRejectedValueOnce(new Error('cache failed'));
+      await expect(service.stopAndTranscribe()).rejects.toThrow('cache failed');
+      expect(cacheSpy).toHaveBeenCalledTimes(1);
+      expect(mockToastService.error).toHaveBeenCalledWith('保存失败', '无法保存录音，请重试');
+    });
+
+    it('录音太短早退时也应释放麦克风并清理录音 owner', async () => {
+      const { stopTrack } = attachRecordedAudioWithTracks([new Blob(['x'], { type: 'audio/webm' })]);
+      await expect(service.stopAndTranscribe()).resolves.toBe('');
+      expect(stopTrack).toHaveBeenCalledTimes(1);
+      expect((service as unknown as { recordingOwnerUserId: string | null }).recordingOwnerUserId).toBeNull();
+      expect(service.isTranscribing()).toBe(false);
+    });
+
+    it('旧 recorder 的 stop 回调晚到时应使用旧会话快照且不得释放新会话流', async () => {
+      const oldStopTrack = vi.fn();
+      const newStopTrack = vi.fn();
+      const oldRecorder = {
+        state: 'recording',
+        mimeType: 'audio/webm',
+        ondataavailable: null as ((event: BlobEvent) => void) | null,
+        onstop: null as (() => void | Promise<void>) | null,
+        stop: vi.fn(),
+        stream: {
+          getTracks: () => [{ stop: oldStopTrack }] as unknown as MediaStreamTrack[],
+        },
+      };
+      const newRecorder = {
+        state: 'recording',
+        mimeType: 'audio/mp4',
+        ondataavailable: null as ((event: BlobEvent) => void) | null,
+        onstop: null as (() => void | Promise<void>) | null,
+        stop: vi.fn(),
+        stream: {
+          getTracks: () => [{ stop: newStopTrack }] as unknown as MediaStreamTrack[],
+        },
+      };
+      const oldChunks = [new Blob([new Uint8Array(1600)], { type: 'audio/webm' })];
+      const newChunks = [new Blob([new Uint8Array(3200)], { type: 'audio/mp4' })];
+      const recorderState = service as unknown as {
+        mediaRecorder: typeof oldRecorder | typeof newRecorder | null;
+        audioChunks: Blob[];
+        recordingOwnerUserId: string | null;
+      };
+      recorderState.mediaRecorder = oldRecorder;
+      recorderState.audioChunks = oldChunks;
+      recorderState.recordingOwnerUserId = 'user-a';
+      isRecording.set(true);
+      let resolveOldTranscription!: (text: string) => void;
+      const transcribeSpy = vi.spyOn(
+        service as unknown as {
+          transcribeOrCacheRecording: (blob: Blob, ownerUserId: string | null) => Promise<string>;
+        },
+        'transcribeOrCacheRecording',
+      ).mockImplementationOnce(() => new Promise(resolve => {
+        resolveOldTranscription = resolve;
+      }));
+      const oldResult = service.stopAndTranscribe();
+      recorderState.mediaRecorder = newRecorder;
+      recorderState.audioChunks = newChunks;
+      recorderState.recordingOwnerUserId = 'user-b';
+      isRecording.set(true);
+      const oldStopHandling = oldRecorder.onstop?.();
+      expect(transcribeSpy).toHaveBeenCalledTimes(1);
+      const [capturedBlob, capturedOwner] = transcribeSpy.mock.calls[0];
+      expect(capturedBlob.size).toBe(1600);
+      expect(capturedBlob.type).toBe('audio/webm');
+      expect(capturedOwner).toBe('user-a');
+      expect(service.isRecording()).toBe(true);
+      resolveOldTranscription('old session text');
+      await expect(oldResult).resolves.toBe('old session text');
+      await oldStopHandling;
+      expect(oldStopTrack).toHaveBeenCalledTimes(1);
+      expect(newStopTrack).not.toHaveBeenCalled();
+      expect(recorderState.mediaRecorder).toBe(newRecorder);
+      expect(recorderState.recordingOwnerUserId).toBe('user-b');
+    });
+
+    it('在线转写前应先完成本地写前缓存，转写成功后清理缓存条目', async () => {
+      attachRecordedAudio();
+      (service as unknown as { recordingOwnerUserId: string | null }).recordingOwnerUserId = 'local-user';
+      const order: string[] = [];
+      const cacheResult: OfflineCacheSaveResult = { id: 'write-ahead-audio', state: 'owned' };
+      const cacheSpy = vi.spyOn(
+        service as unknown as {
+          saveToOfflineCache: (blob: Blob, owner?: string | null) => Promise<OfflineCacheSaveResult>;
+        },
+        'saveToOfflineCache'
+      ).mockImplementationOnce(async () => {
+        order.push('save');
+        return cacheResult;
+      });
+      const transcribeSpy = vi.spyOn(getTranscriber(service), 'transcribe')
+        .mockImplementationOnce(async () => {
+        order.push('transcribe');
+        return 'online text';
+      });
+      const deleteSpy = vi.spyOn(
+        service as unknown as { deleteFromCache: (id: string) => Promise<void> },
+        'deleteFromCache'
+      ).mockImplementationOnce(async id => {
+        order.push(`delete:${id}`);
+      });
+      await expect(service.stopAndTranscribe()).resolves.toBe('online text');
+      expect(cacheSpy).toHaveBeenCalledWith(expect.any(Blob), 'local-user');
+      expect(transcribeSpy).toHaveBeenCalledTimes(1);
+      expect(deleteSpy).toHaveBeenCalledWith('write-ahead-audio');
+      expect(order).toEqual(['save', 'transcribe', 'delete:write-ahead-audio']);
+    });
   });
 
-  describe('transcribeBlob', () => {
-    it('应在 access token 临近过期时先刷新再请求', async () => {
-      mockAuthService.currentUserId.set('cloud-user');
-      mockAuthApi.getSession
-        .mockResolvedValueOnce({
-          data: {
-            session: {
-              access_token: 'stale-token',
-              expires_at: Math.floor(Date.now() / 1000) + 5,
-              user: { id: 'cloud-user' }
-            }
-          },
-          error: null,
-        });
-      mockSessionManager.tryRefreshSessionWithSession.mockResolvedValueOnce({
-        refreshed: true,
-        session: {
-          access_token: 'fresh-token',
-          expires_at: Math.floor(Date.now() / 1000) + 3600,
-          user: { id: 'cloud-user' }
-        }
-      });
-
-      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-        new Response(JSON.stringify({ text: '转写成功', duration: 1 }), {
-          status: 200,
-          headers: { 'Content-Type': 'application/json' }
-        })
-      );
-
-      const result = await (service as unknown as { transcribeBlob: (blob: Blob) => Promise<string> })
-        .transcribeBlob(new Blob(['audio'], { type: 'audio/webm' }));
-
-      expect(result).toBe('转写成功');
-      expect(mockSessionManager.tryRefreshSessionWithSession).toHaveBeenCalledWith('SpeechToText.transcribe.getSession');
-      expect(fetchSpy).toHaveBeenCalledTimes(1);
-      expect(fetchSpy.mock.calls[0]?.[1]).toMatchObject({
-        headers: expect.objectContaining({
-          Authorization: 'Bearer fresh-token'
-        })
-      });
-    });
-
-    it('首次收到 401 时应刷新会话并仅重试一次', async () => {
-      mockAuthService.currentUserId.set('cloud-user');
-      mockAuthApi.getSession.mockResolvedValueOnce({
-        data: {
-          session: {
-            access_token: 'first-token',
-            expires_at: Math.floor(Date.now() / 1000) + 3600,
-            user: { id: 'cloud-user' }
-          }
-        },
-        error: null,
-      });
-      mockSessionManager.tryRefreshSessionWithSession.mockResolvedValueOnce({
-        refreshed: true,
-        session: {
-          access_token: 'second-token',
-          expires_at: Math.floor(Date.now() / 1000) + 3600,
-          user: { id: 'cloud-user' }
-        }
-      });
-
-      const fetchSpy = vi.spyOn(globalThis, 'fetch')
-        .mockResolvedValueOnce(new Response(JSON.stringify({ code: 401, message: 'Invalid JWT' }), {
-          status: 401,
-          headers: { 'Content-Type': 'application/json' }
-        }))
-        .mockResolvedValueOnce(new Response(JSON.stringify({ text: '重试成功', duration: 1 }), {
-          status: 200,
-          headers: { 'Content-Type': 'application/json' }
-        }));
-
-      const result = await (service as unknown as { transcribeBlob: (blob: Blob) => Promise<string> })
-        .transcribeBlob(new Blob(['audio'], { type: 'audio/webm' }));
-
-      expect(result).toBe('重试成功');
-      expect(mockSessionManager.tryRefreshSessionWithSession).toHaveBeenCalledWith('SpeechToText.transcribe.retry401');
-      expect(fetchSpy).toHaveBeenCalledTimes(2);
-      expect(fetchSpy.mock.calls[0]?.[1]).toMatchObject({
-        headers: expect.objectContaining({
-          Authorization: 'Bearer first-token'
-        })
-      });
-      expect(fetchSpy.mock.calls[1]?.[1]).toMatchObject({
-        headers: expect.objectContaining({
-          Authorization: 'Bearer second-token'
-        })
-      });
-    });
-
-    it('401 重试时应直接使用 refresh 返回的新 session，避免再次读到旧 token', async () => {
-      mockAuthService.currentUserId.set('cloud-user');
-      mockAuthApi.getSession.mockResolvedValue({
-        data: {
-          session: {
-            access_token: 'stale-token',
-            expires_at: Math.floor(Date.now() / 1000) + 3600,
-            user: { id: 'cloud-user' }
-          }
-        },
-        error: null,
-      });
-      mockSessionManager.tryRefreshSessionWithSession.mockResolvedValueOnce({
-        refreshed: true,
-        session: {
-          access_token: 'refreshed-token',
-          expires_at: Math.floor(Date.now() / 1000) + 3600,
-          user: { id: 'cloud-user' }
-        }
-      });
-
-      const fetchSpy = vi.spyOn(globalThis, 'fetch')
-        .mockResolvedValueOnce(new Response(JSON.stringify({ code: 401, message: 'Invalid JWT' }), {
-          status: 401,
-          headers: { 'Content-Type': 'application/json' }
-        }))
-        .mockResolvedValueOnce(new Response(JSON.stringify({ text: '刷新后成功', duration: 1 }), {
-          status: 200,
-          headers: { 'Content-Type': 'application/json' }
-        }));
-
-      const result = await (service as unknown as { transcribeBlob: (blob: Blob) => Promise<string> })
-        .transcribeBlob(new Blob(['audio'], { type: 'audio/webm' }));
-
-      expect(result).toBe('刷新后成功');
-      expect(mockAuthApi.getSession).toHaveBeenCalledTimes(1);
-      expect(fetchSpy.mock.calls[1]?.[1]).toMatchObject({
-        headers: expect.objectContaining({
-          Authorization: 'Bearer refreshed-token'
-        })
-      });
-    });
-
-    it('上游转写超时时应作为可重试错误交给外层缓存链路', async () => {
-      mockAuthService.currentUserId.set('cloud-user');
-      mockAuthApi.getSession.mockResolvedValueOnce({
-        data: {
-          session: {
-            access_token: 'valid-token',
-            expires_at: Math.floor(Date.now() / 1000) + 3600,
-            user: { id: 'cloud-user' }
-          }
-        },
-        error: null,
-      });
-      vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-        new Response(JSON.stringify({
-          ok: false,
-          code: 'GROQ_TIMEOUT',
-          error: '转写服务响应超时，请稍后重试',
-          retryable: true,
-        }), {
-          status: 503,
-          headers: { 'Content-Type': 'application/json' }
-        })
-      );
-
-      await expect(
-        (service as unknown as { transcribeBlob: (blob: Blob) => Promise<string> })
-          .transcribeBlob(new Blob(['audio'], { type: 'audio/webm' }))
-      ).rejects.toThrow('FOCUS_NETWORK_ERROR');
-      expect(mockToastService.warning).not.toHaveBeenCalled();
-    });
-
-    it('刷新失败且原因是 no-session 时应抛出 SYNC_AUTH_EXPIRED', async () => {
-      mockAuthService.currentUserId.set('cloud-user');
-      mockAuthApi.getSession.mockResolvedValueOnce({
-        data: { session: null },
-        error: null,
-      });
-      mockSessionManager.tryRefreshSessionWithSession.mockResolvedValueOnce({
-        refreshed: false,
-        reason: 'no-session'
-      });
-
-      await expect(
-        (service as unknown as { transcribeBlob: (blob: Blob) => Promise<string> })
-          .transcribeBlob(new Blob(['audio'], { type: 'audio/webm' }))
-      ).rejects.toThrow('SYNC_AUTH_EXPIRED');
-    });
+  registerSpeechToTextTranscribeSpecs({
+    service: () => service,
+    mockAuthService: () => mockAuthService,
+    mockAuthApi: () => mockAuthApi,
+    mockSessionManager: () => mockSessionManager,
+    mockToastService: () => mockToastService,
   });
 
   describe('stopAndTranscribe 会话恢复兜底', () => {
     it('会话临时不可用时应缓存录音并稍后重试', async () => {
       attachRecordedAudio();
-
-      vi.spyOn(service as unknown as { transcribeBlob: (blob: Blob) => Promise<string> }, 'transcribeBlob')
+      vi.spyOn(getTranscriber(service), 'transcribe')
         .mockRejectedValueOnce(new Error('SESSION_TEMPORARILY_UNAVAILABLE'));
-      const cacheSpy = vi.spyOn(service as unknown as { saveToOfflineCache: (blob: Blob) => Promise<'owned' | 'quarantined'> }, 'saveToOfflineCache')
-        .mockResolvedValueOnce('owned');
-
+      const cacheSpy = vi.spyOn(service as unknown as { saveToOfflineCache: (blob: Blob) => Promise<OfflineCacheSaveResult> }, 'saveToOfflineCache')
+        .mockResolvedValueOnce({ id: 'retry-cache-entry', state: 'owned' });
       const result = await service.stopAndTranscribe();
 
       expect(result).toBe('[转写失败，稍后重试]');
@@ -560,9 +479,9 @@ describe('SpeechToTextService', () => {
     it('会话临时不可用且缓存失败时应显式 reject', async () => {
       attachRecordedAudio();
 
-      vi.spyOn(service as unknown as { transcribeBlob: (blob: Blob) => Promise<string> }, 'transcribeBlob')
+      vi.spyOn(getTranscriber(service), 'transcribe')
         .mockRejectedValueOnce(new Error('SESSION_TEMPORARILY_UNAVAILABLE'));
-      vi.spyOn(service as unknown as { saveToOfflineCache: (blob: Blob) => Promise<'owned' | 'quarantined'> }, 'saveToOfflineCache')
+      vi.spyOn(service as unknown as { saveToOfflineCache: (blob: Blob) => Promise<OfflineCacheSaveResult> }, 'saveToOfflineCache')
         .mockRejectedValueOnce(new Error('cache failed'));
 
       await expect(service.stopAndTranscribe()).rejects.toThrow('cache failed');
@@ -574,8 +493,8 @@ describe('SpeechToTextService', () => {
       attachRecordedAudio();
       (service as unknown as { recordingOwnerUserId: string | null }).recordingOwnerUserId = 'cloud-user';
       mockSupabaseClient.clientAsync.mockResolvedValueOnce(null);
-      const cacheSpy = vi.spyOn(service as unknown as { saveToOfflineCache: (blob: Blob) => Promise<'owned' | 'quarantined'> }, 'saveToOfflineCache')
-        .mockResolvedValueOnce('owned');
+      const cacheSpy = vi.spyOn(service as unknown as { saveToOfflineCache: (blob: Blob) => Promise<OfflineCacheSaveResult> }, 'saveToOfflineCache')
+        .mockResolvedValueOnce({ id: 'supabase-client-cache-entry', state: 'owned' });
 
       const result = await service.stopAndTranscribe();
 
@@ -595,8 +514,8 @@ describe('SpeechToTextService', () => {
         refreshed: false,
         reason: 'client-unready'
       });
-      const cacheSpy = vi.spyOn(service as unknown as { saveToOfflineCache: (blob: Blob) => Promise<'owned' | 'quarantined'> }, 'saveToOfflineCache')
-        .mockResolvedValueOnce('owned');
+      const cacheSpy = vi.spyOn(service as unknown as { saveToOfflineCache: (blob: Blob) => Promise<OfflineCacheSaveResult> }, 'saveToOfflineCache')
+        .mockResolvedValueOnce({ id: 'session-manager-cache-entry', state: 'owned' });
 
       const result = await service.stopAndTranscribe();
 
@@ -604,33 +523,37 @@ describe('SpeechToTextService', () => {
       expect(cacheSpy).toHaveBeenCalledTimes(1);
     });
 
-    it('live 转写期间 owner 切换时应按原 owner 缓存录音', async () => {
+    it('stale authority 应静默保留写前缓存且不安排即时重放', async () => {
+      vi.useFakeTimers();
       attachRecordedAudio();
       mockAuthService.currentUserId.set('user-a');
       (service as unknown as { recordingOwnerUserId: string | null }).recordingOwnerUserId = 'user-a';
-
-      vi.spyOn(service as unknown as { transcribeBlob: (blob: Blob, owner?: string | null) => Promise<string> }, 'transcribeBlob')
-        .mockImplementationOnce(async () => {
-          mockAuthService.currentUserId.set('user-b');
-          return 'owner switched';
-        });
-      const cacheSpy = vi.spyOn(service as unknown as { saveToOfflineCache: (blob: Blob, owner?: string | null) => Promise<'owned' | 'quarantined'> }, 'saveToOfflineCache')
-        .mockResolvedValueOnce('owned');
-
-      const result = await service.stopAndTranscribe();
-
-      expect(result).toBe('[转写失败，稍后重试]');
+      const staleError = new SpeechToTextStaleAuthorityError('SESSION_TEMPORARILY_UNAVAILABLE');
+      vi.spyOn(getTranscriber(service), 'transcribe')
+        .mockRejectedValueOnce(staleError);
+      const cacheSpy = vi.spyOn(service as unknown as { saveToOfflineCache: (blob: Blob, owner?: string | null) => Promise<OfflineCacheSaveResult> }, 'saveToOfflineCache')
+        .mockResolvedValueOnce({ id: 'owner-switch-cache-entry', state: 'owned' });
+      const deleteSpy = vi.spyOn(service as unknown as { deleteFromCache: (id: string) => Promise<void> }, 'deleteFromCache');
+      const replaySpy = vi.spyOn(service as unknown as { processOfflineCacheAndCreateEntries: () => Promise<void> }, 'processOfflineCacheAndCreateEntries');
+      await expect(service.stopAndTranscribe()).rejects.toBe(staleError);
+      await vi.advanceTimersByTimeAsync(1500);
+      expect((service as unknown as { isRetryableTranscribeError(error: unknown): boolean })
+        .isRetryableTranscribeError(staleError)).toBe(true);
       expect(cacheSpy).toHaveBeenCalledWith(expect.any(Blob), 'user-a');
+      expect(deleteSpy).not.toHaveBeenCalled();
+      expect(replaySpy).not.toHaveBeenCalled();
+      expect(mockLoggerService.error).not.toHaveBeenCalled();
+      expect(mockToastService.warning).not.toHaveBeenCalled();
     });
 
     it('在线重试缓存成功后应安排延迟重放', async () => {
       vi.useFakeTimers();
       attachRecordedAudio();
 
-      vi.spyOn(service as unknown as { transcribeBlob: (blob: Blob) => Promise<string> }, 'transcribeBlob')
+      vi.spyOn(getTranscriber(service), 'transcribe')
         .mockRejectedValueOnce(new Error('SESSION_TEMPORARILY_UNAVAILABLE'));
-      vi.spyOn(service as unknown as { saveToOfflineCache: (blob: Blob) => Promise<'owned' | 'quarantined'> }, 'saveToOfflineCache')
-        .mockResolvedValueOnce('owned');
+      vi.spyOn(service as unknown as { saveToOfflineCache: (blob: Blob) => Promise<OfflineCacheSaveResult> }, 'saveToOfflineCache')
+        .mockResolvedValueOnce({ id: 'delayed-replay-cache-entry', state: 'owned' });
       const replaySpy = vi.spyOn(service as unknown as { processOfflineCacheAndCreateEntries: () => Promise<void> }, 'processOfflineCacheAndCreateEntries')
         .mockResolvedValueOnce();
 
@@ -644,10 +567,10 @@ describe('SpeechToTextService', () => {
       vi.useFakeTimers();
       attachRecordedAudio();
 
-      vi.spyOn(service as unknown as { transcribeBlob: (blob: Blob) => Promise<string> }, 'transcribeBlob')
+      vi.spyOn(getTranscriber(service), 'transcribe')
         .mockRejectedValueOnce(new Error('FOCUS_NETWORK_ERROR'));
-      vi.spyOn(service as unknown as { saveToOfflineCache: (blob: Blob) => Promise<'owned' | 'quarantined'> }, 'saveToOfflineCache')
-        .mockResolvedValueOnce('owned');
+      vi.spyOn(service as unknown as { saveToOfflineCache: (blob: Blob) => Promise<OfflineCacheSaveResult> }, 'saveToOfflineCache')
+        .mockResolvedValueOnce({ id: 'controlled-timeout-cache-entry', state: 'owned' });
       const replaySpy = vi.spyOn(service as unknown as { processOfflineCacheAndCreateEntries: () => Promise<void> }, 'processOfflineCacheAndCreateEntries')
         .mockResolvedValueOnce();
 
@@ -674,8 +597,18 @@ describe('SpeechToTextService', () => {
       const store = {
         add,
       };
-      const tx = {
+      const tx: {
+        objectStore: ReturnType<typeof vi.fn>;
+        oncomplete: (() => void) | null;
+        onerror: (() => void) | null;
+        onabort: (() => void) | null;
+        error: unknown;
+      } = {
         objectStore: vi.fn(() => store),
+        oncomplete: null,
+        onerror: null,
+        onabort: null,
+        error: null,
       };
       (service as unknown as { db: { transaction: (name: string, mode: string) => unknown } }).db = {
         transaction: vi.fn(() => tx),
@@ -683,11 +616,15 @@ describe('SpeechToTextService', () => {
       vi.spyOn(service as unknown as { updateOfflinePendingCount: () => Promise<void> }, 'updateOfflinePendingCount')
         .mockResolvedValueOnce();
 
-      const saving = (service as unknown as { saveToOfflineCache: (blob: Blob) => Promise<'owned' | 'quarantined'> })
+      const saving = (service as unknown as { saveToOfflineCache: (blob: Blob) => Promise<OfflineCacheSaveResult> })
         .saveToOfflineCache(new Blob(['audio'], { type: 'audio/webm' }));
       request.onsuccess?.();
+      tx.oncomplete?.();
 
-      await expect(saving).resolves.toBe('quarantined');
+      await expect(saving).resolves.toEqual({
+        id: expect.any(String),
+        state: 'quarantined',
+      });
       expect(add).toHaveBeenCalledWith(expect.objectContaining({
         ownerUserId: '__legacy_unknown_owner__'
       }));
@@ -748,6 +685,27 @@ describe('SpeechToTextService', () => {
       expectDeferredCallback(resolveReplay, 'resolveReplay')();
       await Promise.resolve();
     });
+
+    it('服务销毁后不应继续发布已完成的离线重放结果', async () => {
+      let resolveReplay: ((value: { id: string; text: string }[]) => void) | null = null;
+      vi.spyOn(service, 'processOfflineCache')
+        .mockImplementationOnce(() => new Promise(resolve => {
+          resolveReplay = resolve;
+        }));
+
+      mockEventBus.onSessionRestored$.next({
+        type: 'session-restored',
+        userId: 'local-user',
+        source: 'test'
+      });
+
+      TestBed.resetTestingModule();
+      expectDeferredCallback(resolveReplay, 'resolveReplay')([{ id: 'offline-audio', text: 'done' }]);
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(mockToastService.success).not.toHaveBeenCalled();
+    });
   });
 
   describe('offlinePendingCount', () => {
@@ -795,236 +753,16 @@ describe('SpeechToTextService', () => {
     });
   });
 
-  describe('processOfflineCache', () => {
-    it('应该处理离线缓存', async () => {
-      vi.spyOn(service as unknown as { updateOfflinePendingCount: () => Promise<void> }, 'updateOfflinePendingCount')
-        .mockResolvedValueOnce();
-
-      const request: {
-        result: unknown[];
-        onsuccess: (() => void) | null;
-        onerror: (() => void) | null;
-        error: unknown;
-      } = {
-        result: [],
-        onsuccess: null,
-        onerror: null,
-        error: null,
-      };
-      const store = {
-        getAll: vi.fn(() => request),
-      };
-      const tx = {
-        objectStore: vi.fn(() => store),
-      };
-      (service as unknown as { db: { transaction: (name: string, mode: string) => unknown } }).db = {
-        transaction: vi.fn(() => tx),
-      };
-
-      const processing = service.processOfflineCache();
-      request.onsuccess?.();
-
-      const results = await processing;
-      expect(results).toEqual([]);
-    });
-
-    it('应跳过属于其他用户的离线音频缓存', async () => {
-      mockAuthService.currentUserId.set('user-b');
-      vi.spyOn(service as unknown as { updateOfflinePendingCount: () => Promise<void> }, 'updateOfflinePendingCount')
-        .mockResolvedValueOnce();
-
-      const request: {
-        result: unknown[];
-        onsuccess: (() => void) | null;
-        onerror: (() => void) | null;
-        error: unknown;
-      } = {
-        result: [
-          {
-            id: 'audio-1',
-            ownerUserId: 'user-a',
-            blob: new Blob([new Uint8Array(1600)], { type: 'audio/webm' }),
-            createdAt: new Date().toISOString(),
-            mimeType: 'audio/webm'
-          }
-        ],
-        onsuccess: null,
-        onerror: null,
-        error: null,
-      };
-      const store = {
-        getAll: vi.fn(() => request),
-      };
-      const tx = {
-        objectStore: vi.fn(() => store),
-      };
-      (service as unknown as { db: { transaction: (name: string, mode: string) => unknown } }).db = {
-        transaction: vi.fn(() => tx),
-      };
-
-      const transcribeSpy = vi.spyOn(service as unknown as { transcribeBlob: (blob: Blob) => Promise<string> }, 'transcribeBlob');
-
-      const processing = service.processOfflineCache();
-      request.onsuccess?.();
-
-      const results = await processing;
-      expect(results).toEqual([]);
-      expect(transcribeSpy).not.toHaveBeenCalled();
-    });
-
-    it('回放期间若账号切换则不应创建条目也不应删除缓存', async () => {
-      mockAuthService.currentUserId.set('user-a');
-      vi.spyOn(service as unknown as { updateOfflinePendingCount: () => Promise<void> }, 'updateOfflinePendingCount')
-        .mockResolvedValueOnce();
-
-      const request: {
-        result: unknown[];
-        onsuccess: (() => void) | null;
-        onerror: (() => void) | null;
-        error: unknown;
-      } = {
-        result: [
-          {
-            id: 'audio-2',
-            ownerUserId: 'user-a',
-            blob: new Blob([new Uint8Array(1600)], { type: 'audio/webm' }),
-            createdAt: new Date().toISOString(),
-            mimeType: 'audio/webm'
-          }
-        ],
-        onsuccess: null,
-        onerror: null,
-        error: null,
-      };
-      const store = {
-        getAll: vi.fn(() => request),
-      };
-      const tx = {
-        objectStore: vi.fn(() => store),
-      };
-      (service as unknown as { db: { transaction: (name: string, mode: string) => unknown } }).db = {
-        transaction: vi.fn(() => tx),
-      };
-
-      vi.spyOn(service as unknown as { transcribeBlob: (blob: Blob) => Promise<string> }, 'transcribeBlob')
-        .mockImplementationOnce(async () => {
-          mockAuthService.currentUserId.set('user-b');
-          return '切号后的转写';
-        });
-      const deleteSpy = vi.spyOn(service as unknown as { deleteFromCache: (id: string) => Promise<void> }, 'deleteFromCache');
-
-      const processing = service.processOfflineCache();
-      request.onsuccess?.();
-
-      const results = await processing;
-      expect(results).toEqual([]);
-      expect(mockBlackBoxService.create).not.toHaveBeenCalled();
-      expect(deleteSpy).not.toHaveBeenCalled();
-    });
-
-    it('离线回放遇到瞬时认证错误时应重新安排重试', async () => {
-      mockAuthService.currentUserId.set('user-a');
-      vi.spyOn(service as unknown as { updateOfflinePendingCount: () => Promise<void> }, 'updateOfflinePendingCount')
-        .mockResolvedValueOnce();
-
-      const request: {
-        result: unknown[];
-        onsuccess: (() => void) | null;
-        onerror: (() => void) | null;
-        error: unknown;
-      } = {
-        result: [
-          {
-            id: 'audio-3',
-            ownerUserId: 'user-a',
-            blob: new Blob([new Uint8Array(1600)], { type: 'audio/webm' }),
-            createdAt: new Date().toISOString(),
-            mimeType: 'audio/webm'
-          }
-        ],
-        onsuccess: null,
-        onerror: null,
-        error: null,
-      };
-      const store = {
-        getAll: vi.fn(() => request),
-      };
-      const tx = {
-        objectStore: vi.fn(() => store),
-      };
-      (service as unknown as { db: { transaction: (name: string, mode: string) => unknown } }).db = {
-        transaction: vi.fn(() => tx),
-      };
-
-      vi.spyOn(service as unknown as { transcribeBlob: (blob: Blob) => Promise<string> }, 'transcribeBlob')
-        .mockRejectedValueOnce(new Error('SESSION_TEMPORARILY_UNAVAILABLE'));
-      const scheduleSpy = vi.spyOn(service as unknown as { scheduleOfflineCacheReplay: (reason: string) => void }, 'scheduleOfflineCacheReplay')
-        .mockImplementation(() => undefined);
-
-      const processing = service.processOfflineCache();
-      request.onsuccess?.();
-
-      const results = await processing;
-      expect(results).toEqual([]);
-      expect(scheduleSpy).toHaveBeenCalledWith('offline-replay-retryable-error', 1500);
-    });
-
-    it('应隔离缺少 ownerUserId 的旧版离线缓存', async () => {
-      const request: {
-        result: unknown[];
-        onsuccess: (() => void) | null;
-        onerror: (() => void) | null;
-      } = {
-        result: [
-          {
-            id: 'legacy-audio',
-            blob: new Blob([new Uint8Array(1600)], { type: 'audio/webm' }),
-            createdAt: new Date().toISOString(),
-            mimeType: 'audio/webm'
-          }
-        ],
-        onsuccess: null,
-        onerror: null,
-      };
-      const put = vi.fn();
-      const store = {
-        getAll: vi.fn(() => request),
-        put,
-      };
-      const tx: {
-        objectStore: ReturnType<typeof vi.fn>;
-        oncomplete: (() => void) | null;
-        onerror: (() => void) | null;
-        error: unknown;
-      } = {
-        objectStore: vi.fn(() => store),
-        oncomplete: null,
-        onerror: null,
-        error: null,
-      };
-      (service as unknown as { db: { transaction: (name: string, mode: string) => unknown } }).db = {
-        transaction: vi.fn(() => tx),
-      };
-
-      const migrating = (service as unknown as { migrateLegacyOfflineAudioOwners: () => Promise<void> }).migrateLegacyOfflineAudioOwners();
-      request.onsuccess?.();
-      tx.oncomplete?.();
-      await migrating;
-
-      expect(put).toHaveBeenCalledWith(expect.objectContaining({
-        id: 'legacy-audio',
-        ownerUserId: '__legacy_unknown_owner__'
-      }));
-      expect(mockToastService.warning).toHaveBeenCalledWith(
-        '发现旧版离线录音',
-        '为避免转入错误账号，旧缓存录音已被隔离，不会自动转写'
-      );
-    });
+  registerSpeechToTextOfflineReplaySpecs({
+    service: () => service,
+    mockAuthService: () => mockAuthService,
+    mockBlackBoxService: () => mockBlackBoxService,
+    mockToastService: () => mockToastService,
+    mockNetworkAwareness: () => mockNetworkAwareness,
   });
 
   describe('全局事件监听器清理', () => {
     it('服务应保存 onlineHandler 引用以便清理', () => {
-      // 验证 onlineHandler 在构造后不为 null（意味着可以被移除）
       const handler = (service as unknown as { onlineHandler: (() => void) | null }).onlineHandler;
       expect(handler).not.toBeNull();
       expect(typeof handler).toBe('function');
@@ -1034,7 +772,6 @@ describe('SpeechToTextService', () => {
       const svc = service as unknown as { onlineHandler: (() => void) | null };
       const handler = svc.onlineHandler;
 
-      // 模拟 destroy 行为：移除监听器并置空
       if (handler) {
         window.removeEventListener('online', handler);
         svc.onlineHandler = null;
@@ -1046,12 +783,10 @@ describe('SpeechToTextService', () => {
     it('清理后重复移除不应抛出错误（幂等）', () => {
       const svc = service as unknown as { onlineHandler: (() => void) | null };
 
-      // 第一次清理
       if (svc.onlineHandler) {
         window.removeEventListener('online', svc.onlineHandler);
         svc.onlineHandler = null;
       }
-      // 第二次清理（幂等）
       expect(() => {
         if (svc.onlineHandler) {
           window.removeEventListener('online', svc.onlineHandler);

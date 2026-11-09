@@ -5,6 +5,10 @@ const MAX_PREVIEW_CHILDREN = 10;
 const MAX_PREVIEW_CHARS = 1200;
 const MAX_TITLE_LENGTH = 256;
 const MAX_TOKEN_LENGTH = 256;
+const MAX_OWNER_USER_ID_LENGTH = 128;
+const OWNER_CONFIG_KEY_PREFIX = 'nanoflow.siyuan.owner.';
+const LEGACY_CONFIG_KEYS = ['baseUrl', 'token'];
+const ownerConfigWriteTails = new Map();
 const BLOCK_ID_PATTERN = /^\d{14}-[a-z0-9]{7}$/;
 const SIYUAN_BLOCK_REF_PATTERN = /\(\((\d{14}-[a-z0-9]{7})(?:\s+"([^"]*)")?\)\)/g;
 const ALLOWED_API_PATHS = new Set([
@@ -16,6 +20,8 @@ const ALLOWED_API_PATHS = new Set([
   '/api/filetree/getPathByID',
   '/api/attr/getBlockAttrs',
 ]);
+
+void chrome.storage.local.setAccessLevel?.({ accessLevel: 'TRUSTED_CONTEXTS' }).catch(() => undefined);
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   void handleMessage(message).then(sendResponse);
@@ -44,10 +50,21 @@ async function handleMessage(message) {
 
 async function setConfig(message) {
   const requestId = readRequestId(message);
+  const ownerUserId = readOwnerUserId(message);
+  const configIssuedAt = readConfigIssuedAt(message);
+  if (!ownerUserId || configIssuedAt === undefined) {
+    return {
+      type: 'nanoflow.siyuan.set-config-result',
+      requestId,
+      ok: false,
+      errorCode: 'not-configured',
+    };
+  }
   const payload = message?.payload;
   // 仅允许 payload 中出现 baseUrl/token 两个键，拒绝任何额外字段以收敛 attack surface。
-  if (!payload || typeof payload !== 'object') {
-    return { type: 'nanoflow.siyuan.set-config-result', requestId, ok: false, errorCode: 'unknown' };
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)
+    || Object.keys(payload).some(key => key !== 'baseUrl' && key !== 'token')) {
+    return { type: 'nanoflow.siyuan.set-config-result', requestId, ownerUserId, ok: false, errorCode: 'unknown' };
   }
   const rawBaseUrl = typeof payload.baseUrl === 'string' ? payload.baseUrl.trim() : '';
   const baseUrl = rawBaseUrl || DEFAULT_BASE_URL;
@@ -55,58 +72,90 @@ async function setConfig(message) {
     // 复用 token-invalid 而非新增错误码：UI 在 saveSiyuanConfigToExtension 中已用同一份白名单校验过 baseUrl，
     // 走到这里说明页面被绕过（被注入脚本或调试器），此时把请求统一拒绝即可；下游 UI 的提示文案虽然偏向 token，
     // 但用户最终修复路径仍是"改 baseUrl 或 token 后重新保存"。
-    return { type: 'nanoflow.siyuan.set-config-result', requestId, ok: false, errorCode: 'token-invalid' };
+    return { type: 'nanoflow.siyuan.set-config-result', requestId, ownerUserId, ok: false, errorCode: 'token-invalid' };
   }
   // 空字符串视为"清除授权"，与扩展 Options 页 clearConfig 行为一致。
   const hasTokenField = Object.prototype.hasOwnProperty.call(payload, 'token');
   const rawToken = hasTokenField && typeof payload.token === 'string' ? payload.token : undefined;
   if (rawToken !== undefined && rawToken.length > MAX_TOKEN_LENGTH) {
-    return { type: 'nanoflow.siyuan.set-config-result', requestId, ok: false, errorCode: 'token-invalid' };
+    return { type: 'nanoflow.siyuan.set-config-result', requestId, ownerUserId, ok: false, errorCode: 'token-invalid' };
   }
-  try {
-    await chrome.storage.local.set({ baseUrl });
-    if (hasTokenField) {
-      if (rawToken && rawToken.length > 0) {
-        await chrome.storage.local.set({ token: rawToken });
-      } else {
-        await chrome.storage.local.remove(['token']);
+  return serializeOwnerConfigWrite(ownerUserId, async () => {
+    try {
+      const storageKey = ownerConfigStorageKey(ownerUserId);
+      const stored = await chrome.storage.local.get([storageKey]);
+      const existing = readOwnerConfigRecord(stored[storageKey], ownerUserId);
+      if (existing && configIssuedAt < existing.configIssuedAt) {
+        return { type: 'nanoflow.siyuan.set-config-result', requestId, ownerUserId, ok: true };
       }
+      const token = hasTokenField ? rawToken ?? '' : existing?.token ?? '';
+      const record = { ownerUserId, baseUrl, configIssuedAt };
+      if (token) {
+        record.token = token;
+      }
+      await chrome.storage.local.set({ [storageKey]: record });
+      await chrome.storage.local.remove(LEGACY_CONFIG_KEYS);
+      return { type: 'nanoflow.siyuan.set-config-result', requestId, ownerUserId, ok: true };
+    } catch {
+      return { type: 'nanoflow.siyuan.set-config-result', requestId, ownerUserId, ok: false, errorCode: 'unknown' };
     }
-    return { type: 'nanoflow.siyuan.set-config-result', requestId, ok: true };
-  } catch {
-    return { type: 'nanoflow.siyuan.set-config-result', requestId, ok: false, errorCode: 'unknown' };
-  }
+  });
 }
 
 async function getConfigStatus(message) {
   const requestId = readRequestId(message);
+  const ownerUserId = readOwnerUserId(message);
+  if (!ownerUserId) {
+    return {
+      type: 'nanoflow.siyuan.config-status-result',
+      requestId,
+      ok: false,
+      errorCode: 'not-configured',
+    };
+  }
   try {
-    const stored = await chrome.storage.local.get(['baseUrl', 'token']);
-    const baseUrl = typeof stored.baseUrl === 'string' && isTrustedBaseUrl(stored.baseUrl)
-      ? stored.baseUrl
-      : DEFAULT_BASE_URL;
-    const hasToken = typeof stored.token === 'string' && stored.token.length > 0;
+    const storageKey = ownerConfigStorageKey(ownerUserId);
+    const stored = await chrome.storage.local.get([storageKey]);
+    const config = readOwnerConfigRecord(stored[storageKey], ownerUserId);
+    const baseUrl = config?.baseUrl ?? DEFAULT_BASE_URL;
+    const hasToken = Boolean(config?.token);
     // 仅回传 baseUrl 与 hasToken，绝不把 token 明文经 message channel 返回页面。
     return {
       type: 'nanoflow.siyuan.config-status-result',
       requestId,
+      ownerUserId,
       ok: true,
       data: { baseUrl, hasToken },
     };
   } catch {
-    return { type: 'nanoflow.siyuan.config-status-result', requestId, ok: false, errorCode: 'unknown' };
+    return { type: 'nanoflow.siyuan.config-status-result', requestId, ownerUserId, ok: false, errorCode: 'unknown' };
   }
 }
 
 async function testConnection(message) {
+  const ownerUserId = readOwnerUserId(message);
+  if (!ownerUserId) {
+    return {
+      type: 'nanoflow.siyuan.test-connection-result',
+      requestId: readRequestId(message),
+      ok: false,
+      errorCode: 'not-configured',
+    };
+  }
   try {
-    const config = await loadConfig();
+    const config = await loadConfig(ownerUserId);
     await callSiyuan(config, '/api/system/version', {});
-    return { type: 'nanoflow.siyuan.test-connection-result', requestId: readRequestId(message), ok: true };
+    return {
+      type: 'nanoflow.siyuan.test-connection-result',
+      requestId: readRequestId(message),
+      ownerUserId,
+      ok: true,
+    };
   } catch (error) {
     return {
       type: 'nanoflow.siyuan.test-connection-result',
       requestId: readRequestId(message),
+      ownerUserId,
       ok: false,
       errorCode: mapError(error),
     };
@@ -115,6 +164,8 @@ async function testConnection(message) {
 
 async function getPreview(message) {
   const requestId = readRequestId(message);
+  const ownerUserId = readOwnerUserId(message);
+  if (!ownerUserId) return buildPreviewError(message, 'not-configured');
   const blockId = message?.payload?.blockId;
   if (typeof blockId !== 'string' || !BLOCK_ID_PATTERN.test(blockId)) {
     return buildPreviewError(message, 'block-not-found');
@@ -125,7 +176,7 @@ async function getPreview(message) {
   const maxChars = clampInteger(message.payload.maxChars, 1, MAX_PREVIEW_CHARS);
 
   try {
-    const config = await loadConfig();
+    const config = await loadConfig(ownerUserId);
     const [kramdown, hpath, absoluteHpath, attrs, children] = await Promise.all([
       callSiyuan(config, '/api/block/getBlockKramdown', { id: blockId }),
       callSiyuan(config, '/api/filetree/getHPathByID', { id: blockId }).catch(() => undefined),
@@ -145,6 +196,7 @@ async function getPreview(message) {
     return {
       type: 'nanoflow.siyuan.preview-result',
       requestId,
+      ownerUserId,
       ok: true,
       data: {
         blockId,
@@ -178,14 +230,42 @@ async function readAbsoluteHPath(config, blockId) {
   }
 }
 
-async function loadConfig() {
-  const config = await chrome.storage.local.get(['baseUrl', 'token']);
-  const baseUrl = typeof config.baseUrl === 'string' && isTrustedBaseUrl(config.baseUrl)
-    ? config.baseUrl
+async function loadConfig(ownerUserId) {
+  const storageKey = ownerConfigStorageKey(ownerUserId);
+  const stored = await chrome.storage.local.get([storageKey]);
+  const config = readOwnerConfigRecord(stored[storageKey], ownerUserId);
+  if (!config?.token) throw new RelayError('not-configured');
+  return { baseUrl: config.baseUrl, token: config.token };
+}
+
+function ownerConfigStorageKey(ownerUserId) {
+  return `${OWNER_CONFIG_KEY_PREFIX}${encodeURIComponent(ownerUserId)}`;
+}
+
+function serializeOwnerConfigWrite(ownerUserId, operation) {
+  const previous = ownerConfigWriteTails.get(ownerUserId) ?? Promise.resolve();
+  const current = previous.catch(() => undefined).then(operation);
+  const tracked = current.finally(() => {
+    if (ownerConfigWriteTails.get(ownerUserId) === tracked) {
+      ownerConfigWriteTails.delete(ownerUserId);
+    }
+  });
+  ownerConfigWriteTails.set(ownerUserId, tracked);
+  return tracked;
+}
+
+function readOwnerConfigRecord(value, ownerUserId) {
+  if (!value || typeof value !== 'object' || value.ownerUserId !== ownerUserId) return undefined;
+  const baseUrl = typeof value.baseUrl === 'string' && isTrustedBaseUrl(value.baseUrl)
+    ? value.baseUrl
     : DEFAULT_BASE_URL;
-  const token = typeof config.token === 'string' ? config.token : '';
-  if (!token) throw new RelayError('not-configured');
-  return { baseUrl, token };
+  const token = typeof value.token === 'string' && value.token.length <= MAX_TOKEN_LENGTH
+    ? value.token
+    : '';
+  const configIssuedAt = Number.isSafeInteger(value.configIssuedAt) && value.configIssuedAt > 0
+    ? value.configIssuedAt
+    : 0;
+  return { baseUrl, token, configIssuedAt };
 }
 
 function isTrustedBaseUrl(value) {
@@ -320,10 +400,23 @@ function readRequestId(message) {
   return typeof message?.requestId === 'string' ? message.requestId : crypto.randomUUID();
 }
 
+function readOwnerUserId(message) {
+  const value = message?.ownerUserId;
+  return typeof value === 'string' && value.length > 0 && value.length <= MAX_OWNER_USER_ID_LENGTH
+    ? value
+    : undefined;
+}
+
+function readConfigIssuedAt(message) {
+  const value = message?.configIssuedAt;
+  return Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+
 function buildPreviewError(message, errorCode) {
   return {
     type: 'nanoflow.siyuan.preview-result',
     requestId: readRequestId(message),
+    ownerUserId: readOwnerUserId(message),
     ok: false,
     errorCode,
   };

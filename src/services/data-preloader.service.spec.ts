@@ -282,6 +282,10 @@ describe('DataPreloaderService', () => {
       expect(typeof script).toBe('string');
       expect(script).toContain('<script>');
       expect(script).toContain('__PRELOADED_DATA__');
+      expect(script).toContain("var authKey = 'sb-' + projectRef + '-auth-token'");
+      expect(script).toContain("/rpc/get_server_time");
+      expect(script).toContain("/projects?select=id,title,updated_at&deleted_at=is.null&order=updated_at.desc");
+      expect(script).not.toContain('console.debug');
     });
   });
 });

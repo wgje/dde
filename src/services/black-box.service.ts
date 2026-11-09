@@ -1,6 +1,6 @@
 /**
  * 黑匣子服务
- * 
+ *
  * 负责黑匣子条目的 CRUD 操作
  * 遵循 Offline-first：本地写入 → UI 更新 → 后台推送
  */
@@ -34,12 +34,12 @@ export class BlackBoxService {
   private readonly logger = inject(LoggerService).category('BlackBox');
   private localHydrationPromise: Promise<void> | null = null;
   private localHydratedUserKey: string | null = null;
-  
+
   /**
    * 按日期分组的条目（暴露给组件）
    */
   readonly entriesByDate = blackBoxEntriesGroupedByDate;
-  
+
   /**
    * 条目仓未完成数量：已读不等于完成，仍应显示在黑匣子 badge 中。
    */
@@ -49,26 +49,105 @@ export class BlackBoxService {
    * Gate 待处理队列数量：保留已读冷却/稍后提醒等提醒节奏语义。
    */
   readonly gatePendingCount = computed(() => pendingBlackBoxEntries().length);
-  
+
   /**
    * 获取所有条目 Map
    */
   readonly entriesMap = blackBoxEntriesMap;
-  
+
   /**
    * 创建黑匣子条目
    * 遵循 Offline-first：本地写入 → UI 更新 → 后台推送
    */
   create(data: Partial<BlackBoxEntry>): Result<BlackBoxEntry, OperationError> {
+    const result = this.prepareCreatedEntry(data);
+    if (!result.ok) {
+      return result;
+    }
+
+    if (blackBoxEntriesMap().has(result.value.id)) {
+      return success(result.value);
+    }
+
+    // 兼容旧调用点：UI 仍即时响应，但失败会被记录；关键路径应迁移到 createDurably()。
+    updateBlackBoxEntry(result.value);
+    this.persistAfterLocalChange(result.value);
+
+    return success(result.value);
+  }
+
+  async createDurably(data: Partial<BlackBoxEntry>): Promise<Result<BlackBoxEntry, OperationError>> {
+    const expectedUserId = this.resolveEffectiveUserId();
+    const expectedAuthFence = this.auth.captureAuthIdentityFence();
+    if (data.userId !== undefined && data.userId !== expectedUserId) {
+      return failure(ErrorCodes.SYNC_AUTH_EXPIRED, '身份已切换，未提交黑匣子本地状态');
+    }
+
+    const result = this.prepareCreatedEntry(data);
+    if (!result.ok) {
+      return result;
+    }
+    if (!expectedUserId || result.value.userId !== expectedUserId) {
+      return failure(ErrorCodes.SYNC_AUTH_EXPIRED, '身份已切换，未提交黑匣子本地状态');
+    }
+
+    if (blackBoxEntriesMap().has(result.value.id)) {
+      return success(result.value);
+    }
+
+    if (result.value.clientOperationId) {
+      const durableExisting = await this.findDurableEntryByClientOperationId(
+        result.value.userId,
+        result.value.clientOperationId,
+      );
+      if (!durableExisting.ok) {
+        return durableExisting;
+      }
+      if (
+        this.resolveEffectiveUserId() !== expectedUserId
+        || this.auth.captureAuthIdentityFence() !== expectedAuthFence
+      ) {
+        return failure(ErrorCodes.SYNC_AUTH_EXPIRED, '身份已切换，已保留待重放记录但未提交当前视图');
+      }
+      if (durableExisting.value) {
+        updateBlackBoxEntry(durableExisting.value);
+        return success(durableExisting.value);
+      }
+    }
+
+    const persisted = await this.persistAfterLocalChangeDurably(result.value);
+    if (!persisted.ok) {
+      return persisted;
+    }
+    if (
+      this.resolveEffectiveUserId() !== expectedUserId
+      || this.auth.captureAuthIdentityFence() !== expectedAuthFence
+    ) {
+      return failure(ErrorCodes.SYNC_AUTH_EXPIRED, '身份已切换，已保留待重放记录但未提交当前视图');
+    }
+
+    updateBlackBoxEntry(result.value);
+    return success(result.value);
+  }
+
+  private prepareCreatedEntry(data: Partial<BlackBoxEntry>): Result<BlackBoxEntry, OperationError> {
     const userId = this.resolveEffectiveUserId();
-    
+
     if (!userId) {
       return failure(ErrorCodes.PERMISSION_DENIED, '请先登录');
     }
-    
+
     const now = new Date().toISOString();
     // 解构 data，排除 id 字段，防止外部传入覆盖 crypto.randomUUID()
     const { id: _ignoreId, ...safeData } = data;
+    const existingEntry = this.findExistingEntryByClientOperationId(
+      userId,
+      safeData.clientOperationId,
+    );
+    if (existingEntry) {
+      return success(existingEntry);
+    }
+
     const entry: BlackBoxEntry = {
       id: crypto.randomUUID(),
       // 黑匣子条目仓为跨项目共享容器，projectId 固定为 null。
@@ -95,14 +174,50 @@ export class BlackBoxService {
         : null,
       syncStatus: this.resolveSyncStatusForMode(userId),
     };
-    
-    // 1. 更新状态（立即 UI 响应）
-    updateBlackBoxEntry(entry);
-    
-    // 2. 后台同步（防抖 3s）或本地模式持久化
-    this.persistAfterLocalChange(entry);
-    
     return success(entry);
+  }
+
+  private findExistingEntryByClientOperationId(
+    userId: string,
+    clientOperationId: string | undefined,
+  ): BlackBoxEntry | null {
+    if (!clientOperationId) {
+      return null;
+    }
+
+    return Array.from(blackBoxEntriesMap().values()).find(entry =>
+      entry.userId === userId
+      && entry.clientOperationId === clientOperationId
+      && !entry.deletedAt
+    ) ?? null;
+  }
+
+  private async findDurableEntryByClientOperationId(
+    userId: string,
+    clientOperationId: string | undefined,
+  ): Promise<Result<BlackBoxEntry | null, OperationError>> {
+    if (!clientOperationId) {
+      return success(null);
+    }
+
+    try {
+      const entries = await this.syncService.loadFromLocal({
+        expectedUserId: userId,
+        requireCurrentUser: true,
+      });
+      const existing = entries.find(entry =>
+        entry.userId === userId
+        && entry.clientOperationId === clientOperationId
+        && !entry.deletedAt
+      ) ?? null;
+      return success(existing);
+    } catch (error) {
+      return failure(ErrorCodes.OPERATION_FAILED, '黑匣子本地幂等查重失败', {
+        userId,
+        clientOperationId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   /**
@@ -167,7 +282,7 @@ export class BlackBoxService {
       || this.auth.authState().isCheckingSession
       || this.auth.runtimeState() === 'pending';
   }
-  
+
   /**
    * 更新条目
    */
@@ -175,6 +290,54 @@ export class BlackBoxService {
     id: string,
     updates: Partial<BlackBoxEntry>,
     syncOptions?: ScheduleBlackBoxSyncOptions,
+  ): Result<BlackBoxEntry, OperationError> {
+    const result = this.prepareUpdatedEntry(id, updates);
+    if (!result.ok) {
+      return result;
+    }
+
+    // 本地优先更新
+    updateBlackBoxEntry(result.value);
+
+    // 后台同步或本地模式持久化
+    this.persistAfterLocalChange(result.value, syncOptions);
+
+    return success(result.value);
+  }
+
+  async updateDurably(
+    id: string,
+    updates: Partial<BlackBoxEntry>,
+    syncOptions?: ScheduleBlackBoxSyncOptions,
+  ): Promise<Result<BlackBoxEntry, OperationError>> {
+    const expectedUserId = this.resolveEffectiveUserId();
+    const expectedAuthFence = this.auth.captureAuthIdentityFence();
+    const result = this.prepareUpdatedEntry(id, updates);
+    if (!result.ok) {
+      return result;
+    }
+    if (!expectedUserId || result.value.userId !== expectedUserId) {
+      return failure(ErrorCodes.SYNC_AUTH_EXPIRED, '身份已切换，未提交黑匣子本地状态');
+    }
+
+    const persisted = await this.persistAfterLocalChangeDurably(result.value, syncOptions);
+    if (!persisted.ok) {
+      return persisted;
+    }
+    if (
+      this.resolveEffectiveUserId() !== expectedUserId
+      || this.auth.captureAuthIdentityFence() !== expectedAuthFence
+    ) {
+      return failure(ErrorCodes.SYNC_AUTH_EXPIRED, '身份已切换，已保留待重放记录但未提交当前视图');
+    }
+
+    updateBlackBoxEntry(result.value);
+    return success(result.value);
+  }
+
+  private prepareUpdatedEntry(
+    id: string,
+    updates: Partial<BlackBoxEntry>,
   ): Result<BlackBoxEntry, OperationError> {
     const entry = blackBoxEntriesMap().get(id);
     if (!entry) {
@@ -184,8 +347,8 @@ export class BlackBoxService {
     const safeUpdates = this.preserveContentWhenBlankUpdate(entry, updates);
     const now = new Date().toISOString();
     const completionPatch = this.resolveCompletionPatch(entry, safeUpdates, now);
-    
-    const updated: BlackBoxEntry = {
+
+    return success({
       ...entry,
       ...safeUpdates,
       ...completionPatch,
@@ -194,15 +357,7 @@ export class BlackBoxService {
       focusMeta: (safeUpdates.focusMeta !== undefined ? safeUpdates.focusMeta : entry.focusMeta) ?? null,
       updatedAt: now,
       syncStatus: this.resolveSyncStatusForMode(entry.userId),
-    };
-    
-    // 本地优先更新
-    updateBlackBoxEntry(updated);
-    
-    // 后台同步或本地模式持久化
-    this.persistAfterLocalChange(updated, syncOptions);
-    
-    return success(updated);
+    });
   }
 
   private preserveContentWhenBlankUpdate(
@@ -254,7 +409,7 @@ export class BlackBoxService {
 
     return { completedAt: entry.completedAt ?? now };
   }
-  
+
   /**
    * 标记为已读
    */
@@ -264,7 +419,14 @@ export class BlackBoxService {
       widgetNotifyAction: 'read',
     });
   }
-  
+
+  markAsReadDurably(id: string): Promise<Result<BlackBoxEntry, OperationError>> {
+    return this.updateDurably(id, { isRead: true }, {
+      immediate: true,
+      widgetNotifyAction: 'read',
+    });
+  }
+
   /**
    * 标记为完成
    */
@@ -274,30 +436,85 @@ export class BlackBoxService {
       widgetNotifyAction: 'complete',
     });
   }
-  
+
+  markAsCompletedDurably(id: string): Promise<Result<BlackBoxEntry, OperationError>> {
+    return this.updateDurably(id, { isCompleted: true }, {
+      immediate: true,
+      widgetNotifyAction: 'complete',
+    });
+  }
+
   /**
    * 归档条目
    */
   archive(id: string): Result<BlackBoxEntry, OperationError> {
     return this.update(id, { isArchived: true });
   }
-  
+
+  archiveDurably(id: string): Promise<Result<BlackBoxEntry, OperationError>> {
+    return this.updateDurably(id, { isArchived: true });
+  }
+
   /**
    * 取消归档
    */
   unarchive(id: string): Result<BlackBoxEntry, OperationError> {
     return this.update(id, { isArchived: false });
   }
-  
+
+  unarchiveDurably(id: string): Promise<Result<BlackBoxEntry, OperationError>> {
+    return this.updateDurably(id, { isArchived: false });
+  }
+
   /**
    * 删除条目（软删除）
    */
   delete(id: string): Result<void, OperationError> {
+    const result = this.prepareDeletedEntry(id);
+    if (!result.ok) {
+      return result;
+    }
+
+    updateBlackBoxEntry(result.value);
+
+    // 同步删除操作到服务器，或本地模式仅持久化 tombstone
+    this.persistAfterLocalChange(result.value);
+
+    return success(undefined);
+  }
+
+  async deleteDurably(id: string): Promise<Result<void, OperationError>> {
+    const expectedUserId = this.resolveEffectiveUserId();
+    const expectedAuthFence = this.auth.captureAuthIdentityFence();
+    const result = this.prepareDeletedEntry(id);
+    if (!result.ok) {
+      return result;
+    }
+    if (!expectedUserId || result.value.userId !== expectedUserId) {
+      return failure(ErrorCodes.SYNC_AUTH_EXPIRED, '身份已切换，未提交黑匣子本地状态');
+    }
+
+    const persisted = await this.persistAfterLocalChangeDurably(result.value);
+    if (!persisted.ok) {
+      return persisted;
+    }
+    if (
+      this.resolveEffectiveUserId() !== expectedUserId
+      || this.auth.captureAuthIdentityFence() !== expectedAuthFence
+    ) {
+      return failure(ErrorCodes.SYNC_AUTH_EXPIRED, '身份已切换，已保留待重放记录但未提交当前视图');
+    }
+
+    updateBlackBoxEntry(result.value);
+    return success(undefined);
+  }
+
+  private prepareDeletedEntry(id: string): Result<BlackBoxEntry, OperationError> {
     const entry = blackBoxEntriesMap().get(id);
     if (!entry) {
       return failure(ErrorCodes.FOCUS_ENTRY_NOT_FOUND, '条目不存在');
     }
-    
+
     const now = new Date().toISOString();
     const deleted: BlackBoxEntry = {
       ...entry,
@@ -305,22 +522,16 @@ export class BlackBoxService {
       updatedAt: now,
       syncStatus: this.resolveSyncStatusForMode(entry.userId),
     };
-
-    updateBlackBoxEntry(deleted);
-    
-    // 同步删除操作到服务器，或本地模式仅持久化 tombstone
-    this.persistAfterLocalChange(deleted);
-    
-    return success(undefined);
+    return success(deleted);
   }
-  
+
   /**
    * 获取单个条目
    */
   getEntry(id: string): BlackBoxEntry | undefined {
     return blackBoxEntriesMap().get(id);
   }
-  
+
   /**
    * 获取指定日期的条目仓可见条目
    */
@@ -329,18 +540,18 @@ export class BlackBoxService {
       .filter(e => e.date === date && !e.deletedAt && !e.isArchived && !e.isCompleted)
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   }
-  
+
   /**
    * 获取已完成的条目（用于地质层）
    */
   getCompletedEntries(date?: string): BlackBoxEntry[] {
     const entries = Array.from(blackBoxEntriesMap().values())
       .filter(e => e.isCompleted && !e.deletedAt);
-    
+
     if (date) {
       return entries.filter(entry => this.getCompletionLocalDate(entry) === date);
     }
-    
+
     return entries.sort((leftEntry, rightEntry) =>
       new Date(this.getCompletionTimestamp(rightEntry)).getTime()
       - new Date(this.getCompletionTimestamp(leftEntry)).getTime()
@@ -371,7 +582,7 @@ export class BlackBoxService {
     const day = String(date.getDate()).padStart(2, '0');
     return `${year}-${month}-${day}`;
   }
-  
+
   /**
    * 获取已归档的条目
    */
@@ -380,7 +591,7 @@ export class BlackBoxService {
       .filter(e => e.isArchived && !e.deletedAt)
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   }
-  
+
   /**
    * 跳过条目（稍后提醒）
    */
@@ -389,16 +600,44 @@ export class BlackBoxService {
     if (!entry) {
       return failure(ErrorCodes.FOCUS_ENTRY_NOT_FOUND, '条目不存在');
     }
-    
+
     // 默认跳过到明天
     const snoozeUntil = until ?? this.getTomorrowDate();
-    
-    return this.update(id, { 
+
+    return this.update(id, {
       snoozeUntil,
       snoozeCount: (entry.snoozeCount ?? 0) + 1
     });
   }
-  
+
+  async snoozeDurably(
+    id: string,
+    until?: string,
+    targetSnoozeCount?: number,
+  ): Promise<Result<BlackBoxEntry, OperationError>> {
+    const entry = blackBoxEntriesMap().get(id);
+    if (!entry) {
+      return failure(ErrorCodes.FOCUS_ENTRY_NOT_FOUND, '条目不存在');
+    }
+
+    const snoozeUntil = until ?? this.getTomorrowDate();
+    const currentSnoozeCount = entry.snoozeCount ?? 0;
+    const resolvedTargetSnoozeCount = targetSnoozeCount ?? (
+      entry.snoozeUntil === snoozeUntil && currentSnoozeCount > 0
+        ? currentSnoozeCount
+        : currentSnoozeCount + 1
+    );
+    if (!Number.isSafeInteger(resolvedTargetSnoozeCount) || resolvedTargetSnoozeCount < 1) {
+      return failure(ErrorCodes.OPERATION_FAILED, '稍后提醒计数无效');
+    }
+    const operationAlreadyAppliedOrSuperseded = currentSnoozeCount >= resolvedTargetSnoozeCount;
+
+    return this.updateDurably(id, {
+      snoozeUntil: operationAlreadyAppliedOrSuperseded ? entry.snoozeUntil : snoozeUntil,
+      snoozeCount: Math.max(currentSnoozeCount, resolvedTargetSnoozeCount),
+    });
+  }
+
   /**
    * 从服务器加载条目
    */
@@ -450,7 +689,7 @@ export class BlackBoxService {
 
     await this.localHydrationPromise;
   }
-  
+
   /**
    * 获取明天日期
    */
@@ -473,20 +712,49 @@ export class BlackBoxService {
   }
 
   private persistAfterLocalChange(entry: BlackBoxEntry, syncOptions?: ScheduleBlackBoxSyncOptions): void {
-    if (this.shouldSyncRemotely(entry.userId)) {
-      if (syncOptions) {
-        void this.syncService.scheduleSync(entry, syncOptions);
-      } else {
-        void this.syncService.scheduleSync(entry);
+    void this.persistAfterLocalChangeDurably(entry, syncOptions).then((result) => {
+      if (!result.ok) {
+        this.logger.warn('黑匣子本地持久化失败，当前会话内存状态已更新，后续本地水合可能需要重试', {
+          entryId: entry.id,
+          error: result.error.message,
+        });
       }
-      return;
+    });
+  }
+
+  private async persistAfterLocalChangeDurably(
+    entry: BlackBoxEntry,
+    syncOptions?: ScheduleBlackBoxSyncOptions,
+  ): Promise<Result<void, OperationError>> {
+    if (this.shouldSyncRemotely(entry.userId)) {
+      try {
+        if (syncOptions) {
+          await this.syncService.scheduleSync(entry, syncOptions);
+        } else {
+          await this.syncService.scheduleSync(entry);
+        }
+        return success(undefined);
+      } catch (error) {
+        return this.buildLocalPersistFailure(entry, error);
+      }
     }
 
-    void this.syncService.saveToLocal(entry).catch((error: unknown) => {
-      this.logger.warn('黑匣子本地模式持久化失败，当前会话内存状态已更新，后续本地水合可能需要重试', {
-        entryId: entry.id,
-        error: error instanceof Error ? error.message : String(error),
-      });
+    try {
+      await this.syncService.saveToLocal(entry);
+      return success(undefined);
+    } catch (error) {
+      return this.buildLocalPersistFailure(entry, error);
+    }
+  }
+
+  private buildLocalPersistFailure(
+    entry: BlackBoxEntry,
+    error: unknown,
+  ): Result<void, OperationError> {
+    const message = error instanceof Error ? error.message : String(error);
+    return failure(ErrorCodes.OPERATION_FAILED, '黑匣子本地持久化失败', {
+      entryId: entry.id,
+      error: message,
     });
   }
 }

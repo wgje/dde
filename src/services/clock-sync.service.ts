@@ -15,6 +15,7 @@
  */
 
 import { Injectable, inject, signal, computed } from '@angular/core';
+import { TIMEOUT_CONFIG } from '../config/timeout.config';
 import { LoggerService } from './logger.service';
 import { ToastService } from './toast.service';
 import { SupabaseClientService } from './supabase-client.service';
@@ -76,6 +77,13 @@ export const CLOCK_SYNC_CONFIG = {
   
   /** 缓存有效期（毫秒）*/
   CACHE_TTL: 5 * 60 * 1000,
+
+  /**
+   * 不可靠结果（慢网 RTT 超限 / fallback unknown）的重探窗口（毫秒）。
+   * 弱网一次超限探测若按 CACHE_TTL 缓存 5 分钟，REST 路径的 LWW 比较
+   * 会在整个窗口内即时抛 ClockUncertain 并消耗重试预算。
+   */
+  UNRELIABLE_RETRY_TTL: 30 * 1000,
 } as const;
 
 @Injectable({
@@ -108,6 +116,8 @@ export class ClockSyncService {
   
   /** 是否正在检测 */
   private isChecking = false;
+
+  private checkPromise: Promise<ClockSyncResult> | null = null;
   
   constructor() {
     // 启动时检测 - 延迟到应用空闲时执行，避免阻塞首屏渲染
@@ -127,6 +137,22 @@ export class ClockSyncService {
    * 通过向 Supabase 发送一个简单请求，比较服务端返回的时间
    */
   async checkClockDrift(): Promise<ClockSyncResult> {
+    if (this.checkPromise) {
+      return this.checkPromise;
+    }
+
+    const checkPromise = this.runClockDriftCheck();
+    this.checkPromise = checkPromise;
+    try {
+      return await checkPromise;
+    } finally {
+      if (this.checkPromise === checkPromise) {
+        this.checkPromise = null;
+      }
+    }
+  }
+
+  private async runClockDriftCheck(): Promise<ClockSyncResult> {
     if (this.isChecking) {
       const last = this.lastSyncResult();
       if (last) return last;
@@ -135,17 +161,7 @@ export class ClockSyncService {
     // Supabase 未配置时跳过时钟检测，使用本地时间
     if (!this.supabase.isConfigured) {
       this.logger.debug('Supabase 未配置，跳过时钟检测');
-      const result: ClockSyncResult = {
-        status: 'unknown',
-        driftMs: 0,
-        serverTime: new Date(),
-        clientTime: new Date(),
-        rttMs: 0,
-        checkedAt: new Date(),
-        reliable: false
-      };
-      this.lastSyncResult.set(result);
-      return result;
+      return this.storeUnknownClockResult();
     }
 
     this.isChecking = true;
@@ -155,129 +171,157 @@ export class ClockSyncService {
       const session = await this.supabase.client().auth.getSession();
       if (!session.data.session) {
         this.logger.debug('用户未认证，跳过时钟检测');
-        const result: ClockSyncResult = {
-          status: 'unknown',
-          driftMs: 0,
-          serverTime: new Date(),
-          clientTime: new Date(),
-          rttMs: 0,
-          checkedAt: new Date(),
-          reliable: false
-        };
-        this.lastSyncResult.set(result);
-        return result;
+        return this.storeUnknownClockResult();
       }
 
       const clientTimeStart = new Date();
-      
-      // 使用 RPC 调用获取服务端时间
-      // 如果 RPC 不可用，fallback 到简单的 select
-      let serverTime: Date;
-      let clientTimeEnd: Date;
-      
-      try {
-        const { data, error } = await this.supabase.client()
-          .rpc('get_server_time');
-        
-        clientTimeEnd = new Date();
-        
-        if (error || !data) {
-          // Fallback: 尝试简单查询
-          const fallbackResult = await this.fallbackTimeCheck();
-          if (fallbackResult) {
-            return fallbackResult;
-          }
-          throw new Error(error?.message ?? '无法获取服务端时间');
-        }
-        
-        serverTime = new Date(data);
-      } catch (e) {
-        // Fallback: 使用 HTTP 响应头中的 Date
-        this.logger.debug('获取服务端时间失败，尝试 fallback', { error: e });
-        const fallbackResult = await this.fallbackTimeCheck();
-        if (fallbackResult) {
-          return fallbackResult;
-        }
-        throw new Error('无法获取服务端时间');
+      const serverTimeResult = await this.fetchServerTimeOrFallback();
+      if (serverTimeResult.kind === 'fallback') {
+        return serverTimeResult.result;
       }
-      
-      // 计算往返时间和偏移
-      const rttMs = clientTimeEnd.getTime() - clientTimeStart.getTime();
-      const estimatedServerTimeAtRequest = new Date(
-        serverTime.getTime() - rttMs / 2
+
+      return this.storeMeasuredClockResult(
+        this.buildMeasuredClockResult(
+          clientTimeStart,
+          serverTimeResult.clientTimeEnd,
+          serverTimeResult.serverTime,
+        ),
       );
-      const driftMs = clientTimeStart.getTime() - estimatedServerTimeAtRequest.getTime();
-      
-      // 确定状态
-      const absDrift = Math.abs(driftMs);
-      let status: ClockDriftStatus;
-      
-      if (absDrift < CLOCK_SYNC_CONFIG.CLOCK_DRIFT_WARNING_THRESHOLD) {
-        status = 'synced';
-      } else if (absDrift < CLOCK_SYNC_CONFIG.CLOCK_DRIFT_ERROR_THRESHOLD) {
-        status = 'warning';
-      } else {
-        status = 'error';
-      }
-      
-      const result: ClockSyncResult = {
-        status,
-        driftMs,
-        serverTime,
-        clientTime: clientTimeStart,
-        rttMs,
-        checkedAt: new Date(),
-        reliable: rttMs < CLOCK_SYNC_CONFIG.MAX_RELIABLE_RTT
-      };
-      
-      // 更新状态
-      this.driftStatus.set(status);
-      this.lastSyncResult.set(result);
-      
-      // 记录日志
-      if (status !== 'synced') {
-        this.logger.warn('检测到时钟偏移', {
-          driftMs,
-          status,
-          reliable: result.reliable
-        });
-        
-        if (status === 'error') {
-          // 上报 Sentry
-          this.sentryLazyLoader.captureMessage('Significant clock drift detected', {
-            level: 'warning',
-            tags: { driftMs: String(driftMs) },
-            extra: { result }
-          });
-          
-          // 提示用户
-          this.showClockWarning(driftMs);
-        }
-      } else {
-        this.logger.debug('时钟同步正常', { driftMs });
-      }
-      
-      return result;
       
     } catch (error) {
       this.logger.debug('时钟检测失败', error);
-      
-      // 返回未知状态
-      const result: ClockSyncResult = {
-        status: 'unknown',
-        driftMs: 0,
-        serverTime: new Date(),
-        clientTime: new Date(),
-        rttMs: 0,
-        checkedAt: new Date(),
-        reliable: false
-      };
-      
-      this.lastSyncResult.set(result);
-      return result;
+      return this.storeUnknownClockResult();
       
     } finally {
       this.isChecking = false;
+    }
+  }
+
+  private storeUnknownClockResult(): ClockSyncResult {
+    const result: ClockSyncResult = {
+      status: 'unknown',
+      driftMs: 0,
+      serverTime: new Date(),
+      clientTime: new Date(),
+      rttMs: 0,
+      checkedAt: new Date(),
+      reliable: false
+    };
+
+    this.lastSyncResult.set(result);
+    return result;
+  }
+
+  /**
+   * 给时钟探针加 TIMEOUT_CONFIG.QUICK 上界：探针没有 throttle 包装，
+   * 弱网挂起会占满全局 120s fetch 预算并让共享的 checkPromise 拖住所有
+   * 并发 ensureSynced 调用方。mock/旧 builder 不支持 abortSignal 时按原样等待。
+   */
+  private async awaitWithQuickAbort<T>(builder: PromiseLike<T>): Promise<T> {
+    const abortable = builder as PromiseLike<T> & {
+      abortSignal?: (signal: AbortSignal) => PromiseLike<T>;
+    };
+    if (typeof abortable.abortSignal !== 'function') {
+      return await builder;
+    }
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_CONFIG.QUICK);
+    try {
+      return await abortable.abortSignal(controller.signal);
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  private async fetchServerTimeOrFallback(): Promise<
+    | { kind: 'server'; serverTime: Date; clientTimeEnd: Date }
+    | { kind: 'fallback'; result: ClockSyncResult }
+  > {
+    try {
+      const { data, error } = await this.awaitWithQuickAbort(
+        this.supabase.client().rpc('get_server_time'),
+      );
+      const clientTimeEnd = new Date();
+
+      if (error || !data) {
+        const fallbackResult = await this.fallbackTimeCheck();
+        if (fallbackResult) {
+          return { kind: 'fallback', result: fallbackResult };
+        }
+        throw new Error(error?.message ?? '无法获取服务端时间');
+      }
+
+      return {
+        kind: 'server',
+        serverTime: new Date(data),
+        clientTimeEnd,
+      };
+    } catch (e) {
+      this.logger.debug('获取服务端时间失败，尝试 fallback', { error: e });
+      const fallbackResult = await this.fallbackTimeCheck();
+      if (fallbackResult) {
+        return { kind: 'fallback', result: fallbackResult };
+      }
+      throw new Error('无法获取服务端时间');
+    }
+  }
+
+  private buildMeasuredClockResult(clientTimeStart: Date, clientTimeEnd: Date, serverTime: Date): ClockSyncResult {
+    const rttMs = clientTimeEnd.getTime() - clientTimeStart.getTime();
+    const estimatedServerTimeAtRequest = new Date(serverTime.getTime() - rttMs / 2);
+    const driftMs = clientTimeStart.getTime() - estimatedServerTimeAtRequest.getTime();
+    const status = this.resolveDriftStatus(driftMs);
+
+    return {
+      status,
+      driftMs,
+      serverTime,
+      clientTime: clientTimeStart,
+      rttMs,
+      checkedAt: new Date(),
+      reliable: rttMs < CLOCK_SYNC_CONFIG.MAX_RELIABLE_RTT
+    };
+  }
+
+  private resolveDriftStatus(driftMs: number): ClockDriftStatus {
+    const absDrift = Math.abs(driftMs);
+
+    if (absDrift < CLOCK_SYNC_CONFIG.CLOCK_DRIFT_WARNING_THRESHOLD) {
+      return 'synced';
+    }
+    if (absDrift < CLOCK_SYNC_CONFIG.CLOCK_DRIFT_ERROR_THRESHOLD) {
+      return 'warning';
+    }
+    return 'error';
+  }
+
+  private storeMeasuredClockResult(result: ClockSyncResult): ClockSyncResult {
+    this.driftStatus.set(result.status);
+    this.lastSyncResult.set(result);
+    this.logClockResult(result);
+    return result;
+  }
+
+  private logClockResult(result: ClockSyncResult): void {
+    if (result.status === 'synced') {
+      this.logger.debug('时钟同步正常', { driftMs: result.driftMs });
+      return;
+    }
+
+    this.logger.warn('检测到时钟偏移', {
+      driftMs: result.driftMs,
+      status: result.status,
+      reliable: result.reliable
+    });
+
+    if (result.status === 'error') {
+      this.sentryLazyLoader.captureMessage('Significant clock drift detected', {
+        level: 'warning',
+        tags: { driftMs: String(result.driftMs) },
+        extra: { result }
+      });
+      this.showClockWarning(result.driftMs);
     }
   }
   
@@ -290,11 +334,13 @@ export class ClockSyncService {
       const clientTimeStart = new Date();
       
       // 使用 from().select() 获取当前时间
-      const { data, error } = await this.supabase.client()
-        .from('projects')
-        .select('id')
-        .is('deleted_at', null)
-        .limit(1);
+      const { data, error } = await this.awaitWithQuickAbort(
+        this.supabase.client()
+          .from('projects')
+          .select('id')
+          .is('deleted_at', null)
+          .limit(1),
+      );
       
       const clientTimeEnd = new Date();
       
@@ -407,9 +453,12 @@ export class ClockSyncService {
   needsResync(): boolean {
     const result = this.lastSyncResult();
     if (!result) return true;
-    
+
     const elapsed = Date.now() - result.checkedAt.getTime();
-    return elapsed > CLOCK_SYNC_CONFIG.CACHE_TTL;
+    const cacheTtl = result.reliable
+      ? CLOCK_SYNC_CONFIG.CACHE_TTL
+      : CLOCK_SYNC_CONFIG.UNRELIABLE_RETRY_TTL;
+    return elapsed > cacheTtl;
   }
   
   /**
@@ -429,7 +478,7 @@ export class ClockSyncService {
    * 启动定期时钟检测
    */
   startPeriodicCheck(): void {
-    if (this.periodicCheckTimer) return;
+    if (this.periodicCheckTimer !== null) return;
     
     this.periodicCheckTimer = setInterval(() => {
       this.checkClockDrift().catch(err => {
@@ -444,7 +493,7 @@ export class ClockSyncService {
    * 停止定期时钟检测
    */
   stopPeriodicCheck(): void {
-    if (this.periodicCheckTimer) {
+    if (this.periodicCheckTimer !== null) {
       clearInterval(this.periodicCheckTimer);
       this.periodicCheckTimer = null;
       this.logger.debug('定期时钟检测已停止');

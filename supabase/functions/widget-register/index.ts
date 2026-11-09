@@ -1,5 +1,3 @@
-import 'jsr:@supabase/functions-js/edge-runtime.d.ts';
-
 import {
   buildWidgetClientCapabilitiesPatch,
   buildWidgetToken,
@@ -10,6 +8,7 @@ import {
   extractWidgetClientVersion,
   getClientIp,
   getCorsHeaders,
+  hasServiceRoleConfig,
   jsonResponse,
   loadWidgetCapabilities,
   loadWidgetLimits,
@@ -17,10 +16,13 @@ import {
   mergeJsonObjects,
   normalizeWidgetPlatform,
   redactId,
+  readWidgetRequestJson,
+  serviceNotConfiguredPayload,
   sha256Hex,
   toPublicWidgetCapabilities,
   verifyJwtUser,
   withPrivateNoStoreHeaders,
+  isWidgetRequestBodyTooLargeError,
   type Json,
   type WidgetCapabilities,
   type WidgetPlatform,
@@ -43,6 +45,7 @@ interface WidgetRegisterRequest {
   deviceSecret?: string;
   platform?: WidgetPlatform;
   pushToken?: string | null;
+  expectedBindingGeneration?: number | null;
   capabilities?: Json;
   instance?: WidgetInstancePayload | null;
 }
@@ -76,6 +79,15 @@ function isUuidLike(value: unknown): value is string {
 
 function isNonEmptyText(value: unknown, maxLength = 256): value is string {
   return typeof value === 'string' && value.trim().length > 0 && value.trim().length <= maxLength;
+}
+
+function isExpectedBindingGenerationProvided(value: unknown): boolean {
+  return value !== undefined && value !== null;
+}
+
+function normalizeExpectedBindingGeneration(value: unknown): number | null {
+  if (!isExpectedBindingGenerationProvided(value)) return null;
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : null;
 }
 
 function normalizeInstancePayload(value: unknown): WidgetInstancePayload | null {
@@ -116,6 +128,16 @@ function buildDisabledPayload(code: 'WIDGET_DISABLED' | 'WIDGET_INSTALL_DISABLED
     error: code === 'WIDGET_INSTALL_DISABLED'
       ? 'Widget install is currently disabled'
       : 'Widget backend is currently disabled',
+    capabilities,
+  };
+}
+
+function buildStaleBindingGenerationPayload(existing: WidgetDeviceRow, capabilities: WidgetCapabilities) {
+  return {
+    error: 'Widget binding generation is stale',
+    code: 'STALE_BINDING_GENERATION',
+    deviceId: existing.id,
+    bindingGeneration: existing.binding_generation,
     capabilities,
   };
 }
@@ -200,6 +222,10 @@ Deno.serve(async (req: Request) => {
     return jsonResponse({ error: 'Method not allowed', code: 'METHOD_NOT_ALLOWED' }, responseHeaders, 405);
   }
 
+  if (!hasServiceRoleConfig()) {
+    return jsonResponse(serviceNotConfiguredPayload(), responseHeaders, 503);
+  }
+
   const auth = await verifyJwtUser(req);
   if (!auth) {
     logWidgetEvent('widget_register_failure', { code: 'AUTH_REQUIRED', status: 401 });
@@ -227,14 +253,25 @@ Deno.serve(async (req: Request) => {
 
   let body: WidgetRegisterRequest;
   try {
-    body = await req.json() as WidgetRegisterRequest;
-  } catch {
+    body = await readWidgetRequestJson<WidgetRegisterRequest>(req);
+  } catch (error) {
+    if (isWidgetRequestBodyTooLargeError(error)) {
+      return jsonResponse({
+        error: 'Request body too large',
+        code: 'REQUEST_BODY_TOO_LARGE',
+      }, responseHeaders, 413);
+    }
+
     return jsonResponse({ error: 'Invalid JSON body', code: 'INVALID_JSON' }, responseHeaders, 400);
   }
 
   const action: WidgetRegisterAction = body.action ?? 'register';
   if (action !== 'register' && action !== 'rotate' && action !== 'revoke' && action !== 'revoke-all' && action !== 'uninstall-instance') {
     return jsonResponse({ error: 'Unsupported action', code: 'INVALID_ACTION' }, responseHeaders, 400);
+  }
+  const expectedBindingGeneration = normalizeExpectedBindingGeneration(body.expectedBindingGeneration);
+  if (isExpectedBindingGenerationProvided(body.expectedBindingGeneration) && expectedBindingGeneration === null) {
+    return jsonResponse({ error: 'expectedBindingGeneration must be a positive integer', code: 'INVALID_BINDING_GENERATION' }, responseHeaders, 400);
   }
 
   const capabilities = await loadWidgetCapabilities(client);
@@ -312,6 +349,14 @@ Deno.serve(async (req: Request) => {
   if (body.instance && !instance) {
     return jsonResponse({ error: 'instance payload is invalid', code: 'INVALID_INSTANCE' }, responseHeaders, 400);
   }
+  if (
+    expectedBindingGeneration !== null
+    && existing
+    && existing.user_id === auth.userId
+    && existing.binding_generation !== expectedBindingGeneration
+  ) {
+    return jsonResponse(buildStaleBindingGenerationPayload(existing, capabilities), responseHeaders, 409);
+  }
 
   if (action === 'revoke') {
     if (!existing || existing.user_id !== auth.userId) {
@@ -319,7 +364,7 @@ Deno.serve(async (req: Request) => {
     }
 
     const now = new Date().toISOString();
-    const { error } = await client
+    const { data, error } = await client
       .from('widget_devices')
       .update({
         revoked_at: now,
@@ -330,7 +375,10 @@ Deno.serve(async (req: Request) => {
         updated_at: now,
       })
       .eq('id', existing.id)
-      .eq('user_id', auth.userId);
+      .eq('user_id', auth.userId)
+      .eq('binding_generation', existing.binding_generation)
+      .select('id,binding_generation')
+      .maybeSingle();
 
     if (error) {
       logWidgetEvent('widget_register_failure', {
@@ -341,6 +389,9 @@ Deno.serve(async (req: Request) => {
         status: 500,
       });
       return jsonResponse({ error: 'Failed to revoke widget device', code: 'REVOKE_FAILED' }, responseHeaders, 500);
+    }
+    if (!data) {
+      return jsonResponse(buildStaleBindingGenerationPayload(existing, capabilities), responseHeaders, 409);
     }
 
     logWidgetEvent('widget_register_success', {
@@ -521,9 +572,25 @@ Deno.serve(async (req: Request) => {
     deviceUpsert.push_token_updated_at = nowIso;
   }
 
-  const { error: upsertError } = await client
-    .from('widget_devices')
-    .upsert(deviceUpsert, { onConflict: 'id' });
+  let upsertError: { message: string } | null = null;
+  if (existing) {
+    const { data, error } = await client
+      .from('widget_devices')
+      .update(deviceUpsert)
+      .eq('id', canonicalDeviceId)
+      .eq('binding_generation', existing.binding_generation)
+      .select('id,binding_generation')
+      .maybeSingle();
+    upsertError = error;
+    if (!error && !data) {
+      return jsonResponse(buildStaleBindingGenerationPayload(existing, capabilities), responseHeaders, 409);
+    }
+  } else {
+    const { error } = await client
+      .from('widget_devices')
+      .upsert(deviceUpsert, { onConflict: 'id' });
+    upsertError = error;
+  }
 
   if (upsertError) {
     console.error('[WidgetRegister] upsert failed', {

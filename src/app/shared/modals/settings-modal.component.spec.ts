@@ -5,6 +5,7 @@ import { By } from '@angular/platform-browser';
 import { SettingsModalComponent } from './settings-modal.component';
 import { LoggerService } from '../../../services/logger.service';
 import { UserSessionService } from '../../../services/user-session.service';
+import { RetryQueueService } from '../../core/services/sync/retry-queue.service';
 import { PreferenceService } from '../../../services/preference.service';
 import { ExportService } from '../../../services/export.service';
 import { ImportService } from '../../../services/import.service';
@@ -17,6 +18,16 @@ import { FocusPreferenceService } from '../../../services/focus-preference.servi
 import { GateService } from '../../../services/gate.service';
 import { ExternalSourceCacheService } from '../../core/external-sources/external-source-cache.service';
 import { SiyuanPreviewService } from '../../core/external-sources/siyuan/siyuan-preview.service';
+import type { Project, Task } from '../../../models';
+import type { AttachmentImportItem } from '../../../services/attachment-import.service';
+import { DisasterBackupService } from '../../../services/disaster-backup.service';
+import { BackupDataSafetyMetadataRestoreService } from '../../../services/backup-data-safety-metadata-restore.service';
+import { LocalBackupUiRestoreStageService } from '../../../services/local-backup-ui-restore-stage.service';
+import { LocalBackupUiRestoreTransactionService } from '../../../services/local-backup-ui-restore-transaction.service';
+import { SessionRuntimeResetRegistry } from '../../../services/session-runtime-reset.service';
+import {
+  registerSettingsModalSiyuanOwnerGenerationSpecs,
+} from './settings-modal-siyuan-owner-generation.spec-helpers';
 
 describe('SettingsModalComponent', () => {
   let fixture: ComponentFixture<SettingsModalComponent>;
@@ -95,10 +106,12 @@ describe('SettingsModalComponent', () => {
 
   const mockDockEngine = {
     dailySlots,
-    addDailySlot: vi.fn(),
-    completeDailySlot: vi.fn(),
-    setDailySlotEnabled: vi.fn(),
-    removeDailySlot: vi.fn(),
+    dailySlotService: {
+      addDailySlot: vi.fn(),
+      completeDailySlot: vi.fn(),
+      setDailySlotEnabled: vi.fn(),
+      removeDailySlot: vi.fn(),
+    },
   };
 
   const mockLocalBackupService = {
@@ -118,6 +131,33 @@ describe('SettingsModalComponent', () => {
     performBackup: vi.fn(),
     stopAutoBackup: vi.fn(),
     startAutoBackup: vi.fn(),
+  };
+
+  const mockDisasterBackupService = {
+    buildLocalBlob: vi.fn(),
+  };
+
+  const mockMetadataRestoreService = {
+    preview: vi.fn(),
+    restore: vi.fn(),
+  };
+
+  const mockLocalBackupUiRestoreStageService = {
+    createOperations: vi.fn(),
+  };
+
+  const mockLocalBackupUiRestoreTransactionService = {
+    prepare: vi.fn(),
+  };
+  const mockRetryQueueService = {
+    add: vi.fn(),
+    addDurably: vi.fn(),
+    clear: vi.fn(),
+    configureActionQueueSupersessionBridge: vi.fn(),
+    getItems: vi.fn(() => []),
+    hasEntity: vi.fn(() => false),
+    removeByEntity: vi.fn(() => false),
+    removeByProjectIdDurablyForOwner: vi.fn().mockResolvedValue(true),
   };
 
   const mockExportService = {
@@ -199,24 +239,34 @@ describe('SettingsModalComponent', () => {
       restReminderHighLoadMinutes: 90,
       restReminderLowLoadMinutes: 30,
     });
+    mockDockEngine.dailySlotService.addDailySlot.mockReturnValue('slot-new');
+    mockDockEngine.dailySlotService.completeDailySlot.mockResolvedValue(true);
+    mockDockEngine.dailySlotService.setDailySlotEnabled.mockResolvedValue(true);
+    mockDockEngine.dailySlotService.removeDailySlot.mockResolvedValue(true);
 
     await TestBed.configureTestingModule({
       imports: [SettingsModalComponent],
       providers: [
         { provide: LoggerService, useValue: mockLogger },
         { provide: UserSessionService, useValue: mockUserSession },
+        { provide: RetryQueueService, useValue: mockRetryQueueService },
         { provide: PreferenceService, useValue: mockPreferenceService },
         { provide: ExportService, useValue: mockExportService },
         { provide: ImportService, useValue: mockImportService },
         { provide: AttachmentExportService, useValue: mockAttachmentExportService },
         { provide: AttachmentImportService, useValue: mockAttachmentImportService },
         { provide: LocalBackupService, useValue: mockLocalBackupService },
+        { provide: DisasterBackupService, useValue: mockDisasterBackupService },
+        { provide: BackupDataSafetyMetadataRestoreService, useValue: mockMetadataRestoreService },
+        { provide: LocalBackupUiRestoreStageService, useValue: mockLocalBackupUiRestoreStageService },
+        { provide: LocalBackupUiRestoreTransactionService, useValue: mockLocalBackupUiRestoreTransactionService },
         { provide: ThemeService, useValue: mockThemeService },
         { provide: DockEngineService, useValue: mockDockEngine },
         { provide: FocusPreferenceService, useValue: mockFocusPreferenceService },
         { provide: GateService, useValue: mockGateService },
         { provide: ExternalSourceCacheService, useValue: mockSiyuanCache },
         { provide: SiyuanPreviewService, useValue: mockSiyuanPreview },
+        SessionRuntimeResetRegistry,
       ],
     }).compileComponents();
 
@@ -225,8 +275,22 @@ describe('SettingsModalComponent', () => {
     fixture.detectChanges();
   });
 
+  registerSettingsModalSiyuanOwnerGenerationSpecs({
+    component: () => component,
+    currentUserId,
+    destroyFixture: () => fixture.destroy(),
+    mockSiyuanCache,
+    sessionRuntimeReset: () => TestBed.inject(SessionRuntimeResetRegistry),
+  });
+
   it('should remove the obsolete backup reminder setting from the UI', () => {
     expect(fixture.nativeElement.textContent).not.toContain('定期备份提醒');
+  });
+
+  it('should render the appearance subcomponent with theme and color mode controls', () => {
+    expect(fixture.nativeElement.textContent).toContain('外观风格');
+    expect(fixture.nativeElement.textContent).toContain('颜色模式');
+    expect(fixture.nativeElement.textContent).toContain('薰衣草');
   });
 
   it('should emit themeChange when a theme tile is selected', () => {
@@ -247,6 +311,232 @@ describe('SettingsModalComponent', () => {
 
   it('should expose a stable settings modal test id', () => {
     expect(fixture.nativeElement.querySelector('[data-testid="settings-modal"]')).toBeTruthy();
+  });
+
+  it('should render pending local restore state in the backup preview', () => {
+    mockLocalBackupService.isAvailable.set(true);
+    mockLocalBackupService.hasSavedHandle.set(true);
+    mockLocalBackupService.directoryName.set('NanoFlow Backups');
+    component.localBackupUI.restoreStep.set('preview');
+    component.localBackupUI.restorePreview.set({
+      projects: 1,
+      tasks: 2,
+      connections: 1,
+      attachmentUploads: 1,
+      actionQueue: 2,
+      retryQueue: 3,
+      deadLetters: 1,
+      conflicts: 1,
+      projectCursors: 1,
+      lastSyncTime: 1,
+      replayLog: 2,
+      lastWriteExplain: 1,
+      taskTombstones: 1,
+      connectionTombstones: 1,
+    });
+    fixture.detectChanges();
+
+    const text = fixture.nativeElement.textContent as string;
+    expect(text).toContain('本机待恢复状态');
+    expect(text).toContain('附件上传 1');
+    expect(text).toContain('待同步 2');
+    expect(text).toContain('待重试 3');
+    expect(text).toContain('失败记录 1');
+    expect(text).toContain('冲突副本 1');
+    expect(text).toContain('项目游标 1');
+    expect(text).toContain('写入审计 2');
+    expect(text).toContain('最近写入解释 1');
+    expect(text).toContain('任务删除标记 1');
+    expect(text).toContain('连接删除标记 1');
+  });
+
+  it('should await safe restore without invoking the normal project import callback', async () => {
+    const project = createProject('project-1', []);
+    let releaseRestore!: () => void;
+    const restoreCompletion = new Promise<void>(resolve => {
+      releaseRestore = resolve;
+    });
+    const importProject = vi.fn();
+    (component as unknown as { importProject: () => typeof importProject }).importProject =
+      () => importProject;
+    const confirmRestore = vi.spyOn(component.localBackupUI, 'confirmRestore')
+      .mockReturnValue(restoreCompletion);
+    let settled = false;
+
+    const pending = component.confirmRestore().then(() => { settled = true; });
+    await Promise.resolve();
+
+    expect(confirmRestore).toHaveBeenCalledWith(component.projects());
+    expect(importProject).not.toHaveBeenCalled();
+    expect(settled).toBe(false);
+    releaseRestore();
+    await pending;
+    expect(settled).toBe(true);
+  });
+
+  it('should expose portable data-safety export and file restore without directory API support', async () => {
+    const project = createProject('project-1', []);
+    component.projects = signal([project]) as unknown as typeof component.projects;
+    const download = vi.spyOn(component.localBackupUI, 'handleDownloadDataSafetyPackage')
+      .mockResolvedValue(undefined);
+    const loadFile = vi.spyOn(component.localBackupUI, 'loadRestorePreviewFromFile')
+      .mockResolvedValue(undefined);
+    fixture.detectChanges();
+
+    const exportButton = fixture.nativeElement.querySelector(
+      '[data-testid="settings-data-safety-export"]',
+    ) as HTMLButtonElement | null;
+    const restoreInput = fixture.nativeElement.querySelector(
+      '[data-testid="settings-data-safety-restore-input"]',
+    ) as HTMLInputElement | null;
+
+    expect(exportButton).toBeTruthy();
+    expect(restoreInput).toBeTruthy();
+    exportButton!.click();
+    expect(download).toHaveBeenCalledWith([project]);
+
+    const file = new File(['{}'], 'nanoflow-backup.json', { type: 'application/json' });
+    Object.defineProperty(restoreInput!, 'files', {
+      configurable: true,
+      value: [file],
+    });
+    restoreInput!.dispatchEvent(new Event('change'));
+
+    expect(loadFile).toHaveBeenCalledWith(file, [project]);
+  });
+
+  it('should route a full BackupData file selected through ordinary import into safe restore', async () => {
+    const project = createProject('project-1', []);
+    component.projects = signal([project]) as unknown as typeof component.projects;
+    const loadFile = vi.spyOn(component.localBackupUI, 'loadRestorePreviewFromFile')
+      .mockResolvedValue(undefined);
+    const file = new File([JSON.stringify({
+      payloadVersion: '2.0.0',
+      projects: [{ id: 'project-1', userId: 'user-1' }],
+      tasks: [],
+      connections: [],
+      localState: {},
+    })], 'nanoflow-backup.json', { type: 'application/json' });
+    const event = {
+      target: {
+        files: [file],
+        value: 'nanoflow-backup.json',
+      },
+    } as unknown as Event;
+
+    await component.handleFileSelected(event);
+
+    expect(loadFile).toHaveBeenCalledWith(file, [project]);
+    expect(mockImportService.validateFile).not.toHaveBeenCalled();
+    expect(mockImportService.executeImport).not.toHaveBeenCalled();
+  });
+
+  it('should await the configured project import callback before reporting success', async () => {
+    const importedProject = createProject('project-imported', [createTask('task-imported')]);
+    let resolveImport!: () => void;
+    const importCompletion = new Promise<void>(resolve => {
+      resolveImport = resolve;
+    });
+    const importProject = vi.fn(() => importCompletion);
+    (component as unknown as { importProject: () => typeof importProject }).importProject =
+      () => importProject;
+    const alertSpy = vi.spyOn(globalThis, 'alert').mockImplementation(() => undefined);
+    mockImportService.validateFile.mockResolvedValue({ valid: true, data: { projects: [] } });
+    mockImportService.generatePreview.mockResolvedValue({ conflicts: [] });
+    mockImportService.executeImport.mockImplementation(async (...args: unknown[]) => {
+      const onProjectImported = args[3] as ((project: Project) => Promise<void> | void) | undefined;
+      await onProjectImported?.(importedProject);
+      return {
+        success: true,
+        importedCount: 1,
+        skippedCount: 0,
+        failedCount: 0,
+        details: [],
+        durationMs: 0,
+      };
+    });
+
+    let settled = false;
+    const pending = component.handleFileSelected(createImportFileInputEvent()).then(() => {
+      settled = true;
+    });
+    await vi.waitFor(() => expect(importProject).toHaveBeenCalledWith(importedProject));
+    expect(settled).toBe(false);
+    expect(alertSpy).not.toHaveBeenCalled();
+
+    resolveImport();
+    await pending;
+
+    expect(settled).toBe(true);
+    expect(alertSpy).toHaveBeenCalledWith('导入完成！\n成功: 1\n跳过: 0');
+  });
+
+  it('should report import failure when the configured project callback rejects', async () => {
+    const importedProject = createProject('project-imported', []);
+    const importProject = vi.fn().mockRejectedValue(new Error('persist failed'));
+    (component as unknown as { importProject: () => typeof importProject }).importProject =
+      () => importProject;
+    const alertSpy = vi.spyOn(globalThis, 'alert').mockImplementation(() => undefined);
+    mockImportService.validateFile.mockResolvedValue({ valid: true, data: { projects: [] } });
+    mockImportService.generatePreview.mockResolvedValue({ conflicts: [] });
+    mockImportService.executeImport.mockImplementation(async (...args: unknown[]) => {
+      const onProjectImported = args[3] as ((project: Project) => Promise<void> | void) | undefined;
+      try {
+        await onProjectImported?.(importedProject);
+        return {
+          success: true,
+          importedCount: 1,
+          skippedCount: 0,
+          failedCount: 0,
+          details: [],
+          durationMs: 0,
+        };
+      } catch (error) {
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'persist failed',
+          importedCount: 0,
+          skippedCount: 0,
+          failedCount: 1,
+          details: [],
+          durationMs: 0,
+        };
+      }
+    });
+
+    await component.handleFileSelected(createImportFileInputEvent());
+
+    expect(importProject).toHaveBeenCalledWith(importedProject);
+    expect(alertSpy).toHaveBeenCalledWith('导入失败：persist failed');
+    expect(alertSpy).not.toHaveBeenCalledWith(expect.stringContaining('导入完成'));
+  });
+
+  it('should preserve the importComplete output fallback when no project callback is configured', async () => {
+    const importedProject = createProject('project-imported', []);
+    const importComplete = vi.fn();
+    component.importComplete.subscribe(importComplete);
+    const alertSpy = vi.spyOn(globalThis, 'alert').mockImplementation(() => undefined);
+    mockImportService.validateFile.mockResolvedValue({ valid: true, data: { projects: [] } });
+    mockImportService.generatePreview.mockResolvedValue({ conflicts: [] });
+    mockImportService.executeImport.mockImplementation(async (...args: unknown[]) => {
+      const onProjectImported = args[3] as ((project: Project) => Promise<void> | void) | undefined;
+      await onProjectImported?.(importedProject);
+      return {
+        success: true,
+        importedCount: 1,
+        skippedCount: 0,
+        failedCount: 0,
+        details: [],
+        durationMs: 0,
+      };
+    });
+
+    await component.handleFileSelected(createImportFileInputEvent());
+
+    expect(importComplete).toHaveBeenCalledOnce();
+    expect(importComplete).toHaveBeenCalledWith(importedProject);
+    expect(importComplete.mock.calls[0]?.[0]).toBe(importedProject);
+    expect(alertSpy).toHaveBeenCalledWith('导入完成！\n成功: 1\n跳过: 0');
   });
 
   it('should keep the black box toggle visible and functional', () => {
@@ -278,6 +568,45 @@ describe('SettingsModalComponent', () => {
 
     expect(mockFocusPreferenceService.setRestReminderHighLoadMinutes).toHaveBeenCalledWith(120);
     expect(mockFocusPreferenceService.setRestReminderLowLoadMinutes).toHaveBeenCalledWith(15);
+  });
+
+  it('should return routine slot persistence promises from settings controls', async () => {
+    let resolveComplete!: (saved: boolean) => void;
+    mockDockEngine.dailySlotService.completeDailySlot.mockReturnValueOnce(new Promise<boolean>(resolve => {
+      resolveComplete = resolve;
+    }));
+
+    const completion = component.completeRoutineSlot('slot-1') as unknown as Promise<void>;
+    let completed = false;
+    completion.then(() => {
+      completed = true;
+    });
+
+    expect(mockDockEngine.dailySlotService.completeDailySlot).toHaveBeenCalledWith('slot-1');
+    expect(typeof completion?.then).toBe('function');
+    await Promise.resolve();
+    expect(completed).toBe(false);
+
+    resolveComplete(true);
+    await completion;
+    expect(completed).toBe(true);
+
+    await component.toggleRoutineSlot('slot-1', false);
+    await component.removeRoutineSlot('slot-1');
+    expect(mockDockEngine.dailySlotService.setDailySlotEnabled).toHaveBeenCalledWith('slot-1', false);
+    expect(mockDockEngine.dailySlotService.removeDailySlot).toHaveBeenCalledWith('slot-1');
+  });
+
+  it('should keep routine slot form values when add persistence fails', async () => {
+    mockDockEngine.dailySlotService.addDailySlot.mockResolvedValueOnce('');
+    component.newRoutineTitle = '喝水';
+    component.newRoutineMaxCount = 2;
+
+    await component.addRoutineSlot();
+
+    expect(mockDockEngine.dailySlotService.addDailySlot).toHaveBeenCalledWith('喝水', 2);
+    expect(component.newRoutineTitle).toBe('喝水');
+    expect(component.newRoutineMaxCount).toBe(2);
   });
 
   it('should render SiYuan Knowledge Anchor local-only settings', () => {
@@ -431,6 +760,36 @@ describe('SettingsModalComponent', () => {
     expect(saveBtn!.disabled).toBe(false);
   });
 
+  it('should group attachment ZIP imports by project and summarize unmatched and failed items', async () => {
+    const alertSpy = vi.spyOn(globalThis, 'alert').mockImplementation(() => undefined);
+    const itemA = createAttachmentImportItem('task-a', 'task-a-file.txt');
+    const itemB = createAttachmentImportItem('task-b', 'task-b-file.txt');
+    const unmatchedItem = createAttachmentImportItem('missing-task', 'missing-file.txt');
+    component.projects = signal([
+      createProject('project-a', [createTask('task-a')]),
+      createProject('project-b', [createTask('task-b')]),
+    ]) as unknown as typeof component.projects;
+    mockAttachmentImportService.extractAttachmentsFromZip.mockResolvedValueOnce([itemA, itemB, unmatchedItem]);
+    mockAttachmentImportService.importAttachments
+      .mockResolvedValueOnce({ success: true, imported: 1, failed: 0, skipped: 0, errors: [] })
+      .mockResolvedValueOnce({
+        success: false,
+        imported: 0,
+        failed: 1,
+        skipped: 2,
+        errors: [{ taskId: 'task-b', attachmentName: 'task-b-file.txt', error: 'upload failed' }],
+      });
+
+    await component.handleAttachmentImportFileSelected(createFileInputEvent('attachments.zip'));
+
+    expect(mockAttachmentImportService.importAttachments).toHaveBeenNthCalledWith(1, 'project-a', [itemA]);
+    expect(mockAttachmentImportService.importAttachments).toHaveBeenNthCalledWith(2, 'project-b', [itemB]);
+    expect(alertSpy).toHaveBeenCalledWith(
+      '附件导入部分失败。\n成功: 1\n失败: 1\n跳过: 3\n首个错误: task-b-file.txt: upload failed',
+    );
+    expect(mockLogger.warn).toHaveBeenCalledWith('SettingsModal', '部分附件未匹配到项目，已跳过: 1');
+  });
+
   function findButtonByText(text: string): HTMLButtonElement {
     const buttons = Array.from(fixture.nativeElement.querySelectorAll('button')) as HTMLButtonElement[];
     const button = buttons.find(candidate => candidate.textContent?.includes(text));
@@ -438,5 +797,70 @@ describe('SettingsModalComponent', () => {
       throw new Error(`Button not found: ${text}`);
     }
     return button;
+  }
+
+  function createProject(id: string, tasks: Task[]): Project {
+    return {
+      id,
+      name: id,
+      description: '',
+      createdDate: '2026-01-01T00:00:00.000Z',
+      tasks,
+      connections: [],
+    };
+  }
+
+  function createTask(id: string): Task {
+    return {
+      id,
+      title: id,
+      content: '',
+      stage: null,
+      parentId: null,
+      order: 0,
+      rank: 0,
+      status: 'active',
+      x: 0,
+      y: 0,
+      createdDate: '2026-01-01T00:00:00.000Z',
+      displayId: id,
+    };
+  }
+
+  function createAttachmentImportItem(taskId: string, name: string): AttachmentImportItem {
+    return {
+      taskId,
+      metadata: {
+        id: `${taskId}-attachment`,
+        name,
+        size: 12,
+        mimeType: 'text/plain',
+      },
+      data: new Blob(['attachment'], { type: 'text/plain' }),
+    };
+  }
+
+  function createFileInputEvent(filename: string): Event {
+    return {
+      target: {
+        files: [{
+          name: filename,
+          arrayBuffer: vi.fn().mockResolvedValue(new ArrayBuffer(8)),
+        }],
+        value: filename,
+      },
+    } as unknown as Event;
+  }
+
+  function createImportFileInputEvent(): Event {
+    const file = new File([
+      JSON.stringify({ metadata: { version: '1.0.0' }, projects: [] }),
+    ], 'project-export.json', { type: 'application/json' });
+    return {
+      target: {
+        files: [file],
+        value: file.name,
+      },
+    } as unknown as Event;
   }
 });

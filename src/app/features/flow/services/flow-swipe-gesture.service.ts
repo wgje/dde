@@ -11,6 +11,7 @@ interface SwipeState {
   startTime: number;
   isSwiping: boolean;
   isVerticalScroll: boolean;
+  hasActiveTouch: boolean;
 }
 
 /**
@@ -47,7 +48,8 @@ export class FlowSwipeGestureService {
     startY: 0,
     startTime: 0,
     isSwiping: false,
-    isVerticalScroll: false
+    isVerticalScroll: false,
+    hasActiveTouch: false
   };
   
   // ========== 右侧面板手势 ==========
@@ -107,13 +109,15 @@ export class FlowSwipeGestureService {
       startY: touch.clientY,
       startTime: Date.now(),
       isSwiping: false,
-      isVerticalScroll: false
+      isVerticalScroll: false,
+      hasActiveTouch: true
     };
   }
   
   handleDiagramAreaTouchMove(e: TouchEvent): void {
     if (!this.uiState.isMobile()) return;
     if (e.touches.length !== 1) return;
+    if (!this.diagramAreaSwipeState.hasActiveTouch) return;
     if (this.diagramAreaSwipeState.isVerticalScroll) return;
     
     const touch = e.touches[0];
@@ -134,9 +138,18 @@ export class FlowSwipeGestureService {
   }
   
   handleDiagramAreaTouchEnd(e: TouchEvent): SwipeResult {
-    if (!this.uiState.isMobile()) return 'none';
+    if (!this.uiState.isMobile()) {
+      this.resetDiagramAreaSwipeState();
+      return 'none';
+    }
+
+    if (!this.diagramAreaSwipeState.hasActiveTouch) {
+      this.resetDiagramAreaSwipeState();
+      return 'none';
+    }
     
     if (this.diagramAreaSwipeState.isVerticalScroll || !this.diagramAreaSwipeState.isSwiping) {
+      this.resetDiagramAreaSwipeState();
       return 'none';
     }
     
@@ -146,9 +159,7 @@ export class FlowSwipeGestureService {
     
     const threshold = deltaTime < 300 ? 40 : 60;
     
-    // 重置状态
-    this.diagramAreaSwipeState.isSwiping = false;
-    this.diagramAreaSwipeState.isVerticalScroll = false;
+    this.resetDiagramAreaSwipeState();
     
     if (deltaX > threshold) {
       return 'right'; // 向右滑动 → 打开任务列表
@@ -157,5 +168,12 @@ export class FlowSwipeGestureService {
     }
     
     return 'none';
+  }
+
+  private resetDiagramAreaSwipeState(): void {
+    this.diagramAreaSwipeState.isSwiping = false;
+    this.diagramAreaSwipeState.isVerticalScroll = false;
+    this.diagramAreaSwipeState.startTime = 0;
+    this.diagramAreaSwipeState.hasActiveTouch = false;
   }
 }

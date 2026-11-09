@@ -7,6 +7,21 @@ import { pushStartupTrace } from './src/utils/startup-trace';
 import { ensureBrowserNetworkSuspensionTracking } from './src/utils/browser-network-suspension';
 import { applyStartupVersionAction, decideStartupVersionAction } from './src/utils/startup-version-policy';
 import { forceClearCacheImpl, type ForceClearCacheDeps } from './src/utils/force-clear-cache-impl';
+import { isGojsOverviewOriginRectNoise, extractErrorStack as extractAnyErrorStack } from './src/utils/gojs-overview-noise';
+
+const authCallbackTelemetryBlocked = (() => {
+  const authority = Object.getOwnPropertyDescriptor(
+    globalThis,
+    '__NANOFLOW_AUTH_CANONICAL_STORAGE__',
+  )?.value as { captureAndScrubAuthCallback: () => { blocked: boolean } } | undefined;
+  const callbackPath = window.location.pathname.replace(/\/+$/, '') === '/auth/callback'
+    || window.location.hash.startsWith('#/auth/callback');
+  try {
+    return authority?.captureAndScrubAuthCallback().blocked ?? callbackPath;
+  } catch {
+    return callbackPath;
+  }
+})();
 // ============= 【P0 启动优化 2026-03-26】受控 dynamic import + head modulepreload =============
 // 关键模块改回 dynamic import，以缩小 main 静态闭包并通过 perf-startup-guard。
 // 配套保障：
@@ -46,40 +61,6 @@ const logError = (msg: string, err?: unknown) => {
   const elapsed = Date.now() - START_TIME;
   console.error(`[NanoFlow +${elapsed}ms] ❌ ${msg}`, err || '');
 };
-
-const NULL_WIDTH_PATTERN = /Cannot read properties of null \(reading [\u2018\u2019'"]width[\u2018\u2019'"]\)/i;
-const ORIGIN_RECT_PATTERN = /_getOriginRect/;
-
-function isGojsOverviewOriginRectNoise(
-  message: string | null | undefined,
-  stack: string | null | undefined,
-): boolean {
-  if (!message || typeof message !== 'string') return false;
-  if (!stack || typeof stack !== 'string') return false;
-  return NULL_WIDTH_PATTERN.test(message) && ORIGIN_RECT_PATTERN.test(stack);
-}
-
-function extractAnyErrorStack(error: unknown): string | undefined {
-  if (typeof error === 'string') return error;
-  if (!error || typeof error !== 'object') return undefined;
-
-  const direct = (error as { stack?: unknown }).stack;
-  if (typeof direct === 'string' && direct.length > 0) return direct;
-
-  const nestedError = (error as { error?: unknown }).error;
-  if (nestedError && typeof nestedError === 'object') {
-    const nestedStack = (nestedError as { stack?: unknown }).stack;
-    if (typeof nestedStack === 'string' && nestedStack.length > 0) return nestedStack;
-  }
-
-  const reason = (error as { reason?: unknown }).reason;
-  if (reason && typeof reason === 'object') {
-    const reasonStack = (reason as { stack?: unknown }).stack;
-    if (typeof reasonStack === 'string' && reasonStack.length > 0) return reasonStack;
-  }
-
-  return undefined;
-}
 
 function extractErrorMessageLoose(error: unknown): string {
   if (typeof error === 'string') return error;
@@ -323,7 +304,7 @@ registerForceClearCacheTool();
 log('Build: ' + BUILD_ID);
 log('🚀 main.ts 开始执行');
 log('Angular 版本: ' + VERSION.full);
-log('当前 URL: ' + window.location.href);
+if (!authCallbackTelemetryBlocked) log('当前 URL: ' + window.location.href);
 log('User Agent: ' + navigator.userAgent.substring(0, 80) + '...');
 
 // 检查 Zone.js 是否已加载

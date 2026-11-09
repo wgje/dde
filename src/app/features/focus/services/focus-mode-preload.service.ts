@@ -4,8 +4,7 @@
  * 从 WorkspaceShellComponent 抽离的 Focus 模式懒预热调度。
  *
  * 职责单一：
- * - 在浏览器空闲时机拉取 `FocusModeComponent` 的 chunk
- * - 调用其静态 `preloadAssets()` 以便首次进入 Focus 时瞬开
+ * - 在浏览器空闲时机拉取 `FocusModeComponent` 及其静态样式
  * - 记录 Sentry breadcrumb 便于启动性能归因
  *
  * 为什么抽离：
@@ -17,6 +16,13 @@ import { Injectable, inject } from '@angular/core';
 import { LoggerService } from '../../../../services/logger.service';
 import { SentryLazyLoaderService } from '../../../../services/sentry-lazy-loader.service';
 import { IDLE_SCHEDULE_CONFIG } from '../../../../config/timeout.config';
+
+type WindowWithFocusIdleCallback = Window & {
+  requestIdleCallback?: (
+    callback: IdleRequestCallback,
+    options?: IdleRequestOptions,
+  ) => number;
+};
 
 /** 触发原因：记入 breadcrumb，便于启动性能追溯 */
 export type FocusModePreloadReason = 'startup' | 'p1' | 'intent';
@@ -41,11 +47,7 @@ export class FocusModePreloadService {
     if (this.preloadPromise) return this.preloadPromise;
 
     this.preloadPromise = import('../focus-mode.component')
-      .then(async (module) => {
-        const focusModeComponent = module.FocusModeComponent;
-        if (typeof focusModeComponent?.preloadAssets === 'function') {
-          await focusModeComponent.preloadAssets();
-        }
+      .then(() => {
         this.sentryLazyLoader.addBreadcrumb({
           category: 'startup',
           message: 'focus-mode.preload',
@@ -54,7 +56,7 @@ export class FocusModePreloadService {
         });
       })
       .catch((error: unknown) => {
-        this.logger.warn('FocusMode 懒预热失败', error);
+        this.warnSafely('FocusMode 懒预热失败', error);
       })
       .finally(() => {
         // 重置 promise 以便失败后允许用户显式重试；breadcrumb 已记录
@@ -78,18 +80,31 @@ export class FocusModePreloadService {
       void this.preload(reason);
     };
 
-    if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
-      const requestIdle = (window as Window & {
-        requestIdleCallback: (
-          callback: IdleRequestCallback,
-          options?: IdleRequestOptions,
-        ) => number;
-      }).requestIdleCallback;
-      requestIdle(() => runPreload(), { timeout: 1800 });
-      return;
+    if (typeof window !== 'undefined') {
+      const requestIdle = (window as WindowWithFocusIdleCallback).requestIdleCallback;
+      if (typeof requestIdle === 'function') {
+        try {
+          requestIdle(() => runPreload(), { timeout: 1800 });
+          return;
+        } catch (error: unknown) {
+          this.warnIdleScheduleFallback(error);
+        }
+      }
     }
 
     // Safari 等无 requestIdleCallback 的 fallback
     setTimeout(runPreload, IDLE_SCHEDULE_CONFIG.SHORT_MS);
+  }
+
+  private warnIdleScheduleFallback(error: unknown): void {
+    this.warnSafely('FocusMode idle 预热调度失败，改用 timer fallback', error);
+  }
+
+  private warnSafely(message: string, error: unknown): void {
+    try {
+      this.logger.warn(message, error);
+    } catch {
+      // 日志失败不应重新打开预热调度或预热失败路径。
+    }
   }
 }

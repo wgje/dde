@@ -8,6 +8,7 @@ export default [
   {
     ignores: [
       '.angular/**',
+      '.worktrees/**',
       '.tmp/**',
       'dist/**',
       'node_modules/**',
@@ -21,6 +22,7 @@ export default [
     files: ['src/**/*.ts'],
     ignores: [
       '**/*.spec.ts',
+      '**/*.spec-helpers.ts',
       'src/test-setup.ts'
     ],
     languageOptions: {
@@ -113,21 +115,21 @@ export default [
   // 单独从 pattern 中排除该路径；其余 app/core/* 引用升级为 error。
   {
     files: ['src/services/**/*.ts'],
-    ignores: ['**/*.spec.ts'],
+    ignores: ['**/*.spec.ts', '**/*.spec-helpers.ts'],
     rules: {
       'no-restricted-imports': ['error', {
         patterns: [{
-          // 只禁止 services/shell 子目录，保留 state/（Signal Store 架构性跨层符号）
-          // 这样 `../app/core/state/stores` 通过；`../app/core/services/*` / `../app/core/shell/*` 阻断
-          group: ['../app/core/services/**', '../app/core/shell/**'],
-          message: 'services/ 层不可引用 app/core/services|shell 层（`app/core/state/*` 除外），请将共享依赖移至 src/services/ 或 src/models/'
+          // 只禁止 services/shell 子目录，保留 state/（Signal Store 架构性跨层符号）。
+          // 任意深度的 services 子目录都必须被覆盖；需要复用 core 服务时走 src/core-bridge.ts。
+          group: ['../app/core/services/**', '../../app/core/services/**', '../app/core/shell/**', '../../app/core/shell/**'],
+          message: 'services/ 层不可引用 app/core/services|shell 层（`app/core/state/*` 除外），请将共享依赖移至 src/core-bridge.ts、src/services/ 或 src/models/'
         }]
       }]
     }
   },
   {
     // 测试文件的宽松规则
-    files: ['**/*.spec.ts', '**/test-*.ts'],
+    files: ['**/*.spec.ts', '**/*.spec-helpers.ts', '**/test-*.ts'],
     languageOptions: {
       parser: tsparser,
       parserOptions: {
@@ -152,6 +154,17 @@ export default [
       '@typescript-eslint/no-explicit-any': 'off',
       '@typescript-eslint/no-unused-vars': 'off',
       'no-console': 'off'
+    }
+  },
+  {
+    // 数据库协议类型文件由 Supabase schema 驱动，行数随表结构增长；
+    // 保留类型/导入等规则，只将文件长度红线应用于手写业务代码。
+    files: [
+      'src/models/supabase-types.ts',
+      'src/types/supabase.ts'
+    ],
+    rules: {
+      'max-lines': 'off'
     }
   }
 ];

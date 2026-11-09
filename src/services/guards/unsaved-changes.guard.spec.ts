@@ -23,15 +23,21 @@ import {
   ROUTE_LEAVE_PROTECTION_CONFIG,
   CanLeave
 } from './unsaved-changes.guard';
-import { SimpleSyncService } from '../../app/core/services/simple-sync.service';
+import { SyncStateService } from '../../core-bridge';
 import { LoggerService } from '../logger.service';
 import { BeforeUnloadManagerService } from '../before-unload-manager.service';
+import { SyncCoordinatorService } from '../sync-coordinator.service';
 import { ActivatedRouteSnapshot, RouterStateSnapshot } from '@angular/router';
 
 describe('UnsavedChangesGuard', () => {
   let guard: UnsavedChangesGuard;
   let mockSyncService: {
     syncState: ReturnType<typeof vi.fn>;
+  };
+  let mockSyncCoordinator: {
+    flushPendingPersist: ReturnType<typeof vi.fn>;
+    flushPendingPersistToCloud: ReturnType<typeof vi.fn>;
+    hasPendingLocalChanges: ReturnType<typeof vi.fn>;
   };
   
   const mockLogger = {
@@ -53,11 +59,17 @@ describe('UnsavedChangesGuard', () => {
         isOnline: true,
       }),
     };
+    mockSyncCoordinator = {
+      flushPendingPersist: vi.fn(),
+      flushPendingPersistToCloud: vi.fn().mockResolvedValue(false),
+      hasPendingLocalChanges: vi.fn().mockReturnValue(false),
+    };
     
     const injector = Injector.create({
       providers: [
         UnsavedChangesGuard,
-        { provide: SimpleSyncService, useValue: mockSyncService },
+        { provide: SyncStateService, useValue: mockSyncService },
+        { provide: SyncCoordinatorService, useValue: mockSyncCoordinator },
         { provide: LoggerService, useValue: mockLogger },
       ],
     });
@@ -117,7 +129,7 @@ describe('UnsavedChangesGuard', () => {
       const result = await guard.canDeactivate(
         null,
         createActivatedRouteSnapshot(),
-        createRouteSnapshot('/project/123'),
+        createRouteSnapshot('/projects/123'),
         createRouteSnapshot('/home')
       );
       
@@ -150,7 +162,7 @@ describe('UnsavedChangesGuard', () => {
       
       const result = await canDeactivateWithFakeTimers(
         null,
-        '/project/123',
+        '/projects/123',
         '/home'
       );
       
@@ -170,7 +182,7 @@ describe('UnsavedChangesGuard', () => {
       
       const result = await canDeactivateWithFakeTimers(
         null,
-        '/project/123',
+        '/projects/123',
         '/home'
       );
       
@@ -192,7 +204,7 @@ describe('UnsavedChangesGuard', () => {
       const result = await guard.canDeactivate(
         mockComponent,
         createActivatedRouteSnapshot(),
-        createRouteSnapshot('/project/123'),
+        createRouteSnapshot('/projects/123'),
         createRouteSnapshot('/home')
       );
       
@@ -210,12 +222,146 @@ describe('UnsavedChangesGuard', () => {
       
       await canDeactivateWithFakeTimers(
         null,
-        '/project/123',
+        '/projects/123',
         '/home'
       );
       
       expect(confirmSpy).toHaveBeenCalled();
       
+      confirmSpy.mockRestore();
+    });
+
+    it('本地待持久化标记存在时应进入离开保护', async () => {
+      mockSyncCoordinator.hasPendingLocalChanges.mockReturnValue(true);
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+
+      const result = await guard.canDeactivate(
+        null,
+        createActivatedRouteSnapshot(),
+        createRouteSnapshot('/projects/project-1/text'),
+        createRouteSnapshot('/projects'),
+      );
+
+      expect(result).toBe(false);
+      expect(mockSyncCoordinator.flushPendingPersistToCloud).toHaveBeenCalledWith(
+        'route-leave',
+        { force: true },
+      );
+      expect(confirmSpy).toHaveBeenCalledWith(ROUTE_LEAVE_PROTECTION_CONFIG.SAVE_FAILED_MESSAGE);
+      confirmSpy.mockRestore();
+    });
+
+    it('云端 flush 返回 false 时，即使同步计数清空也必须征求确认', async () => {
+      mockSyncService.syncState.mockReturnValue({
+        pendingCount: 1,
+        isSyncing: false,
+      });
+      mockSyncCoordinator.flushPendingPersistToCloud.mockImplementation(async () => {
+        mockSyncService.syncState.mockReturnValue({
+          pendingCount: 0,
+          isSyncing: false,
+        });
+        return false;
+      });
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+
+      const result = await guard.canDeactivate(
+        null,
+        createActivatedRouteSnapshot(),
+        createRouteSnapshot('/projects/project-1/text'),
+        createRouteSnapshot('/projects'),
+      );
+
+      expect(result).toBe(false);
+      expect(confirmSpy).toHaveBeenCalledWith(ROUTE_LEAVE_PROTECTION_CONFIG.SAVE_FAILED_MESSAGE);
+      confirmSpy.mockRestore();
+    });
+
+    it('云端 flush 超时后应征求确认', async () => {
+      vi.useFakeTimers();
+      mockSyncService.syncState.mockReturnValue({
+        pendingCount: 1,
+        isSyncing: false,
+      });
+      mockSyncCoordinator.flushPendingPersistToCloud.mockReturnValue(
+        new Promise<boolean>(() => undefined),
+      );
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+
+      const resultPromise = guard.canDeactivate(
+        null,
+        createActivatedRouteSnapshot(),
+        createRouteSnapshot('/projects/project-1/text'),
+        createRouteSnapshot('/projects'),
+      );
+      await vi.advanceTimersByTimeAsync(ROUTE_LEAVE_PROTECTION_CONFIG.AUTO_SAVE_TIMEOUT + 1);
+      const result = await resultPromise;
+
+      expect(result).toBe(false);
+      expect(confirmSpy).toHaveBeenCalledWith(ROUTE_LEAVE_PROTECTION_CONFIG.SAVE_FAILED_MESSAGE);
+      confirmSpy.mockRestore();
+    });
+
+    it('云端 flush 成功但本地 dirty 标记未清除时仍应征求确认', async () => {
+      vi.useFakeTimers();
+      mockSyncService.syncState.mockReturnValue({
+        pendingCount: 1,
+        isSyncing: false,
+      });
+      mockSyncCoordinator.flushPendingPersistToCloud.mockImplementation(async () => {
+        mockSyncService.syncState.mockReturnValue({
+          pendingCount: 0,
+          isSyncing: false,
+        });
+        return true;
+      });
+      mockSyncCoordinator.hasPendingLocalChanges.mockReturnValue(true);
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+
+      const resultPromise = guard.canDeactivate(
+        null,
+        createActivatedRouteSnapshot(),
+        createRouteSnapshot('/projects/project-1/text'),
+        createRouteSnapshot('/projects'),
+      );
+      await vi.advanceTimersByTimeAsync(ROUTE_LEAVE_PROTECTION_CONFIG.AUTO_SAVE_TIMEOUT + 1);
+      const result = await resultPromise;
+
+      expect(result).toBe(false);
+      expect(confirmSpy).toHaveBeenCalledWith(ROUTE_LEAVE_PROTECTION_CONFIG.SAVE_FAILED_MESSAGE);
+      confirmSpy.mockRestore();
+    });
+
+    it('真实项目子路由离开前应触发本地与云端 flush，并清理成功路径超时 timer', async () => {
+      vi.useFakeTimers();
+      mockSyncService.syncState.mockReturnValue({
+        pendingCount: 2,
+        isSyncing: false,
+      });
+      mockSyncCoordinator.flushPendingPersistToCloud.mockImplementation(async () => {
+        mockSyncService.syncState.mockReturnValue({
+          pendingCount: 0,
+          isSyncing: false,
+        });
+        return true;
+      });
+      const confirmSpy = vi.spyOn(window, 'confirm');
+
+      const result = await guard.canDeactivate(
+        null,
+        createActivatedRouteSnapshot(),
+        createRouteSnapshot('/projects/project-1/text'),
+        createRouteSnapshot('/projects'),
+      );
+
+      expect(result).toBe(true);
+      expect(mockSyncCoordinator.flushPendingPersist).toHaveBeenCalledTimes(1);
+      expect(mockSyncCoordinator.flushPendingPersistToCloud).toHaveBeenCalledWith(
+        'route-leave',
+        { force: true },
+      );
+      expect(confirmSpy).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
       confirmSpy.mockRestore();
     });
   });
@@ -247,6 +393,16 @@ describe('UnsavedChangesGuard', () => {
       
       expect(guard.hasPendingChanges()).toBe(false);
     });
+
+    it('本地 dirty 标记应算作待处理更改', () => {
+      mockSyncService.syncState.mockReturnValue({
+        pendingCount: 0,
+        isSyncing: false,
+      });
+      mockSyncCoordinator.hasPendingLocalChanges.mockReturnValue(true);
+
+      expect(guard.hasPendingChanges()).toBe(true);
+    });
   });
 });
 
@@ -254,6 +410,9 @@ describe('BeforeUnloadGuardService', () => {
   let service: BeforeUnloadGuardService;
   let mockSyncService: {
     syncState: ReturnType<typeof vi.fn>;
+  };
+  let mockSyncCoordinator: {
+    hasPendingLocalChanges: ReturnType<typeof vi.fn>;
   };
   let mockBeforeUnloadManager: {
     register: ReturnType<typeof vi.fn>;
@@ -280,7 +439,9 @@ describe('BeforeUnloadGuardService', () => {
         isSyncing: false,
       }),
     };
-    
+    mockSyncCoordinator = {
+      hasPendingLocalChanges: vi.fn().mockReturnValue(false),
+    };
     mockBeforeUnloadManager = {
       register: vi.fn((_id: string, callback: () => boolean) => {
         registeredCallback = callback;
@@ -291,7 +452,8 @@ describe('BeforeUnloadGuardService', () => {
     const injector = Injector.create({
       providers: [
         BeforeUnloadGuardService,
-        { provide: SimpleSyncService, useValue: mockSyncService },
+        { provide: SyncStateService, useValue: mockSyncService },
+        { provide: SyncCoordinatorService, useValue: mockSyncCoordinator },
         { provide: LoggerService, useValue: mockLogger },
         { provide: BeforeUnloadManagerService, useValue: mockBeforeUnloadManager },
       ],
@@ -359,6 +521,15 @@ describe('BeforeUnloadGuardService', () => {
       expect(registeredCallback).toBeDefined();
       expect(registeredCallback!()).toBe(false);
     });
+
+    it('本地 dirty 标记存在时应阻止关闭', () => {
+      mockSyncCoordinator.hasPendingLocalChanges.mockReturnValue(true);
+
+      service.enable();
+
+      expect(registeredCallback).toBeDefined();
+      expect(registeredCallback!()).toBe(true);
+    });
   });
 });
 
@@ -366,6 +537,11 @@ describe('ProjectSwitchGuardService', () => {
   let service: ProjectSwitchGuardService;
   let mockSyncService: {
     syncState: ReturnType<typeof vi.fn>;
+  };
+  let mockSyncCoordinator: {
+    flushPendingPersist: ReturnType<typeof vi.fn>;
+    flushPendingPersistToCloud: ReturnType<typeof vi.fn>;
+    hasPendingLocalChanges: ReturnType<typeof vi.fn>;
   };
   
   const mockLogger = {
@@ -386,11 +562,17 @@ describe('ProjectSwitchGuardService', () => {
         isSyncing: false,
       }),
     };
+    mockSyncCoordinator = {
+      flushPendingPersist: vi.fn(),
+      flushPendingPersistToCloud: vi.fn().mockResolvedValue(false),
+      hasPendingLocalChanges: vi.fn().mockReturnValue(false),
+    };
     
     const injector = Injector.create({
       providers: [
         ProjectSwitchGuardService,
-        { provide: SimpleSyncService, useValue: mockSyncService },
+        { provide: SyncStateService, useValue: mockSyncService },
+        { provide: SyncCoordinatorService, useValue: mockSyncCoordinator },
         { provide: LoggerService, useValue: mockLogger },
       ],
     });
@@ -437,6 +619,80 @@ describe('ProjectSwitchGuardService', () => {
       
       confirmSpy.mockRestore();
     });
+
+    it('用户确认切换时应实际触发 flush，并在保存完成后直接 proceed', async () => {
+      mockSyncService.syncState.mockReturnValue({
+        pendingCount: 3,
+        isSyncing: false,
+      });
+      mockSyncCoordinator.flushPendingPersistToCloud.mockImplementation(async () => {
+        mockSyncService.syncState.mockReturnValue({
+          pendingCount: 0,
+          isSyncing: false,
+        });
+        return true;
+      });
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+
+      const result = await service.canSwitchProject();
+
+      expect(result).toBe('proceed');
+      expect(mockSyncCoordinator.flushPendingPersist).toHaveBeenCalledTimes(1);
+      expect(mockSyncCoordinator.flushPendingPersistToCloud).toHaveBeenCalledWith(
+        'project-switch',
+        { force: true },
+      );
+      expect(confirmSpy).toHaveBeenCalledTimes(1);
+      confirmSpy.mockRestore();
+    });
+
+    it('取消提示应明确保留当前项目并返回 cancel', async () => {
+      mockSyncService.syncState.mockReturnValue({
+        pendingCount: 1,
+        isSyncing: false,
+      });
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+
+      const result = await service.canSwitchProject();
+
+      expect(result).toBe('cancel');
+      expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining('留在当前项目'));
+      expect(mockSyncCoordinator.flushPendingPersist).not.toHaveBeenCalled();
+      confirmSpy.mockRestore();
+    });
+
+    it('本地 dirty 标记存在时，即使同步计数为零也应询问用户', async () => {
+      mockSyncCoordinator.hasPendingLocalChanges.mockReturnValue(true);
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+
+      const result = await service.canSwitchProject();
+
+      expect(result).toBe('cancel');
+      expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining('未同步的更改'));
+      expect(mockSyncCoordinator.flushPendingPersist).not.toHaveBeenCalled();
+      confirmSpy.mockRestore();
+    });
+
+    it('云端 flush 返回 false 时应询问是否强制切换', async () => {
+      mockSyncService.syncState.mockReturnValue({
+        pendingCount: 1,
+        isSyncing: false,
+      });
+      const confirmSpy = vi.spyOn(window, 'confirm')
+        .mockReturnValueOnce(true)
+        .mockReturnValueOnce(false);
+
+      const result = await service.canSwitchProject();
+
+      expect(result).toBe('cancel');
+      expect(mockSyncCoordinator.flushPendingPersistToCloud).toHaveBeenCalledWith(
+        'project-switch',
+        { force: true },
+      );
+      expect(confirmSpy).toHaveBeenCalledTimes(2);
+      expect(confirmSpy).toHaveBeenLastCalledWith(expect.stringContaining('强制切换'));
+      confirmSpy.mockRestore();
+    });
   });
 });
 
@@ -445,6 +701,6 @@ describe('配置', () => {
     expect(ROUTE_LEAVE_PROTECTION_CONFIG.ENABLED).toBe(true);
     expect(ROUTE_LEAVE_PROTECTION_CONFIG.AUTO_SAVE_BEFORE_LEAVE).toBe(true);
     expect(ROUTE_LEAVE_PROTECTION_CONFIG.AUTO_SAVE_TIMEOUT).toBe(5000);
-    expect(ROUTE_LEAVE_PROTECTION_CONFIG.PROTECTED_ROUTES).toContain('/project/');
+    expect(ROUTE_LEAVE_PROTECTION_CONFIG.PROTECTED_ROUTES).toContain('/projects/');
   });
 });

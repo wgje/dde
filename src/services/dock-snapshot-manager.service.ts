@@ -167,6 +167,16 @@ export class DockSnapshotManagerService {
     };
   }
 
+  exportSnapshotWithEntries(entries: DockEntry[], savedAt: string = new Date().toISOString()): DockSnapshot {
+    const session = this.buildSessionState(entries);
+    return {
+      ...this.exportSnapshot(),
+      entries,
+      session,
+      savedAt,
+    };
+  }
+
   restoreSnapshot(snapshot: DockSnapshot): void {
     const normalized = this.snapshotPersistence.normalizeSnapshot(snapshot, this.buildNormalizeContext());
     if (!normalized) return;

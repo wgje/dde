@@ -11,6 +11,7 @@ import {
   untracked,
 } from '@angular/core';
 import { DockEngineService } from '../../../../services/dock-engine.service';
+import { FocusDockLeaderService } from '../../../../services/focus-dock-leader.service';
 import { PerformanceTierService } from '../../../../services/performance-tier.service';
 import { PARKING_CONFIG } from '../../../../config/parking.config';
 import { isStatusMachineEntryExpired, StatusMachineEntry } from '../../../../models/parking-dock';
@@ -41,6 +42,7 @@ type StatusPrimaryRow =
 })
 export class DockStatusMachineComponent implements OnDestroy {
   private readonly engine = inject(DockEngineService);
+  private readonly focusLeader = inject(FocusDockLeaderService);
   private readonly performanceTierService = inject(PerformanceTierService);
   private readonly forcedModeState = signal<'full' | 'minimal' | null>(null);
   private readonly passThroughStateInput = signal(false);
@@ -55,6 +57,7 @@ export class DockStatusMachineComponent implements OnDestroy {
   private mqlRef: MediaQueryList | null = null;
   private mqlHandler: ((e: MediaQueryListEvent) => void) | null = null;
   readonly pipToggleRequested = output<void>();
+  readonly canMutateStatus = computed(() => !this.focusLeader.isReadOnlyFollower());
 
   @Input({ alias: 'forcedMode' })
   set forcedMode(value: 'full' | 'minimal' | null) {
@@ -264,17 +267,20 @@ export class DockStatusMachineComponent implements OnDestroy {
   }
 
   onSuspendedClick(entry: StatusMachineEntry): void {
+    if (!this.canMutateStatus()) return;
     this.glowActiveSince.set(null);
     this.engine.switchToTask(entry.taskId);
   }
 
   onStalledClick(entry: StatusMachineEntry): void {
+    if (!this.canMutateStatus()) return;
     this.glowActiveSince.set(null);
     this.engine.switchToTask(entry.taskId);
   }
 
   toggleMute(): void {
-    this.engine.toggleMuteWaitTone();
+    if (!this.canMutateStatus()) return;
+    void this.engine.toggleMuteWaitTone();
   }
 
   requestPipToggle(): void {
@@ -282,6 +288,7 @@ export class DockStatusMachineComponent implements OnDestroy {
   }
 
   dismissRestReminder(): void {
+    if (!this.canMutateStatus()) return;
     this.engine.fragmentRest.dismissRestReminder();
   }
 

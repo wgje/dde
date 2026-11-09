@@ -1,0 +1,50 @@
+{
+  "freshInitOmissions": {
+    "widget_devices_legacy_retired": "Historical widget-device archive data exists only when upgrading an older remote project; a fresh database has nothing to archive.",
+    "widget_instances_legacy_retired": "Historical widget-instance archive data exists only when upgrading an older remote project; a fresh database has nothing to archive."
+  },
+  "generatedTypesAheadOfFreshInit": {
+    "widget_devices_legacy_retired": "The linked generated-type snapshot still contains the upgrade-only widget-device archive table intentionally omitted from fresh-init.",
+    "widget_instances_legacy_retired": "The linked generated-type snapshot still contains the upgrade-only widget-instance archive table intentionally omitted from fresh-init."
+  },
+  "freshInitAheadOfGeneratedTypes": {
+    "attachment_cleanup_jobs": "Local migration 20260715005823 adds the durable cleanup outbox; regenerate linked types after the Preview replay.",
+    "attachment_scans": "The virus-scan Edge Function requires this service table, while linked types still reflect the pre-Preview-replay remote schema.",
+    "project_members": "The current local compatibility target retains and reconverges this table; linked types must be regenerated after Preview replay.",
+    "quarantined_files": "The service-role virus quarantine table is present in migration replay and fresh-init; linked types predate the local target."
+  },
+  "generatedTypeColumnsAheadOfFreshInit": {},
+  "freshInitColumnsAheadOfGeneratedTypes": {
+    "external_source_links.operation_id": "Local migration 20260629031500 adds idempotent external-link operation IDs; regenerate linked types after the Preview replay.",
+    "tasks.attention_meta": "Local migration 20260605062000 adds task attention metadata used by the current sync RPCs; regenerate linked types after the Preview replay."
+  },
+  "migrationReplayColumnsAheadOfFreshInit": {},
+  "freshInitColumnsAheadOfMigrationReplay": {},
+  "generatedTypeNotNullAheadOfFreshInit": {},
+  "freshInitNotNullAheadOfGeneratedTypes": {
+    "black_box_entries.user_id": "Local migration 20260714041000 deterministically backfills project ownership and enforces NOT NULL; regenerate linked types after the Preview replay.",
+    "tasks.created_at": "Local migration 20260718003200 boundedly backfills legacy task timestamps and enforces NOT NULL for keyset pagination; regenerate linked types after the Preview replay.",
+    "transcription_usage.user_id": "Local migration 20260714041000 rejects unresolved legacy ownership and enforces NOT NULL; regenerate linked types after the Preview replay."
+  },
+  "migrationReplayNotNullAheadOfFreshInit": {},
+  "freshInitNotNullAheadOfMigrationReplay": {},
+  "generatedTypeRequiredInsertAheadOfFreshInit": {},
+  "freshInitRequiredInsertAheadOfGeneratedTypes": {
+    "black_box_entries.user_id": "Local migration 20260714041000 enforces required Black Box ownership; regenerate linked types after the Preview replay.",
+    "transcription_usage.user_id": "Local migration 20260714041000 enforces required transcription ownership; regenerate linked types after the Preview replay."
+  },
+  "migrationReplayRequiredInsertAheadOfFreshInit": {},
+  "freshInitRequiredInsertAheadOfMigrationReplay": {},
+  "freshInitRpcFunctionsAheadOfGeneratedTypes": {
+    "claim_attachment_cleanup_jobs": "Fresh-init declares the attachment cleanup claim RPC; linked generated Functions predate the local worker schema.",
+    "claim_attachment_scan_rescan": "Fresh-init declares the attachment rescan claim RPC; linked generated Functions predate the local scan schema.",
+    "claim_due_attachment_scan_rescans": "Fresh-init declares the due attachment rescan claim RPC; linked generated Functions predate the local scan schema.",
+    "claim_task_attachment_cleanup": "Fresh-init declares the task attachment cleanup claim RPC; linked generated Functions predate the local cleanup schema.",
+    "complete_attachment_cleanup_job": "Fresh-init declares the attachment cleanup completion RPC; linked generated Functions predate the local worker schema.",
+    "consume_transcription_quota": "Fresh-init declares the transcription quota consumption RPC; linked generated Functions predate the local quota schema.",
+    "fail_attachment_cleanup_job": "Fresh-init declares the attachment cleanup failure RPC; linked generated Functions predate the local worker schema.",
+    "list_project_heads_page": "Fresh-init declares the paginated project-head listing RPC; linked generated Functions predate the local pagination schema.",
+    "list_widget_notify_devices": "Fresh-init declares the widget notification device RPC; linked generated Functions predate the local widget schema.",
+    "release_transcription_quota": "Fresh-init declares the transcription quota release RPC; linked generated Functions predate the local quota schema."
+  }
+}

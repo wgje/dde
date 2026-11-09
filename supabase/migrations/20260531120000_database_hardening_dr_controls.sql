@@ -693,7 +693,7 @@ BEGIN
       NULLIF(COALESCE(v_task->>'deletedAt', v_task->>'deleted_at'), '')::timestamptz,
       '[]'::jsonb,
       v_expected,
-      COALESCE(v_cognitive, 'low'),
+      v_cognitive,
       v_wait,
       COALESCE(v_task->'parkingMeta', v_task->'parking_meta')
     )
@@ -929,7 +929,7 @@ BEGIN
     END IF;
 
     v_result := jsonb_build_object(
-      'status', 'remote-newer',
+      'status', CASE WHEN v_quarantine_id IS NULL THEN 'remote-newer' ELSE 'quarantined' END,
       'decision', CASE WHEN v_quarantine_id IS NULL THEN 'rejected' ELSE 'quarantined' END,
       'reason', 'missing_task_timestamp',
       'quarantine_id', v_quarantine_id,
@@ -971,7 +971,7 @@ BEGIN
       v_op_id, v_user, 'task', v_task_id, v_client_git, v_client_origin, 'sync_quarantine', payload
     );
     v_result := jsonb_build_object(
-      'status', 'remote-newer',
+      'status', 'quarantined',
       'decision', 'quarantined',
       'reason', 'sync_quarantine',
       'quarantine_id', v_quarantine_id,

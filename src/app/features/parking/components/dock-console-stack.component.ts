@@ -101,34 +101,27 @@ const consoleMotion = PARKING_CONFIG.MOTION.console;
     .console-card.depth-card:hover,
     .console-card.depth-card:focus-visible {
       box-shadow:
-        0 16px 34px rgba(2, 6, 23, 0.28),
-        0 0 0 1px rgba(129, 140, 248, 0.14);
+        0 12px 26px rgba(0, 0, 0, 0.24),
+        0 0 0 1px rgba(171, 181, 157, 0.14);
     }
 
     .console-card.depth-card:focus-visible {
-      outline: 2px solid rgba(129, 140, 248, 0.72);
+      outline: 2px solid rgba(183, 192, 167, 0.72);
       outline-offset: 3px;
     }
 
     .glass-card {
-      background:
-        linear-gradient(165deg, rgba(30, 36, 46, 0.95), rgba(17, 23, 32, 0.92)),
-        radial-gradient(circle at 50% 0%, rgba(99, 102, 241, 0.08), transparent 58%);
-      border: 1px solid rgba(255, 255, 255, 0.09);
+      background: rgba(34, 37, 34, 0.97);
+      border: 1px solid rgba(202, 207, 193, 0.14);
       box-shadow:
-        0 14px 36px rgba(0, 0, 0, 0.42),
-        0 3px 10px rgba(0, 0, 0, 0.18),
-        inset 0 1px 0 rgba(255, 255, 255, 0.05);
+        0 12px 30px rgba(0, 0, 0, 0.32),
+        inset 0 1px 0 rgba(255, 255, 255, 0.035);
     }
 
     .glass-card-bg {
-      background:
-        linear-gradient(165deg, rgba(26, 32, 42, 0.74), rgba(16, 21, 30, 0.68)),
-        radial-gradient(circle at 50% 0%, rgba(255, 255, 255, 0.03), transparent 62%);
-      border: 1px solid rgba(255, 255, 255, 0.05);
-      box-shadow:
-        0 10px 22px rgba(0, 0, 0, 0.24),
-        inset 0 1px 0 rgba(255, 255, 255, 0.02);
+      background: rgba(29, 32, 30, 0.93);
+      border: 1px solid rgba(196, 201, 188, 0.09);
+      box-shadow: 0 8px 20px rgba(0, 0, 0, 0.22);
     }
 
     .load-bar {
@@ -138,17 +131,15 @@ const consoleMotion = PARKING_CONFIG.MOTION.console;
       bottom: 32px;
       width: 6px;
       border-radius: 0 4px 4px 0;
-      transition: background-color 0.3s ease, box-shadow 0.3s ease;
+      transition: background-color 0.3s ease;
     }
 
     .load-high {
-      background-color: #ef4444;
-      box-shadow: 0 0 10px rgba(239, 68, 68, 0.55);
+      background-color: #b87868;
     }
 
     .load-low {
-      background-color: #10b981;
-      box-shadow: 0 0 10px rgba(16, 185, 129, 0.55);
+      background-color: #82927a;
     }
 
     @keyframes detailFadeIn {
@@ -168,41 +159,38 @@ const consoleMotion = PARKING_CONFIG.MOTION.console;
 
     .focus-glow {
       box-shadow:
-        0 8px 32px rgba(0, 0, 0, 0.4),
-        0 0 0 1px rgba(99, 102, 241, 0.15),
-        0 0 40px -10px rgba(99, 102, 241, 0.1);
+        0 14px 32px rgba(0, 0, 0, 0.34),
+        0 0 0 1px rgba(171, 181, 157, 0.16);
     }
 
     .wait-menu {
-      display: none;
+      display: flex;
       flex-direction: column;
       gap: 2px;
+      opacity: 0;
+      pointer-events: none;
+      transform: translateY(4px) scale(.985);
+      transform-origin: bottom right;
+      transition:
+        opacity 140ms var(--pk-ease-enter, ease),
+        transform 140ms var(--pk-ease-enter, ease),
+        visibility 0s linear 140ms;
+      visibility: hidden;
     }
 
     .wait-menu.visible {
-      display: flex;
-    }
-
-    @keyframes swipeHint {
-      0%, 100% {
-        opacity: 0.3;
-        transform: translateY(0);
-      }
-      50% {
-        opacity: 0.6;
-        transform: translateY(-6px);
-      }
-    }
-
-    .swipe-hint {
-      animation: swipeHint 2s ease-in-out infinite;
+      opacity: 1;
+      pointer-events: auto;
+      transform: translateY(0) scale(1);
+      transition-delay: 0s;
+      visibility: visible;
     }
 
     @media (prefers-reduced-motion: reduce) {
       .console-card,
       .console-card.is-animating,
       .detail-fade,
-      .swipe-hint {
+      .wait-menu {
         animation: none;
         transition: none;
       }
@@ -241,20 +229,12 @@ const consoleMotion = PARKING_CONFIG.MOTION.console;
           [style.--console-motion-to-opacity]="motion ? poseOpacity(motion.toPoseKey) : null"
           [style.--console-motion-from-filter]="motion ? poseFilter(motion.fromPoseKey) : null"
           [style.--console-motion-to-filter]="motion ? poseFilter(motion.toPoseKey) : null"
-          (wheel)="onTaskWheel($event, card.taskId)"
-          (click)="card.interactionEnabled && !isAnimating ? onCardClick(card.entry) : null"
-          (keydown.enter)="card.interactionEnabled && !isAnimating ? onCardClick(card.entry) : null"
-          (keydown.space)="card.interactionEnabled && !isAnimating ? onBackgroundCardSpace($event, card.entry) : null"
-          (touchstart)="showFocusDetail ? onSwipeStart($event) : null"
-          (touchmove)="showFocusDetail ? onSwipeMove($event) : null"
-          (touchend)="showFocusDetail ? onSwipeEnd(card.taskId) : null"
-          (pointerdown)="showFocusDetail ? onPointerDown($event) : null"
-          (pointermove)="showFocusDetail ? onPointerMove($event) : null"
-          (pointerup)="showFocusDetail ? onPointerUp(card.taskId) : null"
-          (pointercancel)="onPointerCancel()"
-          [attr.role]="card.interactionEnabled && !isAnimating ? 'button' : null"
-          [attr.tabindex]="card.interactionEnabled && !isAnimating ? 0 : null"
-          [attr.aria-label]="card.interactionEnabled ? ('切换到任务：' + card.entry.title) : null"
+          (click)="card.interactionEnabled && canMutate && !isAnimating ? onCardClick(card.entry) : null"
+          (keydown.enter)="card.interactionEnabled && canMutate && !isAnimating ? onCardClick(card.entry) : null"
+          (keydown.space)="card.interactionEnabled && canMutate && !isAnimating ? onBackgroundCardSpace($event, card.entry) : null"
+          [attr.role]="card.interactionEnabled && canMutate && !isAnimating ? 'button' : null"
+          [attr.tabindex]="card.interactionEnabled && canMutate && !isAnimating ? 0 : null"
+          [attr.aria-label]="card.interactionEnabled && canMutate ? ('切换到任务：' + card.entry.title) : null"
           data-testid="dock-v3-console-card">
 
           <div
@@ -282,6 +262,40 @@ const consoleMotion = PARKING_CONFIG.MOTION.console;
 
           @if (showFocusDetail) {
             <div class="detail-fade ml-3 mb-2 flex flex-col gap-4 flex-1 min-h-0">
+              <div class="flex items-center justify-between gap-3" data-testid="dock-v3-load-control">
+                <span class="text-xs font-medium text-stone-400">认知负荷</span>
+                <div class="inline-flex items-center gap-1" role="group" aria-label="设置认知负荷">
+                  <button
+                    type="button"
+                    (click)="setLoad(card.taskId, 'low')"
+                    [attr.aria-pressed]="card.entry.load === 'low'"
+                    [disabled]="!canMutate || interactionLocked()"
+                    class="rounded-lg px-3 text-xs font-medium transition-colors"
+                    [class.bg-stone-600]="card.entry.load === 'low'"
+                    [class.bg-stone-800]="card.entry.load !== 'low'"
+                    [class.text-white]="card.entry.load === 'low'"
+                    [class.text-stone-400]="card.entry.load !== 'low'"
+                    style="min-height: 44px; min-width: 72px;"
+                    data-testid="dock-v3-load-low">
+                    低负荷
+                  </button>
+                  <button
+                    type="button"
+                    (click)="setLoad(card.taskId, 'high')"
+                    [attr.aria-pressed]="card.entry.load === 'high'"
+                    [disabled]="!canMutate || interactionLocked()"
+                    class="rounded-lg px-3 text-xs font-medium transition-colors"
+                    [class.bg-stone-600]="card.entry.load === 'high'"
+                    [class.bg-stone-800]="card.entry.load !== 'high'"
+                    [class.text-white]="card.entry.load === 'high'"
+                    [class.text-stone-400]="card.entry.load !== 'high'"
+                    style="min-height: 44px; min-width: 72px;"
+                    data-testid="dock-v3-load-high">
+                    高负荷
+                  </button>
+                </div>
+              </div>
+
               <div class="flex-1 text-sm text-stone-300 leading-relaxed border-l-2 border-stone-700 pl-3 overflow-auto hide-scrollbar">
                 @if (card.entry.detail) {
                   {{ card.entry.detail }}
@@ -291,6 +305,7 @@ const consoleMotion = PARKING_CONFIG.MOTION.console;
                   </span>
                 }
               </div>
+
               <app-knowledge-anchor
                 class="ml-3 block"
                 [taskId]="card.taskId"
@@ -304,7 +319,8 @@ const consoleMotion = PARKING_CONFIG.MOTION.console;
                 <button
                   type="button"
                   (click)="onComplete(card.taskId)"
-                  class="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-xl transition-all shadow-lg shadow-indigo-500/20 hover:shadow-indigo-500/30 active:scale-95"
+                  [disabled]="!canMutate || interactionLocked()"
+                  class="px-5 py-2.5 bg-emerald-800 hover:bg-emerald-700 text-white text-sm font-medium rounded-xl transition-colors shadow-sm shadow-black/10 active:scale-95"
                   style="min-height: 44px;"
                   data-testid="dock-v3-complete-btn">
                   完成任务
@@ -314,6 +330,7 @@ const consoleMotion = PARKING_CONFIG.MOTION.console;
                   <button
                     type="button"
                     (click)="toggleWaitPresets(card.taskId)"
+                    [disabled]="!canMutate || interactionLocked()"
                     class="px-3 py-2 rounded-xl bg-stone-800 hover:bg-stone-700 text-stone-400 hover:text-stone-300 transition-colors text-sm"
                     style="min-height: 46px; min-width: 46px;"
                     data-testid="dock-v3-wait-trigger">
@@ -338,6 +355,7 @@ const consoleMotion = PARKING_CONFIG.MOTION.console;
                       <button
                         type="button"
                         (click)="onWait(card.taskId, preset.minutes)"
+                        [disabled]="!canMutate || interactionLocked()"
                         class="w-full rounded-xl px-3 py-2 text-left text-[11px] text-stone-300 transition-colors hover:bg-stone-700 whitespace-nowrap"
                         style="min-height: 44px;"
                         data-testid="dock-v3-wait-preset">
@@ -348,9 +366,6 @@ const consoleMotion = PARKING_CONFIG.MOTION.console;
                 </div>
               </div>
 
-              <div class="text-[10px] text-stone-500">
-                仍支持专家快捷方式：上滑快速完成，Alt + 滚轮切换负荷。
-              </div>
             </div>
           }
         </div>
@@ -404,12 +419,9 @@ export class DockConsoleStackComponent implements OnDestroy {
     this.overrideEntriesState.set(value ? value.map((entry) => ({ ...entry })) : null);
   }
 
-  private touchStartY = 0;
-  private swipeActive = false;
-  private pointerTracking = false;
-  private pointerStartY = 0;
-  private pointerDeltaY = 0;
-  private pointerId: number | null = null;
+  @Input({ alias: 'canMutate' })
+  canMutate = true;
+
   private interactionLockTimer: ReturnType<typeof setTimeout> | null = null;
   private motionTimer: ReturnType<typeof setTimeout> | null = null;
   /**
@@ -476,7 +488,8 @@ export class DockConsoleStackComponent implements OnDestroy {
 
   ngOnDestroy(): void {
     this.clearMotionTimer();
-    if (this.interactionLockTimer) {
+    // 显式 null 判断：timer handle 为 0 时也要清理，避免销毁后残留解锁回调
+    if (this.interactionLockTimer !== null) {
       clearTimeout(this.interactionLockTimer);
       this.interactionLockTimer = null;
     }
@@ -554,7 +567,7 @@ export class DockConsoleStackComponent implements OnDestroy {
   }
 
   onComplete(taskId: string): void {
-    if (this.interactionLocked()) return;
+    if (!this.canMutate || this.interactionLocked()) return;
     this.closeWaitPresets();
     const preEntries = this.snapshotStableEntries();
     this.engine.completeTask(taskId);
@@ -568,7 +581,7 @@ export class DockConsoleStackComponent implements OnDestroy {
   }
 
   onWait(taskId: string, minutes: number): void {
-    if (this.interactionLocked()) return;
+    if (!this.canMutate || this.interactionLocked()) return;
     this.closeWaitPresets();
     const preEntries = this.snapshotStableEntries();
     this.engine.suspendTask(taskId, minutes);
@@ -582,7 +595,7 @@ export class DockConsoleStackComponent implements OnDestroy {
   }
 
   onCardClick(entry: DockEntry): void {
-    if (this.interactionLocked()) return;
+    if (!this.canMutate || this.interactionLocked()) return;
     const preEntries = this.snapshotStableEntries();
     this.engine.switchToTask(entry.taskId);
     const batch = buildSwitchConsoleMotionBatch(preEntries, this.stackEntries(), entry.taskId);
@@ -594,62 +607,15 @@ export class DockConsoleStackComponent implements OnDestroy {
     this.onCardClick(entry);
   }
 
-  onTaskWheel(event: WheelEvent, taskId: string): void {
-    if (!event.altKey) return;
-    event.preventDefault();
-    this.engine.toggleLoad(taskId, event.deltaY > 0 ? 'down' : 'up');
-  }
-
   setLoad(taskId: string, nextLoad: DockEntry['load']): void {
+    if (!this.canMutate || this.interactionLocked()) return;
     const entry = this.stackEntries().find(item => item.taskId === taskId) ?? null;
     if (!entry || entry.load === nextLoad) return;
     this.engine.toggleLoad(taskId, nextLoad === 'high' ? 'up' : 'down');
   }
 
-  onSwipeStart(event: TouchEvent): void {
-    this.touchStartY = event.touches?.[0]?.clientY ?? 0;
-    this.swipeActive = false;
-  }
-
-  onSwipeMove(event: TouchEvent): void {
-    const delta = this.touchStartY - (event.touches?.[0]?.clientY ?? 0);
-    if (delta > 60) this.swipeActive = true;
-  }
-
-  onSwipeEnd(taskId: string): void {
-    if (this.swipeActive) this.onComplete(taskId);
-    this.swipeActive = false;
-  }
-
-  onPointerDown(event: PointerEvent): void {
-    if (event.button !== 0) return;
-    this.pointerTracking = true;
-    this.pointerStartY = event.clientY;
-    this.pointerDeltaY = 0;
-    this.pointerId = event.pointerId;
-  }
-
-  onPointerMove(event: PointerEvent): void {
-    if (!this.pointerTracking || this.pointerId !== event.pointerId) return;
-    this.pointerDeltaY = this.pointerStartY - event.clientY;
-  }
-
-  onPointerUp(taskId: string): void {
-    if (!this.pointerTracking) return;
-    if (this.pointerDeltaY > 70) {
-      this.onComplete(taskId);
-    }
-    this.onPointerCancel();
-  }
-
-  onPointerCancel(): void {
-    this.pointerTracking = false;
-    this.pointerDeltaY = 0;
-    this.pointerStartY = 0;
-    this.pointerId = null;
-  }
-
   toggleWaitPresets(taskId: string): void {
+    if (!this.canMutate || this.interactionLocked()) return;
     this.waitPresetTaskId.update(current => (current === taskId ? null : taskId));
   }
 
@@ -725,7 +691,9 @@ export class DockConsoleStackComponent implements OnDestroy {
 
   private lockInteractions(durationMs: number): void {
     this.interactionLocked.set(true);
-    if (this.interactionLockTimer) {
+    // 显式 null 判断：上一批动画的 lock timer handle 为 0 时若漏清理，
+    // 它会在新一批动画进行中提前解锁交互，放行 settle 期间的重复点击
+    if (this.interactionLockTimer !== null) {
       clearTimeout(this.interactionLockTimer);
     }
     this.interactionLockTimer = setTimeout(() => {

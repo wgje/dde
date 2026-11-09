@@ -1,5 +1,5 @@
 import { Injectable, inject, signal } from '@angular/core';
-import { SimpleSyncService } from '../core-bridge';
+import { ProjectSaveFlightCoordinatorService, ProjectDataService, RetryQueueService, SyncStateService } from '../core-bridge';
 import { ToastService } from './toast.service';
 import { LoggerService } from './logger.service';
 import { Project, Task } from '../models';
@@ -12,6 +12,12 @@ import {
   MigrationStrategy,
   MigrationResult
 } from './migration.types';
+import { detectMigrationNeed } from './migration-detection.helpers';
+import {
+  mergeTombstoneRecord,
+  parseTombstoneRecord,
+  serializeTombstoneRecord,
+} from './migration-tombstone-storage.helpers';
 
 // 重新导出类型以保持向后兼容
 export type {
@@ -22,6 +28,11 @@ export type {
   MigrationStrategy,
   MigrationResult
 } from './migration.types';
+
+interface MigrationUploadState {
+  migratedCount: number;
+  failedProjects: string[];
+}
 
 /**
  * 本地数据迁移服务
@@ -37,7 +48,10 @@ export type {
 export class MigrationService {
   private readonly sentryLazyLoader = inject(SentryLazyLoaderService);
   private readonly integrity = inject(MigrationIntegrityService);
-  private syncService = inject(SimpleSyncService);
+  private projectSaveCoordinator = inject(ProjectSaveFlightCoordinatorService);
+  private projectData = inject(ProjectDataService);
+  private retryQueue = inject(RetryQueueService);
+  private syncState = inject(SyncStateService);
   private toast = inject(ToastService);
   private loggerService = inject(LoggerService);
   private logger = this.loggerService.category('Migration');
@@ -84,24 +98,7 @@ export class MigrationService {
       return false;
     }
 
-    const effectiveRemoteProjects = remoteProjects.filter(project => project.syncSource === 'synced');
-    const remoteProjectIds = new Set(effectiveRemoteProjects.map(project => project.id));
-    const remoteProjectMap = new Map(effectiveRemoteProjects.map(project => [project.id, project]));
-    
-    // 有本地数据，检查是否与远程数据不同
-    const hasLocalOnlyProjects = localData.some(local => 
-      !remoteProjectIds.has(local.id)
-    );
-    
-    // 检查是否有本地修改但远程存在的项目（可能需要合并）
-    const hasPendingChanges = localData.some(local => {
-      const remote = remoteProjectMap.get(local.id);
-      if (!remote) return false;
-      // 简单的版本比较
-      return (local.version ?? 0) > (remote.version ?? 0);
-    });
-    
-    if (hasLocalOnlyProjects || hasPendingChanges) {
+    if (detectMigrationNeed(localData, remoteProjects)) {
       this.needsMigration.set(true);
       this.localProjects.set(localData);
       this.remoteProjects.set(remoteProjects);
@@ -141,6 +138,22 @@ export class MigrationService {
       return { success: true, migratedProjects: 0, strategy };
     }
     
+    const preparationFailure = this.prepareMigration(localData, strategy);
+    if (preparationFailure) return preparationFailure;
+
+    try {
+      const result = await this.runMigrationStrategy(strategy, localData, remoteData, userId);
+      await this.verifyMigrationResult(result, strategy, localData, userId);
+      this.clearSuccessfulMigrationState(result);
+      return result;
+    } catch (e: unknown) {
+      return this.handleMigrationExecutionError(e, strategy, localData.length);
+    } finally {
+      this.resetMigrationDialogState();
+    }
+  }
+
+  private prepareMigration(localData: Project[], strategy: MigrationStrategy): MigrationResult | null {
     // 【v5.9】初始化迁移状态
     this.integrity.updateMigrationStatus('preparing', {
       projectsTotal: localData.length,
@@ -177,81 +190,97 @@ export class MigrationService {
       // 快照保存失败，提示用户但允许继续（非阻塞性警告）
       this.toast.warning('无法保存迁移快照', '建议先手动导出数据再继续');
     }
-    
-    try {
-      let result: MigrationResult;
-      
-      switch (strategy) {
-        case 'keep-local':
-          // 将本地数据上传到云端，覆盖远程
-          this.integrity.updateMigrationStatus('uploading');
-          result = await this.migrateLocalToCloud(localData, userId);
-          break;
-          
-        case 'keep-remote':
-          // 丢弃本地数据，使用远程
-          this.integrity.updateMigrationStatus('cleaning');
-          this.clearLocalGuestData();
-          this.integrity.updateMigrationStatus('completed');
-          result = { success: true, migratedProjects: 0, strategy };
-          break;
-          
-        case 'merge':
-          // 智能合并本地和远程数据
-          result = await this.mergeLocalAndRemote(localData, remoteData, userId);
-          break;
-          
-        case 'discard-local':
-          // 彻底丢弃本地数据
-          this.integrity.updateMigrationStatus('cleaning');
-          this.clearLocalGuestData();
-          this.syncService.clearOfflineCache();
-          this.integrity.updateMigrationStatus('completed');
-          result = { success: true, migratedProjects: 0, strategy };
-          break;
-          
-        default:
-          this.integrity.updateMigrationStatus('failed', { error: '未知的迁移策略' });
-          result = { success: false, migratedProjects: 0, strategy, error: '未知的迁移策略' };
-      }
-      
-      // 【v5.9】迁移成功后验证
-      if (result.success && (strategy === 'keep-local' || strategy === 'merge')) {
-        const verification = await this.integrity.verifyMigrationSuccess(localData, userId);
-        if (!verification.success) {
-          this.logger.error('迁移验证失败，但数据已上传', { missingItems: verification.missingItems });
-          // 不回滚，但记录警告
-          this.toast.warning('部分数据可能未完全同步', '请检查您的项目列表');
-        }
-      }
-      
-      // 迁移成功后清理快照和状态
-      if (result.success) {
-        this.integrity.clearMigrationSnapshot();
-        this.integrity.clearMigrationStatus();
-      }
-      
-      return result;
-    } catch (e: unknown) {
-      const err = e as { message?: string };
-      this.integrity.updateMigrationStatus('failed', { error: err?.message ?? String(e) });
-      this.sentryLazyLoader.captureException(e, { 
-        tags: { operation: 'executeMigration', strategy },
-        extra: { projectCount: localData.length }
-      });
-      return {
-        success: false,
-        migratedProjects: 0,
-        strategy,
-        error: err?.message ?? String(e)
-      };
-    } finally {
-      // 清理迁移状态，释放大型数据对象防止内存泄漏
-      this.needsMigration.set(false);
-      this.showMigrationDialog.set(false);
-      this.localProjects.set([]);
-      this.remoteProjects.set([]);
+
+    return null;
+  }
+
+  private async runMigrationStrategy(
+    strategy: MigrationStrategy,
+    localData: Project[],
+    remoteData: Project[],
+    userId: string,
+  ): Promise<MigrationResult> {
+    switch (strategy) {
+      case 'keep-local':
+        this.integrity.updateMigrationStatus('uploading');
+        return await this.migrateLocalToCloud(localData, userId);
+      case 'keep-remote':
+        return this.keepRemoteMigrationResult(strategy);
+      case 'merge':
+        return await this.mergeLocalAndRemote(localData, remoteData, userId);
+      case 'discard-local':
+        return this.discardLocalMigrationResult(strategy);
+      default:
+        this.integrity.updateMigrationStatus('failed', { error: '未知的迁移策略' });
+        return { success: false, migratedProjects: 0, strategy, error: '未知的迁移策略' };
     }
+  }
+
+  private keepRemoteMigrationResult(strategy: MigrationStrategy): MigrationResult {
+    this.integrity.updateMigrationStatus('cleaning');
+    this.clearLocalGuestData();
+    this.integrity.updateMigrationStatus('completed');
+    return { success: true, migratedProjects: 0, strategy };
+  }
+
+  private discardLocalMigrationResult(strategy: MigrationStrategy): MigrationResult {
+    this.integrity.updateMigrationStatus('cleaning');
+    this.clearLocalGuestData();
+    // 清除离线缓存（原 SimpleSyncService.clearOfflineCache 的本地化组合：清快照+清重试队列+归零 pendingCount，避免依赖门面）
+    this.projectData.clearOfflineSnapshot();
+    this.retryQueue.clear();
+    this.syncState.update({ pendingCount: 0 });
+    this.logger.info('离线缓存已清除');
+    this.integrity.updateMigrationStatus('completed');
+    return { success: true, migratedProjects: 0, strategy };
+  }
+
+  private async verifyMigrationResult(
+    result: MigrationResult,
+    strategy: MigrationStrategy,
+    localData: Project[],
+    userId: string,
+  ): Promise<void> {
+    if (!result.success || (strategy !== 'keep-local' && strategy !== 'merge')) return;
+
+    const verification = await this.integrity.verifyMigrationSuccess(localData, userId);
+    if (!verification.success) {
+      this.logger.error('迁移验证失败，但数据已上传', { missingItems: verification.missingItems });
+      this.toast.warning('部分数据可能未完全同步', '请检查您的项目列表');
+    }
+  }
+
+  private clearSuccessfulMigrationState(result: MigrationResult): void {
+    if (!result.success) return;
+
+    this.integrity.clearMigrationSnapshot();
+    this.integrity.clearMigrationStatus();
+  }
+
+  private handleMigrationExecutionError(
+    error: unknown,
+    strategy: MigrationStrategy,
+    projectCount: number,
+  ): MigrationResult {
+    const err = error as { message?: string };
+    this.integrity.updateMigrationStatus('failed', { error: err?.message ?? String(error) });
+    this.sentryLazyLoader.captureException(error, {
+      tags: { operation: 'executeMigration', strategy },
+      extra: { projectCount }
+    });
+    return {
+      success: false,
+      migratedProjects: 0,
+      strategy,
+      error: err?.message ?? String(error)
+    };
+  }
+
+  private resetMigrationDialogState(): void {
+    this.needsMigration.set(false);
+    this.showMigrationDialog.set(false);
+    this.localProjects.set([]);
+    this.remoteProjects.set([]);
   }
   
   /**
@@ -262,8 +291,7 @@ export class MigrationService {
     localProjects: Project[], 
     userId: string
   ): Promise<MigrationResult> {
-    let migratedCount = 0;
-    const failedProjects: string[] = [];
+    const state = this.createMigrationUploadState();
     
     this.integrity.updateMigrationStatus('uploading', {
       projectsTotal: localProjects.length,
@@ -272,58 +300,66 @@ export class MigrationService {
     });
     
     for (const project of localProjects) {
-      try {
-        const result = await this.syncService.saveProjectToCloud(project, userId);
-        if (result.success) {
-          migratedCount++;
-        } else {
-          failedProjects.push(project.name || project.id);
-        }
-        this.integrity.updateMigrationStatus('uploading', {
-          projectsCompleted: migratedCount + failedProjects.length,
-          projectsFailed: failedProjects
-        });
-      } catch (e) {
-        this.logger.warn('迁移项目失败:', { projectId: project.id, error: e });
-        failedProjects.push(project.name || project.id);
-      }
+      await this.uploadProjectForMigration(project, userId, state, '迁移项目失败:');
+      this.updateUploadProgress(state);
     }
     
-    // 【v5.8 迁移原子性修复】仅在全部成功时才清除本地数据
-    // 部分失败时保留本地数据，允许用户重试
-    if (failedProjects.length === 0) {
+    this.finalizeLocalUploadMigration(state);
+    return {
+      success: state.failedProjects.length === 0,
+      migratedProjects: state.migratedCount,
+      strategy: 'keep-local',
+      error: state.failedProjects.length > 0 ? `${state.failedProjects.length} 个项目迁移失败，本地数据已保留` : undefined
+    };
+  }
+
+  private createMigrationUploadState(): MigrationUploadState {
+    return { migratedCount: 0, failedProjects: [] };
+  }
+
+  private async uploadProjectForMigration(
+    project: Project,
+    userId: string,
+    state: MigrationUploadState,
+    failureLogMessage: string,
+  ): Promise<void> {
+    try {
+      const result = await this.projectSaveCoordinator.save(project, userId);
+      if (result.success) {
+        state.migratedCount++;
+      } else {
+        state.failedProjects.push(project.name || project.id);
+      }
+    } catch (e) {
+      this.logger.warn(failureLogMessage, { projectId: project.id, error: e });
+      state.failedProjects.push(project.name || project.id);
+    }
+  }
+
+  private updateUploadProgress(state: MigrationUploadState): void {
+    this.integrity.updateMigrationStatus('uploading', {
+      projectsCompleted: state.migratedCount + state.failedProjects.length,
+      projectsFailed: state.failedProjects
+    });
+  }
+
+  private finalizeLocalUploadMigration(state: MigrationUploadState): void {
+    if (state.failedProjects.length === 0) {
       this.integrity.updateMigrationStatus('cleaning');
       this.clearLocalGuestData();
       this.integrity.updateMigrationStatus('completed');
     } else {
-      this.integrity.updateMigrationStatus('failed', {
-        projectsFailed: failedProjects,
-        error: `${failedProjects.length} 个项目迁移失败`
-      });
-      this.logger.warn('迁移部分失败，保留本地数据供重试', { migratedCount, failedProjects });
-      this.sentryLazyLoader.captureMessage('数据迁移部分失败', {
-        level: 'warning',
-        tags: { operation: 'migrateLocalToCloud' },
-        extra: { migratedCount, failedProjects }
-      });
+      this.recordPartialMigrationFailure(state, 'migrateLocalToCloud', '迁移');
     }
-    
-    if (failedProjects.length > 0) {
-      this.toast.warning('部分项目迁移失败', `以下项目未能上传: ${failedProjects.join(', ')}。本地数据已保留，您可以稍后重试。`);
+
+    if (state.failedProjects.length > 0) {
+      this.toast.warning('部分项目迁移失败', `以下项目未能上传: ${state.failedProjects.join(', ')}。本地数据已保留，您可以稍后重试。`);
     }
-    if (migratedCount > 0) {
-      this.toast.success('数据迁移完成', `已将 ${migratedCount} 个项目上传到云端`);
+    if (state.migratedCount > 0) {
+      this.toast.success('数据迁移完成', `已将 ${state.migratedCount} 个项目上传到云端`);
     }
-    
-    return {
-      // 仅当没有失败时才返回成功
-      success: failedProjects.length === 0,
-      migratedProjects: migratedCount,
-      strategy: 'keep-local',
-      error: failedProjects.length > 0 ? `${failedProjects.length} 个项目迁移失败，本地数据已保留` : undefined
-    };
   }
-  
+
   /**
    * 智能合并本地和远程数据
    * 【v5.9 原子性修复】仅在全部成功时才清除本地数据
@@ -333,9 +369,8 @@ export class MigrationService {
     remoteProjects: Project[],
     userId: string
   ): Promise<MigrationResult> {
-    const remoteIds = new Set(remoteProjects.map(p => p.id));
-    let migratedCount = 0;
-    const failedProjects: string[] = [];
+    const remoteProjectMap = new Map(remoteProjects.map(project => [project.id, project]));
+    const state = this.createMigrationUploadState();
     
     this.integrity.updateMigrationStatus('uploading', {
       projectsTotal: localProjects.length,
@@ -344,61 +379,52 @@ export class MigrationService {
     });
     
     for (const localProject of localProjects) {
-      try {
-        if (remoteIds.has(localProject.id)) {
-          const remoteProject = remoteProjects.find(p => p.id === localProject.id);
-          if (remoteProject) {
-            const merged = this.mergeProjects(localProject, remoteProject);
-            const result = await this.syncService.saveProjectToCloud(merged, userId);
-            if (result.success) {
-              migratedCount++;
-            } else {
-              failedProjects.push(localProject.name || localProject.id);
-            }
-          }
-        } else {
-          const result = await this.syncService.saveProjectToCloud(localProject, userId);
-          if (result.success) {
-            migratedCount++;
-          } else {
-            failedProjects.push(localProject.name || localProject.id);
-          }
-        }
-        this.integrity.updateMigrationStatus('uploading', {
-          projectsCompleted: migratedCount + failedProjects.length,
-          projectsFailed: failedProjects
-        });
-      } catch (e) {
-        this.logger.warn('合并项目失败:', { projectId: localProject.id, error: e });
-        failedProjects.push(localProject.name || localProject.id);
-      }
+      const remoteProject = remoteProjectMap.get(localProject.id);
+      const projectToUpload = remoteProject ? this.mergeProjects(localProject, remoteProject) : localProject;
+      await this.uploadProjectForMigration(projectToUpload, userId, state, '合并项目失败:');
+      this.updateUploadProgress(state);
     }
     
-    if (failedProjects.length === 0) {
+    this.finalizeMergedUploadMigration(state);
+    return {
+      success: state.failedProjects.length === 0,
+      migratedProjects: state.migratedCount,
+      strategy: 'merge',
+      error: state.failedProjects.length > 0 ? `${state.failedProjects.length} 个项目合并失败，本地数据已保留` : undefined
+    };
+  }
+
+  private finalizeMergedUploadMigration(state: MigrationUploadState): void {
+    if (state.failedProjects.length === 0) {
       this.integrity.updateMigrationStatus('cleaning');
       this.clearLocalGuestData();
       this.integrity.updateMigrationStatus('completed');
-      this.toast.success('数据合并完成', `已合并 ${migratedCount} 个项目`);
-    } else {
-      this.integrity.updateMigrationStatus('failed', {
-        projectsFailed: failedProjects,
-        error: `${failedProjects.length} 个项目合并失败`
-      });
-      this.logger.warn('合并部分失败，保留本地数据供重试', { migratedCount, failedProjects });
-      this.sentryLazyLoader.captureMessage('数据合并部分失败', {
-        level: 'warning',
-        tags: { operation: 'mergeLocalAndRemote' },
-        extra: { migratedCount, failedProjects }
-      });
-      this.toast.warning('部分项目合并失败', `以下项目未能上传: ${failedProjects.join(', ')}。`);
+      this.toast.success('数据合并完成', `已合并 ${state.migratedCount} 个项目`);
+      return;
     }
-    
-    return {
-      success: failedProjects.length === 0,
-      migratedProjects: migratedCount,
-      strategy: 'merge',
-      error: failedProjects.length > 0 ? `${failedProjects.length} 个项目合并失败，本地数据已保留` : undefined
-    };
+
+    this.recordPartialMigrationFailure(state, 'mergeLocalAndRemote', '合并');
+    this.toast.warning('部分项目合并失败', `以下项目未能上传: ${state.failedProjects.join(', ')}。`);
+  }
+
+  private recordPartialMigrationFailure(
+    state: MigrationUploadState,
+    operation: 'migrateLocalToCloud' | 'mergeLocalAndRemote',
+    label: '迁移' | '合并',
+  ): void {
+    this.integrity.updateMigrationStatus('failed', {
+      projectsFailed: state.failedProjects,
+      error: `${state.failedProjects.length} 个项目${label}失败`
+    });
+    this.logger.warn(`${label}部分失败，保留本地数据供重试`, {
+      migratedCount: state.migratedCount,
+      failedProjects: state.failedProjects
+    });
+    this.sentryLazyLoader.captureMessage(`数据${label}部分失败`, {
+      level: 'warning',
+      tags: { operation },
+      extra: { migratedCount: state.migratedCount, failedProjects: state.failedProjects }
+    });
   }
   
   /**
@@ -633,37 +659,23 @@ export class MigrationService {
     }
 
     try {
-      const merged = this.readTombstoneRecord(this.TOMBSTONE_KEY);
+      const merged = parseTombstoneRecord(localStorage.getItem(this.TOMBSTONE_KEY));
       let migratedCount = 0;
 
       for (const key of this.LEGACY_TOMBSTONE_KEYS) {
-        const legacy = this.readTombstoneRecord(key);
+        const legacy = parseTombstoneRecord(localStorage.getItem(key));
         if (Object.keys(legacy).length === 0) {
           continue;
         }
 
-        for (const [projectId, taskIds] of Object.entries(legacy)) {
-          const existing = merged[projectId] ?? new Set<string>();
-          for (const taskId of taskIds) {
-            const before = existing.size;
-            existing.add(taskId);
-            if (existing.size > before) {
-              migratedCount++;
-            }
-          }
-          merged[projectId] = existing;
-        }
+        migratedCount += mergeTombstoneRecord(merged, legacy);
       }
 
       if (migratedCount === 0) {
         return;
       }
 
-      const serializable: Record<string, string[]> = {};
-      for (const [projectId, ids] of Object.entries(merged)) {
-        serializable[projectId] = Array.from(ids);
-      }
-      localStorage.setItem(this.TOMBSTONE_KEY, JSON.stringify(serializable));
+      localStorage.setItem(this.TOMBSTONE_KEY, JSON.stringify(serializeTombstoneRecord(merged)));
 
       for (const key of this.LEGACY_TOMBSTONE_KEYS) {
         localStorage.removeItem(key);
@@ -681,25 +693,6 @@ export class MigrationService {
     }
   }
 
-  private readTombstoneRecord(storageKey: string): Record<string, Set<string>> {
-    const raw = localStorage.getItem(storageKey);
-    if (!raw) {
-      return {};
-    }
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    const result: Record<string, Set<string>> = {};
-    for (const [projectId, value] of Object.entries(parsed)) {
-      if (Array.isArray(value)) {
-        result[projectId] = new Set(value.filter((v): v is string => typeof v === 'string'));
-        continue;
-      }
-      if (value && typeof value === 'object') {
-        result[projectId] = new Set(Object.keys(value));
-      }
-    }
-    return result;
-  }
-  
   /**
    * 获取迁移摘要信息
    */

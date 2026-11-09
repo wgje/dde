@@ -9,20 +9,17 @@ import {
   DockEntry,
   DockFocusTransitionState,
   DockPendingDecision,
-  DockPendingDecisionEntry,
   DockRuleDecision,
   DockSourceSection,
   DockSnapshot,
   DockZoneSource,
   FragmentDefenseLevel,
   HighLoadCounter,
-  StatusMachineEntry,
 } from '../models/parking-dock';
-import { SimpleSyncService, TaskStore } from '../core-bridge';
+import { TaskStore } from '../core-bridge';
 import { BlackBoxService } from './black-box.service';
 import { LoggerService } from './logger.service';
 import { ProjectStateService } from './project-state.service';
-import { TaskOperationAdapterService } from './task-operation-adapter.service';
 import { ToastService } from './toast.service';
 import { FocusHudWindowService } from './focus-hud-window.service';
 import {
@@ -39,19 +36,14 @@ import { DockTaskSyncService } from './dock-task-sync.service';
 import { DockZoneService } from './dock-zone.service';
 import { DockEngineLifecycleService } from './dock-engine-lifecycle.service';
 import { DockSnapshotManagerService } from './dock-snapshot-manager.service';
-import { DockEntryCrudService } from './dock-entry-crud.service';
+import { DockEntryCrudService, type DockSnapshotOverrides } from './dock-entry-crud.service';
 import { DockTaskFlowService } from './dock-task-flow.service';
 import { TimerHandle } from '../utils/timer-handle';
 import {
-  resolveDockFocusChromePhase,
-  type DockFocusChromePhase,
-} from '../utils/dock-focus-phase';
-import {
+  applyDockSnapshotOverrides,
   getWaitRemainingSeconds,
-  isWaitingLike,
-  sortDockEntriesForDisplay,
-  toStatusMachineEntry,
 } from './dock-engine.utils';
+import { createDockEngineViewSignals } from './dock-engine-view-signals';
 
 @Injectable({
   providedIn: 'root',
@@ -61,9 +53,7 @@ export class DockEngineService {
 
   private readonly taskStore = inject(TaskStore);
   private readonly logger = inject(LoggerService).category('DockEngine');
-  private readonly syncService = inject(SimpleSyncService);
   private readonly projectState = inject(ProjectStateService);
-  private readonly taskOps = inject(TaskOperationAdapterService);
   private readonly blackBoxService = inject(BlackBoxService);
   private readonly toast = inject(ToastService);
   private readonly focusHudWindow = inject(FocusHudWindowService);
@@ -209,168 +199,44 @@ export class DockEngineService {
   private readonly blankPeriodNotified = signal(false);
   private readonly fragmentCountdownNotified = signal(false);
 
-  readonly dockedEntries = computed(() => this.entries().filter(entry => entry.status !== 'completed'));
-  readonly orderedDockEntries = computed(() => sortDockEntriesForDisplay(
-    this.dockedEntries(),
-    (entry) => this.completionFlow.toSchedulerCandidate(entry),
-    (entry) => this.zoneService.resolveSourceProjectId(entry),
-  ));
-  readonly dockedCount = computed(() => this.dockedEntries().length);
-  readonly dockedTaskIds = computed(() => new Set(this.dockedEntries().map(entry => entry.taskId)));
-  readonly dockCapacity = computed(() => {
-    const count = this.dockedCount();
-    const softLimit = PARKING_CONFIG.DOCK_CONSOLE_SOFT_LIMIT;
-    const hardLimit = PARKING_CONFIG.DOCK_CONSOLE_HARD_LIMIT;
-    return {
-      count,
-      softLimit,
-      hardLimit,
-      softReached: count >= softLimit,
-      hardReached: count >= hardLimit,
-    };
+  private readonly viewSignals = createDockEngineViewSignals({
+    entries: this.entries,
+    firstMainSelectionWindow: this.firstMainSelectionWindow,
+    focusTransition: this.focusTransition,
+    focusMode: this.focusMode,
+    focusScrimOn: this.focusScrimOn,
+    focusChromeRestoring: this.focusChromeRestoring,
+    pendingRadarEviction: this.pendingRadarEviction,
+    pendingDecision: this.pendingDecision,
+    burnoutTriggeredAt: this.burnoutTriggeredAt,
+    fragmentEntryCountdown: this.fragmentEntryCountdown,
+    dailySlots: this.dailySlots,
+    tick: this.tick,
+    completionFlow: this.completionFlow,
+    zoneService: this.zoneService,
+    fragmentRest: this.fragmentRest,
   });
-  readonly firstMainSelectionPending = computed(() => this.firstMainSelectionWindow());
-  readonly isFocusTransitionBlocking = computed(() => {
-    const phase = this.focusTransition()?.phase ?? null;
-    return phase === 'entering' || phase === 'exiting';
-  });
-  readonly focusChromePhase = computed<DockFocusChromePhase>(() =>
-    resolveDockFocusChromePhase(
-      this.focusMode(),
-      this.focusTransition(),
-      this.focusScrimOn(),
-      this.focusChromeRestoring(),
-    ),
-  );
-  readonly consoleEntries = computed(() =>
-    this.entries().filter(
-      entry =>
-        entry.status !== 'completed' &&
-        (
-          entry.isMain
-          || entry.lane === 'combo-select'
-          || entry.status === 'focusing'
-        ),
-    ),
-  );
-  /**
-   * 主控台 UI / 状态机共享的唯一可见 4 卡真相。
-   * pendingRadarEviction 在动画期间立即从可见集合排除，避免短暂出现第 5 张。
-   */
-  readonly consoleVisibleEntries = computed(() => {
-    const pendingEvictionTaskId = this.pendingRadarEviction();
-    const visibleCandidates = pendingEvictionTaskId
-      ? this.consoleEntries().filter(entry => entry.taskId !== pendingEvictionTaskId)
-      : this.consoleEntries();
-    return this.completionFlow
-      .sortConsoleEntriesForDisplay(visibleCandidates)
-      .slice(0, PARKING_CONFIG.CONSOLE_STACK_VISIBLE_MAX);
-  });
-  readonly focusingEntry = computed(() =>
-    this.entries().find(entry => entry.status === 'focusing') ?? null,
-  );
-  readonly suspendedEntries = computed(() =>
-    this.consoleVisibleEntries().filter(entry => isWaitingLike(entry.status)),
-  );
-  // v3.0 组合选择区域（策划案 §4.2 zone 重命名）
-  // 排除已经占据 C1-C4 的卡片，避免同一任务同时出现在主控台和组合选择区。
-  readonly comboSelectEntries = computed(() => {
-    const visibleTaskIds = new Set(this.consoleVisibleEntries().map(entry => entry.taskId));
-    return this.entries().filter(
-      entry =>
-        !entry.isMain &&
-        entry.lane === 'combo-select' &&
-        entry.status !== 'completed' &&
-        !visibleTaskIds.has(entry.taskId),
-    );
-  });
-  // v3.0 备选区域（策划案 §4.3 zone 重命名）
-  // 排除已经占据 C1-C4 的卡片，保持备选区只显示真正未进前排的任务。
-  readonly backupEntries = computed(() => {
-    const visibleTaskIds = new Set(this.consoleVisibleEntries().map(entry => entry.taskId));
-    return this.entries().filter(
-      entry =>
-        !entry.isMain &&
-        entry.lane === 'backup' &&
-        entry.status !== 'completed' &&
-        !visibleTaskIds.has(entry.taskId),
-    );
-  });
-  // v3.0 倦怠状态（策划案 §7.8 NG-16b）
-  readonly isBurnoutActive = computed(() => this.burnoutTriggeredAt() !== null);
-  /** 空白等待期：倒计时结束但无可选推荐条目 */
-  readonly blankPeriodActive = computed(
-    () =>
-      this.fragmentEntryCountdown() === null
-      && this.pendingDecision() !== null
-      && this.pendingDecisionEntries().length === 0,
-  );
-  readonly isFragmentPhase = computed(() => {
-    const docked = this.dockedEntries();
-    return (
-      this.fragmentEntryCountdown() === null
-      && docked.length > 0
-      && docked.every(entry => isWaitingLike(entry.status))
-      && !this.fragmentRest.isFragmentDismissed()
-    );
-  });
-  readonly availableDailySlots = computed(() =>
-    this.dailySlots().filter(slot => slot.isEnabled && slot.todayCompletedCount < slot.maxDailyCount),
-  );
-  /** GAP-5: 碎片阶段可选的停泊坞任务（非挂起、非完成、非正在专注）*/
-  readonly availableFragmentDockTasks = computed(() =>
-    this.entries().filter(
-      entry =>
-        entry.status !== 'completed' &&
-        entry.status !== 'focusing' &&
-        !isWaitingLike(entry.status),
-    ),
-  );
-  readonly statusMachineEntries = computed<StatusMachineEntry[]>(() => {
-    this.tick();
-    const pendingEvictionTaskId = this.pendingRadarEviction();
-    const visibleStatusCandidates = this.entries()
-      .filter(
-        entry =>
-          entry.taskId !== pendingEvictionTaskId &&
-          entry.status !== 'completed' &&
-          (
-            entry.isMain ||
-            entry.status === 'focusing' ||
-            entry.status === 'suspended_waiting' ||
-            entry.status === 'wait_finished' ||
-            entry.status === 'stalled'
-          ),
-      );
-    return this.completionFlow
-      .sortConsoleEntriesForDisplay(visibleStatusCandidates)
-      .slice(0, PARKING_CONFIG.STATUS_MACHINE_VISIBLE_LIMIT)
-      .map(entry => toStatusMachineEntry(entry));
-  });
-  readonly pendingDecisionEntries = computed<DockPendingDecisionEntry[]>(() => {
-    const pending = this.pendingDecision();
-    if (!pending) return [];
-
-    const entryMap = new Map(this.entries().map(entry => [entry.taskId, entry]));
-    const flattened = pending.candidateGroups.flatMap(group =>
-      group.taskIds.map(taskId => ({ taskId, group: group.type })),
-    );
-    return flattened
-      .map(item => {
-        const entry = entryMap.get(item.taskId);
-        if (!entry) return null;
-        return {
-          taskId: entry.taskId,
-          title: entry.title,
-          group: item.group,
-          lane: entry.lane,
-          load: entry.load,
-          expectedMinutes: entry.expectedMinutes,
-          recommendedScore: entry.recommendedScore,
-        } satisfies DockPendingDecisionEntry;
-      })
-      .filter((entry): entry is DockPendingDecisionEntry => !!entry);
-  });
+  readonly dockedEntries = this.viewSignals.dockedEntries;
+  readonly orderedDockEntries = this.viewSignals.orderedDockEntries;
+  readonly dockedCount = this.viewSignals.dockedCount;
+  readonly dockedTaskIds = this.viewSignals.dockedTaskIds;
+  readonly dockCapacity = this.viewSignals.dockCapacity;
+  readonly firstMainSelectionPending = this.viewSignals.firstMainSelectionPending;
+  readonly isFocusTransitionBlocking = this.viewSignals.isFocusTransitionBlocking;
+  readonly focusChromePhase = this.viewSignals.focusChromePhase;
+  readonly consoleEntries = this.viewSignals.consoleEntries;
+  readonly consoleVisibleEntries = this.viewSignals.consoleVisibleEntries;
+  readonly focusingEntry = this.viewSignals.focusingEntry;
+  readonly suspendedEntries = this.viewSignals.suspendedEntries;
+  readonly comboSelectEntries = this.viewSignals.comboSelectEntries;
+  readonly backupEntries = this.viewSignals.backupEntries;
+  readonly isBurnoutActive = this.viewSignals.isBurnoutActive;
+  readonly blankPeriodActive = this.viewSignals.blankPeriodActive;
+  readonly isFragmentPhase = this.viewSignals.isFragmentPhase;
+  readonly availableDailySlots = this.viewSignals.availableDailySlots;
+  readonly availableFragmentDockTasks = this.viewSignals.availableFragmentDockTasks;
+  readonly statusMachineEntries = this.viewSignals.statusMachineEntries;
+  readonly pendingDecisionEntries = this.viewSignals.pendingDecisionEntries;
 
   constructor() {
     this.initSubServices();
@@ -431,6 +297,13 @@ export class DockEngineService {
   }
 
   private initSubServices(): void {
+    this.initSnapshotManager();
+    this.initCompletionAndSupportServices();
+    this.initEntryServices();
+    this.initTaskFlow();
+  }
+
+  private initSnapshotManager(): void {
     this.snapshotManager.init({
       entries: this.entries,
       focusMode: this.focusMode,
@@ -463,6 +336,9 @@ export class DockEngineService {
       clearFirstMainSelectionWindow: () => this.clearFirstMainSelectionWindow(),
       rebalanceAutoZones: () => this.rebalanceAutoZones(),
     });
+  }
+
+  private initCompletionAndSupportServices(): void {
     this.completionFlow.init({
       entries: this.entries,
       pendingDecision: this.pendingDecision,
@@ -488,11 +364,16 @@ export class DockEngineService {
       schedulerPhase: this.schedulerPhase,
       fragmentDefenseLevel: this.fragmentDefenseLevel,
       isFragmentPhase: this.isFragmentPhase,
+      persistCurrentSnapshot: () => this.persistDockSnapshotNow(this.entries()),
     });
+  }
+
+  private initEntryServices(): void {
     this.entryField.init({
       entries: this.entries,
       focusSessionContext: () => this.focusSessionContext(),
       rebalanceAutoZones: () => this.rebalanceAutoZones(),
+      persistDockSnapshotNow: (entries: DockEntry[], overrides?: DockSnapshotOverrides) => this.persistDockSnapshotNow(entries, overrides),
     });
     this.entryCrud.init({
       entries: this.entries,
@@ -520,7 +401,12 @@ export class DockEngineService {
       rebalanceAutoZones: () => this.rebalanceAutoZones(),
       clearFirstMainSelectionWindow: () => this.clearFirstMainSelectionWindow(),
       startFirstMainSelectionWindow: (taskId: string) => this.startFirstMainSelectionWindow(taskId),
+      persistDockSnapshotNow: (entries: DockEntry[], overrides?: DockSnapshotOverrides) =>
+        this.persistDockSnapshotNow(entries, overrides),
     });
+  }
+
+  private initTaskFlow(): void {
     this.taskFlow.init({
       entries: this.entries,
       focusMode: this.focusMode,
@@ -545,6 +431,7 @@ export class DockEngineService {
       rebalanceAutoZones: () => this.rebalanceAutoZones(),
       clearFirstMainSelectionWindow: () => this.clearFirstMainSelectionWindow(),
       startFirstMainSelectionWindow: (taskId: string) => this.startFirstMainSelectionWindow(taskId),
+      persistDockSnapshotNow: (entries: DockEntry[]) => this.persistDockSnapshotNow(entries),
     });
   }
 
@@ -553,6 +440,8 @@ export class DockEngineService {
       exportSnapshot: () => this.exportSnapshot(),
       restoreSnapshot: (snapshot: DockSnapshot) => this.restoreSnapshot(snapshot),
       scheduleLocalPersist: (snapshot: DockSnapshot, userId: string) => this.scheduleLocalPersist(snapshot, userId),
+      persistLocalSnapshotImmediately: (snapshot: DockSnapshot, userId: string) =>
+        this.persistLocalSnapshotImmediately(snapshot, userId),
       updateDailySlots: (updater: (prev: DailySlotEntry[]) => DailySlotEntry[]) => this.dailySlots.update(updater),
       getNonCriticalHoldDelay: () => this.lifecycle.getNonCriticalHoldDelay(),
       getFocusSessionContext: () => this.focusSessionContext(),
@@ -615,11 +504,11 @@ export class DockEngineService {
       detail?: string;
       zoneSource?: DockZoneSource;
     },
-  ): boolean {
+  ): Promise<boolean> {
     return this.entryCrud.dockTask(taskId, lane, options);
   }
 
-  dockTaskFromExternalDrag(taskId: string, sourceSection?: Extract<DockSourceSection, 'text' | 'flow'>): boolean {
+  dockTaskFromExternalDrag(taskId: string, sourceSection?: Extract<DockSourceSection, 'text' | 'flow'>): Promise<boolean> {
     return this.entryCrud.dockTaskFromExternalDrag(taskId, sourceSection);
   }
 
@@ -628,7 +517,7 @@ export class DockEngineService {
     lane: DockLane,
     load: CognitiveLoad = 'low',
     options?: { expectedMinutes?: number | null; waitMinutes?: number | null; detail?: string },
-  ): string | null {
+  ): Promise<string | null> {
     return this.inlineCreation.createInDock(title, lane, load, options);
   }
 
@@ -640,7 +529,7 @@ export class DockEngineService {
     return this.inlineCreation.getInlineArchiveCandidates();
   }
 
-  archiveInlineEntriesToActiveProject(): { converted: number; failed: number } {
+  archiveInlineEntriesToActiveProject(): Promise<{ converted: number; failed: number }> {
     return this.inlineCreation.archiveInlineEntriesToActiveProject();
   }
 
@@ -664,65 +553,73 @@ export class DockEngineService {
     this.lastExitAction.set(action);
   }
 
-  clearDockForExit(): void {
-    this.entryCrud.clearDockForExit();
+  clearDockForExit(): Promise<boolean> {
+    return this.entryCrud.clearDockForExit();
   }
 
-  finalizeClearDockForExit(): void {
+  finalizeClearDockForExit(): Promise<boolean> {
     this.dailySlots.set([]);
     this.lastRuleDecision.set(null);
     this.zoneService.clearAdjacencyCache();
+    return this.persistDockSnapshotNow(this.entries());
   }
 
-  reorderDockEntries(sourceTaskId: string, targetTaskId: string): void {
-    this.entryCrud.reorderDockEntries(sourceTaskId, targetTaskId);
+  reorderDockEntries(sourceTaskId: string, targetTaskId: string): Promise<boolean> {
+    return this.entryCrud.reorderDockEntries(sourceTaskId, targetTaskId);
   }
 
   setDockExpanded(
     expanded: boolean,
     options?: { persistPreference?: boolean },
-  ): void {
-    if (options?.persistPreference ?? true) {
-      this.persistDockExpandedPreference(expanded);
-    }
-    this.entryCrud.setDockExpanded(expanded);
+  ): Promise<boolean> {
+    return this.entryCrud.setDockExpanded(expanded).then(persisted => {
+      if (persisted && (options?.persistPreference ?? true)) {
+        this.persistDockExpandedPreference(expanded);
+      }
+      return persisted;
+    });
   }
 
-  toggleMuteWaitTone(): void {
-    this.entryCrud.toggleMuteWaitTone();
+  toggleMuteWaitTone(): Promise<boolean> {
+    return this.entryCrud.toggleMuteWaitTone();
   }
 
-  toggleLoad(taskId: string, direction: 'up' | 'down'): void {
-    this.entryField.toggleLoad(taskId, direction);
+  toggleLoad(taskId: string, direction: 'up' | 'down'): Promise<boolean> {
+    return this.entryField.toggleLoad(taskId, direction);
   }
 
-  setExpectedTime(taskId: string, minutes: number | null): void {
-    this.entryField.setExpectedTime(taskId, minutes);
+  setExpectedTime(taskId: string, minutes: number | null): Promise<boolean> {
+    return this.entryField.setExpectedTime(taskId, minutes);
   }
 
-  setWaitTime(taskId: string, minutes: number | null): void {
-    this.entryField.setWaitTime(taskId, minutes);
+  setWaitTime(taskId: string, minutes: number | null): Promise<boolean> {
+    return this.entryField.setWaitTime(taskId, minutes);
   }
 
-  setDetail(taskId: string, detail: string): void {
-    this.entryField.setDetail(taskId, detail);
+  setDetail(taskId: string, detail: string): Promise<boolean> {
+    return this.entryField.setDetail(taskId, detail);
   }
 
-  setLane(taskId: string, lane: DockLane, zoneSource: DockZoneSource = 'manual'): void {
-    this.entryField.setLane(taskId, lane, zoneSource);
+  setLane(taskId: string, lane: DockLane, zoneSource: DockZoneSource = 'manual'): Promise<boolean> {
+    return this.entryField.setLane(taskId, lane, zoneSource);
   }
 
-  toggleFocusMode(): void {
+  toggleFocusMode(): Promise<boolean> {
     this.clearFocusChromeRestore();
-    this.taskFlow.toggleFocusMode();
+    return this.taskFlow.toggleFocusMode();
   }
 
-  toggleFocusScrim(): void {
-    this.focusScrimOn.update(value => !value);
+  toggleFocusScrim(): Promise<boolean> {
+    return this.setFocusScrim(!this.focusScrimOn());
   }
 
-  setFocusScrim(on: boolean): void {
-    this.focusScrimOn.set(on);
+  setFocusScrim(on: boolean): Promise<boolean> {
+    if (this.focusScrimOn() === on) return Promise.resolve(true);
+    return this.persistDockSnapshotNow(this.entries(), { focusScrimOn: on }).then(persisted => {
+      if (!persisted) return false;
+      this.focusScrimOn.set(on);
+      return true;
+    });
   }
 
   beginFocusTransition(state: DockFocusTransitionState): void {
@@ -760,24 +657,24 @@ export class DockEngineService {
     this.taskFlow.completeTask(taskId);
   }
 
-  suspendTask(taskId: string, waitMinutes: number): void {
-    this.taskFlow.suspendTask(taskId, waitMinutes);
+  suspendTask(taskId: string, waitMinutes: number): Promise<boolean> {
+    return this.taskFlow.suspendTask(taskId, waitMinutes);
   }
 
-  switchToTask(taskId: string): void {
-    this.taskFlow.switchToTask(taskId);
+  switchToTask(taskId: string): Promise<boolean> {
+    return this.taskFlow.switchToTask(taskId);
   }
 
-  choosePendingDecisionCandidate(taskId: string): void {
-    this.taskFlow.choosePendingDecisionCandidate(taskId);
+  choosePendingDecisionCandidate(taskId: string): Promise<boolean> {
+    return this.taskFlow.choosePendingDecisionCandidate(taskId);
   }
 
-  cancelPendingDecisionAutoPromote(): void {
-    this.taskFlow.cancelPendingDecisionAutoPromote();
+  cancelPendingDecisionAutoPromote(): Promise<boolean> {
+    return this.taskFlow.cancelPendingDecisionAutoPromote();
   }
 
-  removeFromDock(taskId: string): void {
-    this.taskFlow.removeFromDock(taskId);
+  removeFromDock(taskId: string): Promise<boolean> {
+    return this.taskFlow.removeFromDock(taskId);
   }
 
   dismissZenMode(): void {
@@ -820,6 +717,31 @@ export class DockEngineService {
       userId,
       () => this.lifecycle.getNonCriticalHoldDelay(),
     );
+  }
+
+  private persistLocalSnapshotImmediately(snapshot: DockSnapshot, userId: string): Promise<boolean> {
+    return this.snapshotPersistence.persistImmediateSnapshot(() => snapshot, userId);
+  }
+
+  private persistDockSnapshotNow(entries: DockEntry[], overrides: DockSnapshotOverrides = {}): Promise<boolean> {
+    const userId = this.currentSnapshotUserId;
+    if (userId === null) return Promise.resolve(false);
+
+    const savedAt = new Date().toISOString();
+    this.snapshotSavedAt.set(savedAt);
+    return this.snapshotPersistence.persistImmediateSnapshot(
+      () => this.buildDockSnapshotForImmediatePersist(entries, savedAt, overrides),
+      userId,
+    );
+  }
+
+  private buildDockSnapshotForImmediatePersist(
+    entries: DockEntry[],
+    savedAt: string,
+    overrides: DockSnapshotOverrides,
+  ): DockSnapshot {
+    const snapshot = this.snapshotManager.exportSnapshotWithEntries(entries, savedAt);
+    return applyDockSnapshotOverrides(snapshot, overrides);
   }
 
   private getDockExpandedPreference(): boolean {

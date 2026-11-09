@@ -51,7 +51,11 @@ export class MobileDrawerGestureService {
   
   // 私有状态
   private gestureState: GestureState | null = null;
-  private animationFrameId: number | null = null;
+  private readonly animationFrameIds: Record<'top' | 'bottom', number | null> = {
+    top: null,
+    bottom: null,
+  };
+  private activeAnimationCount = 0;
   private hintTimerId: ReturnType<typeof setTimeout> | null = null;
   
   // 容器高度缓存（替代 viewportHeight，避免移动端 vh 与实际容器高度不一致）
@@ -62,6 +66,7 @@ export class MobileDrawerGestureService {
   private containerEl: HTMLElement | null = null;
   // 容器尺寸观察器
   private resizeObserver: ResizeObserver | null = null;
+  private isInitialized = false;
   private readonly handleWindowMetricsChange = () => {
     this.refreshContainerMetrics();
   };
@@ -70,6 +75,14 @@ export class MobileDrawerGestureService {
    * 初始化服务
    */
   initialize(): void {
+    if (!this.isBrowser()) {
+      return;
+    }
+    if (this.isInitialized) {
+      return;
+    }
+    this.isInitialized = true;
+
     // 回退到 window.innerHeight，setContainer 调用后会覆盖
     this.containerHeight = window.innerHeight;
     this.visibleContainerOffsetTopPx.set(0);
@@ -90,6 +103,11 @@ export class MobileDrawerGestureService {
     this.refreshContainerMetrics();
 
     this.resizeObserver?.disconnect();
+    this.resizeObserver = null;
+    if (typeof ResizeObserver === 'undefined') {
+      return;
+    }
+
     this.resizeObserver = new ResizeObserver(() => {
       this.refreshContainerMetrics();
     });
@@ -98,6 +116,10 @@ export class MobileDrawerGestureService {
 
   /** 刷新容器尺寸缓存 */
   private refreshContainerMetrics(): void {
+    if (!this.isBrowser()) {
+      return;
+    }
+
     if (!this.containerEl) {
       const fallbackHeight = window.visualViewport?.height ?? window.innerHeight;
       this.containerHeight = fallbackHeight;
@@ -136,27 +158,40 @@ export class MobileDrawerGestureService {
    * 清理资源
    */
   destroy(): void {
-    if (this.animationFrameId) {
-      cancelAnimationFrame(this.animationFrameId);
-      this.animationFrameId = null;
-    }
-    if (this.hintTimerId) {
+    this.isDragging.set(false);
+    this.gestureState = null;
+    this.cancelPanelAnimation('top');
+    this.cancelPanelAnimation('bottom');
+    if (this.hintTimerId !== null) {
       clearTimeout(this.hintTimerId);
       this.hintTimerId = null;
     }
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
-    window.removeEventListener('resize', this.handleWindowMetricsChange);
-    window.removeEventListener('orientationchange', this.handleWindowMetricsChange);
-    window.visualViewport?.removeEventListener('resize', this.handleWindowMetricsChange);
-    window.visualViewport?.removeEventListener('scroll', this.handleWindowMetricsChange);
+    if (!this.isBrowser()) {
+      this.containerEl = null;
+      this.isInitialized = false;
+      return;
+    }
+
+    if (this.isInitialized) {
+      window.removeEventListener('resize', this.handleWindowMetricsChange);
+      window.removeEventListener('orientationchange', this.handleWindowMetricsChange);
+      window.visualViewport?.removeEventListener('resize', this.handleWindowMetricsChange);
+      window.visualViewport?.removeEventListener('scroll', this.handleWindowMetricsChange);
+    }
     this.containerEl = null;
+    this.isInitialized = false;
   }
   
   /**
    * 检测并显示首次使用提示
    */
   private checkAndShowGestureHint(): void {
+    if (!this.isBrowser()) {
+      return;
+    }
+
     try {
       const shown = localStorage.getItem(DRAWER_CONFIG.GESTURE_HINT_SHOWN_KEY);
       if (!shown) {
@@ -176,11 +211,12 @@ export class MobileDrawerGestureService {
    */
   dismissGestureHint(): void {
     this.showGestureHint.set(false);
-    if (this.hintTimerId) {
+    if (this.hintTimerId !== null) {
       clearTimeout(this.hintTimerId);
       this.hintTimerId = null;
     }
     try {
+      if (!this.isBrowser()) return;
       localStorage.setItem(DRAWER_CONFIG.GESTURE_HINT_SHOWN_KEY, 'true');
     } catch {
       // 忽略
@@ -234,6 +270,8 @@ export class MobileDrawerGestureService {
     if (!panel) {
       return false;
     }
+
+    this.cancelPanelAnimation(panel);
     
     const startHeight = panel === 'top' 
       ? this.topPanelHeight() 
@@ -241,7 +279,7 @@ export class MobileDrawerGestureService {
     
     this.gestureState = {
       startY: touch.clientY,
-      startTime: performance.now(),
+      startTime: this.now(),
       currentY: touch.clientY,
       velocity: 0,
       startHeight,
@@ -276,7 +314,7 @@ export class MobileDrawerGestureService {
     
     // 更新速度
     const prevY = this.gestureState.currentY;
-    const now = performance.now();
+    const now = this.now();
     const dt = now - this.gestureState.startTime;
     this.gestureState.currentY = touch.clientY;
     this.gestureState.velocity = dt > 0 ? (touch.clientY - prevY) / dt : 0;
@@ -349,6 +387,14 @@ export class MobileDrawerGestureService {
     
     this.gestureState = null;
   }
+
+  /**
+   * 处理触摸取消：系统手势、浏览器滚动接管或来电等场景不应继续复用旧拖拽状态。
+   */
+  onTouchCancel(): void {
+    this.isDragging.set(false);
+    this.gestureState = null;
+  }
   
   /**
    * 动画到目标高度
@@ -368,16 +414,14 @@ export class MobileDrawerGestureService {
       return;
     }
     
-    this.isAnimating.set(true);
-    
-    this.animateSpring(currentHeight, targetHeight, (value) => {
+    this.animateSpring(panel, currentHeight, targetHeight, (value) => {
       if (panel === 'top') {
         this.topPanelHeight.set(value);
       } else {
         this.bottomPanelHeight.set(value);
       }
     }, () => {
-      this.isAnimating.set(false);
+      this.markPanelAnimationFinished();
     });
   }
   
@@ -385,19 +429,23 @@ export class MobileDrawerGestureService {
    * 弹簧动画
    */
   private animateSpring(
+    panel: 'top' | 'bottom',
     from: number,
     to: number,
     onUpdate: (value: number) => void,
     onComplete: () => void
   ): void {
-    if (this.animationFrameId) {
-      cancelAnimationFrame(this.animationFrameId);
-    }
+    this.cancelPanelAnimation(panel);
+    this.markPanelAnimationStarted(panel);
     
     const duration = DRAWER_CONFIG.ANIMATION_DURATION;
-    const start = performance.now();
+    const start = this.now();
     
     const animate = (now: number) => {
+      if (this.animationFrameIds[panel] === null) {
+        return;
+      }
+
       const elapsed = now - start;
       const progress = Math.min(elapsed / duration, 1);
       
@@ -408,14 +456,60 @@ export class MobileDrawerGestureService {
       onUpdate(current);
       
       if (progress < 1) {
-        this.animationFrameId = requestAnimationFrame(animate);
+        this.animationFrameIds[panel] = this.requestFrame(animate);
       } else {
-        this.animationFrameId = null;
+        this.animationFrameIds[panel] = null;
         onComplete();
       }
     };
     
-    this.animationFrameId = requestAnimationFrame(animate);
+    this.animationFrameIds[panel] = this.requestFrame(animate);
+  }
+
+  private cancelPanelAnimation(panel: 'top' | 'bottom'): void {
+    const animationFrameId = this.animationFrameIds[panel];
+    if (animationFrameId !== null) {
+      this.cancelFrame(animationFrameId);
+      this.animationFrameIds[panel] = null;
+      this.markPanelAnimationFinished();
+    }
+  }
+
+  private markPanelAnimationStarted(panel: 'top' | 'bottom'): void {
+    if (this.animationFrameIds[panel] === null) {
+      this.activeAnimationCount += 1;
+    }
+    this.isAnimating.set(this.activeAnimationCount > 0);
+  }
+
+  private markPanelAnimationFinished(): void {
+    this.activeAnimationCount = Math.max(0, this.activeAnimationCount - 1);
+    this.isAnimating.set(this.activeAnimationCount > 0);
+  }
+
+  private isBrowser(): boolean {
+    return typeof window !== 'undefined';
+  }
+
+  private now(): number {
+    return typeof performance !== 'undefined' && typeof performance.now === 'function'
+      ? performance.now()
+      : Date.now();
+  }
+
+  private requestFrame(callback: FrameRequestCallback): number {
+    return typeof requestAnimationFrame === 'function'
+      ? requestAnimationFrame(callback)
+      : setTimeout(() => callback(this.now()), 16) as unknown as number;
+  }
+
+  private cancelFrame(id: number): void {
+    if (typeof cancelAnimationFrame === 'function') {
+      cancelAnimationFrame(id);
+      return;
+    }
+
+    clearTimeout(id);
   }
   
   // ========== 程序化控制 ==========
