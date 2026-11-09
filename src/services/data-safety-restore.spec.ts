@@ -3,13 +3,27 @@ import { buildDataSafetyExportPackage, type DataSafetyExportPackage } from './da
 import { restoreDataSafetyPackage } from './data-safety-restore';
 
 function makePackage(): DataSafetyExportPackage {
+  const task = {
+    id: 'task-1',
+    title: 'Task 1',
+    content: 'content survives restore',
+    stage: 1,
+    parentId: null,
+    order: 0,
+    rank: 1,
+    status: 'active' as const,
+    x: 0,
+    y: 0,
+    createdDate: '2026-06-16T00:00:00.000Z',
+    updatedAt: '2026-06-16T00:00:00.000Z',
+  };
   return buildDataSafetyExportPackage({
     exportedAt: '2026-06-16T00:00:00.000Z',
     ownerUserId: 'user-1',
     app: { appVersion: '1.0.0', syncProtocolVersion: 1, deploymentEpoch: 0 },
     localData: {
       projects: [{ id: 'project-1', name: 'P1' }],
-      tasks: [{ id: 'task-1', projectId: 'project-1', content: 'content survives restore' }],
+      tasks: [{ ...task, projectId: 'project-1' }],
       connections: [{ id: 'connection-1', projectId: 'project-1', source: 'task-1', target: 'task-1' }],
       syncCursors: [{ key: 'project:user-1:project-1', cursor: { updatedAt: '2026-06-16T00:00:00.000Z', entityType: 'task', id: 'task-1' } }],
       meta: { activeProjectId: 'project-1' },
@@ -21,14 +35,23 @@ function makePackage(): DataSafetyExportPackage {
           operationId: 'op-1',
           type: 'task',
           operation: 'upsert',
-          data: { id: 'task-1' },
+          data: task,
           retryCount: 0,
           createdAt: 1781539200000,
           sourceUserId: 'user-1',
           projectId: 'project-1',
         },
       ],
-      actionQueue: [{ id: 'action-1', operationId: 'op-2', entityType: 'task', entityId: 'task-1' }],
+      actionQueue: [{
+        id: 'action-1',
+        operationId: 'op-2',
+        entityType: 'task',
+        entityId: 'task-1',
+        type: 'update',
+        payload: { projectId: 'project-1', task },
+        timestamp: 1781539200000,
+        retryCount: 0,
+      }],
       deadLetters: [],
       conflicts: [{ id: 'conflict-1' }],
       taskTombstones: { project: ['task-deleted'] },
@@ -70,6 +93,7 @@ describe('restoreDataSafetyPackage', () => {
     expect(stateWrites.map(write => write.key)).toEqual([
       'meta',
       'retryQueue',
+      'legacyRetryReview',
       'actionQueue',
       'deadLetters',
       'conflicts',
