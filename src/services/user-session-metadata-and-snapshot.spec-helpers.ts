@@ -91,12 +91,12 @@ export function registerUserSessionMetadataAndSnapshotSpecs(getContext: () => Us
         };
         return { createQuery, ranges, limitCursors };
       }
-  
+
       it('浏览器网络挂起导致项目列表查询失败时应保留本地项目且不告警', async () => {
         const localProject = context.createProject({ id: 'proj-local', name: 'Local', syncSource: 'synced' });
         (context.mockProjectState['setProjects'] as (projects: Project[]) => void)([localProject]);
         vi.clearAllMocks();
-  
+
         const query = {
           select: vi.fn().mockReturnThis(),
           eq: vi.fn().mockReturnThis(),
@@ -110,18 +110,18 @@ export function registerUserSessionMetadataAndSnapshotSpecs(getContext: () => Us
         context.mockSupabaseClientService.clientAsync.mockResolvedValue({
           from: vi.fn().mockReturnValue(query),
         });
-  
+
         const accessibleProjectIds = await (
           context.service as unknown as {
             syncProjectListMetadata: (userId: string) => Promise<Set<string>>;
           }
         ).syncProjectListMetadata('user-1');
-  
+
         expect([...accessibleProjectIds]).toEqual(['proj-local']);
         expect(context.mockProjectState['setProjectsMetadataOnly']).not.toHaveBeenCalled();
         expect(context.mockLoggerCategory.warn).not.toHaveBeenCalled();
       });
-  
+
       it('Supabase auth session 尚未切到当前用户时，应把空项目清单视为非权威结果', async () => {
         const localProject = context.createProject({ id: 'proj-local', name: 'Local', syncSource: 'synced' });
         context.userIdSignal.set('user-1');
@@ -133,18 +133,18 @@ export function registerUserSessionMetadataAndSnapshotSpecs(getContext: () => Us
           error: null,
         });
         setupSupabaseQuery([]);
-  
+
         const accessibleProjectIds = await (
           context.service as unknown as {
             syncProjectListMetadata: (userId: string) => Promise<Set<string>>;
           }
         ).syncProjectListMetadata('user-1');
-  
+
         expect([...accessibleProjectIds]).toEqual(['proj-local']);
         expect(context.mockProjectState['setProjectsMetadataOnly']).not.toHaveBeenCalled();
         expect(context.service.canAuthoritativelyRejectProjectRoute()).toBe(false);
       });
-  
+
       it('在项目数达到裁剪阈值时，应清理不可访问且无待同步改动的非活跃项目', async () => {
         const keepProject = context.createProject({ id: 'proj-ok', name: 'Keep' });
         const keepProject2 = context.createProject({ id: 'proj-ok-2', name: 'Keep 2' });
@@ -153,7 +153,7 @@ export function registerUserSessionMetadataAndSnapshotSpecs(getContext: () => Us
         // activeProjectId 设为 null，以便 staleProject 可被裁剪
         (context.mockProjectState['activeProjectId'] as ReturnType<typeof vi.fn>).mockReturnValue(null);
         (context.mockSyncCoordinator['hasPendingChangesForProject'] as ReturnType<typeof vi.fn>).mockReturnValue(false);
-  
+
         setupSupabaseQuery([
           {
             id: 'proj-ok', title: 'Keep', description: '',
@@ -164,13 +164,13 @@ export function registerUserSessionMetadataAndSnapshotSpecs(getContext: () => Us
             created_date: keepProject2.createdDate, updated_at: keepProject2.updatedAt, version: 1,
           },
         ]);
-  
+
         const result = await (
           context.service as unknown as {
             syncProjectListMetadata: (userId: string) => Promise<Set<string>>;
           }
         ).syncProjectListMetadata('user-1');
-  
+
         expect(result.has('proj-ok')).toBe(true);
         expect(result.has('proj-ok-2')).toBe(true);
         expect(result.has('proj-stale')).toBe(false);
@@ -179,7 +179,7 @@ export function registerUserSessionMetadataAndSnapshotSpecs(getContext: () => Us
           expect.objectContaining({ id: 'proj-ok-2' }),
         ]);
       });
-  
+
       it('项目列表元数据应使用 keyset 加载并发移动后的全部项目', async () => {
         (context.mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([]);
         const serverProjects = Array.from({ length: 1001 }, (_, index) => ({
@@ -192,13 +192,13 @@ export function registerUserSessionMetadataAndSnapshotSpecs(getContext: () => Us
           owner_id: 'user-1',
         }));
         const paged = setupSupabaseQuery(serverProjects, true);
-  
+
         const result = await (
           context.service as unknown as {
             syncProjectListMetadata: (userId: string) => Promise<Set<string>>;
           }
         ).syncProjectListMetadata('user-1');
-  
+
         expect(result.size).toBe(1001);
         expect(result.has('proj-0000')).toBe(true);
         expect(result.has('proj-1000')).toBe(true);
@@ -208,7 +208,7 @@ export function registerUserSessionMetadataAndSnapshotSpecs(getContext: () => Us
           expect.arrayContaining([expect.objectContaining({ id: 'proj-0000', name: 'Project 0 moved' })]),
         );
       });
-  
+
       it('当前活跃项目不应被裁剪（由调用方处理）', async () => {
         const keepProject = context.createProject({ id: 'proj-ok', name: 'Keep' });
         const activeProject = context.createProject({ id: 'proj-active', name: 'Active' });
@@ -216,7 +216,7 @@ export function registerUserSessionMetadataAndSnapshotSpecs(getContext: () => Us
         (context.mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue([keepProject, activeProject, staleProject]);
         (context.mockProjectState['activeProjectId'] as ReturnType<typeof vi.fn>).mockReturnValue('proj-active');
         (context.mockSyncCoordinator['hasPendingChangesForProject'] as ReturnType<typeof vi.fn>).mockReturnValue(false);
-  
+
         // 服务端返回 proj-ok 和一个新项目，ratio 2/3 ≥ 50%，裁剪正常执行
         // proj-active 和 proj-stale 都不可访问，但 proj-active 受保护
         setupSupabaseQuery([
@@ -229,13 +229,13 @@ export function registerUserSessionMetadataAndSnapshotSpecs(getContext: () => Us
             created_date: new Date().toISOString(), updated_at: new Date().toISOString(), version: 1,
           },
         ]);
-  
+
         await (
           context.service as unknown as {
             syncProjectListMetadata: (userId: string) => Promise<Set<string>>;
           }
         ).syncProjectListMetadata('user-1');
-  
+
         // 验证 setProjectsMetadataOnly 被调用（有壳新增 + 裁剪变更）
         const setProjectsCall = (context.mockProjectState['setProjectsMetadataOnly'] as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
         expect(setProjectsCall).toBeDefined();
@@ -499,7 +499,7 @@ export function registerUserSessionMetadataAndSnapshotSpecs(getContext: () => Us
         expect(syncCore.saveOfflineSnapshot).not.toHaveBeenCalled();
         expect(context.mockSyncCoordinator['commitProjectManifestWatermark']).not.toHaveBeenCalled();
       });
-  
+
       it('服务端返回空列表时应裁剪全部不可访问的 synced 项目', async () => {
         const localA = context.createProject({ id: 'proj-a', name: 'A' });
         const localB = context.createProject({ id: 'proj-b', name: 'B' });
@@ -507,20 +507,20 @@ export function registerUserSessionMetadataAndSnapshotSpecs(getContext: () => Us
         (context.mockProjectState['activeProjectId'] as ReturnType<typeof vi.fn>).mockReturnValue(null);
         (context.mockSyncCoordinator['hasPendingChangesForProject'] as ReturnType<typeof vi.fn>).mockReturnValue(false);
         (context.mockSyncCoordinator['core'] as { saveOfflineSnapshot: ReturnType<typeof vi.fn> }).saveOfflineSnapshot.mockClear();
-  
+
         setupSupabaseQuery([]); // 服务端返回空
-  
+
         await (
           context.service as unknown as {
             syncProjectListMetadata: (userId: string) => Promise<Set<string>>;
           }
         ).syncProjectListMetadata('user-1');
-  
+
         expect(context.mockProjectState['setProjectsMetadataOnly']).toHaveBeenCalledWith([]);
         expect((context.mockSyncCoordinator['core'] as { saveOfflineSnapshot: ReturnType<typeof vi.fn> }).saveOfflineSnapshot)
           .toHaveBeenCalledWith([], 'user-1');
       });
-  
+
       it('服务端暂未返回 pendingSync 的 synced 项目时应保留本地项目', async () => {
         context.userIdSignal.set('user-1');
         const pendingProject = context.createProject({
@@ -536,22 +536,22 @@ export function registerUserSessionMetadataAndSnapshotSpecs(getContext: () => Us
         (context.mockProjectState['activeProjectId'] as ReturnType<typeof vi.fn>).mockReturnValue(null);
         (context.mockSyncCoordinator['hasPendingChangesForProject'] as ReturnType<typeof vi.fn>).mockReturnValue(false);
         (context.mockSyncCoordinator['core'] as { saveOfflineSnapshot: ReturnType<typeof vi.fn> }).saveOfflineSnapshot.mockClear();
-  
+
         setupSupabaseQuery([]);
-  
+
         const result = await (
           context.service as unknown as {
             syncProjectListMetadata: (userId: string) => Promise<Set<string>>;
           }
         ).syncProjectListMetadata('user-1');
-  
+
         expect([...result]).toEqual([]);
         expect(context.mockProjectState['setProjectsMetadataOnly']).not.toHaveBeenCalledWith([]);
         expect((context.mockSyncCoordinator['core'] as { saveOfflineSnapshot: ReturnType<typeof vi.fn> }).saveOfflineSnapshot)
           .not.toHaveBeenCalledWith([], 'user-1');
         expect(context.service.isProjectAuthoritativelyAccessible('proj-new-pending')).toBe(true);
       });
-  
+
       it('服务端项目数显著少于本地时仍应裁剪缺失的 synced 项目', async () => {
         const localProjects = [
           context.createProject({ id: 'p1', name: 'P1' }),
@@ -562,23 +562,23 @@ export function registerUserSessionMetadataAndSnapshotSpecs(getContext: () => Us
         (context.mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue(localProjects);
         (context.mockProjectState['activeProjectId'] as ReturnType<typeof vi.fn>).mockReturnValue(null);
         (context.mockSyncCoordinator['hasPendingChangesForProject'] as ReturnType<typeof vi.fn>).mockReturnValue(false);
-  
+
         // 服务端只返回 1/4，但查询已成功，应按真实远端状态裁剪
         setupSupabaseQuery([{
           id: 'p1', title: 'P1', description: '',
           created_date: localProjects[0].createdDate, updated_at: localProjects[0].updatedAt, version: 1,
         }]);
-  
+
         await (
           context.service as unknown as {
             syncProjectListMetadata: (userId: string) => Promise<Set<string>>;
           }
         ).syncProjectListMetadata('user-1');
-  
+
         const setProjectsCall = (context.mockProjectState['setProjectsMetadataOnly'] as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as Project[] | undefined;
         expect(setProjectsCall?.map((project: Project) => project.id)).toEqual(['p1']);
       });
-  
+
       it('本地仅有 2 个项目时也应裁剪缺失的 synced 项目', async () => {
         const localProjects = [
           context.createProject({ id: 'p1', name: 'P1' }),
@@ -587,22 +587,22 @@ export function registerUserSessionMetadataAndSnapshotSpecs(getContext: () => Us
         (context.mockProjectState['projects'] as ReturnType<typeof vi.fn>).mockReturnValue(localProjects);
         (context.mockProjectState['activeProjectId'] as ReturnType<typeof vi.fn>).mockReturnValue(null);
         (context.mockSyncCoordinator['hasPendingChangesForProject'] as ReturnType<typeof vi.fn>).mockReturnValue(false);
-  
+
         setupSupabaseQuery([{
           id: 'p1', title: 'P1', description: '',
           created_date: localProjects[0].createdDate, updated_at: localProjects[0].updatedAt, version: 1,
         }]);
-  
+
         await (
           context.service as unknown as {
             syncProjectListMetadata: (userId: string) => Promise<Set<string>>;
           }
         ).syncProjectListMetadata('user-1');
-  
+
         const setProjectsCall = (context.mockProjectState['setProjectsMetadataOnly'] as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as Project[] | undefined;
         expect(setProjectsCall?.map((project: Project) => project.id)).toEqual(['p1']);
       });
-  
+
       it('服务端存在的项目应被提升为 synced，清除 local-only 影子标记', async () => {
         const remoteUpdatedAt = '2026-04-04T04:00:00.000Z';
         const localProject = context.createProject({
@@ -616,18 +616,18 @@ export function registerUserSessionMetadataAndSnapshotSpecs(getContext: () => Us
         (context.mockProjectState['activeProjectId'] as ReturnType<typeof vi.fn>).mockReturnValue(null);
         (context.mockSyncCoordinator['hasPendingChangesForProject'] as ReturnType<typeof vi.fn>).mockReturnValue(false);
         (context.mockSyncCoordinator['core'] as { saveOfflineSnapshot: ReturnType<typeof vi.fn> }).saveOfflineSnapshot.mockClear();
-  
+
         setupSupabaseQuery([{
           id: 'proj-shadow', title: 'Shadow', description: '',
           created_date: localProject.createdDate, updated_at: remoteUpdatedAt, version: localProject.version,
         }]);
-  
+
         await (
           context.service as unknown as {
             syncProjectListMetadata: (userId: string) => Promise<Set<string>>;
           }
         ).syncProjectListMetadata('user-1');
-  
+
         const setProjectsCall = (context.mockProjectState['setProjectsMetadataOnly'] as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as Project[] | undefined;
         expect(setProjectsCall).toBeDefined();
         const syncedProject = setProjectsCall?.find((project: Project) => project.id === 'proj-shadow');
@@ -644,7 +644,7 @@ export function registerUserSessionMetadataAndSnapshotSpecs(getContext: () => Us
             }),
           ], 'user-1');
       });
-  
+
       it('local-only 项目即使服务端不存在也应继续保留，等待用户决定是否迁移', async () => {
         const remoteProjectA = context.createProject({ id: 'proj-a', name: 'A', syncSource: 'synced' });
         const remoteProjectB = context.createProject({ id: 'proj-b', name: 'B', syncSource: 'synced' });
@@ -661,7 +661,7 @@ export function registerUserSessionMetadataAndSnapshotSpecs(getContext: () => Us
         ]);
         (context.mockProjectState['activeProjectId'] as ReturnType<typeof vi.fn>).mockReturnValue(null);
         (context.mockSyncCoordinator['hasPendingChangesForProject'] as ReturnType<typeof vi.fn>).mockReturnValue(false);
-  
+
         setupSupabaseQuery([
           {
             id: 'proj-a', title: 'A', description: '',
@@ -672,17 +672,17 @@ export function registerUserSessionMetadataAndSnapshotSpecs(getContext: () => Us
             created_date: remoteProjectB.createdDate, updated_at: remoteProjectB.updatedAt, version: 1,
           },
         ]);
-  
+
         await (
           context.service as unknown as {
             syncProjectListMetadata: (userId: string) => Promise<Set<string>>;
           }
         ).syncProjectListMetadata('user-1');
-  
+
         const setProjectsCall = (context.mockProjectState['setProjectsMetadataOnly'] as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as Project[] | undefined;
         expect(setProjectsCall?.some((project: Project) => project.id === 'proj-local-only')).toBe(true);
       });
-  
+
       it('metadata sync 后保留的 local-only 项目仍应被视为可访问', async () => {
         const remoteProject = context.createProject({ id: 'proj-a', name: 'A', syncSource: 'synced' });
         const localOnlyProject = context.createProject({
@@ -701,23 +701,23 @@ export function registerUserSessionMetadataAndSnapshotSpecs(getContext: () => Us
         );
         (context.mockProjectState['activeProjectId'] as ReturnType<typeof vi.fn>).mockReturnValue(null);
         (context.mockSyncCoordinator['hasPendingChangesForProject'] as ReturnType<typeof vi.fn>).mockReturnValue(false);
-  
+
         setupSupabaseQuery([
           {
             id: 'proj-a', title: 'A', description: '',
             created_date: remoteProject.createdDate, updated_at: remoteProject.updatedAt, version: 1,
           },
         ]);
-  
+
         await (
           context.service as unknown as {
             syncProjectListMetadata: (userId: string) => Promise<Set<string>>;
           }
         ).syncProjectListMetadata('user-1');
-  
+
         expect(context.service.isProjectAuthoritativelyAccessible('proj-local-only')).toBe(true);
       });
-  
+
       it('远端清单尚未包含新建项目时，pendingSync 的 synced 项目仍应被视为可访问', () => {
         const pendingProject = context.createProject({
           id: 'proj-new-pending',
@@ -732,14 +732,14 @@ export function registerUserSessionMetadataAndSnapshotSpecs(getContext: () => Us
         ));
         (context.mockSyncCoordinator['hasPendingChangesForProject'] as ReturnType<typeof vi.fn>).mockReturnValue(false);
         (context.mockChangeTracker['hasProjectChanges'] as ReturnType<typeof vi.fn>).mockReturnValue(false);
-  
+
         expect(context.service.isProjectAuthoritativelyAccessible('proj-new-pending')).toBe(true);
       });
-  
+
       it('匿名或 local-user 模式下缺失项目不应被视为可访问', () => {
         context.userIdSignal.set(AUTH_CONFIG.LOCAL_MODE_USER_ID);
         (context.mockProjectState['getProject'] as ReturnType<typeof vi.fn>).mockReturnValue(undefined);
-  
+
         expect(context.service.isProjectAuthoritativelyAccessible('proj-missing')).toBe(false);
       });
 
@@ -748,7 +748,7 @@ export function registerUserSessionMetadataAndSnapshotSpecs(getContext: () => Us
         setupSupabaseQuery,
       });
     });
-  
+
     registerUserSessionMergeSingleProjectContentSpecs(() => context);
     registerUserSessionSnapshotPrehydrateSpecs(() => context);
 }

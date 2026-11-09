@@ -169,9 +169,9 @@ describe('持久化状态管理', () => {
 
     it('markLocalChanges 应该设置 hasPendingLocalChanges 为 true', () => {
       expect(service.hasPendingLocalChanges()).toBe(false);
-      
+
       service.markLocalChanges();
-      
+
       expect(service.hasPendingLocalChanges()).toBe(true);
     });
 
@@ -197,10 +197,10 @@ describe('持久化状态管理', () => {
     it('markLocalChanges 应该更新 lastUpdateType', () => {
       service.markLocalChanges('content');
       expect(service.getLastUpdateType()).toBe('content');
-      
+
       service.markLocalChanges('position');
       expect(service.getLastUpdateType()).toBe('position');
-      
+
       service.markLocalChanges('structure');
       expect(service.getLastUpdateType()).toBe('structure');
     });
@@ -213,18 +213,18 @@ describe('持久化状态管理', () => {
       const project = createTestProject({ id: 'proj-1' });
       mockProjectStateService.activeProject.set(project);
       mockProjectStateService.projects.set([project]);
-      
+
       // 清除前面测试可能的影响
       mockSyncService.saveOfflineSnapshot.mockClear();
-      
+
       service.schedulePersist();
-      
+
       // 持久化尚未执行
       expect(mockSyncService.saveOfflineSnapshot).not.toHaveBeenCalled();
-      
+
       // 前进 3000ms（SYNC_CONFIG.DEBOUNCE_DELAY = 3000）
       await vi.advanceTimersByTimeAsync(3000);
-      
+
       // 等待异步持久化操作完成
       await vi.waitFor(() => {
         expect(mockSyncService.saveOfflineSnapshot).toHaveBeenCalled();
@@ -396,22 +396,22 @@ describe('持久化状态管理', () => {
     it('连续调用 schedulePersist 应该只触发一次持久化', async () => {
       // 确保从干净状态开始
       mockSyncService.saveOfflineSnapshot.mockClear();
-      
+
       const project = createTestProject({ id: 'proj-1' });
       mockProjectStateService.activeProject.set(project);
       mockProjectStateService.projects.set([project]);
-      
+
       // 记录初始调用次数（可能有来自本地自动保存的调用）
       const initialCalls = mockSyncService.saveOfflineSnapshot.mock.calls.length;
-      
+
       // 连续快速调用三次，由于防抖机制，应该只触发一次持久化
       service.schedulePersist();
       service.schedulePersist();
       service.schedulePersist();
-      
+
       // 等待 DEBOUNCE_DELAY (3000ms) 后应该触发
       await vi.advanceTimersByTimeAsync(3000);
-      
+
       // 等待异步持久化操作完成
       await vi.waitFor(() => {
         // 验证持久化已被调用（至少有 persistActiveProject 的 2 次调用）

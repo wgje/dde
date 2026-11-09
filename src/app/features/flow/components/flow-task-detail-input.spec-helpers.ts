@@ -33,7 +33,7 @@ export function registerFlowTaskDetailInputSpecs(
       const task = createMockTask('task-a', 'Task A', 'Content A');
       (getComponent() as any)['task'] = signal(task);
       getFixture().detectChanges();
-      
+
       // 🔴 等待 queueMicrotask 完成，确保 isTaskSwitching 标志被重置
       await Promise.resolve();
 
@@ -52,7 +52,7 @@ export function registerFlowTaskDetailInputSpecs(
       const task = createMockTask('task-a', 'Task A', 'Content A');
       (getComponent() as any)['task'] = signal(task);
       getFixture().detectChanges();
-      
+
       // 🔴 等待 queueMicrotask 完成，确保 isTaskSwitching 标志被重置
       await Promise.resolve();
 
@@ -157,7 +157,7 @@ export function registerFlowTaskDetailInputSpecs(
 
       expect(getComponent().formService.isTitleFocused).toBe(false);
       expect(getComponent().formService['unlockTimers'].size).toBe(0);
-      
+
       vi.useRealTimers();
     }, 5000);
 

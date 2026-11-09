@@ -158,7 +158,7 @@ export class SessionManagerService {
     } else {
       this.logger.debug(`会话已过期（已标记）: ${context}`, details);
     }
-    
+
     throw new PermanentFailureError(
       'Session expired',
       undefined,
@@ -234,7 +234,7 @@ export class SessionManagerService {
 
       const { data, error } = await client.auth.getSession();
       if (!this.authFlights.isCurrent(fence)) return { valid: false };
-      
+
       if (error) {
         this.logger.warn('session 预热验证异常', { error });
         this.markValidationSnapshot(false);
@@ -337,7 +337,7 @@ export class SessionManagerService {
   ): Promise<SessionRefreshResult> {
     try {
       this.logger.info('尝试自动刷新会话', { context });
-      
+
       const { data, error } = await client.auth.refreshSession();
 
       if (error) {
@@ -495,7 +495,7 @@ export class SessionManagerService {
     );
     const effectiveCooldownMs = this.REFRESH_FAILURE_COOLDOWN_MS * cooldownMultiplier;
     const timeSinceLastFailure = Date.now() - this.lastRefreshFailureTime;
-    
+
     return {
       consecutiveFailures: this.consecutiveFailures,
       cooldownMultiplier,
@@ -586,13 +586,13 @@ export class SessionManagerService {
    * 处理认证错误并尝试刷新
    */
   async handleAuthErrorWithRefresh(
-    context: string, 
+    context: string,
     details?: Record<string, unknown>
   ): Promise<boolean> {
     const result = await this.tryRefreshSessionWithSession(context);
     const refreshed = result.refreshed
       && this.authFlights.isAcceptedSessionCurrent(result.session);
-    
+
     if (refreshed) {
       this.logger.info('会话刷新成功，可重试操作', { context, details });
       this.sentryLazyLoader.addBreadcrumb({
@@ -603,7 +603,7 @@ export class SessionManagerService {
       });
       return true;
     }
-    
+
     this.logger.warn('会话刷新失败，标记为过期', { context, details });
     return false;
   }
@@ -617,10 +617,10 @@ export class SessionManagerService {
     if (!this.syncState.isSessionExpired()) {
       return;
     }
-    
+
     this.syncState.setSessionExpired(false);
     this.logger.info('会话状态已重置');
-    
+
     this.sentryLazyLoader.addBreadcrumb({
       category: 'sync',
       message: 'Session expired state reset',
@@ -649,7 +649,7 @@ export class SessionManagerService {
     }
     const client = resolved.client;
     const fence = resolved.fence;
-    
+
     try {
       const { data: { session } } = await client.auth.getSession();
       if (session?.user?.id) {

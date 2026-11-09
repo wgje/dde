@@ -40,7 +40,7 @@ export class TaskSyncPositionService extends TaskSyncOperationsBase {
     if (!this.canStartTaskPositionPush(taskId)) {
       return false;
     }
-    
+
     const client = this.getSupabaseClient();
     if (!client) {
       return false;

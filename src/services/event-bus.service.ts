@@ -1,12 +1,12 @@
 /**
  * EventBusService - 事件总线服务
- * 
+ *
  * 用于解耦服务之间的循环依赖，特别是：
  * - StoreService ↔ TaskOperationAdapterService 循环
  * - AuthService ↔ SimpleSyncService 循环
- * 
+ *
  * 通过发布/订阅模式，上层服务发送事件，下层服务订阅处理
- * 
+ *
  * @see docs/tech-debt-remediation-plan.md C-05
  */
 import { Injectable, signal } from '@angular/core';
@@ -88,10 +88,10 @@ export interface SessionSignedOutEvent {
 }
 
 /** 所有事件类型联合 */
-export type AppEvent = 
-  | UndoRequestEvent 
-  | RedoRequestEvent 
-  | ProjectSwitchEvent 
+export type AppEvent =
+  | UndoRequestEvent
+  | RedoRequestEvent
+  | ProjectSwitchEvent
   | SyncStatusEvent
   | ForceSyncRequestEvent
   | TaskUpdateEvent
@@ -117,53 +117,53 @@ export class EventBusService {
   private readonly _sessionRestored$ = new Subject<SessionRestoredEvent>();
   private readonly _sessionInvalidated$ = new Subject<SessionInvalidatedEvent>();
   private readonly _sessionSignedOut$ = new Subject<SessionSignedOutEvent>();
-  
+
   // 通用事件通道（用于扩展）
   private readonly _events$ = new Subject<AppEvent>();
-  
+
   // 最近事件记录（调试用）
   private readonly _lastEvent = signal<AppEvent | null>(null);
-  
+
   // ========== 公开的 Observable ==========
-  
+
   /** 撤销请求事件流 */
   readonly onUndoRequest$: Observable<UndoRequestEvent> = this._undoRequest$.asObservable();
-  
+
   /** 重做请求事件流 */
   readonly onRedoRequest$: Observable<RedoRequestEvent> = this._redoRequest$.asObservable();
-  
+
   /** 项目切换事件流 */
   readonly onProjectSwitch$: Observable<ProjectSwitchEvent> = this._projectSwitch$.asObservable();
-  
+
   /** 同步状态事件流 */
   readonly onSyncStatus$: Observable<SyncStatusEvent> = this._syncStatus$.asObservable();
-  
+
   /** 强制同步请求事件流 */
   readonly onForceSyncRequest$: Observable<ForceSyncRequestEvent> = this._forceSyncRequest$.asObservable();
-  
+
   /** 任务更新事件流 */
   readonly onTaskUpdate$: Observable<TaskUpdateEvent> = this._taskUpdate$.asObservable();
-  
+
   /** 会话恢复前置条件事件流（sync runtime 已冻结，等待下一次确认过的 auth 恢复） */
   readonly onSessionRecoveryRequired$: Observable<SessionRecoveryRequiredEvent> = this._sessionRecoveryRequired$.asObservable();
 
   /** 会话恢复事件流 */
   readonly onSessionRestored$: Observable<SessionRestoredEvent> = this._sessionRestored$.asObservable();
-  
+
   /** 会话失效事件流（后台刷新推翻 FastPath 乐观身份） */
   readonly onSessionInvalidated$: Observable<SessionInvalidatedEvent> = this._sessionInvalidated$.asObservable();
-  
+
   /** 用户主动登出事件流（非过期；订阅方只做旧会话缓存清理） */
   readonly onSessionSignedOut$: Observable<SessionSignedOutEvent> = this._sessionSignedOut$.asObservable();
-  
+
   /** 所有事件流（调试/日志用） */
   readonly allEvents$: Observable<AppEvent> = this._events$.asObservable();
-  
+
   /** 最近事件（Signal，用于调试面板） */
   readonly lastEvent = this._lastEvent.asReadonly();
-  
+
   // ========== 发布方法 ==========
-  
+
   /**
    * 请求撤销操作
    * @param source 请求来源服务名
@@ -174,7 +174,7 @@ export class EventBusService {
     this._events$.next(event);
     this._lastEvent.set(event);
   }
-  
+
   /**
    * 请求重做操作
    * @param source 请求来源服务名
@@ -185,7 +185,7 @@ export class EventBusService {
     this._events$.next(event);
     this._lastEvent.set(event);
   }
-  
+
   /**
    * 发布项目切换事件
    * @param projectId 目标项目 ID
@@ -197,7 +197,7 @@ export class EventBusService {
     this._events$.next(event);
     this._lastEvent.set(event);
   }
-  
+
   /**
    * 发布同步状态变更
    * @param status 同步状态
@@ -209,7 +209,7 @@ export class EventBusService {
     this._events$.next(event);
     this._lastEvent.set(event);
   }
-  
+
   /**
    * 请求强制同步
    * @param source 请求来源
@@ -220,7 +220,7 @@ export class EventBusService {
     this._events$.next(event);
     this._lastEvent.set(event);
   }
-  
+
   /**
    * 发布任务更新事件
    * @param taskId 任务 ID
@@ -228,8 +228,8 @@ export class EventBusService {
    * @param source 来源
    */
   publishTaskUpdate(
-    taskId: string, 
-    updateType: TaskUpdateEvent['updateType'], 
+    taskId: string,
+    updateType: TaskUpdateEvent['updateType'],
     source: string
   ): void {
     const event: TaskUpdateEvent = { type: 'task-update', taskId, updateType, source };
@@ -248,7 +248,7 @@ export class EventBusService {
     this._events$.next(event);
     this._lastEvent.set(event);
   }
-  
+
   /**
    * 发布会话恢复事件
    * @param userId 用户 ID

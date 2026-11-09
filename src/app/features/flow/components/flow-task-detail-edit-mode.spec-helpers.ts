@@ -26,7 +26,7 @@ export function registerFlowTaskDetailEditModeSpecs(
     it('应该正确切换编辑模式', async () => {
       // 使用 fake timers 避免等待真实的 350ms
       vi.useFakeTimers();
-      
+
       const task = createMockTask('task-a', 'Task A', 'Content A');
       (getComponent() as any)['task'] = signal(task);
       getFixture().detectChanges();
@@ -41,7 +41,7 @@ export function registerFlowTaskDetailEditModeSpecs(
 
       getComponent().toggleEditMode();
       expect(getComponent().isEditMode()).toBe(false);
-      
+
       vi.useRealTimers();
     });
 

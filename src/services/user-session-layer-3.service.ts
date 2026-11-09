@@ -260,7 +260,7 @@ export abstract class UserSessionLayer3 extends UserSessionLayer2 {
   }
 
 
-  
+
   /** 同步项目列表元数据（不加载完整数据） */
   protected async syncProjectListMetadata(
     userId: string,

@@ -51,20 +51,20 @@ export function registerSyncCoordinatorOfflineMergeSpecs(context: SyncCoordinato
     it('离线新建项目应该同步到云端', async () => {
       const offlineProject = createTestProject({ id: 'new-proj', name: 'Offline' });
       const cloudProjects: Project[] = [];
-      
+
       // 配置 mock 返回值
       mockProjectSyncOperationsService.mergeOfflineDataOnReconnect.mockResolvedValueOnce({
         projects: [offlineProject],
         syncedCount: 1,
         conflictProjects: []
       });
-      
+
       const result = await service.mergeOfflineDataOnReconnect(
         cloudProjects,
         [offlineProject],
         'user-123'
       );
-      
+
       expect(result.syncedCount).toBe(1);
       expect(mockProjectSyncOperationsService.mergeOfflineDataOnReconnect).toHaveBeenCalledWith(
         cloudProjects,
@@ -78,47 +78,47 @@ export function registerSyncCoordinatorOfflineMergeSpecs(context: SyncCoordinato
     it('离线版本高于云端时应该同步', async () => {
       const cloudProject = createTestProject({ id: 'proj-1', version: 3 });
       const offlineProject = createTestProject({ id: 'proj-1', version: 5 });
-      
+
       // 配置 mock 返回值
       mockProjectSyncOperationsService.mergeOfflineDataOnReconnect.mockResolvedValueOnce({
         projects: [offlineProject],
         syncedCount: 1,
         conflictProjects: []
       });
-      
+
       const result = await service.mergeOfflineDataOnReconnect(
         [cloudProject],
         [offlineProject],
         'user-123'
       );
-      
+
       expect(result.syncedCount).toBe(1);
     });
 
     it('云端版本高于离线时不应该同步', async () => {
       const cloudProject = createTestProject({ id: 'proj-1', version: 10 });
       const offlineProject = createTestProject({ id: 'proj-1', version: 3 });
-      
+
       // 配置 mock 返回值 - 云端版本更高时 syncedCount 为 0
       mockProjectSyncOperationsService.mergeOfflineDataOnReconnect.mockResolvedValueOnce({
         projects: [cloudProject],
         syncedCount: 0,
         conflictProjects: []
       });
-      
+
       const result = await service.mergeOfflineDataOnReconnect(
         [cloudProject],
         [offlineProject],
         'user-123'
       );
-      
+
       expect(result.syncedCount).toBe(0);
     });
 
     it('冲突时应该发布冲突事件到 onConflict$', async () => {
       const cloudProject = createTestProject({ id: 'proj-1', version: 5 });
       const offlineProject = createTestProject({ id: 'proj-1', version: 6 });
-      
+
       // 配置 mock 返回冲突项目
       mockProjectSyncOperationsService.mergeOfflineDataOnReconnect.mockImplementationOnce(
         async (
@@ -137,16 +137,16 @@ export function registerSyncCoordinatorOfflineMergeSpecs(context: SyncCoordinato
           };
         }
       );
-      
+
       const onConflictSpy = vi.fn();
       const subscription = service.onConflict$.subscribe(onConflictSpy);
-      
+
       await service.mergeOfflineDataOnReconnect(
         [cloudProject],
         [offlineProject],
         'user-123'
       );
-      
+
       await vi.waitFor(() => {
         expect(onConflictSpy).toHaveBeenCalledWith({
           localProject: offlineProject,
@@ -164,7 +164,7 @@ export function registerSyncCoordinatorOfflineMergeSpecs(context: SyncCoordinato
         pendingTaskDeleteIds: undefined,
         pendingTaskDeleteBaseUpdatedAtMap: undefined,
       });
-      
+
       subscription.unsubscribe();
     });
 

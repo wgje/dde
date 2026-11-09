@@ -302,7 +302,7 @@
           (click)="parkTask.emit()"
           class="text-task-action-button flex-1 font-medium rounded-md flex items-center justify-center transition-colors duration-200"
           [ngClass]="{
-            'px-2 py-1 text-xs gap-1': !isMobile(), 
+            'px-2 py-1 text-xs gap-1': !isMobile(),
             'px-1.5 py-0.5 text-[10px] gap-0.5': isMobile(),
             'bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300 border border-amber-300 dark:border-amber-600': task().parkingMeta?.state === 'parked',
             'bg-amber-50 dark:bg-amber-900/20 hover:bg-amber-500 text-amber-600 dark:text-amber-400 hover:text-white border border-amber-200 dark:border-amber-700 hover:border-amber-500': task().parkingMeta?.state !== 'parked'
