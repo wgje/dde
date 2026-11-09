@@ -13,6 +13,7 @@ source_paths:
   - src/app/features/flow/components/flow-link-action-menu.component.ts
   - src/app/features/flow/components/flow-batch-delete-dialog.component.ts
   - src/app/features/flow/components/flow-view-mobile-interaction.controller.ts
+  - src/app/features/flow/services/flow-overview-lifecycle.helpers.ts
 ---
 
 # 流程图视图
@@ -85,7 +86,7 @@ source_paths:
 
 点击图例项目只会临时隐藏或显示对应类别，不会修改任务、连线、同步数据或项目存储。关闭小地图、切换 SVG/GoJS 概览模式或离开当前组件后，临时筛选会自动重置。浅色主题使用瓷白星图，深色主题使用深空星图；两种主题都保留相同的几何含义，不能只凭颜色判断状态。
 
-正常情况下会显示 SVG Constellation；内部兼容开关启用时，可以回退到旧的 GoJS Overview。回退只影响概览的绘制方式，主键拖动、滚轮、方向键和缩放操作仍然保留，也不会改变流程图数据。若切换后概览短暂重建，等待它重新出现再继续操作即可。
+正常情况下会显示 SVG Constellation；内部兼容开关启用时，可以回退到旧的 GoJS Overview。概览容器会显式设置字体平滑和像素渲染策略，保证重建或主题切换时的视觉边缘保持一致。回退只影响概览的绘制方式，主键拖动、滚轮、方向键和缩放操作仍然保留，也不会改变流程图数据。若切换后概览短暂重建，等待它重新出现再继续操作即可。
 
 ## 和文本视图如何配合
 

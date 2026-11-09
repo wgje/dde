@@ -17,12 +17,14 @@ describe('flow-overview-lifecycle.helpers', () => {
   it('configures overview container rendering styles', () => {
     const container = document.createElement('div');
 
+    const setProperty = vi.spyOn(container.style, 'setProperty');
+
     configureOverviewContainerRendering(container, '#101010');
 
     expect(container.style.backgroundColor).toBe('#101010');
     expect(container.style.imageRendering).toBe('auto');
-    expect((container.style as CSSStyleDeclaration & Record<string, string>)['webkitFontSmoothing']).toBe('antialiased');
-    expect((container.style as CSSStyleDeclaration & Record<string, string>)['mozOsxFontSmoothing']).toBe('grayscale');
+    expect(setProperty).toHaveBeenCalledWith('-webkit-font-smoothing', 'antialiased');
+    expect(setProperty).toHaveBeenCalledWith('-moz-osx-font-smoothing', 'grayscale');
   });
 
   it('creates overview with manual scale control and no eager observed diagram', () => {

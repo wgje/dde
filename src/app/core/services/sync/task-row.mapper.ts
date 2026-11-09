@@ -77,7 +77,7 @@ function mapNullableJsonField<T>(row: TaskRowLike, key: keyof TaskRowLike): T | 
 
 function getMissingRequiredTaskRowFields(row: TaskRowLike): RequiredTaskRowField[] {
   return REQUIRED_TASK_ROW_FIELDS.filter(field => {
-    if (field === 'content') return row.content !== undefined && typeof row.content !== 'string';
+    if (field === 'content') return typeof row.content !== 'string';
     return !Object.prototype.hasOwnProperty.call(row, field) || row[field] === undefined;
   });
 }

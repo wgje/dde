@@ -115,6 +115,10 @@ RetryQueue behavior:
 - handles capacity using durable-first strategy
 - exposes terminal or rejected states when replay cannot proceed
 
+Remote task rows without a string content field are rejected before tombstone
+materialization. They must not be normalized into an empty body, because that
+would turn an incomplete response into visible data loss.
+
 Connection replay keeps two retry paths explicit: the unfenced callback is named
 `enqueueRetry`, while an ActionQueue replay fence uses
 `ConnectionRetryEnqueueService.enqueueConnectionUpsertFromActionQueue()` and

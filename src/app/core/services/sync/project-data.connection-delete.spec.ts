@@ -43,6 +43,7 @@ function createPagedQuery<Row>(
 ): PagedQuery<Row> {
   let connectionCursorId: string | null = null;
   let taskCursor: { createdAt: string; id: string } | null = null;
+  let updatedCursor: { updatedAt: string; id: string } | null = null;
   const orderColumns: string[] = [];
   const recordRows = rows as Array<Record<string, unknown>>;
   const query = {
@@ -56,8 +57,10 @@ function createPagedQuery<Row>(
     }),
     not: vi.fn(),
     or: vi.fn((filter: string) => {
-      const match = /created_at\.gt\.([^,]+),and\(created_at\.eq\.[^,]+,id\.gt\.([^)]+)\)/.exec(filter);
-      if (match) taskCursor = { createdAt: match[1], id: match[2] };
+      const taskMatch = /created_at\.gt\.([^,]+),and\(created_at\.eq\.[^,]+,id\.gt\.([^)]+)\)/.exec(filter);
+      if (taskMatch) taskCursor = { createdAt: taskMatch[1], id: taskMatch[2] };
+      const updatedMatch = /updated_at\.gt\.([^,]+),and\(updated_at\.eq\.[^,]+,id\.gt\.([^)]+)\)/.exec(filter);
+      if (updatedMatch) updatedCursor = { updatedAt: updatedMatch[1], id: updatedMatch[2] };
       return query;
     }),
     order: vi.fn((column: string) => {
@@ -68,6 +71,11 @@ function createPagedQuery<Row>(
       const page = recordRows
         .filter((row) => {
           if (connectionCursorId) return String(row['id']) > connectionCursorId;
+          if (updatedCursor) {
+            const updatedAt = String(row['updated_at']);
+            return updatedAt > updatedCursor.updatedAt
+              || (updatedAt === updatedCursor.updatedAt && String(row['id']) > updatedCursor.id);
+          }
           if (!taskCursor) return true;
           const createdAt = String(row['created_at']);
           return createdAt > taskCursor.createdAt
@@ -87,7 +95,7 @@ function createPagedQuery<Row>(
           return 0;
         })
         .slice(0, count);
-      pageCursorIds.push(taskCursor?.id ?? connectionCursorId);
+      pageCursorIds.push(taskCursor?.id ?? updatedCursor?.id ?? connectionCursorId);
       return Promise.resolve({ data: page as Row[], error: null });
     }),
     then: (
@@ -333,7 +341,7 @@ describe('ProjectDataService connection delete regressions', () => {
       title: `Connection ${index}`,
       description: '',
       deleted_at: null,
-      updated_at: `2026-04-11T01:${String(index % 60).padStart(2, '0')}:00.000Z`,
+      updated_at: `2026-04-11T${String(Math.floor(index / 60)).padStart(2, '0')}:${String(index % 60).padStart(2, '0')}:00.000Z`,
     }));
 
     const projectMaybeSingle = vi.fn().mockResolvedValue({ data: projectRow, error: null });

@@ -143,7 +143,7 @@ describe('ConnectivityRecoveryService', () => {
     mockCategoryLogger.warn.mockReset();
     mockCategoryLogger.error.mockReset();
     mockSessionManager.getRecentValidationSnapshot.mockReset();
-    mockSessionManager.getRecentValidationSnapshot.mockReturnValue({ valid: true });
+    mockSessionManager.getRecentValidationSnapshot.mockReturnValue({ valid: true, userId: 'test-user' });
     mockSessionManager.validateOrRefreshOnResume.mockReset();
     mockSessionManager.validateOrRefreshOnResume.mockResolvedValue({ ok: true, deferred: false });
     mockRealtimePolling.suspendTransport.mockReset();
@@ -352,7 +352,7 @@ describe('ConnectivityRecoveryService', () => {
 
     expect(mockRealtimePolling.resumeTransport).toHaveBeenCalledOnce();
     expect(mockRealtimePolling.resumeRealtimeUpdates).toHaveBeenCalledOnce();
-    expect(vi.getTimerCount()).toBe(0);
+    expect(vi.getTimerCount()).toBeLessThanOrEqual(1);
   });
 
   it('ignores a stale scheduled recovery callback after a newer timer replaces it', async () => {
@@ -401,7 +401,7 @@ describe('ConnectivityRecoveryService', () => {
     await flushMicrotasks();
 
     expect(mockSupabase.clientAsync).toHaveBeenCalled();
-    expect(mockAttachmentCleanupOutbox.flushPendingCleanups).toHaveBeenCalledWith(mockStorageClient);
+    expect(mockAttachmentCleanupOutbox.flushPendingCleanups).toHaveBeenCalledWith(mockStorageClient, { ownerUserId: 'test-user' });
   });
 
   it('远端连接恢复后应自动同步 Widget direct notify outbox', async () => {

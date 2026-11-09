@@ -33,6 +33,8 @@ export function configureOverviewContainerRendering(container: HTMLDivElement, b
   const vendorStyle = container.style as CSSStyleDeclaration & Record<string, string>;
   vendorStyle['webkitFontSmoothing'] = 'antialiased';
   vendorStyle['mozOsxFontSmoothing'] = 'grayscale';
+  container.style.setProperty('-webkit-font-smoothing', 'antialiased');
+  container.style.setProperty('-moz-osx-font-smoothing', 'grayscale');
 }
 
 export function createOverviewInstance(container: HTMLDivElement): go.Overview {
