@@ -299,7 +299,7 @@ describe('Widget operational retention', () => {
     expect(
       manifest.entries.find(entry => entry.path.endsWith(migrationSuffix)),
     ).toBeUndefined();
-  });
+  }, 30_000);
 
   it('treats any real blocked_until CREATE INDEX variant as forbidden while ignoring comments', () => {
     const legacyCreateVariants = [

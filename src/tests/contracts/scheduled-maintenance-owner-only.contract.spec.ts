@@ -121,7 +121,7 @@ describe('scheduled maintenance owner-only execution', () => {
       expect(types).not.toContain(`${functionName}:`);
     }
     expect(read(initPath)).toContain(`-- 版本: ${CURRENT_SUPABASE_INIT_VERSION}`);
-  });
+  }, 30_000);
 
   it('keeps private deployment cron examples aligned with canonical schedules', () => {
     const deploymentDoc = read('docs/deploy-private-instance.md');

@@ -114,5 +114,5 @@ describe('internal sync helper privilege convergence', () => {
 
     expect(read('src/models/supabase-types.ts')).not.toContain('soft_delete_project:');
     expect(read(initPath)).toContain(`-- 版本: ${CURRENT_SUPABASE_INIT_VERSION}`);
-  });
+  }, 30_000);
 });

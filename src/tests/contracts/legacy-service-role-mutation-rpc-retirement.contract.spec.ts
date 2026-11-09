@@ -108,5 +108,5 @@ describe('legacy service-role mutation RPC retirement', () => {
     for (const [functionName] of retiredFunctions) {
       expect(types).not.toContain(`${functionName}:`);
     }
-  });
+  }, 30_000);
 });

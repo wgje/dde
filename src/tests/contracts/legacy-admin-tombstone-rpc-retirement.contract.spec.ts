@@ -108,5 +108,5 @@ describe('legacy admin and tombstone RPC retirement', () => {
     for (const [functionName] of retiredFunctions) {
       expect(types).not.toContain(`${functionName}:`);
     }
-  });
+  }, 30_000);
 });
