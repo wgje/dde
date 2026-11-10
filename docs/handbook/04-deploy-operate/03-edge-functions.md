@@ -2,7 +2,7 @@
 title: Edge Functions
 status: canonical
 audience: operator
-last_verified: 2026-07-15
+last_verified: 2026-11-10
 category: deploy-operate
 source_paths:
   - package.json
@@ -54,9 +54,9 @@ NanoFlow 当前真正需要运维的 Edge Functions 分成四组：语音转写�
 
 重要事实：
 
-1. `supabase/functions/backup-alert/index.ts` 当前是空文件。
+1. `backup-alert` 的零字节占位入口已由 B18 移除，仓库中没有该函数目录。
 2. `supabase/config.toml` 里没有 `[functions.backup-alert]`。
-3. 因此本页不把 `backup-alert` 当成一个可操作的生产函数写运行步骤。
+3. 因此本页不把该 slug 当成可操作函数写运行步骤。
 
 ## 鉴权、CORS 与配置边界
 
@@ -536,12 +536,12 @@ widget 共用 `logWidgetEvent()`，日志前缀是：
 
 ## 未纳入运行册的目录
 
-`supabase/functions/backup-alert/` 目前只说明“目录存在”，不说明“函数真实可用”：
+`backup-alert` 原先只有零字节占位入口；B18 已移除该文件，仓库中没有该函数目录：
 
-- `index.ts` 是空文件。
+- 仓库没有 `backup-alert` 入口文件。
 - `supabase/config.toml` 没有对应 `[functions.backup-alert]`。
 
-所以当前 operator 运行册不提供它的部署、验收、回滚或事故步骤。等它有真实入口、真实鉴权和真实配置合同后，再单独补页。
+因此本运行册不提供该 slug 的部署、验收、回滚或事故步骤。若未来需要告警功能，应先定义真实入口、调用方、鉴权和配置合同，再另行实现与审查。
 
 ## 下一步
 

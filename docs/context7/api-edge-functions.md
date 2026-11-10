@@ -2,7 +2,7 @@
 title: API and Edge Functions
 status: canonical
 audience: ai-agent, maintainer, operator
-last_verified: 2026-06-09
+last_verified: 2026-11-10
 source_paths:
   - supabase/functions/
   - src/config/focus.config.ts
@@ -22,7 +22,7 @@ NanoFlow uses Supabase for cloud auth, storage, database access, and Edge Functi
 | PostgreSQL | projects, tasks, connections, black box entries, focus/dock support tables |
 | RLS | owner/user isolation |
 | Storage | private attachment bucket named `attachments` |
-| Edge Functions | transcription, widget APIs, cleanup, virus scan, backup alerts |
+| Edge Functions | transcription, widget APIs, cleanup, virus scan |
 | Secrets | Groq API key, FCM credentials, service credentials |
 
 ## Edge Function Directory
@@ -30,7 +30,6 @@ NanoFlow uses Supabase for cloud auth, storage, database access, and Edge Functi
 Current function directories under `supabase/functions/`:
 
 - `_shared`
-- `backup-alert`
 - `cleanup-attachments`
 - `transcribe`
 - `virus-scan`

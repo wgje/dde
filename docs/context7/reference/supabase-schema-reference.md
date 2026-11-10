@@ -2,7 +2,7 @@
 title: Supabase Schema Reference
 status: canonical
 audience: ai-agent, maintainer, operator
-last_verified: 2026-06-09
+last_verified: 2026-11-10
 source_paths:
   - supabase/migrations/
   - supabase/functions/
@@ -79,7 +79,6 @@ Rules:
 Function directories:
 
 - `_shared`
-- `backup-alert`
 - `cleanup-attachments`
 - `transcribe`
 - `virus-scan`
@@ -96,7 +95,6 @@ Function directories:
 | `transcribe` | proxy speech audio to Groq `whisper-large-v3` | `GROQ_API_KEY` |
 | `virus-scan` | scan uploaded files or record scan state | scanner service credentials if configured |
 | `cleanup-attachments` | remove stale or deleted attachment objects | service-side access |
-| `backup-alert` | alert or report backup conditions | alerting credentials |
 | `widget-register` | register Android widget/device context | user auth |
 | `widget-summary` | serve widget summary | user auth |
 | `widget-notify` | notify widget refresh, optionally FCM | FCM credentials |

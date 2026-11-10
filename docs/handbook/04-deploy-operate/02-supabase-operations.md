@@ -2,7 +2,7 @@
 title: Supabase 运维
 status: canonical
 audience: operator
-last_verified: 2026-07-15
+last_verified: 2026-11-10
 category: deploy-operate
 source_paths:
   - README.md
@@ -427,7 +427,7 @@ npm run db:types
 - 若干 widget 函数
 - `_shared/backup-utils.ts`
 
-但当前并不存在已实现的 `backup-full`、`backup-incremental`、`backup-cleanup` 这类服务端备份函数目录；`supabase/functions/backup-alert/index.ts` 还是一个长度为 `0` 的空文件。
+当前仓库不包含可部署的服务端备份流水线源码；`backup-alert` 的零字节占位入口已由 B18 移除。生产侧备份函数仍保持独立 HOLD。
 
 所以这页手册必须把边界写清楚：
 
@@ -489,7 +489,7 @@ Supabase 相关问题不要一上来就写 SQL、删缓存或改 policy。先按
 - 不要在真实数据实例上运行 `npm run supabase:db:reset`。
 - 不要把 `cleanup-attachments` 的 HTTP Bearer 当成 service-role key；它要求的是维护 secret。
 - 不要把普通 JSON 导出说成“已经包含附件本体和待上传 outbox”；那只对本地增强备份或附件 ZIP 成立。
-- 不要告诉用户“仓库已经自带服务端自动备份/告警”；当前树里没有可用的 backup-full / incremental 流水线，`backup-alert/index.ts` 还是空文件。
+- 不要告诉用户“仓库已经自带服务端自动备份/告警”；当前树里没有可用的 backup-full / incremental 流水线，`backup-alert` 零字节占位已移除，生产侧函数仍需独立审查。
 - 不要在没导出当前数据前，让用户清浏览器数据、切换多个设备同时恢复，或手工在生产库改大量记录。
 
 ## 下一步

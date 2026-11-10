@@ -2,7 +2,7 @@
 title: Edge Functions API Reference
 status: canonical
 audience: ai-agent, maintainer, operator
-last_verified: 2026-07-14
+last_verified: 2026-11-10
 source_paths:
   - supabase/functions/
   - src/config/focus.config.ts
@@ -17,7 +17,6 @@ source_paths:
 | `transcribe` | speech-to-text proxy | `GROQ_API_KEY` |
 | `virus-scan` | file scan workflow | scanner credentials if configured |
 | `cleanup-attachments` | stale attachment cleanup | service-side access |
-| `backup-alert` | backup alerting | alert credentials |
 | `widget-register` | Android widget registration | user auth |
 | `widget-summary` | widget summary read | user auth |
 | `widget-notify` | widget refresh notification | FCM credentials |

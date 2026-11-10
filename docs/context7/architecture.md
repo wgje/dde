@@ -2,7 +2,7 @@
 title: NanoFlow Architecture
 status: canonical
 audience: ai-agent, maintainer
-last_verified: 2026-06-09
+last_verified: 2026-11-10
 source_paths:
   - src/app/core/state/stores.ts
   - src/app/core/state/store-persistence.service.ts
@@ -103,7 +103,7 @@ Supabase provides:
 - Auth and user identity
 - PostgreSQL tables with RLS
 - private Storage bucket named `attachments`
-- Edge Functions for transcription, widget APIs, cleanup, virus scan, backup alerts
+- Edge Functions for transcription, widget APIs, cleanup, virus scan
 
 Cloud data access should use typed mappers and centralized error conversion through `supabaseErrorToError()`.
 

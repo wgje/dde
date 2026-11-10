@@ -1689,8 +1689,8 @@ private checkExportReminder(): void {
 - 需要完整的告警通道集成
 - 需处理恢复操作原子性问题
 
-**当前状态（v5.13 验证后更新）**：
-- ✅ 备份 Edge Functions 已实现（**v5.5 实现：backup-full, backup-incremental, backup-cleanup, backup-alert, backup-attachments**）
+**分项状态记录**：
+- ⚠️ **服务端备份/告警状态（B18 核验，2026-11-10）**：当前仓库没有可部署的服务端备份函数源码；`backup-alert` 零字节占位入口已由 B18 移除。生产侧备份函数保持独立 HOLD。
 - ✅ 对象存储已配置（**v5.5 实现：Supabase Storage 集成**）
 - ✅ 恢复服务已实现（**v5.5 实现：src/services/recovery.service.ts**）
 - ✅ 备份健康校验已实现（**v5.5 实现：备份完整性验证**）
@@ -3320,7 +3320,7 @@ async switchProject(newProjectId: string): Promise<void> {
 #### Week 10-13: P2 服务端备份 - 45-65h
 
 > 🚨 **审查修订**：新增密钥管理、分批恢复、恢复超时处理。
-> ✅ **2025-01 进度**：核心功能已全部实现。
+> 🗂️ **2025-01 历史快照**：以下状态和实现路径只记录当时策划案进度，不代表当前仓库源码、生产部署或当前可用性。当前备份/告警状态以 B18 当前状态说明为准，生产侧备份函数继续 HOLD。
 
 | 任务 | 工时 | 产出 | 状态 | 测试要求 | 备注 |
 |------|------|------|------|----------|------|
@@ -3332,7 +3332,7 @@ async switchProject(newProjectId: string): Promise<void> {
 | 健康校验逻辑（增强） | 5h | `validateBackup()` + 绝对值+相对值结合 | ✅ | ≥90% 覆盖 | backup-utils.ts#validateBackup |
 | 版本保留清理 | 3h | 过期备份清理 | ✅ | ≥80% 覆盖 | supabase/functions/backup-cleanup |
 | 定时任务配置 | 2h | Supabase Cron | ✅ | 手动验证 | scripts/backup-cron-setup.sql |
-| 告警通道集成 | 3h | Slack/Email 告警 | ✅ | 手动验证 | supabase/functions/backup-alert |
+| 告警通道集成 | 3h | Slack/Email 告警 | HOLD | 无可用入口 | `backup-alert` 空占位已退役，告警契约未定义 |
 | RecoveryService（分批） | 8h | 恢复服务 + 分批恢复 + 断点续传 | ✅ | ≥80% 覆盖 | src/services/recovery.service.ts |
 | 恢复 UI | 6h | 历史版本列表 + 预览 | ✅ | 手动验证 | src/app/shared/modals/recovery-modal.component.ts |
 | 附件备份 | 4h | Storage bucket 备份 | ✅ | ≥80% 覆盖 | supabase/functions/backup-attachments |
@@ -3407,7 +3407,7 @@ async switchProject(newProjectId: string): Promise<void> {
 | **✅ 时钟偏移导致 LWW 失效** | 低 | 中 | ✅ **已修复** | **v5.10 实现：ClockSyncService** |
 | **✅ 配置死代码残留** | 低 | 低 | ✅ **已修复** | **v5.7 验证：已迁移到 CIRCUIT_BREAKER_CONFIG** |
 | **乐观更新回滚不统一** | 中 | 中 | ✅ 已实现 | **v5.13 验证：TaskOperationAdapterService 广泛使用** |
-| **✅ E 层备份无告警通道** | 中 | 高 | ✅ **已修复** | **v5.5 实现：backup-alert Edge Function** |
+| **E 层备份无告警通道** | 中 | 高 | ⚠️ 未闭合 | `backup-alert` 空占位已移除；告警功能仍无可用实现 |
 | **附件导出文件过大** | 中 | 中 | - | 采用 ZIP 打包 + 流式下载 |
 | **✅ 迁移过程数据丢失** | 中 | 高 | ✅ **已修复** | **v5.7 实现：saveMigrationSnapshot** |
 | **✅ 路由切换丢失未保存数据** | 中 | 中 | ✅ **已修复** | **v5.7 实现：UnsavedChangesGuard** |
