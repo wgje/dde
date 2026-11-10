@@ -378,7 +378,7 @@ async function sha256HexBytes(bytes: Uint8Array): Promise<string> {
 
 // ==================== 主函数 ====================
 
-serve(async (req: Request) => {
+export async function handleRequest(req: Request): Promise<Response> {
   // SEC-H1 fix: 使用局部变量避免并发请求间 CORS 头竞态
   const origin = req.headers.get('Origin');
   const corsHeaders = getCorsHeaders(origin);
@@ -448,7 +448,11 @@ serve(async (req: Request) => {
     console.error('Error processing request:', error);
     return jsonResponse({ error: 'Internal server error' }, corsHeaders, 500);
   }
-});
+}
+
+if ((import.meta as ImportMeta & { main?: boolean }).main === true) {
+  serve(handleRequest);
+}
 
 // ==================== 处理函数 ====================
 
