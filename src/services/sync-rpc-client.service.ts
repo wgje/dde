@@ -95,6 +95,35 @@ export type TaskWriteIntent =
   | 'task_soft_delete'
   | 'task_attachment_update';
 
+export type SyncRpcName =
+  | 'sync_upsert_task'
+  | 'sync_upsert_connection'
+  | 'sync_upsert_blackbox_entry'
+  | 'sync_upsert_project'
+  | 'sync_upsert_user_preferences'
+  | 'sync_upsert_focus_session'
+  | 'sync_upsert_routine_task'
+  | 'sync_increment_routine_completion'
+  | 'sync_delete_project'
+  | 'sync_delete_tasks';
+
+const SYNC_RPC_NAMES: ReadonlySet<string> = new Set<SyncRpcName>([
+  'sync_upsert_task',
+  'sync_upsert_connection',
+  'sync_upsert_blackbox_entry',
+  'sync_upsert_project',
+  'sync_upsert_user_preferences',
+  'sync_upsert_focus_session',
+  'sync_upsert_routine_task',
+  'sync_increment_routine_completion',
+  'sync_delete_project',
+  'sync_delete_tasks',
+]);
+
+function isSyncRpcName(name: string): name is SyncRpcName {
+  return SYNC_RPC_NAMES.has(name);
+}
+
 interface SyncRpcEnvironmentSlice {
   syncRpcEnabled?: boolean;
   syncProtocolVersion?: number;
@@ -443,12 +472,16 @@ export class SyncRpcClientService {
   // ---------------- internals ----------------
 
   private async invokeRpc(
-    name: string,
+    name: SyncRpcName,
     payload: Record<string, unknown>,
     signal?: AbortSignal,
     isCurrent?: () => boolean,
   ): Promise<SyncRpcResult> {
     assertSyncOperationId(payload['operation_id']);
+    if (!isSyncRpcName(name)) {
+      this.logger.error('sync_rpc_name_rejected', { name });
+      throw new Error(`unsupported sync RPC name: ${name}`);
+    }
     if (isCurrent && !isCurrent()) return this.replayFenceStaleResult();
     const client = await this.supabase.clientAsync();
     if (isCurrent && !isCurrent()) return this.replayFenceStaleResult();

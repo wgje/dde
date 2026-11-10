@@ -755,4 +755,38 @@ describe('SyncRpcClientService', () => {
     });
     expect(result.status).toBe('unauthorized');
   });
+
+  it.each(['get_projects_list', 'purge_tasks_v2', 'safe_delete_tasks'])(
+    'rejects legacy RPC name %s before Supabase client.rpc',
+    async legacyName => {
+      const env = syncRpcEnv();
+      env.syncRpcEnabled = true;
+      const rpc = vi.fn(async () => ({ data: { status: 'applied' }, error: null }));
+      const service = buildService(rpc as never);
+      const invoke = (service as unknown as {
+        invokeRpc: (name: string, payload: Record<string, unknown>) => Promise<unknown>;
+      }).invokeRpc.bind(service);
+
+      await expect(invoke(legacyName, { operation_id: TEST_OPERATION_ID })).rejects.toThrow(
+        'unsupported sync RPC name',
+      );
+      expect(rpc).not.toHaveBeenCalled();
+    },
+  );
+
+  it('rejects an arbitrary unknown RPC name before Supabase client.rpc', async () => {
+    const env = syncRpcEnv();
+    env.syncRpcEnabled = true;
+    const rpc = vi.fn(async () => ({ data: { status: 'applied' }, error: null }));
+    const service = buildService(rpc as never);
+    const invoke = (service as unknown as {
+      invokeRpc: (name: string, payload: Record<string, unknown>) => Promise<unknown>;
+    }).invokeRpc.bind(service);
+
+    await expect(invoke('sync_unknown', { operation_id: TEST_OPERATION_ID })).rejects.toThrow(
+      'unsupported sync RPC name',
+    );
+    expect(rpc).not.toHaveBeenCalled();
+  });
+
 });
