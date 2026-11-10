@@ -51,27 +51,32 @@ describe('attachment scan due-claim index performance', () => {
     );
   });
 
-  it('rewrites the function before replacing the old index concurrently', () => {
+  it('bounds lock waits before creating and dropping the due-claim indexes', () => {
     const migration = normalize(read(migrationPath));
     const functionIndex = migration.indexOf(
       'create or replace function public.claim_due_attachment_scan_rescans',
     );
+    const lockTimeout = migration.indexOf("set local lock_timeout = '2s';");
     const createIndex = migration.indexOf(
       'create index if not exists idx_attachment_scans_due_claim',
     );
     const dropIndex = migration.indexOf(
-      "set local lock_timeout = '2s'; drop index if exists public.idx_attachment_scans_next_rescan; set local lock_timeout = default;",
+      'drop index if exists public.idx_attachment_scans_next_rescan;',
     );
+    const resetLockTimeout = migration.indexOf('set local lock_timeout = default;');
 
     expect(functionIndex).toBeGreaterThanOrEqual(0);
-    expect(createIndex).toBeGreaterThan(functionIndex);
+    expect(lockTimeout).toBeGreaterThan(functionIndex);
+    expect(createIndex).toBeGreaterThan(lockTimeout);
     expect(dropIndex).toBeGreaterThan(createIndex);
+    expect(resetLockTimeout).toBeGreaterThan(dropIndex);
     expect(migration).toContain(
       "on public.attachment_scans (next_rescan_at, id) where status in ('clean', 'failed', 'scanning');",
     );
     expect(migration).toContain(
       "and scans.status in ('clean', 'failed', 'scanning') and ( scans.status <> 'scanning' or scans.rescan_started_at is null or scans.rescan_started_at <= now() - make_interval(secs => greatest(p_stale_after_seconds, 1)) )",
     );
+    expect(migration).not.toContain('create index concurrently if not exists idx_attachment_scans_due_claim');
     expect(migration).not.toContain(
       'drop index concurrently if exists public.idx_attachment_scans_next_rescan',
     );

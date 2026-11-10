@@ -55,10 +55,9 @@ REVOKE ALL ON FUNCTION public.claim_due_attachment_scan_rescans(INTEGER, INTEGER
 GRANT EXECUTE ON FUNCTION public.claim_due_attachment_scan_rescans(INTEGER, INTEGER)
   TO service_role;
 
+SET LOCAL lock_timeout = '2s';
 CREATE INDEX IF NOT EXISTS idx_attachment_scans_due_claim
   ON public.attachment_scans (next_rescan_at, id)
   WHERE status IN ('clean', 'failed', 'scanning');
-
-SET LOCAL lock_timeout = '2s';
 DROP INDEX IF EXISTS public.idx_attachment_scans_next_rescan;
 SET LOCAL lock_timeout = DEFAULT;
