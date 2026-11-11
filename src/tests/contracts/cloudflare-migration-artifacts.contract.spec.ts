@@ -10,6 +10,18 @@ const EXPECTED_WRANGLER_VERSION = '3.112.0';
 const WRANGLER_VERSION_REFERENCE = '${WRANGLER_VERSION}';
 const collectWranglerInvocations = (workflow: string): string[] =>
   Array.from(workflow.matchAll(/wrangler@([^\s"']+)/g), (match) => match[1]);
+const extractWorkflowStep = (workflow: string, stepName: string): string => {
+  const marker = `      - name: ${stepName}`;
+  const start = workflow.indexOf(marker);
+
+  if (start < 0) {
+    return '';
+  }
+
+  const nextStep = workflow.indexOf('\n      - name: ', start + marker.length);
+  return workflow.slice(start, nextStep < 0 ? undefined : nextStep);
+};
+
 const readAllMigrations = (): string =>
   fs.readdirSync(path.join(root, 'supabase', 'migrations'))
     .filter((file) => file.endsWith('.sql'))
@@ -45,6 +57,65 @@ describe('Cloudflare migration artifact contracts', () => {
     const beforeDeploy = workflow.split('- name: Deploy to Cloudflare Pages')[0] ?? workflow;
     expect(beforeDeploy).not.toContain('CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}');
     expect(beforeDeploy).not.toContain('CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}');
+  });
+
+  it('keeps push and pull request builds testable while only allowing an opted-in manual upload', () => {
+    const workflow = read('.github/workflows/deploy-cloudflare-pages.yml');
+    const dispatchStart = workflow.indexOf('  workflow_dispatch:');
+    const dispatchEnd = workflow.indexOf('\nconcurrency:', dispatchStart);
+    const dispatch = workflow.slice(dispatchStart, dispatchEnd < 0 ? undefined : dispatchEnd);
+    const normalizedWorkflow = workflow.replace(/\r\n/g, '\n');
+    const buildDeployStart = normalizedWorkflow.indexOf('\n  build-deploy:');
+    const buildDeployGate = [
+      '    if: >-',
+      '      ${{',
+      "        (github.event_name == 'push' && github.ref == 'refs/heads/main') ||",
+      "        github.event_name == 'workflow_dispatch' ||",
+      "        (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)",
+      '      }}',
+    ].join('\n');
+
+    expect(workflow).toMatch(/^  push:\r?\n/m);
+    expect(workflow).toMatch(/^  pull_request:\r?\n/m);
+    expect(workflow).toContain('run: npm run test:run');
+    expect(buildDeployStart).toBeGreaterThanOrEqual(0);
+    expect(normalizedWorkflow.slice(buildDeployStart)).toContain(buildDeployGate);
+    expect(workflow).toContain('needs: test');
+    expect(workflow).toContain('run: npm run build:strict');
+    expect(dispatch).toMatch(/^      deploy:\s*$/m);
+    expect(dispatch).toMatch(/^        default: false\s*$/m);
+    expect(dispatch).toMatch(/^        type: boolean\s*$/m);
+    expect(normalizedWorkflow.slice(buildDeployStart)).toContain(
+      "SHOULD_DEPLOY: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.deploy == 'true' }}",
+    );
+  });
+
+  it('requires production manual builds to run from main and uploads production to the main branch', () => {
+    const workflow = read('.github/workflows/deploy-cloudflare-pages.yml');
+    const selectionStep = extractWorkflowStep(workflow, 'Select Supabase build env');
+    const deployStep = extractWorkflowStep(workflow, 'Deploy to Cloudflare Pages');
+
+    expect(workflow).toContain(
+      "DEPLOYMENT_TARGET: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') && 'production' || (github.event_name == 'workflow_dispatch' && inputs.target == 'production' && 'production' || 'preview') }}",
+    );
+    expect(selectionStep).toContain('Production workflow_dispatch deploy/build must run from main');
+    expect(selectionStep).toContain(
+      'if [ "$DEPLOYMENT_TARGET" = "production" ] && [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ "${{ github.ref }}" != "refs/heads/main" ]; then',
+    );
+    expect(selectionStep).toContain('[ "${{ github.ref }}" != "refs/heads/main" ]');
+    expect(deployStep).toContain('if [ "$DEPLOYMENT_TARGET" = "production" ]; then');
+    expect(deployStep).toContain('BRANCH_FLAG="--branch=main"');
+  });
+
+  it('keeps the sole Pages upload command inside the manual-deploy-gated step', () => {
+    const workflow = read('.github/workflows/deploy-cloudflare-pages.yml');
+    const deployStep = extractWorkflowStep(workflow, 'Deploy to Cloudflare Pages');
+    const uploadCommand = 'npx --yes wrangler@${WRANGLER_VERSION} pages deploy dist/browser';
+
+    expect(deployStep).toContain("if: env.SHOULD_DEPLOY == 'true'");
+    expect(deployStep).toContain(uploadCommand);
+    expect(workflow.match(/npx --yes wrangler@\$\{WRANGLER_VERSION\} pages deploy dist\/browser/g)).toHaveLength(1);
+    expect(workflow.replace(deployStep, '')).not.toContain(uploadCommand);
   });
 
   it('uses NanoFlow-Preview environment for preview builds while keeping public Sentry DSN optional but validated', () => {
