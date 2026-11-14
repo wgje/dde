@@ -33,6 +33,7 @@ NanoFlow 是一个**离线优先、单用户、多设备同步**的个人任务�
 - [常见问题](#常见问题)
 - [近期更新](#近期更新)
 - [文档导航](#文档导航)
+- [贡献与仓库协作](#贡献与仓库协作)
 - [开发者折叠区](#开发者折叠区)
 - [当前边界与取舍](#当前边界与取舍)
 
@@ -129,7 +130,7 @@ NG_APP_SUPABASE_ANON_KEY=your-anon-key
 
 ### 想用语音转写
 
-还需要额外部署 `transcribe` Edge Function，并配置 Groq API Key。排查文档见：[TRANSCRIBE-TROUBLESHOOTING.md](TRANSCRIBE-TROUBLESHOOTING.md)
+还需要额外部署 `transcribe` Edge Function，并配置 Groq API Key。排查文档见：[语音转写故障排查](docs/transcribe-troubleshooting.md)
 
 ### 想用 Android 手机端小组件
 
@@ -195,7 +196,7 @@ FCM_PRIVATE_KEY=...
 - **搜索**：全局搜索框跨项目搜索任务
 - **批量操作**：选中多个任务后批量删除
 - **任务编辑**：标题 + Markdown 内容，支持内嵌清单
-- **任务内容链接**：支持 `[说明](https://example.com)` 外链，也支持 `[关联任务](task:<taskId>)` 这种稳定任务内链
+- **任务内容链接**：支持 `[说明](https://example.com)` 外链，也支持 ``[关联任务](task:<taskId>)`` 这种稳定任务内链
 - **附件管理**：上传、预览、管理文件附件
 - **标签系统**：给任务打标签分类
 - **优先级**：low / medium / high / urgent 四级优先级
@@ -203,9 +204,9 @@ FCM_PRIVATE_KEY=...
 
 **Markdown 链接说明**：
 - 外部网站：使用标准 Markdown 链接，例如 `[NanoFlow](https://example.com)`，也支持直接粘贴裸网址，例如 `https://example.com/docs`
-- 页内锚点 / 相对路径：如 `[跳转](#section)`、`[说明](./docs/guide)` 会保留站内导航语义，不会被强制新开页
+- 页内锚点 / 相对路径：如 `[跳转](#section)`、``[说明](./docs/guide)`` 会保留站内导航语义，不会被强制新开页
 - 项目内任务跳转：使用稳定任务 ID，例如 `[跳到任务](task:550e8400-e29b-41d4-a716-446655440000)`，也支持直接写 `task:550e8400-e29b-41d4-a716-446655440000`
-- Windows 本地路径：支持显式 Markdown 链接如 `[打开文档](C:\Users\me\Docs\Plan.md)`，也支持无空格裸路径如 `C:\Tools\Todo\plan.md`
+- Windows 本地路径：支持显式 Markdown 链接如 ``[打开文档](C:\Users\me\Docs\Plan.md)``，也支持无空格裸路径如 `C:\Tools\Todo\plan.md`
 - `file:` 本地链接不会把原始 `file:///` 暴露到 DOM，而是走受控链路：普通文档会在点击手势内优先尝试打开并同步复制路径；浏览器拦截时会自动提示
 - 网络共享路径（UNC）和高风险可执行文件不会被直接启动，只会给出提示并复制路径，避免误触远程共享或本地可执行目标
 - 路径里如果包含空格，优先使用显式 Markdown 链接，避免裸文本自动识别歧义
@@ -561,7 +562,7 @@ NanoFlow 采用多层数据保护策略，从前端到后端构建了完整的�
 2. `GROQ_API_KEY` 是否已设置（`supabase secrets list`）
 3. `transcription_usage` 表是否存在且 RLS 已启用
 4. 今日额度是否已用完（每日 50 次）
-5. 详细排查见 [TRANSCRIBE-TROUBLESHOOTING.md](TRANSCRIBE-TROUBLESHOOTING.md)
+5. 详细排查见 [语音转写故障排查](docs/transcribe-troubleshooting.md)
 
 ### 8. 多个浏览器标签页会冲突吗？
 
@@ -641,6 +642,9 @@ Gate 现在会在冷启动、进入 reviewing 和页面重新可见时主动做�
 | [docs/handbook/03-data-sync-safety/index.md](docs/handbook/03-data-sync-safety/index.md) | 离线优先、同步冲突、备份恢复、安全隐私 |
 | [docs/handbook/04-deploy-operate/index.md](docs/handbook/04-deploy-operate/index.md) | 私有部署、Supabase 运维、Edge Functions、生产排障 |
 | [docs/handbook/05-develop-maintain/index.md](docs/handbook/05-develop-maintain/index.md) | 开发环境、仓库地图、测试质量、文档维护 |
+| [docs/handbook/05-develop-maintain/02-repository-map.md](docs/handbook/05-develop-maintain/02-repository-map.md) | 按功能能力与工程边界定位代码、测试和数据边界 |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Issue、贡献准备、数据安全与 PR 验证要求 |
+| [docs/github-repository-settings-proposal.md](docs/github-repository-settings-proposal.md) | GitHub 描述、Topics、标签和在线治理建议（未应用） |
 
 ### AI / Context7 / 机器可读入口
 
@@ -658,7 +662,7 @@ Gate 现在会在冷启动、进入 reviewing 和页面重新可见时主动做�
 |------|------|
 | [docs/deploy-private-instance.md](docs/deploy-private-instance.md) | 部署私有实例（Cloudflare Pages / Vercel / Netlify / Railway） |
 | [docs/cloudflare-migration-plan.md](docs/cloudflare-migration-plan.md) | Cloudflare Pages 迁移方案、门禁与迁移后建议 |
-| [TRANSCRIBE-TROUBLESHOOTING.md](TRANSCRIBE-TROUBLESHOOTING.md) | 语音转写异常排查 |
+| [语音转写故障排查](docs/transcribe-troubleshooting.md) | 语音转写异常排查 |
 | [scripts/README.md](scripts/README.md) | 数据库初始化、脚本用途、测试矩阵说明 |
 
 ### 设计 / 审计 / 深入背景
@@ -672,13 +676,17 @@ Gate 现在会在冷启动、进入 reviewing 和页面重新可见时主动做�
 | [docs/focus-mode-design.md](docs/focus-mode-design.md) | Focus 模式整体设计 |
 | [docs/focus-console-design.md](docs/focus-console-design.md) | Focus 控制台设计 |
 | [docs/parking-dock-modular-design.md](docs/parking-dock-modular-design.md) | Parking Dock 模块化设计 |
-| [docs/parking-dock-implementation-audit-2026-03-09.md](docs/parking-dock-implementation-audit-2026-03-09.md) | Parking Dock 实现审计 |
+| [docs/parking-dock-implementation-audit-2026-03-09.md](docs/archive/parking-dock-implementation-audit-2026-03-09.md) | Parking Dock 实现审计 |
 | [docs/data-protection-plan.md](docs/data-protection-plan.md) | 数据保护方案 |
-| [docs/data-loss-and-ui-truthfulness-master-plan-2026-02-09.md](docs/data-loss-and-ui-truthfulness-master-plan-2026-02-09.md) | 数据丢失防护与 UI 真实性 |
+| [docs/data-loss-and-ui-truthfulness-master-plan-2026-02-09.md](docs/archive/data-loss-and-ui-truthfulness-master-plan-2026-02-09.md) | 数据丢失防护与 UI 真实性 |
 | [docs/pwa-instant-startup-plan.md](docs/pwa-instant-startup-plan.md) | PWA 秒开方案 |
-| [docs/deep-performance-audit-2026-02-18.md](docs/deep-performance-audit-2026-02-18.md) | 性能深度审计 |
+| [docs/deep-performance-audit-2026-02-18.md](docs/archive/deep-performance-audit-2026-02-18.md) | 性能深度审计 |
 
 ---
+
+### 贡献与仓库协作
+
+开始改动前，请阅读 [贡献指南](CONTRIBUTING.md)，再用[仓库地图](docs/handbook/05-develop-maintain/02-repository-map.md)确认功能所有权与验证入口。Issue 模板用于分类和收集信息，不代表维护者已承诺排期。GitHub 描述、Topics、标签和治理设置建议见[设置提案](docs/github-repository-settings-proposal.md)；在线设置需维护者审阅后另行应用。
 
 ## 开发者折叠区
 
@@ -976,14 +984,14 @@ supabase/
 ### 数据与可靠性
 
 - [docs/data-protection-plan.md](docs/data-protection-plan.md) — 数据保护方案
-- [docs/data-loss-and-ui-truthfulness-master-plan-2026-02-09.md](docs/data-loss-and-ui-truthfulness-master-plan-2026-02-09.md) — 数据丢失防护总计划
-- [docs/data-protection-plan-comprehensive-audit-report-2026-02-09.md](docs/data-protection-plan-comprehensive-audit-report-2026-02-09.md) — 数据保护审计报告
+- [docs/data-loss-and-ui-truthfulness-master-plan-2026-02-09.md](docs/archive/data-loss-and-ui-truthfulness-master-plan-2026-02-09.md) — 数据丢失防护总计划
+- [docs/data-protection-plan-comprehensive-audit-report-2026-02-09.md](docs/archive/data-protection-plan-comprehensive-audit-report-2026-02-09.md) — 数据保护审计报告
 
 ### 启动与性能
 
 - [docs/pwa-instant-startup-plan.md](docs/pwa-instant-startup-plan.md) — PWA 秒开方案
 - [docs/pwa-instant-open-plan.md](docs/pwa-instant-open-plan.md) — PWA 即时打开方案
-- [docs/deep-performance-audit-2026-02-18.md](docs/deep-performance-audit-2026-02-18.md) — 深度性能审计
+- [docs/deep-performance-audit-2026-02-18.md](docs/archive/deep-performance-audit-2026-02-18.md) — 深度性能审计
 
 ### Agent / 仓库执行规则
 
