@@ -7,7 +7,7 @@
 - 默认分支：`main`；仓库描述为空；Topics 为空；Homepage 已设置。
 - Issues、Projects、Wiki 已启用；Discussions 未启用；仓库未归档。
 - 当前可见 Issue 标签共 9 个：`bug`、`documentation`、`duplicate`、`enhancement`、`good first issue`、`help wanted`、`invalid`、`question`、`wontfix`。
-- GitHub 私密漏洞报告接口返回 `enabled: false`。当前尚无已验证的私密漏洞提交通道；未读取任何 Secret 值。
+- GitHub 私密漏洞报告已于 2026-11-14 启用：仓库设置页显示保存成功且操作按钮变为“Disable private vulnerability reporting”；随后官方 REST 状态读取返回 `enabled: true`。未读取任何 Secret 值。
 - 公开的 main branch rule evaluation 和仓库 Rulesets 列表返回空结果。经典 branch-protection 与 Actions permissions 端点需要认证；组织级规则、权限、环境保护要求均未据此确认。
 - 仓库有 7 个 Environment；本次只核对数量，未读取环境配置或任何 Secret 值。
 
@@ -39,11 +39,11 @@
 
 ## 安全与治理待办
 
-1. 维护者应先决定并批准启用 GitHub 私密漏洞报告，确认通知/响应责任人后再发布正式 `SECURITY.md`。目前不通过公开 Issue 收集漏洞细节。
+1. GitHub 私密漏洞报告已启用，并新增 [`SECURITY.md`](../SECURITY.md) 说明报告入口与披露边界。维护团队仍需确保有人关注 GitHub 私密报告通知；目前未承诺响应时限或漏洞赏金。
 2. 用已授权账号复核 main 分支保护/Rulesets、Actions 权限、7 个 Environment 的审批与分支限制；只记录配置状态，不导出或展示 Secret 值。
 3. 当前根目录未发现 `LICENSE`，且 `package.json` 未声明 `license`；在维护者决定前，不要向贡献者暗示已授予某种开放源码许可。
 4. 审阅通过后，分别记录仓库描述/Topics/标签/安全设置的修改前后读回。PR 不会自动改变 GitHub Settings。
 
 ## 非本次动作
 
-本次只读核对并新增此建议文档。没有修改在线仓库设置、标签、分支规则、Actions 权限、Environment、Secret、部署、PR 或远端分支。
+本次维护动作启用了 GitHub 私密漏洞报告，并通过设置页与只读 API 状态读回确认；PR 文档补充了状态及报告流程。除此之外，没有修改标签、分支规则、Actions 权限、Environment、Secret 或部署。
