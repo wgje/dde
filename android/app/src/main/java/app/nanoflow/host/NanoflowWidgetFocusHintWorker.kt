@@ -54,6 +54,16 @@ internal object NanoflowWidgetFocusHintStateMachine {
     if (incoming.owner != binding) {
       return NanoflowWidgetFocusHintResolution(NanoflowWidgetFocusHintDecision.IGNORED, ownedCurrent)
     }
+    // Event IDs are idempotency keys: only an exact payload may replay.
+    if (ownedCurrent != null && incoming.eventId == ownedCurrent.hint.eventId) {
+      if (!ownedCurrent.ambiguous && incoming == ownedCurrent.hint) {
+        return NanoflowWidgetFocusHintResolution(NanoflowWidgetFocusHintDecision.REPLAY, ownedCurrent)
+      }
+      val conflict = if (ownedCurrent.ambiguous) ownedCurrent else {
+        ownedCurrent.copy(projectable = false, ambiguous = true, issuedAtMs = nowMs)
+      }
+      return NanoflowWidgetFocusHintResolution(NanoflowWidgetFocusHintDecision.CONFLICT, conflict)
+    }
     if (ownedCurrent == null || incoming.revisionMicros > ownedCurrent.hint.revisionMicros) {
       return NanoflowWidgetFocusHintResolution(
         NanoflowWidgetFocusHintDecision.APPLIED,
@@ -63,14 +73,10 @@ internal object NanoflowWidgetFocusHintStateMachine {
     if (incoming.revisionMicros < ownedCurrent.hint.revisionMicros) {
       return NanoflowWidgetFocusHintResolution(NanoflowWidgetFocusHintDecision.IGNORED, ownedCurrent)
     }
-    val exactReplay = !ownedCurrent.ambiguous && incoming.eventId == ownedCurrent.hint.eventId
-    if (exactReplay) {
-      return NanoflowWidgetFocusHintResolution(NanoflowWidgetFocusHintDecision.REPLAY, ownedCurrent)
+    val conflict = if (ownedCurrent.ambiguous) ownedCurrent else {
+      ownedCurrent.copy(projectable = false, ambiguous = true, issuedAtMs = nowMs)
     }
-    return NanoflowWidgetFocusHintResolution(
-      NanoflowWidgetFocusHintDecision.CONFLICT,
-      ownedCurrent.copy(projectable = false, ambiguous = true, issuedAtMs = nowMs),
-    )
+    return NanoflowWidgetFocusHintResolution(NanoflowWidgetFocusHintDecision.CONFLICT, conflict)
   }
 
   private val NanoflowWidgetFocusHint.owner: NanoflowWidgetBindingIdentity

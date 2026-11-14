@@ -79,8 +79,10 @@ class NanoflowWidgetFocusHintWorkerTest {
       binding,
       1_002,
     )
-    assertEquals(NanoflowWidgetFocusHintDecision.REPLAY, ancillaryReplay.decision)
-    assertEquals(applied.next, ancillaryReplay.next)
+    assertEquals(NanoflowWidgetFocusHintDecision.CONFLICT, ancillaryReplay.decision)
+    assertFalse(assertNotNull(ancillaryReplay.next).projectable)
+    assertTrue(assertNotNull(ancillaryReplay.next).ambiguous)
+    assertEquals(applied.next.hint, ancillaryReplay.next.hint)
 
     val conflict = NanoflowWidgetFocusHintStateMachine.resolve(
       applied.next,
