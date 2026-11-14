@@ -1,0 +1,68 @@
+name: Bug 报告
+description: 报告可复现的问题，帮助维护者定位影响范围
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提交前请移除真实用户数据、访问令牌和未脱敏日志。安全漏洞请勿公开填写；当前私密漏洞报告渠道尚待维护者启用。
+  - type: dropdown
+    id: area
+    attributes:
+      label: 受影响能力
+      options:
+        - 文本视图
+        - Flow 流程图
+        - Focus / Black Box
+        - Parking Dock
+        - Android 小组件
+        - 离线 / 同步
+        - 备份 / 数据安全
+        - 认证 / 会话
+        - 部署 / 工具链
+        - 不确定
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: 问题描述
+      description: 说明实际行为、影响和发生频率。
+      placeholder: 清楚描述发生了什么
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      description: 尽量给出最小、可重复的操作序列。
+      placeholder: |
+        1. …
+        2. …
+        3. …
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期与实际结果
+      placeholder: 预期……；实际……
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: 环境
+      description: 浏览器/操作系统/应用版本；请勿填写访问令牌或个人数据。
+      placeholder: Chrome 版本、Android 版本等
+    validations:
+      required: false
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 脱敏证据
+      description: 可附截图或错误摘要；先遮盖个人数据、URL token、邮件地址和密钥。
+    validations:
+      required: false

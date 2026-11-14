@@ -1,0 +1,40 @@
+name: 文档改进
+description: 指出缺失、过时或难以理解的文档
+title: "docs: "
+labels:
+  - documentation
+body:
+  - type: input
+    id: page
+    attributes:
+      label: 文档页面或阅读入口
+      description: 提供链接或仓库内路径；不确定时描述读者任务。
+    validations:
+      required: false
+  - type: textarea
+    id: gap
+    attributes:
+      label: 读者遇到的困难
+      description: 说明读者想完成什么，以及现有说明哪里不够。
+    validations:
+      required: true
+  - type: dropdown
+    id: audience
+    attributes:
+      label: 主要读者
+      options:
+        - NanoFlow 使用者
+        - 私有实例部署者
+        - 贡献者 / 维护者
+        - AI / Context7 检索
+        - 不确定
+    validations:
+      required: true
+  - type: checkboxes
+    id: accuracy
+    attributes:
+      label: 事实准确性
+      options:
+        - label: 如果涉及尚未实现或未验证的行为，我已将其标注为目标或未验证，而非当前能力。
+    validations:
+      required: false
