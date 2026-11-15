@@ -3,7 +3,6 @@ import { testHelpers } from './helpers';
 import { waitForAppReady } from '../shared/page-helpers';
 
 const LOCAL_MODE_KEY = 'nanoflow.local-mode';
-const AUTH_CACHE_KEY = 'nanoflow.auth-cache';
 
 async function settleWorkspaceOverlays(page: Page): Promise<void> {
   const demoBanner = page.locator('.demo-banner-shell').first();
@@ -18,20 +17,29 @@ async function settleWorkspaceOverlays(page: Page): Promise<void> {
 
 async function bootstrapLocalWorkspace(page: Page): Promise<void> {
   await page.goto('/');
+  await waitForAppReady(page, { timeoutMs: 30_000, recoverStaticLoader: true });
+
+  const loginModal = page.locator('[data-testid="login-modal"]').first();
   const localModeButton = page.locator('[data-testid="local-mode-btn"]').first();
-  if (await testHelpers.isElementVisible(localModeButton, 8_000)) {
-    await localModeButton.click();
-  } else {
-    await waitForAppReady(page, { timeoutMs: 30_000, recoverStaticLoader: true });
+  if (!(await testHelpers.isElementVisible(loginModal, 1_000))) {
+    const loginButton = page.locator('[data-testid="login-btn"]').first();
+    await expect(loginButton).toBeVisible({ timeout: 10_000 });
+    await loginButton.click();
   }
-  await page.evaluate(({ localModeKey, authCacheKey }) => {
-    localStorage.setItem(localModeKey, 'true');
-    localStorage.removeItem(authCacheKey);
-    window.dispatchEvent(new Event('nanoflow:local-mode-changed'));
-  }, { localModeKey: LOCAL_MODE_KEY, authCacheKey: AUTH_CACHE_KEY });
+
+  await expect(loginModal).toBeVisible({ timeout: 10_000 });
+  await expect(localModeButton).toBeVisible({ timeout: 10_000 });
+  await localModeButton.click();
+  await expect.poll(
+    () => page.evaluate(key => localStorage.getItem(key) === 'true', LOCAL_MODE_KEY),
+    { timeout: 10_000, intervals: [100, 200, 300, 500] },
+  ).toBe(true);
+  await expect(loginModal).toBeHidden({ timeout: 30_000 });
+
   await waitForAppReady(page, { timeoutMs: 30_000, recoverStaticLoader: true });
   await settleWorkspaceOverlays(page);
   await expect(page.locator('[data-testid="project-selector"]')).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('[data-testid="add-task-btn"]').first()).toBeVisible({ timeout: 15_000 });
 }
 
 async function createTextUnassignedTask(page: Page, title: string): Promise<Locator> {
@@ -157,17 +165,13 @@ async function waitForParent(page: Page, taskId: string, parentId: string | null
     .toMatchObject({ id: taskId, parentId });
 }
 
-async function dispatchRealDrop(page: Page, source: Locator, target: Locator): Promise<void> {
-  const dataTransfer = await page.evaluateHandle(() => new DataTransfer());
-  try {
-    await source.dispatchEvent('dragstart', { dataTransfer });
-    await target.dispatchEvent('dragenter', { dataTransfer });
-    await target.dispatchEvent('dragover', { dataTransfer });
-    await target.dispatchEvent('drop', { dataTransfer });
-    await source.dispatchEvent('dragend', { dataTransfer });
-  } finally {
-    await dataTransfer.dispose();
-  }
+async function dragToTarget(source: Locator, target: Locator): Promise<void> {
+  await source.dragTo(target);
+}
+
+const chromiumExecutablePath = process.env['PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH'];
+if (chromiumExecutablePath) {
+  test.use({ launchOptions: { executablePath: chromiumExecutablePath } });
 }
 
 test.describe('Floating task tree browser drops', () => {
@@ -175,11 +179,9 @@ test.describe('Floating task tree browser drops', () => {
 
   test('Text unassigned card drop persists the reparent after reload', async ({ page }) => {
     await bootstrapLocalWorkspace(page);
-    await testHelpers.ensureEditorReady(page, { mode: 'local' });
     await settleWorkspaceOverlays(page);
-    const projectId = await testHelpers.createTestProject(page, `浮动树 Text ${testHelpers.uniqueId()}`);
-    expect(projectId).not.toBeNull();
-    if (projectId) testHelpers.trackProjectId(projectId);
+    // Use the starter project already visible in this fresh local workspace; project creation has a separate local readback blocker.
+    await expect(page.locator('[data-testid="project-item"]').first()).toBeVisible();
 
     const source = await createTextUnassignedTask(page, `Text source ${testHelpers.uniqueId()}`);
     const target = await createTextUnassignedTask(page, `Text target ${testHelpers.uniqueId()}`);
@@ -188,7 +190,7 @@ test.describe('Floating task tree browser drops', () => {
     expect(sourceId).toBeTruthy();
     expect(targetId).toBeTruthy();
 
-    await dispatchRealDrop(page, source, target);
+    await dragToTarget(source, target);
     await waitForParent(page, sourceId!, targetId!);
     await page.reload({ waitUntil: 'domcontentloaded' });
     await waitForAppReady(page, { timeoutMs: 30_000, recoverStaticLoader: true });
@@ -197,11 +199,9 @@ test.describe('Floating task tree browser drops', () => {
 
   test('Flow unassigned drop honors a specific target and rejects blank or assigned targets', async ({ page }) => {
     await bootstrapLocalWorkspace(page);
-    await testHelpers.ensureEditorReady(page, { mode: 'local' });
     await settleWorkspaceOverlays(page);
-    const projectId = await testHelpers.createTestProject(page, `浮动树 Flow ${testHelpers.uniqueId()}`);
-    expect(projectId).not.toBeNull();
-    if (projectId) testHelpers.trackProjectId(projectId);
+    // Use the starter project already visible in this fresh local workspace; project creation has a separate local readback blocker.
+    await expect(page.locator('[data-testid="project-item"]').first()).toBeVisible();
 
     const sourceTitle = `Flow source ${testHelpers.uniqueId()}`;
     const firstTargetTitle = `Flow first ${testHelpers.uniqueId()}`;
@@ -210,7 +210,7 @@ test.describe('Floating task tree browser drops', () => {
     await createTextUnassignedTask(page, sourceTitle);
     await createTextUnassignedTask(page, firstTargetTitle);
     await createTextUnassignedTask(page, targetTitle);
-    await testHelpers.createTask(page, assignedTitle);
+    await createTextUnassignedTask(page, assignedTitle);
     await ensureStageExists(page, 1);
     const assignedId = await assignTaskToStage(page, assignedTitle, 1);
 
@@ -237,7 +237,7 @@ test.describe('Floating task tree browser drops', () => {
     const blankTarget = page.locator('div.border-dashed').filter({ has: page.locator('[data-testid^="flow-palette-task-"]') }).first();
     const blankBox = await blankTarget.boundingBox();
     expect(blankBox).toBeTruthy();
-    await dispatchRealDrop(page, source, blankTarget);
+    await dragToTarget(source, blankTarget);
     await waitForParent(page, sourceId!, targetId!);
 
     await expect.poll(() => readPersistedTask(page, assignedId), {
