@@ -20,6 +20,8 @@ import {
 import { QueueBackupService } from './queue-backup.service';
 import { ToastService } from './toast.service';
 import { createMockDestroyRef } from '../test-setup.mocks';
+import { createOfflineCommandStore } from './sync/offline-command-store';
+import { OfflineSyncCommandCoordinator } from './sync/offline-sync-command-coordinator';
 import { ThemeService } from './theme.service';
 import { UiStateService } from './ui-state.service';
 import { PreferenceService } from './preference.service';
@@ -124,6 +126,7 @@ describe('DisasterBackupService', () => {
       'keyval-store',
       'nanoflow-conflicts',
       'nanoflow-store-cache',
+      'nanoflow-offline-command-store',
     ]) {
       await new Promise<void>((resolve) => {
         const request = indexedDB.deleteDatabase(name);
@@ -391,6 +394,18 @@ describe('DisasterBackupService', () => {
     expect(activeLinksForTask).toHaveBeenCalledWith('task-1');
     expect(exportedLinks?.map(link => link.id)).toEqual([currentOwnerLink.id]);
     expect(exportedLinks?.some(link => link.id === foreignOwnerLink.id)).toBe(false);
+  });
+
+  it('buildLocalBlob exports complete offline conflict evidence through the legacy backup entry point', async () => {
+    const store = createOfflineCommandStore();
+    const coordinator = new OfflineSyncCommandCoordinator({ store });
+    const base = { ownerUserId: 'user-1', installationId: 'installation-1', deviceId: 'device-1', entityType: 'task' as const, entityId: 'task-backup-evidence', command: 'task.update' as const, intent: { fields: ['content'] }, normalizedResultPatch: { content: 'base' }, nowMs: 1_000 };
+    await coordinator.commit({ command: { ...base, operationId: 'backup-losing', normalizedResultPatch: { content: 'losing' }, logicalClock: { physicalMs: 10, logical: 0 } }, initialProjection: { content: 'base' } });
+    await coordinator.commit({ command: { ...base, operationId: 'backup-winning', normalizedResultPatch: { content: 'winning' }, logicalClock: { physicalMs: 20, logical: 0 } }, initialProjection: { content: 'base' } });
+    const { payload } = await createLocalBackupService().buildLocalBlob([createProject()], { autoBackupEnabled: false, autoBackupIntervalMs: 900000 });
+    const evidence = (payload.localState as { dataSafety?: { offlineCommandStore?: { conflictEvidence?: Array<Record<string, unknown>> } } } | undefined)?.dataSafety?.offlineCommandStore?.conflictEvidence;
+    expect(evidence).toHaveLength(1);
+    expect(evidence?.[0]).toMatchObject({ losingOperationId: 'backup-losing', winningOperationId: 'backup-winning', evidence: { losingValue: 'losing', winningValue: 'winning' } });
   });
 
   it('buildLocalBlob preserves ActionQueue replay identity and dead letters', async () => {

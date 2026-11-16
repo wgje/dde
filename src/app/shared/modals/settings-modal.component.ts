@@ -1,4 +1,4 @@
-import { Component, inject, output, input, computed, viewChild, ElementRef, isDevMode, ChangeDetectionStrategy, effect } from '@angular/core';
+import { Component, inject, output, input, computed, viewChild, ElementRef, isDevMode, ChangeDetectionStrategy, effect, Input, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { LoggerService } from '../../../services/logger.service';
@@ -63,12 +63,19 @@ export class SettingsModalComponent {
   /** 是否开发模式（用于显示开发工具） */
   readonly isDev = isDevMode();
   
-  /** 当前登录用户邮箱 */
-  sessionEmail = input<string | null>(null);
+  /** DynamicModalService uses ComponentRef.setInput; alias setters retain runtime metadata in JIT and AOT. */
+  private readonly sessionEmailState = signal<string | null>(null);
+  @Input('sessionEmail')
+  set sessionEmailInput(value: string | null) { this.sessionEmailState.set(value); }
+  readonly sessionEmail = this.sessionEmailState.asReadonly();
+
   initialSection = input<'focus-routines' | null>(null);
-  
-  /** 所有项目（用于导出） */
-  projects = input<Project[]>([]);
+
+  /** All projects (used by backup/export); keep the signal-call interface for component logic. */
+  private readonly projectsState = signal<Project[]>([]);
+  @Input('projects')
+  set projectsInput(value: Project[] | null | undefined) { this.projectsState.set(value ?? []); }
+  readonly projects = this.projectsState.asReadonly();
   private readonly focusRoutineSectionRef = viewChild<ElementRef<HTMLElement>>('focusRoutineSection');
   
   readonly close = output<void>();
@@ -76,7 +83,12 @@ export class SettingsModalComponent {
   readonly themeChange = output<ThemeType>();
   readonly openDashboard = output<void>();
   readonly importComplete = output<Project>();
-  readonly importProject = input<(project: Project) => void | Promise<void>>();
+  private readonly importProjectState = signal<((project: Project) => void | Promise<void>) | undefined>(undefined);
+  @Input('importProject')
+  set importProjectInput(value: ((project: Project) => void | Promise<void>) | undefined) {
+    this.importProjectState.set(value);
+  }
+  readonly importProject = this.importProjectState.asReadonly();
   readonly routineSlots = computed(() =>
     [...this.dockEngine.dailySlots()].sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
   );

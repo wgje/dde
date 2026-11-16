@@ -2,7 +2,7 @@
 title: Data Recovery Runbook
 status: canonical
 audience: ai-agent, maintainer, operator
-last_verified: 2026-06-09
+last_verified: 2026-11-17
 source_paths:
   - src/app/core/state/store-persistence.service.ts
   - src/services/disaster-backup*.ts
@@ -116,6 +116,20 @@ Checklist:
 4. avoid destructive merge by default
 5. verify task and connection counts
 6. save recovered project locally before cloud push
+
+## UI Restore Transaction
+
+The settings-page local restore path is coordinated by `LocalBackupUiRestoreJournal`. Before any stage writes, it validates the owner, source checksum, queue identity, and writer quiescence evidence, then captures pre-images for every affected local store. The durable stage order is:
+
+1. project state
+2. attachment outbox
+3. ActionQueue
+4. RetryQueue
+5. dead letters
+6. conflicts
+7. metadata
+
+Each stage persists progress and performs a readback before the next stage. A failed stage compensates in reverse order. If compensation fails or evidence no longer matches, the journal and recovery marker remain durable and startup recovery fails closed. Startup may take over only when owner, marker, quiescence evidence, and an expired lease agree. IDs, operation IDs, cursors, and tombstones remain monotonic and owner-scoped.
 
 ## Recovery Verification
 

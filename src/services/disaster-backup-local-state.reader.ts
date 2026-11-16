@@ -29,6 +29,8 @@ import {
   toDockSnapshotCandidate,
 } from './disaster-backup-local-state.helpers';
 import type { DataSafetyAuditPersistence } from './data-safety-audit-persistence';
+import { createOfflineCommandStore, type OfflineCommandStoreExport } from './sync/offline-command-store';
+import type { OfflineSyncCommandEnvelope } from './sync/offline-sync-command-envelope';
 import type { ConflictStorageService } from './conflict-storage.service';
 import type { ExternalSourceCacheService } from '../app/core/external-sources/external-source-cache.service';
 
@@ -105,6 +107,7 @@ interface DisasterBackupLocalStateParts {
   externalSourcePendingLinks: BackupLocalState['externalSourcePendingLinks'];
   attachmentUploadOutbox: BackupPendingAttachmentUpload[];
   projectCursors: unknown[];
+  offlineCommandStoreExport?: OfflineCommandStoreExport<OfflineSyncCommandEnvelope, unknown>;
 }
 
 export class DisasterBackupLocalStateReader {
@@ -146,6 +149,7 @@ export class DisasterBackupLocalStateReader {
       externalSourcePendingLinks,
       attachmentUploadOutbox,
       projectCursors,
+      offlineCommandStoreExport,
     ] = await Promise.all([
       this.readSnapshotFromIndexedDb(snapshotOwnerUserId),
       this.readDockSnapshot(snapshotOwnerUserId),
@@ -159,6 +163,9 @@ export class DisasterBackupLocalStateReader {
       this.deps.externalSourceCache.loadPendingLinks(),
       this.readAttachmentUploadOutbox(ownerUserId),
       this.readProjectCursors(ownerUserId, visibleProjectIds),
+      ownerUserId
+        ? createOfflineCommandStore().exportOwner<OfflineSyncCommandEnvelope, unknown>(ownerUserId)
+        : Promise.resolve<OfflineCommandStoreExport<OfflineSyncCommandEnvelope, unknown> | undefined>(undefined),
     ]);
 
     return {
@@ -174,6 +181,7 @@ export class DisasterBackupLocalStateReader {
       externalSourcePendingLinks,
       attachmentUploadOutbox,
       projectCursors,
+      offlineCommandStoreExport,
     };
   }
 
@@ -208,6 +216,7 @@ export class DisasterBackupLocalStateReader {
         syncState: this.deps.readSyncState?.() ?? null,
         projectCursors: parts.projectCursors,
         dataSafetyAuditPersistence: this.deps.dataSafetyAuditPersistence,
+        offlineCommandStoreExport: parts.offlineCommandStoreExport,
       }),
     };
   }

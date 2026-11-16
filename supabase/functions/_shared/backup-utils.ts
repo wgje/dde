@@ -284,6 +284,8 @@ export interface BackupDataSafetySnapshot {
   replayLog: BackupDataSafetyReplayEntry[];
   replayPlan: BackupDataSafetyReplayPlan;
   lastWriteExplain: BackupDataSafetyLastWriteExplain | null;
+  /** Owner-scoped OfflineCommandStore export; kept structural for shared edge-function types. */
+  offlineCommandStore?: unknown;
 }
 
 export interface BackupDataSafetyReplayPlan {

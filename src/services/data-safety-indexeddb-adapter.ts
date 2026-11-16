@@ -16,6 +16,17 @@ import {
   type DataSafetyRetryQueueItem,
 } from './data-safety-package';
 import {
+  buildOfflineCommandDataSafetyPackage,
+  extractOfflineCommandStoreExportForRestore,
+  hasEmbeddedOfflineCommandStoreExport,
+  restoreOfflineCommandStoreFromPackage,
+} from './sync/offline-command-data-safety-bridge';
+import {
+  createOfflineCommandStore,
+  type OfflineCommandStoreExport,
+} from './sync/offline-command-store';
+import type { OfflineSyncCommandEnvelope } from './sync/offline-sync-command-envelope';
+import {
   clearDataSafetyRestoreMarker,
   claimExpiredDataSafetyRestoreMarker,
   collectTombstoneRestoreValidationErrors,
@@ -150,11 +161,16 @@ export async function exportDataSafetyPackageFromIndexedDb(
   const retryQueue = options.retryQueue ?? [];
   const actionQueue = options.actionQueue ?? [];
   const deadLetters = options.deadLetters ?? [];
+  const offlineCommandStore = createOfflineCommandStore();
+  const offlineCommandStoreExport = await offlineCommandStore.exportOwner<OfflineSyncCommandEnvelope, unknown>(
+    options.ownerUserId,
+  );
 
   return buildDataSafetyExportPackageFromRows(
     { projects, tasks, connections, syncCursors, meta },
     { retryQueue, actionQueue, deadLetters },
     options,
+    offlineCommandStoreExport,
   );
 }
 
@@ -166,46 +182,71 @@ function buildDataSafetyExportPackageFromRows(
     deadLetters: DataSafetyDeadLetterItem[];
   },
   options: IndexedDbDataSafetyExportOptions,
+  offlineCommandStoreExport?: OfflineCommandStoreExport<OfflineSyncCommandEnvelope, unknown>,
 ): DataSafetyExportPackage {
   const syncCursors = rows.syncCursors.filter(isSyncCursorRecord);
 
+  const localData = {
+    projects: rows.projects.filter(isEntityRecord),
+    tasks: rows.tasks.filter(isEntityRecord),
+    connections: rows.connections.filter(isEntityRecord),
+    syncCursors,
+    meta: rows.meta,
+  };
+  const localState = {
+    retryQueue: queues.retryQueue,
+    legacyRetryReview: options.legacyRetryReview ?? [],
+    actionQueue: queues.actionQueue,
+    deadLetters: queues.deadLetters,
+    conflicts: options.conflicts ?? [],
+    taskTombstones: options.taskTombstones ?? {},
+    connectionTombstones: options.connectionTombstones ?? [],
+    offlineSnapshots: options.offlineSnapshots,
+  };
+  const syncSnapshot = {
+    syncState: {
+      lastSyncTime: readLastSyncTime(rows.meta),
+      pendingCount: queues.retryQueue.length + queues.actionQueue.length,
+    },
+    projectCursors: syncCursors.map(cursor => ({
+      projectId: parseProjectIdFromCursorKey(cursor['key']),
+      userId: options.ownerUserId,
+      cursor: cursor['cursor'] ?? cursor,
+    })),
+    queueCounts: {
+      retryQueue: queues.retryQueue.length,
+      actionQueue: queues.actionQueue.length,
+      deadLetters: queues.deadLetters.length,
+    },
+  };
+  if (offlineCommandStoreExport) {
+    const pendingOfflineCommands = offlineCommandStoreExport.commands.filter(command =>
+      command.status === 'pending'
+      || command.status === 'sent'
+      || command.status === 'unknown'
+      || command.status === 'rejected',
+    ).length;
+    syncSnapshot.syncState.pendingCount += pendingOfflineCommands;
+    syncSnapshot.queueCounts.retryQueue += pendingOfflineCommands;
+    return buildOfflineCommandDataSafetyPackage({
+      storeExport: offlineCommandStoreExport,
+      exportedAt: options.exportedAt,
+      ownerUserId: options.ownerUserId,
+      app: options.app,
+      localData,
+      localState,
+      syncSnapshot,
+      replayLog: options.replayLog,
+      lastWriteExplain: options.lastWriteExplain,
+    });
+  }
   return buildDataSafetyExportPackage({
     exportedAt: options.exportedAt,
     ownerUserId: options.ownerUserId,
     app: options.app,
-    localData: {
-      projects: rows.projects.filter(isEntityRecord),
-      tasks: rows.tasks.filter(isEntityRecord),
-      connections: rows.connections.filter(isEntityRecord),
-      syncCursors,
-      meta: rows.meta,
-    },
-    localState: {
-      retryQueue: queues.retryQueue,
-      legacyRetryReview: options.legacyRetryReview ?? [],
-      actionQueue: queues.actionQueue,
-      deadLetters: queues.deadLetters,
-      conflicts: options.conflicts ?? [],
-      taskTombstones: options.taskTombstones ?? {},
-      connectionTombstones: options.connectionTombstones ?? [],
-      offlineSnapshots: options.offlineSnapshots,
-    },
-    syncSnapshot: {
-      syncState: {
-        lastSyncTime: readLastSyncTime(rows.meta),
-        pendingCount: queues.retryQueue.length + queues.actionQueue.length,
-      },
-      projectCursors: syncCursors.map(cursor => ({
-        projectId: parseProjectIdFromCursorKey(cursor['key']),
-        userId: options.ownerUserId,
-        cursor: cursor['cursor'] ?? cursor,
-      })),
-      queueCounts: {
-        retryQueue: queues.retryQueue.length,
-        actionQueue: queues.actionQueue.length,
-        deadLetters: queues.deadLetters.length,
-      },
-    },
+    localData,
+    localState,
+    syncSnapshot,
     replayLog: options.replayLog ?? [],
     lastWriteExplain: options.lastWriteExplain ?? null,
   });
@@ -264,6 +305,9 @@ async function executeDataSafetyRestore(
       throw new DataSafetyRestoreMarkerOwnershipLostError();
     }
     await restoreLocalState(pkg, localStateRollbackSnapshot.retryQueueRestoreItems);
+    if (hasEmbeddedOfflineCommandStoreExport(pkg)) {
+      await restoreOfflineCommandStoreFromPackage(pkg);
+    }
     if (
       !await markerHeartbeat.verifyOwnership()
       || !await clearDataSafetyRestoreMarker(restoreMarker)
@@ -320,6 +364,7 @@ async function readRestoreRollbackSnapshots(
   const localStateRollbackSnapshot = await readLocalStateRestoreSnapshot(
     pkg.ownerUserId,
     pkg.localState.retryQueue,
+    { captureOfflineCommandStore: hasEmbeddedOfflineCommandStoreExport(pkg) },
   );
   return { rollbackSnapshot, localStateRollbackSnapshot };
 }
@@ -339,11 +384,16 @@ function validateRestorePackage(
   pkg: DataSafetyExportPackage,
 ): IndexedDbDataSafetyRestoreResult | null {
   const validation = validateDataSafetyExportPackage(pkg);
-  if (validation.valid) return null;
+  const errors = [...validation.errors];
+  if (hasEmbeddedOfflineCommandStoreExport(pkg)
+    && !extractOfflineCommandStoreExportForRestore(pkg)) {
+    errors.push('embedded offline command store export is invalid or owner-mismatched');
+  }
+  if (errors.length === 0) return null;
   return {
     success: false,
-    plan: emptyRestorePlan(validation.errors),
-    errors: validation.errors,
+    plan: emptyRestorePlan(errors),
+    errors,
   };
 }
 

@@ -21,6 +21,7 @@ const externalSourceLinkFingerprint = (link: ExternalSourceLink): string => JSON
 export class ExternalSourceCacheService {
   private readonly auth = inject(AuthService);
   private readonly previewGenerations = new Map<string, number>();
+  private readonly linkWriteFlights = new Map<string, Promise<void>>();
 
   ownerId(): string {
     return this.auth.currentUserId() ?? AUTH_CONFIG.LOCAL_MODE_USER_ID;
@@ -65,11 +66,37 @@ export class ExternalSourceCacheService {
     return this.mergeLinks(indexedLinks, this.readLinksMirror(userId));
   }
 
-  async saveLinks(links: ExternalSourceLink[], userId = this.ownerId()): Promise<void> {
+  async saveLinks(
+    links: ExternalSourceLink[],
+    userId = this.ownerId(),
+    isCurrent: () => boolean = () => true,
+  ): Promise<void> {
+    const previous = this.linkWriteFlights.get(userId) ?? Promise.resolve();
+    const current = previous
+      .catch(() => undefined)
+      .then(() => this.writeLinksSnapshot(links, userId, isCurrent));
+    this.linkWriteFlights.set(userId, current);
+    try {
+      await current;
+    } finally {
+      if (this.linkWriteFlights.get(userId) === current) {
+        this.linkWriteFlights.delete(userId);
+      }
+    }
+  }
+
+  private async writeLinksSnapshot(
+    links: ExternalSourceLink[],
+    userId: string,
+    isCurrent: () => boolean,
+  ): Promise<void> {
+    if (!isCurrent()) return;
     try {
       await set(this.linksKey(userId), links);
+      if (!isCurrent()) return;
       this.writeLinksMirror(userId, links);
     } catch (error) {
+      if (!isCurrent()) return;
       if (!this.writeLinksMirror(userId, links)) {
         throw error;
       }

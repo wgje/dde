@@ -28,6 +28,7 @@ export interface CaptureLocalBackupUiRestorePreImageInput {
   ownerUserId: string;
   touchedProjectIds: readonly string[];
   retryQueueRestoreItems: readonly unknown[];
+  captureOfflineCommandStore?: boolean;
 }
 
 export interface LocalBackupUiRestorePreImageReaders {
@@ -36,6 +37,8 @@ export interface LocalBackupUiRestorePreImageReaders {
   readMetadata(
     ownerUserId: string,
     touchedProjectIds: ReadonlySet<string>,
+    checkpoint?: () => Promise<void>,
+    options?: { captureOfflineCommandStore?: boolean },
   ): Promise<DataSafetyMetadataRestoreState | unknown>;
   readExternalLinks(ownerUserId: string): Promise<unknown[]>;
   readExternalPendingLinks(ownerUserId: string): Promise<unknown[]>;
@@ -61,8 +64,8 @@ export class LocalBackupUiRestorePreImageService {
         return projects;
       },
       readLocalStateSnapshot: ownerUserId => readLocalStateRestoreSnapshot(ownerUserId),
-      readMetadata: (ownerUserId, touchedProjectIds) => (
-        this.metadata.readCurrent(ownerUserId, touchedProjectIds)
+      readMetadata: (ownerUserId, touchedProjectIds, checkpoint, options) => (
+        this.metadata.readCurrent(ownerUserId, touchedProjectIds, checkpoint, options)
       ),
       readExternalLinks: ownerUserId => this.externalSourceCache.loadLinks(ownerUserId),
       readExternalPendingLinks: ownerUserId => this.externalSourceCache.loadPendingLinks(ownerUserId),
@@ -137,7 +140,12 @@ async function readPreImageSources(
   ] = await Promise.all([
     readers.readCurrentProjects(input.ownerUserId),
     readers.readLocalStateSnapshot(input.ownerUserId),
-    readers.readMetadata(input.ownerUserId, touchedProjectIdSet),
+    readers.readMetadata(
+      input.ownerUserId,
+      touchedProjectIdSet,
+      undefined,
+      input.captureOfflineCommandStore ? { captureOfflineCommandStore: true } : undefined,
+    ),
     readers.readExternalLinks(input.ownerUserId),
     readers.readExternalPendingLinks(input.ownerUserId),
     readers.readAttachmentUploads(input.ownerUserId),

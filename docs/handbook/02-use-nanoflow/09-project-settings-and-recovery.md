@@ -2,7 +2,7 @@
 title: 项目、设置与回收站
 status: canonical
 audience: user
-last_verified: 2026-11-04
+last_verified: 2026-11-17
 category: use-nanoflow
 source_paths:
   - src/app/shared/modals/new-project-modal.component.ts
@@ -279,6 +279,12 @@ JSON 不包含原始附件二进制文件。完整的恢复原则见 [备份与�
 ### 本地增强备份没有显示或提示需要权限怎么办？
 
 这通常说明当前浏览器不支持对应能力，或之前选择的目录需要重新授权。不要把它当作已经成功运行的备份；改用 JSON 与附件 ZIP 导出，同时选择支持的桌面浏览器或恢复目录权限。
+
+## 本地增强备份恢复的安全门
+
+设置页的本地增强备份恢复由同一个恢复 journal 协调。恢复前会核对当前账号、来源校验和、队列身份及写入静默证据，并保存受影响本地存储的恢复前快照。恢复顺序固定为项目、附件 outbox、ActionQueue、RetryQueue、失败记录、冲突和元数据；每一步都要持久化进度并读回验证。
+
+任一步骤失败时，系统按相反顺序补偿。补偿失败、证据不匹配或进程在步骤之间中断时，journal、marker 和诊断信息会保留，启动恢复只在账号、marker、静默证据一致且 lease 已过期时接管。恢复不会重写实体 ID、operationId、游标或 tombstone。
 
 ## 下一步
 

@@ -2,6 +2,8 @@ import type {
   BackupDataSafetySnapshot,
 } from '../../supabase/functions/_shared/backup-utils';
 import type { DataSafetyAuditPersistence } from './data-safety-audit-persistence';
+import type { OfflineCommandStoreExport } from './sync/offline-command-store';
+import type { OfflineSyncCommandEnvelope } from './sync/offline-sync-command-envelope';
 
 export function buildDisasterBackupDataSafetySnapshot(context: {
   ownerUserId: string | null;
@@ -14,6 +16,7 @@ export function buildDisasterBackupDataSafetySnapshot(context: {
   } | null;
   projectCursors?: unknown[];
   dataSafetyAuditPersistence: DataSafetyAuditPersistence;
+  offlineCommandStoreExport?: OfflineCommandStoreExport<OfflineSyncCommandEnvelope, unknown>;
 }): BackupDataSafetySnapshot | undefined {
   if (!context.ownerUserId) {
     return undefined;
@@ -22,6 +25,10 @@ export function buildDisasterBackupDataSafetySnapshot(context: {
   const actionQueue = Array.isArray(context.actionQueue) ? context.actionQueue : [];
   const persistedAudit =
     context.dataSafetyAuditPersistence.loadForExport(context.ownerUserId);
+  const commandStore = context.offlineCommandStoreExport;
+  if (commandStore && commandStore.ownerUserId !== context.ownerUserId) {
+    throw new Error('Offline command backup owner mismatch');
+  }
   const replayLog = [
     ...persistedAudit.replayLog,
     ...context.retryQueue.map(item => toDataSafetyReplayEntry(item, 'retryQueue')),
@@ -35,22 +42,27 @@ export function buildDisasterBackupDataSafetySnapshot(context: {
     replayLog,
   });
 
+  const pendingCommands = commandStore?.commands.filter(command =>
+    command.status === 'pending' || command.status === 'sent' || command.status === 'unknown' || command.status === 'rejected',
+  ).length ?? 0;
+  const syncSnapshot = buildDataSafetySyncSnapshot({
+    syncState: context.syncState,
+    projectCursors: context.projectCursors,
+    retryQueueCount: context.retryQueue.length + pendingCommands,
+    actionQueueCount: actionQueue.length,
+    deadLetterCount: context.deadLetters.length,
+  });
   return {
     schemaVersion: '1.0.0',
     exportedAt,
     ownerUserId: context.ownerUserId,
-    syncSnapshot: buildDataSafetySyncSnapshot({
-      syncState: context.syncState,
-      projectCursors: context.projectCursors,
-      retryQueueCount: context.retryQueue.length,
-      actionQueueCount: actionQueue.length,
-      deadLetterCount: context.deadLetters.length,
-    }),
+    syncSnapshot,
     replayLog,
     replayPlan,
     lastWriteExplain: persistedAudit.lastWriteExplain ?? (replayLog.length > 0
       ? toDataSafetyLastWriteExplain(replayLog[replayLog.length - 1], context.ownerUserId)
       : null),
+    ...(commandStore ? { offlineCommandStore: commandStore } : {}),
   };
 }
 

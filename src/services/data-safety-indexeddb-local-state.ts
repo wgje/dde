@@ -13,6 +13,12 @@ import {
   type DataSafetySyncCursorRecord,
 } from './data-safety-package';
 import { LOCAL_QUEUE_CONFIG } from './action-queue-storage.helpers';
+import {
+  createOfflineCommandStore,
+  OFFLINE_COMMAND_STORE_SCHEMA_VERSION,
+  type OfflineCommandStoreExport,
+} from './sync/offline-command-store';
+import type { OfflineSyncCommandEnvelope } from './sync/offline-sync-command-envelope';
 import { DataSafetyAuditPersistence } from './data-safety-audit-persistence';
 import {
   type DeadLetterBackupRecord,
@@ -120,6 +126,7 @@ export interface LocalStateRestoreSnapshot extends ProjectLocalStateRestoreSnaps
   connectionTombstonesLocalStorageValue?: string | null;
   conflictRestoreSnapshot?: DataSafetyConflictRestoreSnapshot;
   offlineSnapshotRestoreSnapshot?: DataSafetyOfflineSnapshotRestoreSnapshot;
+  offlineCommandStoreExport?: OfflineCommandStoreExport<OfflineSyncCommandEnvelope, unknown>;
 }
 
 export interface DataSafetyRestoreMarker {
@@ -178,6 +185,7 @@ export async function restoreLocalState(
 export async function readLocalStateRestoreSnapshot(
   ownerUserId: string,
   retryQueueItems: DataSafetyExportPackage['localState']['retryQueue'] = [],
+  options: { captureOfflineCommandStore?: boolean } = {},
 ): Promise<LocalStateRestoreSnapshot> {
   const retryQueueRestoreItems = prepareRetryQueueRestoreItems(ownerUserId, retryQueueItems);
   const [
@@ -195,6 +203,9 @@ export async function readLocalStateRestoreSnapshot(
     readOfflineSnapshotRestoreSnapshot(ownerUserId),
     readProjectLocalStateRestoreSnapshot(ownerUserId),
   ]);
+  const offlineCommandStoreExport = options.captureOfflineCommandStore
+    ? await createOfflineCommandStore().exportOwner<OfflineSyncCommandEnvelope, unknown>(ownerUserId)
+    : undefined;
 
   const legacyReviewStorageKey = ownerScopedLegacyRetryReviewStorageKey(ownerUserId);
   const legacyRetryReviewLocalStorageValue = readLocalStorageValue(legacyReviewStorageKey);
@@ -213,6 +224,7 @@ export async function readLocalStateRestoreSnapshot(
     ...readTombstoneLocalStateSnapshot(),
     conflictRestoreSnapshot,
     offlineSnapshotRestoreSnapshot,
+    ...(offlineCommandStoreExport ? { offlineCommandStoreExport } : {}),
     ...projectLocalStateRestoreSnapshot,
   };
 }
@@ -243,6 +255,13 @@ export async function restoreLocalStateSnapshot(
     );
   });
   assertLocalStateRestoreContinuation(errors, canContinue);
+  if (snapshot.offlineCommandStoreExport) {
+    await attemptLocalStateRollback(errors, 'offline command store', async () => {
+      if (!canContinue()) throw new Error('restore ownership lost before offline command store rollback');
+      await createOfflineCommandStore().restoreOwner(snapshot.offlineCommandStoreExport!);
+      if (!canContinue()) throw new Error('restore ownership lost after offline command store rollback');
+    });
+  }
 
   if (errors.length > 0) throw new Error(errors.join('; '));
 }
@@ -553,6 +572,26 @@ function normalizeDataSafetyRestoreMarker(
   };
 }
 
+function isOfflineCommandStoreExportForOwner(value: unknown, ownerUserId: string): boolean {
+  if (!isUnknownRecord(value)
+    || value['schemaVersion'] !== OFFLINE_COMMAND_STORE_SCHEMA_VERSION
+    || value['ownerUserId'] !== ownerUserId
+    || !Array.isArray(value['projections'])
+    || !Array.isArray(value['commands'])
+    || !Array.isArray(value['audits'])
+    || !Array.isArray(value['quarantine'])
+    || (value['conflictEvidence'] !== undefined && !Array.isArray(value['conflictEvidence']))) return false;
+  const businessRecords = [
+    ...value['projections'], ...value['commands'], ...value['audits'],
+    ...(Array.isArray(value['conflictEvidence']) ? value['conflictEvidence'] : []),
+  ];
+  const businessRecordsValid = businessRecords.every(record => isUnknownRecord(record) && record['ownerUserId'] === ownerUserId);
+  const quarantineRecords = value['quarantine'];
+  const quarantineRecordsValid = quarantineRecords.every(record => isUnknownRecord(record)
+    && (record['ownerUserId'] === null || record['ownerUserId'] === ownerUserId));
+  return businessRecordsValid && quarantineRecordsValid;
+}
+
 function normalizePrimaryStoreSnapshot(value: unknown): RestorableIndexedDbLocalData | null {
   if (!isUnknownRecord(value)
     || !isEntityRecordArray(value['projects'])
@@ -581,12 +620,18 @@ function normalizeLocalStateRestoreSnapshot(
   const queueSnapshot = normalizeMarkerQueueRestoreSnapshot(value, ownerUserId);
   const tombstoneSnapshot = normalizeMarkerTombstoneRestoreSnapshot(value);
   const extendedSnapshot = normalizeMarkerExtendedRestoreSnapshot(value, ownerUserId);
+  const offlineCommandStoreExport = value['offlineCommandStoreExport'];
   if (!queueSnapshot || !tombstoneSnapshot || !extendedSnapshot) return null;
+  if (offlineCommandStoreExport !== undefined
+    && !isOfflineCommandStoreExportForOwner(offlineCommandStoreExport, ownerUserId)) return null;
 
   return {
     ...queueSnapshot,
     ...tombstoneSnapshot,
     ...extendedSnapshot,
+    ...(offlineCommandStoreExport === undefined ? {} : {
+      offlineCommandStoreExport: offlineCommandStoreExport as OfflineCommandStoreExport<OfflineSyncCommandEnvelope, unknown>,
+    }),
   };
 }
 

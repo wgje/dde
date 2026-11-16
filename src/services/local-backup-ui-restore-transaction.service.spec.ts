@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { SYNC_CONFIG } from '../config';
+import type { BackupData } from '../../supabase/functions/_shared/backup-utils';
 import { deleteDataSafetyRestoreMarkerJournalDatabaseForTests } from './data-safety-restore-marker-journal';
 import {
   createLocalBackupUiRestoreJournal,
@@ -123,6 +124,27 @@ describe('prepareLocalBackupUiRestoreTransaction', () => {
     expect('run' in handle).toBe(true);
     expect('commit' in handle).toBe(false);
     await expect(handle.verifyOwnership()).resolves.toBe(true);
+  });
+
+  it('captures command-store metadata in the durable rollback pre-image when the backup carries it', async () => {
+    const order: string[] = [];
+    const markerStore = { current: null as unknown };
+    const dependencies = makeDependencies(order, markerStore);
+    const backup = makeBackup([]) as BackupData & { localState: { dataSafety: { offlineCommandStore: unknown } } };
+    backup.localState = { ...(backup.localState ?? {}), dataSafety: {
+      ...(backup.localState?.dataSafety ?? {}), offlineCommandStore: { schemaVersion: 1, ownerUserId: OWNER_USER_ID },
+    } };
+
+    await prepareLocalBackupUiRestoreTransaction({
+      ownerUserId: OWNER_USER_ID,
+      source: { kind: 'local-file', reference: 'backup.json', checksum: SOURCE_DIGEST },
+      touchedProjectIds: [], retryQueueRestoreItems: [], restoredActionQueueItems: [], blackBoxBackup: backup,
+      captureOfflineCommandStore: true,
+    }, dependencies);
+
+    expect(dependencies.capturePreImage).toHaveBeenCalledWith(expect.objectContaining({
+      captureOfflineCommandStore: true,
+    }));
   });
 
   it('clears the restore marker before reopening writers on an owned no-mutation abort', async () => {

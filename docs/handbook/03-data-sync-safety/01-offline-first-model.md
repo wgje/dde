@@ -2,7 +2,7 @@
 title: 离线优先模型
 status: canonical
 audience: user, operator
-last_verified: 2026-07-15
+last_verified: 2026-11-17
 category: data-sync-safety
 source_paths:
   - AGENTS.md
@@ -207,6 +207,12 @@ NanoFlow 的实体 ID 应该由客户端生成，例如使用 `crypto.randomUUID
 ### 为什么不建议同时开多个标签页编辑同一个项目？
 
 应用会协调后台写入，但它不能替你判断两个页面的意图是否冲突。集中编辑可以减少重复操作和对“哪个页面最新”的猜测。
+
+## 本地恢复与写入 fence
+
+本地增强备份恢复会先让写入静默，再捕获恢复前快照，然后按固定阶段推进并读回。ActionQueue、RetryQueue、失败记录和冲突副本都保留 owner、queue identity 与 operationId；恢复完成不会把同步游标或 tombstone 往回拨。
+
+账号、lease、marker 或静默证据缺失或属于其他 owner 时，启动恢复直接停止且不写入。这样可以把“本地可恢复”与“云端暂不可用”分开判断，同时保留后续导出和重放所需的证据。
 
 ## 下一步
 

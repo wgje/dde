@@ -2,7 +2,7 @@
 title: Edge Functions
 status: canonical
 audience: operator
-last_verified: 2026-11-10
+last_verified: 2026-11-17
 category: deploy-operate
 source_paths:
   - package.json
@@ -542,6 +542,12 @@ widget 共用 `logWidgetEvent()`，日志前缀是：
 - `supabase/config.toml` 没有对应 `[functions.backup-alert]`。
 
 因此本运行册不提供该 slug 的部署、验收、回滚或事故步骤。若未来需要告警功能，应先定义真实入口、调用方、鉴权和配置合同，再另行实现与审查。
+
+## 本地恢复共享类型与 Edge 部署边界
+
+`supabase/functions/_shared/backup-utils.ts` 也被本地备份恢复路径用于共享恢复数据结构和校验类型。它在本组中只作为类型级 schema 依赖参与本地编译和测试，不是新的可部署 Edge 入口，也不表示已经执行 Supabase migration、Edge deploy 或生产读写。
+
+涉及真正的 Edge 入口、密钥、迁移或部署时，仍按本页的生产授权、source parity、回滚和冒烟证据要求单独审查。
 
 ## 下一步
 

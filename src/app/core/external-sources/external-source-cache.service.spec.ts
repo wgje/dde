@@ -51,6 +51,43 @@ describe('ExternalSourceCacheService fallback storage', () => {
     mockUpdate.mockResolvedValue(undefined);
   }, 5_000);
 
+  it('does not start a stale auth-generation link snapshot write', async () => {
+    const service = createService();
+    const link = createLink({ id: 'stale-auth-generation-link' });
+
+    await expect(service.saveLinks([link], ownerUserId, () => false)).resolves.toBeUndefined();
+
+    expect(mockSet).not.toHaveBeenCalledWith('external-source-links:owner-a', [link]);
+    expect(localStorage.getItem('nanoflow.externalSource.links.owner-a')).toBeNull();
+  });
+
+  it('serializes overlapping snapshots so a newer auth generation wins after an older IDB set resolves', async () => {
+    const service = createService();
+    const older = createLink({ id: 'older-auth-generation-link' });
+    const newer = createLink({ id: 'newer-auth-generation-link' });
+    let releaseOlder: (() => void) | null = null;
+    let setCalls = 0;
+    mockSet.mockImplementation(async () => {
+      setCalls += 1;
+      if (setCalls === 1) {
+        await new Promise<void>(resolve => { releaseOlder = resolve; });
+      }
+    });
+    let olderCurrent = true;
+
+    const olderSave = service.saveLinks([older], ownerUserId, () => olderCurrent);
+    await vi.waitFor(() => expect(mockSet).toHaveBeenCalledTimes(1));
+    olderCurrent = false;
+    const newerSave = service.saveLinks([newer], ownerUserId, () => true);
+    releaseOlder!();
+
+    await Promise.all([olderSave, newerSave]);
+
+    expect(mockSet).toHaveBeenCalledTimes(2);
+    expect(localStorage.getItem('nanoflow.externalSource.links.owner-a')).toBe(JSON.stringify([newer]));
+    await expect(service.loadLinks(ownerUserId)).resolves.toEqual([newer]);
+  });
+
   it('falls back to localStorage when IndexedDB pending enqueue fails and restores pending links', async () => {
     const service = createService();
     mockUpdate.mockRejectedValueOnce(new Error('indexeddb unavailable'));

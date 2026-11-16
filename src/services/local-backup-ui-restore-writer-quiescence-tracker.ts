@@ -338,9 +338,16 @@ function assertWriterContinuation(
   const sentinel = readQuiescenceSentinel(ownerUserId);
   const active = localActiveWriters.get(activeWriterStorageKey(ownerUserId, identity.runId));
   if (!active || !hasSameIdentity(active, identity) || identity.ownerUserId !== ownerUserId
-    || identity.source !== source || !sentinel
-    || (sentinel.state !== 'pausing' && sentinel.state !== 'quiesced')
-    || sentinel.leaseExpiresAt === null || Date.parse(sentinel.leaseExpiresAt) <= Date.now()) {
+    || identity.source !== source) {
+    throw new LocalBackupUiRestoreWriterPausedError(ownerUserId);
+  }
+  // A continuation can belong to an ordinary in-flight writer (for example,
+  // an async project import) when no restore quiescence sentinel exists. Only
+  // enforce the paused/quiesced state when a restore sentinel is present.
+  if (sentinel !== null
+    && ((sentinel.state !== 'pausing' && sentinel.state !== 'quiesced')
+      || sentinel.leaseExpiresAt === null
+      || Date.parse(sentinel.leaseExpiresAt) <= Date.now())) {
     throw new LocalBackupUiRestoreWriterPausedError(ownerUserId);
   }
 }

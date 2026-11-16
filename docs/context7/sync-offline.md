@@ -2,7 +2,7 @@
 title: Sync and Offline Behavior
 status: canonical
 audience: ai-agent, maintainer, operator
-last_verified: 2026-06-09
+last_verified: 2026-11-17
 source_paths:
   - src/config/sync.config.ts
   - src/app/core/services/sync/
@@ -47,6 +47,14 @@ Relevant config:
 - `SYNC_CONFIG.DEBOUNCE_DELAY = 3000`
 - `INDEXEDDB_HEALTH_CONFIG.CHECK_ON_INIT = true`
 - `INDEXEDDB_HEALTH_CONFIG.ON_CORRUPTION = 'prompt-recovery'`
+
+## Local Restore and Queue Fences
+
+Local backup restore uses the same owner-scoped write fence as normal offline persistence. The restore journal quiesces writers, snapshots pre-images, and advances the project, attachment outbox, ActionQueue, RetryQueue, dead-letter, conflict, and metadata stages with durable readback. A stage or compensation mismatch leaves the marker and diagnostic evidence in place; it does not clear queues or move cursors backward.
+
+The offline data-safety bridge is included only where export and restore need queue evidence. It preserves `operationId`, queue identity, owner identity, retry monotonicity, and tombstones. Startup recovery performs zero writes when owner, lease, marker, or quiescence evidence is missing or foreign.
+
+External-source cache writes are serialized per owner and fenced by auth generation before IndexedDB writes, after completion, and before the localStorage mirror. A stale in-flight write cannot publish an older generation over a newer snapshot.
 
 ## Cloud Sync
 

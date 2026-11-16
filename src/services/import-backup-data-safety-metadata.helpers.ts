@@ -3,6 +3,8 @@ import type {
   BackupDataSafetyLastWriteExplain,
   BackupDataSafetyReplayEntry,
 } from '../../supabase/functions/_shared/backup-utils';
+import type { OfflineCommandStoreExport } from './sync/offline-command-store';
+import type { OfflineSyncCommandEnvelope } from './sync/offline-sync-command-envelope';
 import {
   compareProjectSyncCursor,
   isProjectSyncCursor,
@@ -31,6 +33,7 @@ export interface DataSafetyMetadataRestoreState {
   lastWriteExplain: BackupDataSafetyLastWriteExplain | null;
   taskTombstones: DataSafetyTaskTombstoneSnapshot;
   connectionTombstones: DataSafetyConnectionTombstoneSnapshot[];
+  offlineCommandStoreExport?: OfflineCommandStoreExport<OfflineSyncCommandEnvelope, unknown>;
 }
 
 export interface DataSafetyMetadataRestoreCounts {
@@ -40,6 +43,7 @@ export interface DataSafetyMetadataRestoreCounts {
   lastWriteExplain: number;
   taskTombstones: number;
   connectionTombstones: number;
+  offlineCommandStore?: number;
 }
 
 export interface DataSafetyMetadataRestorePlan {
@@ -52,6 +56,8 @@ export interface DataSafetyMetadataRestoreAdapter {
   readCurrent(
     ownerUserId: string,
     visibleProjectIds: ReadonlySet<string>,
+    checkpoint?: () => Promise<void>,
+    options?: { captureOfflineCommandStore?: boolean },
   ): Promise<DataSafetyMetadataRestoreState>;
   replaceAtomically(
     ownerUserId: string,
@@ -90,6 +96,9 @@ export function buildDataSafetyMetadataRestorePlan(
     incoming.connectionTombstones,
   );
   const lastSyncTime = pickLatestIsoTimestamp(current.lastSyncTime, incoming.lastSyncTime);
+  const offlineCommandStoreExport = incoming.offlineCommandStoreExport ?? current.offlineCommandStoreExport;
+  const offlineCommandStoreChanged = incoming.offlineCommandStoreExport !== undefined
+    && JSON.stringify(incoming.offlineCommandStoreExport) !== JSON.stringify(current.offlineCommandStoreExport);
 
   return {
     ownerUserId,
@@ -100,6 +109,7 @@ export function buildDataSafetyMetadataRestorePlan(
       lastWriteExplain,
       taskTombstones: taskTombstones.value,
       connectionTombstones: connectionTombstones.value,
+      ...(offlineCommandStoreExport ? { offlineCommandStoreExport } : {}),
     },
     counts: {
       projectCursors: projectCursors.changed,
@@ -108,6 +118,7 @@ export function buildDataSafetyMetadataRestorePlan(
       lastWriteExplain: lastWriteExplain !== current.lastWriteExplain ? 1 : 0,
       taskTombstones: taskTombstones.changed,
       connectionTombstones: connectionTombstones.changed,
+      ...(offlineCommandStoreChanged ? { offlineCommandStore: 1 } : {}),
     },
   };
 }
@@ -122,7 +133,10 @@ export async function restoreDataSafetyMetadataFromBackup(
       .filter(project => project.userId === ownerUserId)
       .map(project => project.id),
   );
-  const current = await adapter.readCurrent(ownerUserId, visibleProjectIds);
+  const captureOfflineCommandStore = backup.localState?.dataSafety?.offlineCommandStore !== undefined;
+  const current = captureOfflineCommandStore
+    ? await adapter.readCurrent(ownerUserId, visibleProjectIds, undefined, { captureOfflineCommandStore: true })
+    : await adapter.readCurrent(ownerUserId, visibleProjectIds);
   const plan = buildDataSafetyMetadataRestorePlan(backup, ownerUserId, current);
   await adapter.replaceAtomically(ownerUserId, plan.target, current);
   return plan.counts;
@@ -170,9 +184,41 @@ function readIncomingDataSafetyMetadata(
       backup.localState?.connectionTombstones,
       visibleProjectIds,
     ),
+    ...(snapshot.offlineCommandStore === undefined ? {} : {
+      offlineCommandStoreExport: readOfflineCommandStoreExport(snapshot.offlineCommandStore, ownerUserId),
+    }),
   };
 }
 
+function readOfflineCommandStoreExport(
+  value: unknown,
+  ownerUserId: string,
+): OfflineCommandStoreExport<OfflineSyncCommandEnvelope, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new DataSafetyMetadataValidationError('localState.dataSafety.offlineCommandStore is invalid');
+  }
+  const record = value as Record<string, unknown>;
+  if (record['schemaVersion'] !== 1 || record['ownerUserId'] !== ownerUserId
+    || !Array.isArray(record['projections']) || !Array.isArray(record['commands'])
+    || !Array.isArray(record['audits']) || !Array.isArray(record['quarantine'])
+    || (record['conflictEvidence'] !== undefined && !Array.isArray(record['conflictEvidence']))) {
+    throw new DataSafetyMetadataValidationError('localState.dataSafety.offlineCommandStore is invalid');
+  }
+  const businessRecords = [
+    ...record['projections'], ...record['commands'], ...record['audits'],
+    ...(Array.isArray(record['conflictEvidence']) ? record['conflictEvidence'] : []),
+  ];
+  if (businessRecords.some(item => !item || typeof item !== 'object' || Array.isArray(item)
+    || (item as Record<string, unknown>)['ownerUserId'] !== ownerUserId)) {
+    throw new DataSafetyMetadataValidationError('localState.dataSafety.offlineCommandStore owner mismatch');
+  }
+  if (record['quarantine'].some((item: unknown) => !item || typeof item !== 'object' || Array.isArray(item)
+    || ((item as Record<string, unknown>)['ownerUserId'] !== null
+      && (item as Record<string, unknown>)['ownerUserId'] !== ownerUserId))) {
+    throw new DataSafetyMetadataValidationError('localState.dataSafety.offlineCommandStore quarantine owner mismatch');
+  }
+  return value as OfflineCommandStoreExport<OfflineSyncCommandEnvelope, unknown>;
+}
 function readProjectCursorSnapshots(
   value: unknown,
   ownerUserId: string,

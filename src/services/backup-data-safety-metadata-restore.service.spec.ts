@@ -7,6 +7,7 @@ import { IndexedDBService } from '../app/core/state/persistence';
 import { SyncStateService } from '../app/core/services/sync/sync-state.service';
 import { TombstoneService } from '../app/core/services/sync/tombstone.service';
 import { BackupDataSafetyMetadataRestoreService } from './backup-data-safety-metadata-restore.service';
+import { createOfflineCommandStore } from './sync/offline-command-store';
 
 const DB_NAME = 'nanoflow-store-cache';
 
@@ -23,6 +24,7 @@ describe('BackupDataSafetyMetadataRestoreService', () => {
     vi.clearAllMocks();
     lastSyncTime = '2026-06-18T00:00:10.000Z';
     await deleteDatabase(DB_NAME);
+    await deleteDatabase('nanoflow-offline-command-store');
     db = await openDatabase();
     await replaceCursorRows(db, [{
       key: 'project:user-1:project-1',
@@ -79,6 +81,7 @@ describe('BackupDataSafetyMetadataRestoreService', () => {
   afterEach(() => {
     vi.restoreAllMocks();
     db.close();
+    void deleteDatabase('nanoflow-offline-command-store');
   });
 
   it('does not recover an unexpired metadata restore marker from another run', async () => {
@@ -393,6 +396,33 @@ describe('BackupDataSafetyMetadataRestoreService', () => {
     expect(JSON.stringify(await readCursorRows(db))).toBe(rowsBefore);
   });
 
+  it('restores legacy backup command-store evidence with owner isolation', async () => {
+    const service = TestBed.inject(BackupDataSafetyMetadataRestoreService);
+    const commandStore = createOfflineCommandStore();
+    const backup = createBackup() as BackupData & { localState: NonNullable<BackupData['localState']> & { dataSafety: NonNullable<NonNullable<BackupData['localState']>['dataSafety']> & { offlineCommandStore: unknown } } };
+    backup.localState.dataSafety.offlineCommandStore = {
+      schemaVersion: 1,
+      ownerUserId: 'user-1',
+      projections: [],
+      commands: [],
+      audits: [{
+        key: 'user-1:audit:legacy-op', ownerUserId: 'user-1', operationId: 'legacy-op',
+        entityType: 'task', entityId: 'task-1', operation: 'task.update',
+        localTimestamp: '2026-06-18T00:00:20.000Z', queueResult: 'acked', schemaVersion: 1,
+      }],
+      quarantine: [{
+        key: 'user-1:quarantine:legacy-q', ownerUserId: 'user-1', reason: 'legacy-review',
+        raw: { operationId: 'legacy-op' }, quarantinedAt: '2026-06-18T00:00:20.000Z', schemaVersion: 1,
+      }],
+      conflictEvidence: [],
+    };
+
+    await service.restore(backup, 'user-1');
+    const restored = await commandStore.exportOwner('user-1');
+    expect(restored.audits).toEqual([expect.objectContaining({ operationId: 'legacy-op' })]);
+    expect(restored.quarantine).toEqual([expect.objectContaining({ reason: 'legacy-review' })]);
+    expect((await commandStore.exportOwner('user-2')).audits).toEqual([]);
+  });
   it('restores cursors, lastSyncTime, audit history, and tombstones idempotently', async () => {
     const service = TestBed.inject(BackupDataSafetyMetadataRestoreService);
     const backup = createBackup();

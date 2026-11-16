@@ -2,7 +2,7 @@
 title: 备份与恢复
 status: canonical
 audience: user, operator
-last_verified: 2026-11-04
+last_verified: 2026-11-17
 category: data-sync-safety
 source_paths:
   - src/services/export.service.ts
@@ -475,6 +475,14 @@ ActionQueue 中可执行的 pending 项会在恢复前检查 `id` 和 UUID `oper
 - 不要在`恢复中，请勿关闭...`时关闭页面或切账号。
 - 不要两台设备同时恢复两份不同备份。
 - 不要把应用内部 IndexedDB 回滚层当作跨设备灾难恢复方案。
+
+## 本地增强备份的事务式恢复
+
+设置页恢复使用 `LocalBackupUiRestoreJournal` 作为唯一协调入口。系统会在写入前核对账号、来源校验和、queue identity 与 quiescence 证据，并保存所有受影响存储的 pre-image。阶段顺序为项目、附件 outbox、ActionQueue、RetryQueue、dead letters、冲突、元数据；每阶段完成后都要持久化并读回。
+
+阶段失败会逆序补偿。若补偿失败、恢复证据漂移或进程在记录完成前退出，journal、marker 和诊断数据会保留；下次启动只接管 owner、marker、quiescence 证据一致且 lease 已过期的恢复。其他情况 fail closed 且零写入。
+
+验收恢复时要同时核对项目、附件、待同步操作、待重试操作、失败记录和冲突副本的读回结果。不要用清浏览器数据、回退游标或删除 tombstone 来“修复”恢复失败。
 
 ## 下一步
 

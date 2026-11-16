@@ -2,7 +2,7 @@
 title: 思源知识锚点
 status: canonical
 audience: user
-last_verified: 2026-07-15
+last_verified: 2026-11-17
 category: use-nanoflow
 source_paths:
   - docs/siyuan-knowledge-anchor-plan.md
@@ -400,6 +400,10 @@ Relay 模式下还有四个关键按钮：
 ### 我可以把远端自建思源地址填进 direct 模式吗？
 
 当前不能。源码只信任 `http://127.0.0.1:6806` 和 `http://localhost:6806`，而且页面本身也必须是本机页面或 `file:` 页面。
+
+## 缓存与账号切换
+
+思源锚点缓存按账号和设备隔离。保存链接时会在 IndexedDB 写入前、写入完成后和 localStorage 镜像前检查当前认证代次；旧认证代次的在途写入不能覆盖新代次已经保存的快照。切换账号后，如果看到旧预览没有立即消失，先等待当前设备的缓存 fence 收敛，不要把旧缓存当成新账号数据。
 
 ## 下一步
 

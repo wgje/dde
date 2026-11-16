@@ -107,7 +107,7 @@ export class ExternalSourceLinkService {
     const merged = mergeExternalSourceLinks(localLinks, remotePull.links);
     if (!this.isAuthIdentityFenceCurrent(token)) return;
     this.replaceOwnedLinks(ownerId, merged);
-    await this.cache.saveLinks(merged, ownerId);
+    await this.cache.saveLinks(merged, ownerId, () => this.isAuthIdentityFenceCurrent(token));
     if (!this.isAuthIdentityFenceCurrent(token)) return;
     if (!remotePull.deferredBySuspension && !remotePull.failed) {
       this.lastPullAt = Date.now();
@@ -156,7 +156,7 @@ export class ExternalSourceLinkService {
     const merged = mergeExternalSourceLinks(localLinks, remotePull.links);
     if (!this.isAuthIdentityFenceCurrent(token)) return;
     this.replaceOwnedLinks(ownerId, merged);
-    await this.cache.saveLinks(merged, ownerId);
+    await this.cache.saveLinks(merged, ownerId, () => this.isAuthIdentityFenceCurrent(token));
     if (!this.isAuthIdentityFenceCurrent(token)) return;
     this.lastPullAt = Date.now();
     await this.pushLocalNewerLinks(merged, remotePull.links, token);
@@ -392,7 +392,11 @@ export class ExternalSourceLinkService {
           snapshots.get(link.id)!.operationIds.add(pending.operationId);
           this.assertImportFence(token);
           stagedLinks.set(link.id, link);
-          await this.cache.saveLinks(mergeExternalSourceLinks(Array.from(stagedLinks.values()), []), ownerId);
+          await this.cache.saveLinks(
+            mergeExternalSourceLinks(Array.from(stagedLinks.values()), []),
+            ownerId,
+            () => this.isAuthIdentityFenceCurrent(token),
+          );
           this.assertImportFence(token);
         }
         this.assertImportFence(token);
@@ -413,7 +417,7 @@ export class ExternalSourceLinkService {
         }
         const restoredLinks = mergeExternalSourceLinks(Array.from(currentLinks.values()), []);
         this.assertImportFence(token);
-        await this.cache.saveLinks(restoredLinks, ownerId);
+        await this.cache.saveLinks(restoredLinks, ownerId, () => this.isAuthIdentityFenceCurrent(token));
         this.assertImportFence(token);
         if (this.isCurrentOwner(ownerId)) {
           this.replaceOwnedLinks(ownerId, restoredLinks);
@@ -736,7 +740,7 @@ export class ExternalSourceLinkService {
   ): Promise<boolean> {
     if (!this.isAuthIdentityFenceCurrent(token)) return false;
     const links = this.mergeLocalLink(tombstone);
-    await this.cache.saveLinks(links, token.ownerId);
+    await this.cache.saveLinks(links, token.ownerId, () => this.isAuthIdentityFenceCurrent(token));
     if (!this.isAuthIdentityFenceCurrent(token)) return false;
     this.replaceOwnedLinks(token.ownerId, links);
     if (!this.isAuthIdentityFenceCurrent(token)) return false;
@@ -756,7 +760,7 @@ export class ExternalSourceLinkService {
     const merged = mergeExternalSourceLinks(localLinks, remotePull.links);
     if (!this.isAuthIdentityFenceCurrent(token)) return false;
     this.replaceOwnedLinks(token.ownerId, merged);
-    await this.cache.saveLinks(merged, token.ownerId);
+    await this.cache.saveLinks(merged, token.ownerId, () => this.isAuthIdentityFenceCurrent(token));
     return this.isAuthIdentityFenceCurrent(token);
   }
 

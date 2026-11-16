@@ -376,7 +376,7 @@ describe('SettingsModalComponent', () => {
 
   it('should expose portable data-safety export and file restore without directory API support', async () => {
     const project = createProject('project-1', []);
-    component.projects = signal([project]) as unknown as typeof component.projects;
+    fixture.componentRef.setInput('projects', [project]);
     const download = vi.spyOn(component.localBackupUI, 'handleDownloadDataSafetyPackage')
       .mockResolvedValue(undefined);
     const loadFile = vi.spyOn(component.localBackupUI, 'loadRestorePreviewFromFile')
@@ -407,7 +407,7 @@ describe('SettingsModalComponent', () => {
 
   it('should route a full BackupData file selected through ordinary import into safe restore', async () => {
     const project = createProject('project-1', []);
-    component.projects = signal([project]) as unknown as typeof component.projects;
+    fixture.componentRef.setInput('projects', [project]);
     const loadFile = vi.spyOn(component.localBackupUI, 'loadRestorePreviewFromFile')
       .mockResolvedValue(undefined);
     const file = new File([JSON.stringify({
@@ -765,10 +765,10 @@ describe('SettingsModalComponent', () => {
     const itemA = createAttachmentImportItem('task-a', 'task-a-file.txt');
     const itemB = createAttachmentImportItem('task-b', 'task-b-file.txt');
     const unmatchedItem = createAttachmentImportItem('missing-task', 'missing-file.txt');
-    component.projects = signal([
+    fixture.componentRef.setInput('projects', [
       createProject('project-a', [createTask('task-a')]),
       createProject('project-b', [createTask('task-b')]),
-    ]) as unknown as typeof component.projects;
+    ]);
     mockAttachmentImportService.extractAttachmentsFromZip.mockResolvedValueOnce([itemA, itemB, unmatchedItem]);
     mockAttachmentImportService.importAttachments
       .mockResolvedValueOnce({ success: true, imported: 1, failed: 0, skipped: 0, errors: [] })

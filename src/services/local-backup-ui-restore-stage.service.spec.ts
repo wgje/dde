@@ -13,6 +13,7 @@ import type { QueuedAction } from './action-queue.types';
 import { ActionQueueStorageService } from './action-queue-storage.service';
 import { ConflictStorageService, type ConflictRecord } from './conflict-storage.service';
 import { BackupDataSafetyMetadataRestoreService } from './backup-data-safety-metadata-restore.service';
+import type { OfflineCommandStoreExport } from './sync/offline-command-store';
 import { LocalBackupUiBlackBoxRestoreService } from './local-backup-ui-black-box-restore.service';
 import type { LocalBackupUiBlackBoxRestoreSnapshot } from './local-backup-ui-black-box-restore.types';
 import { convertBackupDataToExportData } from './import-backup-conversion.helpers';
@@ -211,6 +212,48 @@ describe('createLocalBackupUiRestoreStageOperations', () => {
       snapshot,
       OWNER_USER_ID,
       marker.source.checksum,
+    );
+  });
+
+  it('retains offline command-store pre-image through staged metadata rollback', async () => {
+    const commandStoreExport: OfflineCommandStoreExport = {
+      schemaVersion: 1, ownerUserId: OWNER_USER_ID,
+      projections: [], commands: [], audits: [], quarantine: [], conflictEvidence: [],
+    };
+    const restoredCommandStoreExport: OfflineCommandStoreExport = {
+      ...commandStoreExport,
+      commands: [{
+        key: `${OWNER_USER_ID}:command:restored`, ownerUserId: OWNER_USER_ID,
+        operationId: 'restored', entityType: 'task', entityId: 'task-1', command: {},
+        status: 'pending', createdAt: '2026-11-14T00:00:00.000Z', updatedAt: '2026-11-14T00:00:00.000Z', schemaVersion: 1,
+      }],
+    };
+    const currentMetadata = { ...makeSnapshots().metadata, offlineCommandStoreExport: restoredCommandStoreExport };
+    const readCurrent = vi.fn(async () => currentMetadata);
+    const replaceAtomically = vi.fn(async () => undefined);
+    const metadataRestore = { readCurrent, replaceAtomically } as unknown as Pick<
+      BackupDataSafetyMetadataRestoreService, 'readCurrent' | 'replaceAtomically'
+    >;
+    const service = makeStageService(undefined, undefined, undefined, undefined, undefined, undefined, undefined, metadataRestore);
+    const marker = makeStageMarker();
+    marker.preImage.metadata = { ...(marker.preImage.metadata as Record<string, unknown>), offlineCommandStoreExport: commandStoreExport } as never;
+    const operations = service.createOperations({
+      ownerUserId: OWNER_USER_ID,
+      data: {} as never,
+      backup: { localState: { dataSafety: { offlineCommandStore: restoredCommandStoreExport } } } as never,
+      existingProjects: [],
+      actionQueueRestore: makeActionQueueRestore(),
+    });
+    operations.decodePreImage(marker);
+
+    await operations.rollback('metadata', makeContext(marker));
+
+    expect(readCurrent).toHaveBeenCalledWith(OWNER_USER_ID, new Set(), expect.any(Function), { captureOfflineCommandStore: true });
+    expect(replaceAtomically).toHaveBeenCalledWith(
+      OWNER_USER_ID,
+      expect.objectContaining({ offlineCommandStoreExport: commandStoreExport }),
+      expect.objectContaining({ offlineCommandStoreExport: restoredCommandStoreExport }),
+      expect.any(Function),
     );
   });
 
@@ -812,6 +855,10 @@ function makeStageService(
   },
   projectState: Pick<ProjectStateService, 'getProjectsWithCurrentData' | 'updateProjects'> = {} as never,
   importService: Pick<ImportService, 'prepareLocalBackupRestorePlan'> = {} as never,
+  metadataRestore: Pick<BackupDataSafetyMetadataRestoreService, 'readCurrent' | 'replaceAtomically'> = {
+    readCurrent: vi.fn(async () => makeSnapshots().metadata),
+    replaceAtomically: vi.fn(async () => undefined),
+  },
 ): LocalBackupUiRestoreStageService {
   TestBed.resetTestingModule();
   TestBed.configureTestingModule({
@@ -826,7 +873,7 @@ function makeStageService(
       { provide: RetryQueueService, useValue: retryQueue },
       { provide: ActionQueueStorageService, useValue: {} },
       { provide: ConflictStorageService, useValue: conflictStorage },
-      { provide: BackupDataSafetyMetadataRestoreService, useValue: {} },
+      { provide: BackupDataSafetyMetadataRestoreService, useValue: metadataRestore },
       { provide: LocalBackupUiBlackBoxRestoreService, useValue: blackBoxRestore },
     ],
   });
