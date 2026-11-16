@@ -25,7 +25,7 @@ const OBJECT_RULES = [
   ["angular.components[].hostDirectives[]",["directive","inputs","line","outputs"],[["directive","inputs","outputs","line"]]],
   ["angular.components[].hostListeners[]",["api","event","expression","line","name"],[["name","api","event","line"],["name","api","event","expression","line"]]],
   ["angular.components[].importDetails[]",["column","line","matchedNeedle","name"],[["name","line","column","matchedNeedle"]]],
-  ["angular.components[].inputs[]",["api","line","name"],[["name","api","line"]]],
+  ["angular.components[].inputs[]",["alias","api","line","name"],[["name","api","line"],["name","api","alias","line"]]],
   ["angular.components[].models[]",["api","line","name"],[["name","api","line"]]],
   ["angular.components[].outputs[]",["api","line","name"],[["name","api","line"]]],
   ["angular.components[].providerDetails[]",["column","line","matchedNeedle","name"],[["name","line","column","matchedNeedle"]]],
@@ -137,7 +137,7 @@ const SCALAR_TYPE_GROUPS = [
     "angular.components[].hostBindings[].kind", "angular.components[].hostBindings[].name", "angular.components[].hostDirectives[].directive",
     "angular.components[].hostDirectives[].inputs[]", "angular.components[].hostDirectives[].outputs[]", "angular.components[].hostListeners[].api",
     "angular.components[].hostListeners[].event", "angular.components[].hostListeners[].expression", "angular.components[].hostListeners[].name", "angular.components[].importDetails[].matchedNeedle",
-    "angular.components[].importDetails[].name", "angular.components[].imports[]", "angular.components[].inputs[].api",
+    "angular.components[].importDetails[].name", "angular.components[].imports[]", "angular.components[].inputs[].alias", "angular.components[].inputs[].api",
     "angular.components[].inputs[].name", "angular.components[].models[].api", "angular.components[].models[].name",
     "angular.components[].outputs[].api", "angular.components[].outputs[].name",
     "angular.components[].providerDetails[].matchedNeedle", "angular.components[].providerDetails[].name", "angular.components[].providers[]",
@@ -173,7 +173,7 @@ const SCALAR_TYPE_GROUPS = [
   ]],
 ];
 
-const DESCRIPTOR_DIGEST = "a68c9feed371bb4d107b7e458559431df0197a013e0434350f63285b38027bbc";
+const DESCRIPTOR_DIGEST = "b6b797b6ec939fce7f7a85a126a7eab3e7350ff1083a78e5a108f11f7813b9f1";
 
 const DESCRIPTOR = {
   name: "angular-support",

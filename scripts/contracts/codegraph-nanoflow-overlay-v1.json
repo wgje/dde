@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "schemaDigest": "5132af08c96287a8808840b6667fe2df8e0a4d6a57e471c9aada686d0f2e3250",
+  "schemaDigest": "affa3567ec1efb56464390579752eb65faacc0f7422a1334246722584a20348b",
   "digestDomain": "nanoflow-overlay-schema-v1",
   "sourcePolicyDigest": "ca78ea5e17d32399faac676bcab26fc1d7f48186a89792774d37a6b8549d0ca3",
   "encoding": {
@@ -145,11 +145,11 @@
   },
   "descriptorDigests": {
     "typescript": "cd2538e77f1abbe5aabe750e0a4ecda1807e006cecc2fc6acc03296dd7f2eabf",
-    "angular-support": "a68c9feed371bb4d107b7e458559431df0197a013e0434350f63285b38027bbc",
+    "angular-support": "b6b797b6ec939fce7f7a85a126a7eab3e7350ff1083a78e5a108f11f7813b9f1",
     "supabase-android": "7deba66271dd9253c05ff74b2000a3a6124a793da35c2c490d0e7bb03ae16e9d",
-    "graph": "63f663485bdbcf3465ae17ba939589d0a8632ab1e29e2b9d3ec67ca85502498b"
+    "graph": "147bee93d8a4255882de1b41a62f0531b31ce58c6cb7e76dd013a8d34b61c791"
   },
-  "descriptorManifestDigest": "245dade46ea7b39cd068f2c6ce7c160a05c04238341d9d78e5e54fee9c64b2a5",
+  "descriptorManifestDigest": "97683a08e4ae433c877c98956955b9b77141508337d1307d42959d45ade33704",
   "authority": {
     "generator": {
       "sourcePath": "scripts/generate-codegraph-nanoflow-overlay.mjs",

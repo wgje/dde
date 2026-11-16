@@ -291,6 +291,90 @@ describe('CodeGraph Overlay generation publisher', { timeout: 30_000 }, () => {
     expect(next.current.sequence).toBe('3');
   });
 
+  it('publishes an Angular component input with a legacy alias', () => {
+    const root = makeRoot();
+    const overlay = validOverlay(root) as { angular: { components: Array<Record<string, unknown>> } };
+    overlay.angular.components = [{
+      className: 'SettingsModalComponent',
+      file: 'src/app/shared/modals/settings-modal.component.ts',
+      selector: 'app-settings-modal',
+      standalone: true,
+      changeDetection: 'OnPush',
+      imports: [],
+      importDetails: [],
+      providers: [],
+      providerDetails: [],
+      hostDirectives: [],
+      templateUrl: 'src/app/shared/modals/settings-modal.component.html',
+      templateInline: false,
+      styleUrls: [],
+      dependencies: [],
+      dependencyDetails: [],
+      constructorDependencies: [],
+      dynamicImports: [],
+      inputs: [{ name: 'legacyMode', api: 'legacyMode', alias: 'legacy-mode', line: 12 }],
+      outputs: [],
+      models: [],
+      queries: [],
+      signals: [],
+      hostAttributes: [],
+      hostBindings: [],
+      hostListeners: [],
+      templateBindings: [],
+      templateUsages: { elements: [], attributes: [], elementUsages: [], pipes: [] },
+      line: 1,
+      tests: [],
+      testMappings: [],
+    }];
+    const api = publisher.createOverlayGenerationPublisher({
+      readLeaseEvidence: heldLeaseEvidence,
+      transactionId: () => `tx-${'a'.repeat(32)}`,
+    });
+    const result = api.publish({
+      projectRoot: root,
+      overlay,
+      sequence: '1',
+      publishedAt: '2026-08-03T00:11:00.000Z',
+      ...fixedDigests,
+    });
+    expect(result.current.sequence).toBe('1');
+  });
+
+  it('publishes a combined-baseline function node with type and return metadata', () => {
+    const root = makeRoot();
+    const overlay = validOverlay(root) as { graph: { nodes: Array<Record<string, unknown>> } };
+    overlay.graph.nodes = [{
+      id: 'function:src/services/local-backup-ui-restore-writer-quiescence-tracker.ts:runLocalBackupUiRestoreWriterContinuationSync',
+      kind: 'function',
+      name: 'runLocalBackupUiRestoreWriterContinuationSync',
+      qualifiedName: 'runLocalBackupUiRestoreWriterContinuationSync',
+      filePath: 'src/services/local-backup-ui-restore-writer-quiescence-tracker.ts',
+      language: 'typescript',
+      startLine: 1,
+      endLine: 2,
+      startColumn: 1,
+      endColumn: 2,
+      signature: '(): void',
+      typeParameters: [],
+      isExported: false,
+      isAsync: false,
+      metadata: { platform: 'typescript', riskTags: [] },
+      updatedAt: Date.parse('2026-08-03T00:00:00.000Z'),
+    }];
+    const api = publisher.createOverlayGenerationPublisher({
+      readLeaseEvidence: heldLeaseEvidence,
+      transactionId: () => `tx-${'b'.repeat(32)}`,
+    });
+    const result = api.publish({
+      projectRoot: root,
+      overlay,
+      sequence: '1',
+      publishedAt: '2026-08-03T00:12:00.000Z',
+      ...fixedDigests,
+    });
+    expect(result.current.sequence).toBe('1');
+  });
+
   it('validates the exact Overlay v1 stream before creating publication evidence', () => {
     const root = makeRoot();
     const api = publisher.createOverlayGenerationPublisher({
