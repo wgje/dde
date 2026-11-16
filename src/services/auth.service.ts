@@ -291,9 +291,7 @@ export class AuthService {
     isConfigured: () => this.supabase.isConfigured,
     ensureRuntimeAuthReady: () => this.ensureRuntimeAuthReady(),
     hasActiveAuthListener: () => this.authStateSubscription !== null,
-    hasCurrentAuthClient: () => {
-      try { this.supabase.client(); return true; } catch { return false; }
-    },
+    hasCurrentAuthClient: () => this.supabase.isConfigured && this.supabase.getCurrentClient() !== null,
     captureOwnerFence: () => {
       const currentOwner = this.currentUserId();
       const pendingOwner = this.pendingStorageBridgeSessionIdentity?.userId ?? null;

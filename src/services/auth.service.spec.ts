@@ -57,6 +57,7 @@ describe('AuthService', () => {
     isConfigured: boolean;
     client: ReturnType<typeof vi.fn>;
     clientAsync: ReturnType<typeof vi.fn>;
+    getCurrentClient: ReturnType<typeof vi.fn>;
     getSession: ReturnType<typeof vi.fn>;
     signInWithPassword: ReturnType<typeof vi.fn>;
     consumeCredentialRequestIdForAccessToken: ReturnType<typeof vi.fn>;
@@ -161,6 +162,7 @@ describe('AuthService', () => {
       isConfigured: true,
       client: vi.fn().mockReturnValue(authClient),
       clientAsync: vi.fn().mockResolvedValue(authClient),
+      getCurrentClient: vi.fn().mockReturnValue(authClient),
       getSession: vi.fn().mockResolvedValue({
         data: { session: null },
         error: null

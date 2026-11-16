@@ -147,6 +147,9 @@ export class SupabaseClientService {
     if (!this.canInitialize || !this.supabaseUrl) return null;
     return resolveSupabaseStorageKey(this.supabaseUrl);
   }
+  getCurrentClient(): SupabaseClient<Database> | null {
+    return this.supabase;
+  }
   consumeCredentialRequestIdForAccessToken(
     accessToken: string,
   ): CredentialRequestSessionBinding | null {

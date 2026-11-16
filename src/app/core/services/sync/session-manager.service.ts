@@ -56,11 +56,7 @@ export class SessionManagerService {
   private readonly authFlights = new SessionManagerAuthFlightController<SupabaseClient<Database>>({
     getStorageKey: () => this.supabase.getStorageKey(),
     peekBundle: storageKey => getCanonicalAuthStorageAuthority()?.peekBundle(storageKey) ?? null,
-    getCurrentClient: () => {
-      let client: SupabaseClient<Database> | null = null;
-      try { client = this.supabase.client(); } catch { /* client remains unavailable */ }
-      return client;
-    },
+    getCurrentClient: () => this.supabase.getCurrentClient(),
   });
   private readonly loggerService = inject(LoggerService);
   private readonly logger = this.loggerService.category('SessionManager');

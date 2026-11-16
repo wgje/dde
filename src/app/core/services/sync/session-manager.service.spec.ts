@@ -24,6 +24,7 @@ describe('SessionManagerService', () => {
     isConfigured: true,
     clientAsync: vi.fn(),
     client: vi.fn(),
+    getCurrentClient: vi.fn(),
     getStorageKey: vi.fn(() => 'canonical-key'),
   };
 
@@ -62,6 +63,7 @@ describe('SessionManagerService', () => {
     currentClient = { auth: mockAuth };
     supabaseMock.clientAsync.mockReset().mockImplementation(async () => currentClient);
     supabaseMock.client.mockReset().mockImplementation(() => currentClient);
+    supabaseMock.getCurrentClient.mockReset().mockImplementation(() => currentClient);
     Object.defineProperty(globalThis, '__NANOFLOW_AUTH_CANONICAL_STORAGE__', {
       configurable: true,
       value: {

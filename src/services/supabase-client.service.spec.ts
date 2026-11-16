@@ -273,6 +273,20 @@ async function flushAuthAutoRefresh(service: SupabaseClientService): Promise<voi
       expect(() => service.client()).toThrow('Supabase 客户端尚未就绪');
     });
 
+    it('getCurrentClient 只返回已提升客户端且不会触发初始化', () => {
+      const mutable = service as unknown as {
+        supabase: unknown;
+        initPromise: Promise<unknown> | null;
+      };
+      const currentClient = { auth: { getSession: vi.fn() } };
+      mutable.supabase = currentClient;
+      mutable.initPromise = Promise.resolve(currentClient);
+
+      expect(service.getCurrentClient()).toBe(currentClient);
+      expect(service.getCurrentClient()).toBe(currentClient);
+      mutable.supabase = null;
+    });
+
     it('probeReachability 成功时应清除连接中断状态', async () => {
       const mutable = service as unknown as {
         canInitialize: boolean;
