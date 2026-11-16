@@ -37,6 +37,14 @@ function externalSourceLink(overrides: Partial<ExternalSourceLink> = {}): Extern
 }
 type UpsertError = { code?: string; status?: number; message: string } | Error;
 type UpsertResult = { error: UpsertError | null };
+type RemotePullResult = { links: ExternalSourceLink[]; deferredBySuspension: boolean; failed: boolean };
+type RemotePullLinksAccess = {
+  pullRemoteLinks(ownerId: string, token?: { ownerId: string; authFence: string }): Promise<RemotePullResult>;
+};
+type PushLocalNewerLinksAccess = {
+  pushLocalNewerLinks(localLinks: ExternalSourceLink[], remoteLinks: ExternalSourceLink[], token?: { ownerId: string; authFence: string }): Promise<void>;
+};
+type LoadStateAccess = { lastPullAt: number };
 const SECOND_OWNER_ID = '00000000-0000-0000-0000-000000000002';
 describe('ExternalSourceLinkService', () => {
   let upsertPayloads: unknown[];
@@ -489,6 +497,144 @@ describe('ExternalSourceLinkService', () => {
     await ownerALoad;
 
     expect(service.links().map(link => link.id)).toEqual([ownerBLink.id]);
+  });
+
+  it('ignores an initial remote result from a previous same-owner auth generation and loads the new fence', async () => {
+    const service = TestBed.inject(ExternalSourceLinkService);
+    const cache = TestBed.inject(ExternalSourceCacheService);
+    const ownerId = authUser();
+    const oldLocal = externalSourceLink({ id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1', targetId: '20260614000000-old0001' });
+    const freshLink = externalSourceLink({ id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1', targetId: '20260614000000-new0001' });
+    const staleRemote = externalSourceLink({ id: 'cccccccc-cccc-4ccc-8ccc-ccccccccccc1', targetId: '20260614000000-stale01' });
+    await cache.saveLinks([oldLocal], ownerId);
+
+    const stalePull = createDeferred<RemotePullResult>();
+    const pullRemoteLinks = vi.spyOn(service as unknown as RemotePullLinksAccess, 'pullRemoteLinks')
+      .mockImplementationOnce(() => stalePull.promise)
+      .mockResolvedValueOnce({ links: [freshLink], deferredBySuspension: false, failed: false });
+    const saveLinks = vi.spyOn(cache, 'saveLinks');
+    const staleLoad = service.ensureLoaded();
+    await vi.waitFor(() => expect(pullRemoteLinks).toHaveBeenCalledTimes(1));
+
+    authFence.set('auth-fence-a-relogin');
+    await cache.saveLinks([freshLink], ownerId);
+    const freshLoad = service.ensureLoaded();
+    await freshLoad;
+    expect(pullRemoteLinks).toHaveBeenNthCalledWith(2, ownerId, { ownerId, authFence: 'auth-fence-a-relogin' });
+    const currentLinks = await cache.loadLinks(ownerId);
+    const saveCountAfterFreshLoad = saveLinks.mock.calls.length;
+    const currentWatermark = (service as unknown as LoadStateAccess).lastPullAt;
+
+    stalePull.resolve({ links: [staleRemote], deferredBySuspension: false, failed: false });
+    await staleLoad;
+
+    expect(saveLinks).toHaveBeenCalledTimes(saveCountAfterFreshLoad);
+    expect(await cache.loadLinks(ownerId)).toEqual(currentLinks);
+    expect(service.links()).toEqual(currentLinks);
+    expect((service as unknown as LoadStateAccess).lastPullAt).toBe(currentWatermark);
+    expect(await cache.loadPendingLinks(ownerId)).toEqual([]);
+    expect(service.links().map(link => link.id)).not.toContain(staleRemote.id);
+  });
+
+  it('ignores an ordinary refresh result from a previous same-owner auth generation', async () => {
+    const service = TestBed.inject(ExternalSourceLinkService);
+    const cache = TestBed.inject(ExternalSourceCacheService);
+    const ownerId = authUser();
+    await service.ensureLoaded();
+    const freshLink = externalSourceLink({ id: 'dddddddd-dddd-4ddd-8ddd-ddddddddddd1', targetId: '20260614000000-new0002' });
+    const staleRemote = externalSourceLink({ id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee1', targetId: '20260614000000-stale02' });
+    const stalePull = createDeferred<RemotePullResult>();
+    const pullRemoteLinks = vi.spyOn(service as unknown as RemotePullLinksAccess, 'pullRemoteLinks')
+      .mockImplementationOnce(() => stalePull.promise)
+      .mockResolvedValueOnce({ links: [freshLink], deferredBySuspension: false, failed: false });
+    const saveLinks = vi.spyOn(cache, 'saveLinks');
+    const pushLocalNewerLinks = vi.spyOn(service as unknown as PushLocalNewerLinksAccess, 'pushLocalNewerLinks');
+
+    const staleRefresh = service.refreshIfStale(true);
+    await vi.waitFor(() => expect(pullRemoteLinks).toHaveBeenCalledTimes(1));
+    authFence.set('auth-fence-a-relogin');
+    await cache.saveLinks([freshLink], ownerId);
+    await service.ensureLoaded();
+    expect(pullRemoteLinks).toHaveBeenNthCalledWith(2, ownerId, { ownerId, authFence: 'auth-fence-a-relogin' });
+    const currentLinks = await cache.loadLinks(ownerId);
+    const saveCountAfterFreshLoad = saveLinks.mock.calls.length;
+    const pushCountAfterFreshLoad = pushLocalNewerLinks.mock.calls.length;
+    (service as unknown as LoadStateAccess).lastPullAt = 424242;
+
+    stalePull.resolve({ links: [staleRemote], deferredBySuspension: false, failed: false });
+    await staleRefresh;
+
+    expect(saveLinks).toHaveBeenCalledTimes(saveCountAfterFreshLoad);
+    expect(pushLocalNewerLinks).toHaveBeenCalledTimes(pushCountAfterFreshLoad);
+    expect(await cache.loadLinks(ownerId)).toEqual(currentLinks);
+    expect(service.links()).toEqual(currentLinks);
+    expect((service as unknown as LoadStateAccess).lastPullAt).toBe(424242);
+    expect(await cache.loadPendingLinks(ownerId)).toEqual([]);
+    expect(service.links().map(link => link.id)).not.toContain(staleRemote.id);
+  });
+
+  it('stops an import continuation when the same owner auth fence changes during a snapshot read', async () => {
+    const service = TestBed.inject(ExternalSourceLinkService);
+    const cache = TestBed.inject(ExternalSourceCacheService);
+    const store = TestBed.inject(ExternalSourceLinkStore);
+    const ownerId = authUser();
+    await service.ensureLoaded();
+
+    const imported = externalSourceLink({ id: 'ffffffff-ffff-4fff-8fff-fffffffffff1', targetId: '20260614000000-import01' });
+    const freshLink = externalSourceLink({ id: '11111111-1111-4111-8111-111111111112', targetId: '20260614000000-fresh01' });
+    const loadStarted = createDeferred<void>();
+    const loadGate = createDeferred<ExternalSourceLink[]>();
+    vi.spyOn(cache, 'loadLinks').mockImplementationOnce(() => {
+      loadStarted.resolve();
+      return loadGate.promise;
+    });
+    const saveLinks = vi.spyOn(cache, 'saveLinks');
+    const upsertPendingLink = vi.spyOn(cache, 'upsertPendingLink');
+    const commitProject = vi.fn();
+    const importPromise = service.importPointers([imported], commitProject);
+    await loadStarted.promise;
+
+    authFence.set('auth-fence-a-relogin');
+    await cache.saveLinks([freshLink], ownerId);
+    const freshPending = await cache.upsertPendingLink(freshLink, { resetRetryCount: true }, ownerId);
+    store.replaceAll([freshLink]);
+    loadGate.resolve([]);
+
+    await expect(importPromise).rejects.toThrow(/auth session changed/i);
+    expect(commitProject).not.toHaveBeenCalled();
+    expect(saveLinks).toHaveBeenCalledTimes(1);
+    expect(upsertPendingLink).toHaveBeenCalledTimes(1);
+    expect(await cache.loadLinks(ownerId)).toEqual([freshLink]);
+    expect(await cache.loadPendingLinks(ownerId)).toEqual([freshPending]);
+    expect(service.links()).toEqual([freshLink]);
+  });
+
+  it('does not roll back a fresh same-owner session snapshot after an import commit fails stale', async () => {
+    const service = TestBed.inject(ExternalSourceLinkService);
+    const cache = TestBed.inject(ExternalSourceCacheService);
+    const store = TestBed.inject(ExternalSourceLinkStore);
+    const ownerId = authUser();
+    await service.ensureLoaded();
+    const imported = externalSourceLink({ id: '22222222-2222-4222-8222-222222222223', targetId: '20260614000000-import02' });
+    const commitGate = createDeferred<void>();
+    const commitProject = vi.fn(() => commitGate.promise);
+    const importPromise = service.importPointers([imported], commitProject);
+    await vi.waitFor(() => expect(commitProject).toHaveBeenCalledTimes(1));
+    const stagedPending = (await cache.loadPendingLinks(ownerId)).find(entry => entry.link.id === imported.id);
+    expect(stagedPending).toBeDefined();
+
+    authFence.set('auth-fence-a-relogin');
+    await cache.saveLinks([imported], ownerId);
+    await cache.removePendingLink(imported.id, stagedPending!.operationId, ownerId);
+    const freshPending = await cache.upsertPendingLink(imported, { resetRetryCount: true }, ownerId);
+    expect(freshPending.operationId).not.toBe(stagedPending!.operationId);
+    store.replaceAll([imported]);
+    commitGate.reject(new Error('project commit failed after reauthentication'));
+
+    await expect(importPromise).rejects.toThrow(/auth session changed/i);
+    expect(await cache.loadLinks(ownerId)).toEqual([imported]);
+    expect(service.links()).toEqual([imported]);
+    expect(await cache.loadPendingLinks(ownerId)).toEqual([freshPending]);
   });
 
   it('soft deletes links and hides them from active task anchors', async () => {

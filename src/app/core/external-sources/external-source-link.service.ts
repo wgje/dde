@@ -49,11 +49,12 @@ export class ExternalSourceLinkService {
   readonly activeLinks = computed(() => this.links().filter((link) => !link.deletedAt));
   private initialized = false;
   private loadedOwnerId: string | null = null;
+  private loadedAuthFence: AuthIdentityFence | null = null;
   private flushFlight: { token: AuthIdentityFence; promise: Promise<void> } | null = null;
   private importPromise: Promise<void> | null = null;
-  private loadPromise: Promise<void> | null = null;
+  private loadFlight: { token: AuthIdentityFence; promise: Promise<void> } | null = null;
   private lastPullAt = 0;
-  private refreshPromise: Promise<void> | null = null;
+  private refreshFlight: { token: AuthIdentityFence; promise: Promise<void> } | null = null;
   private opportunisticListenersBound = false;
   private resumeSyncTimer: number | null = null;
   private resumeSyncForceRefresh = false;
@@ -67,41 +68,57 @@ export class ExternalSourceLinkService {
       this.unbindOpportunisticListeners();
     });
   }
-  async ensureLoaded(): Promise<void> { return localBackupUiRestoreWriterQuiescence.runContinuationAsync(this.currentUserId(), 'external-source', async () => {
-    if (this.destroyed) return;
-    const ownerId = this.currentUserId();
-    if (this.visibleOwnerId() !== ownerId) {
-      this.store.replaceAll([]);
-      this.visibleOwnerId.set(null);
-    }
-    if (this.initialized && this.loadedOwnerId === ownerId) return;
-    if (this.loadPromise && this.loadedOwnerId === ownerId) return this.loadPromise;
-    const loadPromise = this.runEnsureLoaded(ownerId).finally(() => {
-      if (this.loadPromise === loadPromise) {
-        this.loadPromise = null;
-      }
+  async ensureLoaded(): Promise<void> {
+    return localBackupUiRestoreWriterQuiescence.runContinuationAsync(this.currentUserId(), 'external-source', async () => {
+      if (this.destroyed) return;
+      return this.ensureLoadedFor(this.captureAuthIdentityFence(), true);
     });
-    this.loadPromise = loadPromise;
-    return this.loadPromise;
-  }); }
-  private async runEnsureLoaded(ownerId: string): Promise<void> {
-    this.initialized = true;
-    this.loadedOwnerId = ownerId;
+  }
+  private async ensureLoadedFor(token: AuthIdentityFence, alreadyInContinuation = false): Promise<void> {
+    const load = async (): Promise<void> => {
+      if (!this.isAuthIdentityFenceCurrent(token)) return;
+      const { ownerId } = token;
+      if (this.visibleOwnerId() !== ownerId
+        || (this.loadedOwnerId === ownerId
+          && (!this.loadedAuthFence || !this.sameAuthIdentityFence(this.loadedAuthFence, token)))) {
+        this.store.replaceAll([]);
+        this.visibleOwnerId.set(null);
+      }
+      if (this.initialized && this.loadedOwnerId === ownerId && this.loadedAuthFence
+        && this.sameAuthIdentityFence(this.loadedAuthFence, token)) return;
+      const activeLoad = this.loadFlight;
+      if (activeLoad && this.sameAuthIdentityFence(activeLoad.token, token)) return activeLoad.promise;
+      const loadPromise = this.runEnsureLoaded(token).finally(() => {
+        if (this.loadFlight?.promise === loadPromise) this.loadFlight = null;
+      });
+      this.loadFlight = { token, promise: loadPromise };
+      return loadPromise;
+    };
+    if (alreadyInContinuation) return load();
+    return localBackupUiRestoreWriterQuiescence.runContinuationAsync(token.ownerId, 'external-source', load);
+  }
+  private async runEnsureLoaded(token: AuthIdentityFence): Promise<void> {
+    const { ownerId } = token;
     const localLinks = await this.cache.loadLinks(ownerId);
-    if (!this.isCurrentOwner(ownerId)) return;
+    if (!this.isAuthIdentityFenceCurrent(token)) return;
     this.replaceOwnedLinks(ownerId, mergeExternalSourceLinks(localLinks, []));
-    const remotePull = await this.pullRemoteLinks(ownerId);
-    if (!this.isCurrentOwner(ownerId)) return;
+    const remotePull = await this.pullRemoteLinks(ownerId, token);
+    if (!this.isAuthIdentityFenceCurrent(token)) return;
     const merged = mergeExternalSourceLinks(localLinks, remotePull.links);
+    if (!this.isAuthIdentityFenceCurrent(token)) return;
     this.replaceOwnedLinks(ownerId, merged);
     await this.cache.saveLinks(merged, ownerId);
-    if (!this.isCurrentOwner(ownerId)) return;
+    if (!this.isAuthIdentityFenceCurrent(token)) return;
     if (!remotePull.deferredBySuspension && !remotePull.failed) {
       this.lastPullAt = Date.now();
-      await this.pushLocalNewerLinks(merged, remotePull.links);
-      if (!this.isCurrentOwner(ownerId)) return;
+      await this.pushLocalNewerLinks(merged, remotePull.links, token);
+      if (!this.isAuthIdentityFenceCurrent(token)) return;
       this.runInBackground(this.flushPendingLinks(), "flush after initial load");
     }
+    if (!this.isAuthIdentityFenceCurrent(token)) return;
+    this.initialized = true;
+    this.loadedOwnerId = ownerId;
+    this.loadedAuthFence = token;
     this.bindOpportunisticListeners();
   }
   /**
@@ -109,35 +126,40 @@ export class ExternalSourceLinkService {
    * 当 lastPullAt 早于 REMOTE_REFRESH_STALE_MS 时重新 pull-merge；否则跳过以节省请求。
    * 与 ensureLoaded 共享 owner 切换语义；并发调用复用同一 in-flight promise。
    */
-  async refreshIfStale(force = false): Promise<void> { return localBackupUiRestoreWriterQuiescence.runContinuationAsync(this.currentUserId(), 'external-source', async () => {
-    if (this.destroyed) return;
-    if (!this.initialized) return;
-    const ownerId = this.currentUserId();
-    if (this.loadedOwnerId !== ownerId) return; // owner 切换会经 ensureLoaded 处理
-    if (!force && Date.now() - this.lastPullAt < SIYUAN_CONFIG.REMOTE_REFRESH_STALE_MS) return;
-    if (this.refreshPromise) return this.refreshPromise;
-    const refreshPromise = this.runRefresh(ownerId).finally(() => {
-      if (this.refreshPromise === refreshPromise) {
-        this.refreshPromise = null;
+  async refreshIfStale(force = false): Promise<void> {
+    return localBackupUiRestoreWriterQuiescence.runContinuationAsync(this.currentUserId(), 'external-source', async () => {
+      if (this.destroyed) return;
+      const token = this.captureAuthIdentityFence();
+      if (!this.isAuthIdentityFenceCurrent(token) || !this.initialized) return;
+      if (this.loadedOwnerId !== token.ownerId) return; // owner changes still flow through ensureLoaded
+      if (!this.loadedAuthFence || !this.sameAuthIdentityFence(this.loadedAuthFence, token)) {
+        await this.ensureLoadedFor(token, true);
+        return;
       }
+      if (!force && Date.now() - this.lastPullAt < SIYUAN_CONFIG.REMOTE_REFRESH_STALE_MS) return;
+      const activeRefresh = this.refreshFlight;
+      if (activeRefresh && this.sameAuthIdentityFence(activeRefresh.token, token)) return activeRefresh.promise;
+      const refreshPromise = this.runRefresh(token).finally(() => {
+        if (this.refreshFlight?.promise === refreshPromise) this.refreshFlight = null;
+      });
+      this.refreshFlight = { token, promise: refreshPromise };
+      return refreshPromise;
     });
-    this.refreshPromise = refreshPromise;
-    return this.refreshPromise;
-  }); }
-  private async runRefresh(ownerId: string): Promise<void> {
+  }
+  private async runRefresh(token: AuthIdentityFence): Promise<void> {
+    const { ownerId } = token;
     const localLinks = await this.cache.loadLinks(ownerId);
-    if (!this.isCurrentOwner(ownerId)) return;
-    const remotePull = await this.pullRemoteLinks(ownerId);
-    if (!this.isCurrentOwner(ownerId)) return;
-    if (remotePull.deferredBySuspension || remotePull.failed) {
-      return;
-    }
-    this.lastPullAt = Date.now();
+    if (!this.isAuthIdentityFenceCurrent(token)) return;
+    const remotePull = await this.pullRemoteLinks(ownerId, token);
+    if (!this.isAuthIdentityFenceCurrent(token)) return;
+    if (remotePull.deferredBySuspension || remotePull.failed) return;
     const merged = mergeExternalSourceLinks(localLinks, remotePull.links);
+    if (!this.isAuthIdentityFenceCurrent(token)) return;
     this.replaceOwnedLinks(ownerId, merged);
     await this.cache.saveLinks(merged, ownerId);
-    if (!this.isCurrentOwner(ownerId)) return;
-    await this.pushLocalNewerLinks(merged, remotePull.links);
+    if (!this.isAuthIdentityFenceCurrent(token)) return;
+    this.lastPullAt = Date.now();
+    await this.pushLocalNewerLinks(merged, remotePull.links, token);
   }
   private bindOpportunisticListeners(): void {
     if (this.opportunisticListenersBound || typeof window === "undefined") return;
@@ -339,14 +361,24 @@ export class ExternalSourceLinkService {
   }
 
   async importPointers(links: ExternalSourceLink[], commit?: () => void | Promise<void>): Promise<void> { return localBackupUiRestoreWriterQuiescence.runContinuationAsync(this.currentUserId(), 'external-source', async () => {
-    if (links.length === 0) return await commit?.();
-    const ownerId = this.currentUserId(), priorImport = this.importPromise, priorFlush = this.flushFlight?.promise;
+    const token = this.captureAuthIdentityFence();
+    const ownerId = token.ownerId;
+    if (links.length === 0) {
+      this.assertImportFence(token);
+      await commit?.();
+      this.assertImportFence(token);
+      return;
+    }
+    const priorImport = this.importPromise, priorFlush = this.flushFlight?.promise;
     const transaction = Promise.resolve().then(async () => {
-      if (priorImport) await priorImport; if (priorFlush) await priorFlush;
-      this.assertImportOwner(ownerId); await this.ensureLoaded();
+      if (priorImport) await priorImport;
+      if (priorFlush) await priorFlush;
+      this.assertImportFence(token);
+      await this.ensureLoadedFor(token, true);
+      this.assertImportFence(token);
       if (!this.isCurrentOwner(ownerId)) throw new Error("External source link import owner changed");
-      const linksBefore = new Map((await this.cache.loadLinks(ownerId)).map(link => [link.id, link])); this.assertImportOwner(ownerId);
-      const pendingBefore = new Map((await this.cache.loadPendingLinks(ownerId)).map(entry => [entry.link.id, entry])); this.assertImportOwner(ownerId);
+      const linksBefore = new Map((await this.cache.loadLinks(ownerId)).map(link => [link.id, link])); this.assertImportFence(token);
+      const pendingBefore = new Map((await this.cache.loadPendingLinks(ownerId)).map(entry => [entry.link.id, entry])); this.assertImportFence(token);
       const writes = links.map(normalizeExternalSourceLink), snapshots = new Map<string, ImportLinkSnapshot>();
       for (const link of writes) {
         const snapshot = snapshots.get(link.id) ?? { previousLink: linksBefore.get(link.id), previousPending: pendingBefore.get(link.id), fingerprints: new Set<string>(), operationIds: new Set<string>() };
@@ -355,36 +387,55 @@ export class ExternalSourceLinkService {
       const stagedLinks = new Map(linksBefore);
       try {
         for (const link of writes) {
-          this.assertImportOwner(ownerId);
+          this.assertImportFence(token);
           const pending = await this.cache.upsertPendingLink(link, { resetRetryCount: false }, ownerId);
-          snapshots.get(link.id)!.operationIds.add(pending.operationId); this.assertImportOwner(ownerId);
+          snapshots.get(link.id)!.operationIds.add(pending.operationId);
+          this.assertImportFence(token);
           stagedLinks.set(link.id, link);
           await this.cache.saveLinks(mergeExternalSourceLinks(Array.from(stagedLinks.values()), []), ownerId);
-          this.assertImportOwner(ownerId);
+          this.assertImportFence(token);
         }
-        await commit?.(); if (!this.isCurrentOwner(ownerId)) throw new Error("External source link import owner changed");
+        this.assertImportFence(token);
+        await commit?.();
+        this.assertImportFence(token);
+        if (!this.isCurrentOwner(ownerId)) throw new Error("External source link import owner changed");
         this.replaceOwnedLinks(ownerId, mergeExternalSourceLinks(Array.from(stagedLinks.values()), []));
       } catch (error) {
+        if (!this.isAuthIdentityFenceCurrent(token)) {
+          throw new Error("External source link import owner changed or auth session changed");
+        }
         const currentLinks = new Map((await this.cache.loadLinks(ownerId)).map(link => [link.id, link]));
+        this.assertImportFence(token);
         for (const [linkId, snapshot] of snapshots) {
           const current = currentLinks.get(linkId);
           if (!current || !snapshot.fingerprints.has(externalSourceLinkFingerprint(current))) continue;
           if (snapshot.previousLink) currentLinks.set(linkId, snapshot.previousLink); else currentLinks.delete(linkId);
         }
-        const restoredLinks = mergeExternalSourceLinks(Array.from(currentLinks.values()), []); await this.cache.saveLinks(restoredLinks, ownerId);
+        const restoredLinks = mergeExternalSourceLinks(Array.from(currentLinks.values()), []);
+        this.assertImportFence(token);
+        await this.cache.saveLinks(restoredLinks, ownerId);
+        this.assertImportFence(token);
         if (this.isCurrentOwner(ownerId)) {
           this.replaceOwnedLinks(ownerId, restoredLinks);
           for (const [linkId, snapshot] of snapshots) {
+            this.assertImportFence(token);
             const current = (await this.cache.loadPendingLinks(ownerId)).find(entry => entry.link.id === linkId);
+            this.assertImportFence(token);
             if (!current || !snapshot.operationIds.has(current.operationId) || !snapshot.fingerprints.has(externalSourceLinkFingerprint(current.link))) continue;
             await this.cache.restorePendingLinkSnapshot(linkId, current.operationId, snapshot.previousPending, ownerId);
+            this.assertImportFence(token);
           }
         }
         throw error;
       }
     });
     this.importPromise = transaction;
-    try { await transaction; } finally { if (this.importPromise === transaction) this.importPromise = null; }
+    try {
+      await transaction;
+      this.assertImportFence(token);
+    } finally {
+      if (this.importPromise === transaction) this.importPromise = null;
+    }
     this.runInBackground(this.flushPendingLinks(), "flush after import");
   }); }
   openLink(link: ExternalSourceLink): void {
@@ -565,8 +616,8 @@ export class ExternalSourceLinkService {
   private async pushLocalNewerLinks(
     localLinks: ExternalSourceLink[],
     remoteLinks: ExternalSourceLink[],
+    token: AuthIdentityFence = this.captureAuthIdentityFence(),
   ): Promise<void> {
-    const token = this.captureAuthIdentityFence();
     const remoteById = new Map(remoteLinks.map((link) => [link.id, link]));
     const localsToPush = localLinks.filter((local) => {
       const remote = remoteById.get(local.id);
@@ -747,12 +798,17 @@ export class ExternalSourceLinkService {
     return !this.destroyed && this.sameAuthIdentityFence(token, this.captureAuthIdentityFence());
   }
 
-  private assertImportOwner(ownerId: string): void {
-    if (this.currentUserId() !== ownerId) throw new Error("External source link import owner changed");
+  private assertImportFence(token: AuthIdentityFence): void {
+    if (!this.isAuthIdentityFenceCurrent(token)) {
+      throw new Error("External source link import owner changed or auth session changed");
+    }
   }
 
   private isCurrentOwner(ownerId: string): boolean {
-    return this.currentUserId() === ownerId && this.loadedOwnerId === ownerId;
+    return this.currentUserId() === ownerId
+      && this.loadedOwnerId === ownerId
+      && this.loadedAuthFence !== null
+      && this.isAuthIdentityFenceCurrent(this.loadedAuthFence);
   }
 
   private parseSiyuanInput(
