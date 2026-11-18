@@ -597,6 +597,96 @@ export function registerAnalyzeCodegraphMcpLogSourceOrderingCurrentSpecs(): void
     ]));
   }, CURRENT_SOURCE_ORDERING_ANALYZER_TIMEOUT_MS);
 
+  it('correlates benign missing evidence without suppressing an independent non-benign ordering failure', () => {
+    const script = makeScriptFile('module.exports = { version: "correlated-source-ordering" };\n');
+    const logPath = makeLog([
+      wrapperStartEvent('run-correlated', script),
+      contextResponseEvent('run-correlated', 'request-benign-missing', {
+        query: 'codegraph nanoflow adaptation dedup contract source ordering',
+        sourceOrdering: makeSourceOrderingFixture({
+          sourceBlockCount: 1,
+          firstSourceFiles: ['scripts/codegraph-nanoflow-mcp-stdio.cjs'],
+          rankedOverlayFiles: [
+            'src/tests/scripts/codegraph-nanoflow-overlay.spec.ts',
+            'scripts/codegraph-nanoflow-mcp-stdio.cjs',
+          ],
+          rawTopRankedOverlayFile: 'src/tests/scripts/codegraph-nanoflow-overlay.spec.ts',
+          topRankedOverlayFile: 'src/tests/scripts/codegraph-nanoflow-overlay.spec.ts',
+          topRankedOverlayFileSelectionReason: 'raw-score-top',
+          topRankedOverlayFileVisibleIndex: -1,
+          firstSourceBlockIsTopRankedOverlayFile: false,
+          topRankedOverlayFileMissing: true,
+          rankedOverlayFileDetails: [
+            {
+              filePath: 'src/tests/scripts/codegraph-nanoflow-overlay.spec.ts',
+              score: 30_000,
+              matchRank: 0,
+              nodeRank: 0,
+              lowValuePenalty: 12_000,
+              rawLowValuePenalty: 12_000,
+              pathClassLowValue: true,
+            },
+            {
+              filePath: 'scripts/codegraph-nanoflow-mcp-stdio.cjs',
+              score: 25_000,
+              matchRank: 1,
+              nodeRank: 1,
+              lowValuePenalty: 0,
+              rawLowValuePenalty: 0,
+              codegraphToolingSource: true,
+              dedupMaintenanceSource: true,
+            },
+          ],
+          topRankedOverlayDecision: {
+            rawFile: 'src/tests/scripts/codegraph-nanoflow-overlay.spec.ts',
+            selectedFile: 'src/tests/scripts/codegraph-nanoflow-overlay.spec.ts',
+            selectionReason: 'raw-score-top',
+            rawVisibleIndex: -1,
+            selectedVisibleIndex: -1,
+            rawLowValuePenalty: 12_000,
+            selectedLowValuePenalty: 12_000,
+            skippedLowValue: false,
+            baseSourceReorderAllowed: true,
+            baseSourceReorderReason: 'overlay-evidence-first',
+            queryMentionsTests: false,
+            queryMentionsCodegraphDedupMaintenance: true,
+            queryMentionsCodegraphTooling: true,
+          },
+        }),
+      }),
+      contextResponseEvent('run-correlated', 'request-real-ordering-failure', {
+        query: 'ImplementationService real source ordering',
+        sourceOrdering: makeSourceOrderingFixture({
+          sourceBlockCount: 2,
+          firstSourceFiles: ['src/noisy.ts', 'src/services/implementation.service.ts'],
+          rankedOverlayFiles: ['src/services/implementation.service.ts'],
+          topRankedOverlayFile: 'src/services/implementation.service.ts',
+          topRankedOverlayFileVisibleIndex: 1,
+          firstSourceBlockIsTopRankedOverlayFile: false,
+          topRankedOverlayFileMissing: false,
+        }),
+      }),
+    ]);
+
+    const result = runAnalyzer(logPath, ['--fail-on-current-source-ordering']);
+    const summary = JSON.parse(result.stdout);
+
+    expect(result.status, result.stderr).toBe(1);
+    expect(summary.currentContextSourceOrdering).toEqual(expect.objectContaining({
+      benignTopRankedMissing: 1,
+      topRankedNotFirst: 1,
+      lowValueVisibleSourceBlocks: 0,
+      latestIssue: expect.objectContaining({
+        requestId: 'request-real-ordering-failure',
+        issue: 'top-ranked-overlay-not-first',
+      }),
+    }));
+    expect(summary.currentContextSourceOrdering.latestBenignTopRankedMissing).toEqual(expect.objectContaining({
+      requestId: 'request-benign-missing',
+      benignReason: 'low-value-top-ranked-overlay-filtered',
+    }));
+  }, CURRENT_SOURCE_ORDERING_ANALYZER_TIMEOUT_MS);
+
   it('marks the current wrapper as matching the on-disk script hash', () => {
     const script = makeScriptFile('module.exports = { version: "fresh" };\n');
     const logPath = makeLog([wrapperStartEvent('fresh-run', script)]);
