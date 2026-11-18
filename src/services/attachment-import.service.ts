@@ -25,8 +25,6 @@ import type { AttachmentUploadPayload, QueuedAction } from './action-queue.types
 import { AttachmentUploadOutboxService } from './attachment-upload-outbox.service';
 import type { QueuedAttachmentUploadReceipt } from './attachment-upload-queue.helpers';
 import { ProjectStateService, type ActiveProjectOwner } from './project-state.service';
-import type { TaskProjectAttachmentOwnerFence } from './task-operation-attachment-project.helpers';
-import { UserSessionService } from './user-session.service';
 import { Attachment } from '../models';
 import { ATTACHMENT_CONFIG } from '../config/attachment.config';
 import { extractAttachmentItemsFromZip, type AttachmentImportZipLimits } from './attachment-import-zip.helpers';
@@ -154,7 +152,7 @@ interface AttachmentImportRun {
   ownerFence: AttachmentImportOwnerFence;
 }
 
-interface AttachmentImportOwnerFence extends AttachmentUploadOwnerFence, TaskProjectAttachmentOwnerFence {
+interface AttachmentImportOwnerFence extends AttachmentUploadOwnerFence {
   readonly ownerUserId: string;
   readonly projectOwner: ActiveProjectOwner;
 }
@@ -179,7 +177,6 @@ export class AttachmentImportService {
   private readonly auth = inject(AuthService);
   private readonly supabase = inject(SupabaseClientService);
   private readonly projectState = inject(ProjectStateService, { optional: true });
-  private readonly userSession = inject(UserSessionService, { optional: true });
   private readonly resume = inject(AttachmentImportResumeService, { optional: true })
     ?? new AttachmentImportResumeService();
   private readonly zipLimits: AttachmentImportZipLimits = {
@@ -251,26 +248,16 @@ export class AttachmentImportService {
       && typeof this.projectState.captureActiveProjectOwner === 'function'
       ? this.projectState.captureActiveProjectOwner()
       : { projectId, generation: 0 };
-    const authIdentityFence = typeof this.auth.captureAuthIdentityFence === 'function'
-      ? this.auth.captureAuthIdentityFence()
-      : `${userId}:${projectOwner.generation}`;
-    const sessionGeneration = this.userSession
-      && typeof this.userSession.getCurrentSessionGeneration === 'function'
-      ? this.userSession.getCurrentSessionGeneration()
-      : -1;
+    const captureAuthIdentityFence = typeof (this.auth as AuthService & { captureAuthIdentityFence?: () => string }).captureAuthIdentityFence === 'function'
+      ? () => (this.auth as AuthService & { captureAuthIdentityFence: () => string }).captureAuthIdentityFence()
+      : () => this.auth.currentUserId() ?? '';
+    const authIdentityFence = captureAuthIdentityFence();
     const ownerFence: AttachmentImportOwnerFence = Object.freeze({
       ownerUserId: userId,
       projectOwner,
-      authIdentityFence,
-      sessionGeneration,
-      operationId: '',
       isCurrent: () => (
         this.auth.currentUserId() === userId
-        && (typeof this.auth.captureAuthIdentityFence !== 'function'
-          || this.auth.captureAuthIdentityFence() === authIdentityFence)
-        && (!this.userSession
-          || typeof this.userSession.isSessionContextCurrent !== 'function'
-          || this.userSession.isSessionContextCurrent(sessionGeneration, userId))
+        && captureAuthIdentityFence() === authIdentityFence
         && (!this.projectState
           || typeof this.projectState.isActiveProjectOwnerCurrent !== 'function'
           || this.projectState.isActiveProjectOwnerCurrent(projectOwner))
@@ -805,6 +792,7 @@ export class AttachmentImportService {
         error: uploadResult.error,
         attachment: uploadResult.attachment,
         pendingUpload: uploadResult.pendingUpload,
+        queuedUpload: uploadResult.queuedUpload,
       };
     }
 
@@ -829,16 +817,18 @@ export class AttachmentImportService {
     ownerFence: AttachmentImportOwnerFence,
   ): Promise<BatchUploadResult> {
     if (!ownerFence.isCurrent()) {
-      const compensationStatus = await this.compensateQueuedUpload(queuedUpload);
-      return this.createMissingTargetResult(item, itemKey, queuedUpload, attachment, compensationStatus);
+      return this.createMissingTargetResult(item, itemKey, queuedUpload, attachment, 'unknown');
     }
     const written = await this.taskOpsAdapter.addTaskAttachmentToProject(
       projectId,
       item.taskId,
       attachment,
-      { operationId, ownerFence: { ...ownerFence, operationId } },
+      { operationId, ownerFence },
     );
     if (!written || !ownerFence.isCurrent()) {
+      if (!ownerFence.isCurrent()) {
+        return this.createMissingTargetResult(item, itemKey, queuedUpload, attachment, 'unknown');
+      }
       const compensationStatus = await this.compensateQueuedUpload(queuedUpload);
       return this.createMissingTargetResult(item, itemKey, queuedUpload, attachment, compensationStatus);
     }

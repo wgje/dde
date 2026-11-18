@@ -117,10 +117,19 @@ export class RetryQueueUnknownOutcomeFenceController {
       if (this.options.getQueuePressureReason() === RETRY_QUEUE_UNKNOWN_OUTCOME_STORAGE_PRESSURE_REASON) {
         this.options.clearPressureMode();
       }
-      if (expectedUnknownOutcomeFence) {
-        clearRetryQueuePendingUnknownOutcomeFence(expectedUnknownOutcomeFence);
-      } else if (item) {
-        this.clearFenceForItem(item);
+      const cleared = expectedUnknownOutcomeFence
+        ? clearRetryQueuePendingUnknownOutcomeFence(expectedUnknownOutcomeFence)
+        : item
+          ? this.clearFenceForItem(item)
+          : true;
+      if (!cleared) {
+        this.options.enterPressureMode(RETRY_QUEUE_UNKNOWN_OUTCOME_STORAGE_PRESSURE_REASON);
+        this.options.warn('RetryQueue unknown-outcome fence 清理未确认，保持 fail closed', {
+          ownerUserId: expectedUnknownOutcomeFence?.ownerUserId ?? this.options.getCurrentOwnerUserId(),
+          queueItemId: expectedUnknownOutcomeFence?.queueItemId ?? item?.id,
+          operationId: expectedUnknownOutcomeFence?.operationId ?? item?.operationId,
+        });
+        return false;
       }
       return true;
     } catch (error) {
@@ -163,7 +172,14 @@ export class RetryQueueUnknownOutcomeFenceController {
     }
 
     if (item.lastFailure?.remoteOutcome === 'unknown') {
-      clearRetryQueuePendingUnknownOutcomeFence(record.fence);
+      if (!clearRetryQueuePendingUnknownOutcomeFence(record.fence)) {
+        this.options.enterPressureMode(RETRY_QUEUE_UNKNOWN_OUTCOME_STORAGE_PRESSURE_REASON);
+        this.options.warn('RetryQueue unknown-outcome fence 清理未确认，保持恢复栅栏', {
+          ownerUserId,
+          queueItemId: record.fence.queueItemId,
+          operationId: record.fence.operationId,
+        });
+      }
       return;
     }
 
@@ -201,7 +217,15 @@ export class RetryQueueUnknownOutcomeFenceController {
       return;
     }
 
-    clearRetryQueuePendingUnknownOutcomeFence(record.fence);
+    if (!clearRetryQueuePendingUnknownOutcomeFence(record.fence)) {
+      this.options.enterPressureMode(RETRY_QUEUE_UNKNOWN_OUTCOME_STORAGE_PRESSURE_REASON);
+      this.options.warn('RetryQueue unknown-outcome fence 清理未确认，保持存储压力栅栏', {
+        ownerUserId,
+        queueItemId: record.fence.queueItemId,
+        operationId: record.fence.operationId,
+      });
+      return;
+    }
     this.options.clearPressureMode();
     this.options.info('RetryQueue unknown-outcome marker 已写回并读验，恢复对账', {
       ownerUserId,
@@ -222,7 +246,14 @@ export class RetryQueueUnknownOutcomeFenceController {
       if (presentInQueue && hasPersistedItem(item.id)) {
         continue;
       }
-      this.clearFenceForItem(item);
+      if (!this.clearFenceForItem(item)) {
+        this.options.enterPressureMode(RETRY_QUEUE_UNKNOWN_OUTCOME_STORAGE_PRESSURE_REASON);
+        this.options.warn('RetryQueue unknown-outcome fence 清理未确认，保留诊断栅栏', {
+          ownerUserId: this.options.getCurrentOwnerUserId(),
+          queueItemId: item.id,
+          operationId: item.operationId,
+        });
+      }
     }
   }
 
@@ -258,8 +289,8 @@ export class RetryQueueUnknownOutcomeFenceController {
     }
   }
 
-  private clearFenceForItem(item: RetryQueueItem): void {
-    clearRetryQueuePendingUnknownOutcomeFence(
+  private clearFenceForItem(item: RetryQueueItem): boolean {
+    return clearRetryQueuePendingUnknownOutcomeFence(
       createRetryQueuePendingUnknownOutcomeFence(item, this.options.getCurrentOwnerUserId()),
     );
   }

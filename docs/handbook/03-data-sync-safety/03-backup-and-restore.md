@@ -483,3 +483,8 @@ ActionQueue 中可执行的 pending 项会在恢复前检查 `id` 和 UUID `oper
 - 进一步核查附件与文件安全: [附件与文件安全](../02-use-nanoflow/10-attachments-and-file-safety.md)
 - 处理同步异常与恢复后残留问题: [同步诊断与冲突中心](05-sync-diagnostics-and-conflict-center.md)
 - 涉及部署、账号或云端权限时再看: [安全与隐私](04-security-and-privacy.md)
+## UI 恢复事务的阶段顺序
+
+本地 UI 恢复由 journal transaction 协调，阶段顺序固定为：项目、附件 outbox、ActionQueue、RetryQueue、dead letters、冲突、元数据。每个阶段都会保存 pre-image、持久化进度并读回验证；失败时按逆序补偿。
+
+如果补偿失败、owner 或 quiescence 证据不一致、lease 未过期或读回不匹配，流程会保留 journal、marker 和诊断信息并阻止清理。启动恢复只接管 owner、run、队列和 quiescence 证据一致且 lease 已过期的记录；其他情况保持零写入。

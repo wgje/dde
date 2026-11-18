@@ -20,6 +20,22 @@ describe('attachment-storage-path.helpers', () => {
     expect(isValidAttachmentPathSegment('x'.repeat(256))).toBe(false);
   });
 
+  it('拒绝不安全的 owner/project/task/attachment identity segments', () => {
+    const base = {
+      userId: 'user-1',
+      projectId: 'project-1',
+      taskId: 'task-1',
+      attachmentId: 'attachment-1',
+      fileName: 'report.pdf',
+    };
+
+    for (const key of ['userId', 'projectId', 'taskId', 'attachmentId'] as const) {
+      expect(() => buildAttachmentStoragePath({ ...base, [key]: '../foreign' })).toThrow(
+        'Invalid attachment storage path identity',
+      );
+    }
+  });
+
   it('构建统一附件存储路径并清洗扩展名', () => {
     expect(buildAttachmentStoragePath({
       userId: 'user-1',

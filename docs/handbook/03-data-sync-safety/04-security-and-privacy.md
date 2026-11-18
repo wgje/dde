@@ -198,3 +198,8 @@ Markdown 的可读性不是信任背书。一个看起来像项目链接的文�
 
 - 配置云端：[Supabase 运维](../04-deploy-operate/02-supabase-operations.md)。
 - 保护数据：[备份与恢复](03-backup-and-restore.md)。
+## 附件 owner fence 与导入安全
+
+附件导入会携带不可变的 owner/session fence。适配器在进入 writer、入队、状态写入前以及等待后的状态提交前都会重新校验它；owner 或 session 变化时，不会写入旧账号的队列或 ProjectState。
+
+`operationId`、保留的失败回执和本地双存储镜像用于重放和诊断。它们不能替代服务端身份校验、Storage 私有 bucket 或 Edge Function 的授权配置。

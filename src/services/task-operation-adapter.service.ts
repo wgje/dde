@@ -443,17 +443,37 @@ export class TaskOperationAdapterService {
     projectId: string,
     taskId: string,
     attachment: Attachment,
-    options: { operationId?: string; ownerFence?: TaskProjectAttachmentOwnerFence } = {},
+    options: {
+      operationId?: string;
+      ownerFence?: Pick<TaskProjectAttachmentOwnerFence, 'ownerUserId' | 'projectOwner' | 'isCurrent'>;
+    } = {},
   ): Promise<boolean> {
     if (this.blockLocalMutation('添加任务附件')) {
       return false;
     }
 
-    const ownerFence = options.ownerFence ?? this.captureTaskAttachmentOwnerFence(options.operationId);
+    const suppliedFence = options.ownerFence;
+    if (suppliedFence && !suppliedFence.isCurrent()) return false;
+    const ownerUserId = suppliedFence?.ownerUserId
+      ?? this.authService.currentUserId()
+      ?? AUTH_CONFIG.LOCAL_MODE_USER_ID;
+    const projectOwner = Object.freeze({
+      ...(suppliedFence?.projectOwner ?? this.projectState.captureActiveProjectOwner()),
+    });
+    const ownerFence: TaskProjectAttachmentOwnerFence = Object.freeze({
+      ownerUserId,
+      projectOwner,
+      operationId: options.operationId ?? crypto.randomUUID(),
+      isCurrent: () => (
+        (suppliedFence?.isCurrent() ?? true)
+        && (this.authService.currentUserId() ?? AUTH_CONFIG.LOCAL_MODE_USER_ID) === ownerUserId
+        && this.projectState.isActiveProjectOwnerCurrent(projectOwner)
+      ),
+    });
     if (!ownerFence.isCurrent()) return false;
 
     const result = await localBackupUiRestoreWriterQuiescence.runAsync(
-      ownerFence.ownerUserId,
+      ownerUserId,
       'project-state',
       () => {
         if (!ownerFence.isCurrent()) return Promise.resolve(false);
@@ -461,32 +481,6 @@ export class TaskOperationAdapterService {
       },
     );
     return ownerFence.isCurrent() ? result : false;
-  }
-
-  private captureTaskAttachmentOwnerFence(operationId?: string): TaskProjectAttachmentOwnerFence {
-    const ownerUserId = this.authService.currentUserId() ?? AUTH_CONFIG.LOCAL_MODE_USER_ID;
-    const projectOwner = Object.freeze({ ...this.projectState.captureActiveProjectOwner() });
-    const authIdentityFence = typeof this.authService.captureAuthIdentityFence === 'function'
-      ? this.authService.captureAuthIdentityFence()
-      : `${ownerUserId}:${projectOwner.generation}`;
-    const sessionGeneration = typeof this.userSession.getCurrentSessionGeneration === 'function'
-      ? this.userSession.getCurrentSessionGeneration()
-      : -1;
-    return Object.freeze({
-      ownerUserId,
-      projectOwner,
-      authIdentityFence,
-      sessionGeneration,
-      operationId: operationId ?? crypto.randomUUID(),
-      isCurrent: () => (
-        (this.authService.currentUserId() ?? AUTH_CONFIG.LOCAL_MODE_USER_ID) === ownerUserId
-        && this.projectState.isActiveProjectOwnerCurrent(projectOwner)
-        && (typeof this.authService.captureAuthIdentityFence !== 'function'
-          || this.authService.captureAuthIdentityFence() === authIdentityFence)
-        && (typeof this.userSession.isSessionContextCurrent !== 'function'
-          || this.userSession.isSessionContextCurrent(sessionGeneration, ownerUserId))
-      ),
-    });
   }
 
   private async addTaskAttachmentToProjectUnderWriter(
@@ -526,7 +520,8 @@ export class TaskOperationAdapterService {
       return false;
     }
 
-    return addTaskAttachmentToProjectState({
+    if (!ownerFence.isCurrent()) return false;
+    const stateWritten = await addTaskAttachmentToProjectState({
       projectId,
       taskId,
       attachment,
@@ -546,6 +541,7 @@ export class TaskOperationAdapterService {
       schedulePersist: () => this.syncCoordinator.schedulePersist(),
       warn: (message, data) => this.logger.warn(message, data),
     });
+    return ownerFence.isCurrent() ? stateWritten : false;
   }
 
   removeTaskAttachment(taskId: string, attachmentId: string): Promise<boolean> {

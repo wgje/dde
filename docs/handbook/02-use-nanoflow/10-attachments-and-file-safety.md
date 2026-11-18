@@ -398,3 +398,8 @@ source_paths:
 - 想做导出、恢复和回收站操作：读 [项目、设置与回收站](09-project-settings-and-recovery.md) 和 [备份与恢复](../03-data-sync-safety/03-backup-and-restore.md)。
 - 想检查隐私、Storage 与扫描责任边界：读 [安全与隐私](../03-data-sync-safety/04-security-and-privacy.md)。
 - 想排查部署侧上传、扫描或链接失效：读 [生产排障](../04-deploy-operate/04-production-troubleshooting.md) 和 [Edge Functions](../04-deploy-operate/03-edge-functions.md)。
+## 本次安全收尾补充
+
+附件存储路径现在会在构造前拒绝不安全的用户、项目、任务、附件身份段和不允许的扩展名。`../foreign`、路径分隔符、控制字符或不符合身份规则的值不会进入上传、签名 URL 刷新、下载和删除路径。
+
+这项检查是客户端路径安全边界。它不等同于服务端对象授权、加密或病毒扫描证明；下载仍需通过扫描状态和权限检查。

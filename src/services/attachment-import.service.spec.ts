@@ -36,6 +36,7 @@ describe('AttachmentImportService', () => {
   };
   let mockAuthService: {
     currentUserId: ReturnType<typeof vi.fn>;
+    captureAuthIdentityFence: ReturnType<typeof vi.fn>;
   };
   let mockToastService: {
     error: ReturnType<typeof vi.fn>;
@@ -100,6 +101,7 @@ describe('AttachmentImportService', () => {
     
     mockAuthService = {
       currentUserId: vi.fn().mockReturnValue('user-1'),
+      captureAuthIdentityFence: vi.fn().mockReturnValue('session-1:user-1'),
     };
     
     mockToastService = {
@@ -696,7 +698,36 @@ describe('AttachmentImportService', () => {
       expect(await resumeService.readCheckpoint('user-1', 'project-1', identity.packageDigest)).toBeNull();
     });
 
-    it('owner 在 upload await 期间切换时不进入 task metadata，checkpoint 保留', async () => {
+    it('session generation 在 upload await 期间变化时不进入 task metadata，checkpoint 保留', async () => {
+    const items = [{
+      projectId: 'project-1',
+      taskId: 'task-1',
+      metadata: { id: 'att-session-await', name: 'session-await.txt', size: 4, mimeType: 'text/plain' },
+      data: new Blob(['data']),
+    }];
+    let resolveUpload!: (value: unknown) => void;
+    const uploadDone = new Promise(resolve => { resolveUpload = resolve; });
+    mockAttachmentService.uploadFile.mockImplementation(async () => {
+      await uploadDone;
+      return {
+        success: true,
+        attachment: { id: 'att-session-await', name: 'session-await.txt', type: 'document', url: 'pending', mimeType: 'text/plain', size: 4, createdAt: new Date().toISOString() },
+        queuedUpload: { actionId: 'action-session-await', ownerUserId: 'user-1', blobKey: 'att-session-await', operationId: 'operation-session-await' },
+      };
+    });
+
+    const importing = service.importAttachments('project-1', items);
+    await vi.waitFor(() => expect(mockAttachmentService.uploadFile).toHaveBeenCalled());
+    mockAuthService.captureAuthIdentityFence.mockReturnValue('session-2:user-1');
+    resolveUpload(undefined);
+    const result = await importing;
+
+    expect(result.success).toBe(false);
+    expect(mockTaskOpsAdapter.addTaskAttachmentToProject).not.toHaveBeenCalled();
+    const identity = await resumeService.buildPackageIdentity('project-1', items);
+    expect(await resumeService.readCheckpoint('user-1', 'project-1', identity.packageDigest)).not.toBeNull();
+  });
+  it('owner 在 upload await 期间切换时不进入 task metadata，checkpoint 保留', async () => {
       const item: AttachmentImportItem = {
         projectId: 'project-1',
         taskId: 'task-0',
@@ -717,6 +748,35 @@ describe('AttachmentImportService', () => {
       const result = await importPromise;
       expect(result.success).toBe(false);
       expect(mockTaskOpsAdapter.addTaskAttachmentToProject).not.toHaveBeenCalled();
+      mockAuthService.currentUserId.mockReturnValue('user-1');
+    });
+
+    it('owner 在 queue enqueue 后切换时仍保留 queued receipt，不执行补偿删除', async () => {
+      const item: AttachmentImportItem = {
+        projectId: 'project-1',
+        taskId: 'task-0',
+        metadata: { id: 'att-queue-owner', name: 'queue-owner.txt', size: 4, mimeType: 'text/plain' },
+        data: new Blob(['demo'], { type: 'text/plain' }),
+      };
+      let releaseUpload!: (value: unknown) => void;
+      mockAttachmentService.uploadFile.mockReturnValueOnce(new Promise(resolve => { releaseUpload = resolve; }));
+      const importPromise = service.importAttachments('project-1', [item]);
+      await vi.waitFor(() => expect(mockAttachmentService.uploadFile).toHaveBeenCalledOnce());
+      mockAuthService.currentUserId.mockReturnValue('user-2');
+      releaseUpload({
+        success: false,
+        error: 'owner changed after enqueue',
+        attachment: { id: 'att-queue-owner', name: 'queue-owner.txt', type: 'document', url: 'pending', mimeType: 'text/plain', size: 4, createdAt: new Date().toISOString() },
+        queuedUpload: { actionId: 'action-queue-owner', ownerUserId: 'user-1', blobKey: 'att-queue-owner', operationId: 'operation-queue-owner' },
+      });
+      const result = await importPromise;
+      expect(result.success).toBe(false);
+      expect(mockUploadOutbox.removePendingUpload).not.toHaveBeenCalled();
+      const identity = await resumeService.buildPackageIdentity('project-1', [item]);
+      const checkpoint = await resumeService.readCheckpoint('user-1', 'project-1', identity.packageDigest);
+      expect(checkpoint?.items[0]?.queuedUpload).toEqual({
+        actionId: 'action-queue-owner', ownerUserId: 'user-1', blobKey: 'att-queue-owner', operationId: 'operation-queue-owner',
+      });
       mockAuthService.currentUserId.mockReturnValue('user-1');
     });
 
@@ -741,6 +801,7 @@ describe('AttachmentImportService', () => {
       expect(lookup.status).toBe('storage-failed');
       expect(localStorage.getItem(key)).toContain('mismatched');
     });
+
   });
   
   describe('checkQuota', () => {

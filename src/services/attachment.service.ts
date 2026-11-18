@@ -254,9 +254,14 @@ export class AttachmentService {
       options.operationId,
       options.ownerFence,
     );
-    return options.ownerFence && !options.ownerFence.isCurrent()
-      ? { success: false, error: '附件导入 owner 已变化，已保留上传证据' }
-      : result;
+    if (!options.ownerFence || options.ownerFence.isCurrent()) return result;
+    if (!result.success) return result;
+    return {
+      success: false,
+      error: '附件导入 owner 已变化，已保留上传证据',
+      attachment: result.attachment,
+      queuedUpload: result.queuedUpload,
+    };
   }
 
   async uploadQueuedAttachment(

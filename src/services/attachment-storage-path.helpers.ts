@@ -23,6 +23,15 @@ export function isValidAttachmentPathSegment(segment: string): boolean {
 }
 
 export function buildAttachmentStoragePath(input: AttachmentStoragePathInput): string {
+  const segments = [input.userId, input.projectId, input.taskId, input.attachmentId];
+  if (segments.some(segment => !isValidAttachmentPathSegment(segment))) {
+    throw new Error('Invalid attachment storage path identity');
+  }
+
   const fileExt = sanitizeAttachmentPathSegment(input.fileName.split('.').pop() || 'bin');
+  if (!isValidAttachmentPathSegment(fileExt)) {
+    throw new Error('Invalid attachment storage path extension');
+  }
+
   return `${input.userId}/${input.projectId}/${input.taskId}/${input.attachmentId}.${fileExt}`;
 }

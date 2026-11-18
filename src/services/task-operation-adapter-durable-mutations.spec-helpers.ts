@@ -353,7 +353,7 @@ export function registerTaskOperationAdapterDurableMutationsSpecs(
     expect(context.mockOptimisticStateService().discardSnapshot).toHaveBeenNthCalledWith(1, 'snapshot-1');
     expect(context.mockOptimisticStateService().discardSnapshot).toHaveBeenNthCalledWith(2, 'snapshot-1');
     expect(context.mockLoggerCategory().warn).toHaveBeenCalledWith(
-      '任务永久删除本地持久化失败，未提交 UI 更新', { taskId: 'task-1' },
+      '任务永久删除未完成，未提交 UI 更新', { taskId: 'task-1' },
     );
     expect(context.mockLoggerCategory().warn).toHaveBeenCalledWith(
       '清空回收站本地持久化失败，未提交 UI 更新', {},

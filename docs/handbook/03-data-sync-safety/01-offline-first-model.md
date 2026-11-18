@@ -213,3 +213,8 @@ NanoFlow 的实体 ID 应该由客户端生成，例如使用 `crypto.randomUUID
 - 多设备使用前读 [同步与冲突处理](02-sync-and-conflicts.md)。
 - 重要数据使用前读 [备份与恢复](03-backup-and-restore.md)。
 - 已看到红色、死信或存储风险提示：读 [同步诊断与冲突中心](05-sync-diagnostics-and-conflict-center.md)。
+## Unknown outcome 重试状态
+
+当 RetryQueue 写入或清理结果未知时，NanoFlow 会保留 owner、队列项和 `operationId` 绑定的诊断 fence。清理未被确认前不会解除 `storage_unknown_outcome` 压力状态；恢复、重试和处理完成后的清理都遵守同一规则。
+
+因此，看到待处理或压力状态时不要手动删除本地队列或回退游标。先保留诊断证据，再按导出、恢复和重试路径处理。

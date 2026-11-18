@@ -38,6 +38,7 @@ export interface AttachmentUploadFailure {
   cancelled?: boolean;
   attachment?: Attachment;
   pendingUpload?: PendingAttachmentUploadIdentity;
+  queuedUpload?: QueuedAttachmentUploadReceipt;
 }
 
 export type AttachmentUploadResult = AttachmentUploadSuccess | AttachmentUploadFailure;
@@ -247,7 +248,17 @@ export async function queuePendingLocalAttachmentUpload(
     payload,
   );
   if (input.ownerFence && !input.ownerFence.isCurrent()) {
-    return { success: false, error: '附件导入 owner 已变化，已保留 queue 证据' };
+    return {
+      success: false,
+      error: '附件导入 owner 已变化，已保留 queue 证据',
+      attachment,
+      queuedUpload: createQueuedAttachmentUploadReceipt(
+        input.userId,
+        actionId,
+        operationId,
+        blobKey,
+      ),
+    };
   }
 
   if (!actionId) {

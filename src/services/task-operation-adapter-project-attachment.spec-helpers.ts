@@ -403,6 +403,30 @@ export function registerTaskOperationAdapterProjectAttachmentSpecs(
     }
   }, 10000);
 
+  it('导入 owner fence 在 adapter 调用边界失效时应零写入', async () => {
+    const targetTask = context.createTask({ id: 'adapter-race-task', attachments: [] });
+    context.setProjects([context.createProject({ id: 'target-project', tasks: [targetTask] })]);
+    context.setActiveProjectId('target-project');
+    const ownerFence = {
+      ownerUserId: 'user-1',
+      projectOwner: { projectId: 'target-project', generation: 0 },
+      isCurrent: vi.fn().mockReturnValueOnce(true).mockReturnValue(false),
+    };
+
+    const result = await context.service().addTaskAttachmentToProject('target-project', 'adapter-race-task', {
+      id: 'adapter-race-attachment',
+      type: 'file',
+      name: 'adapter-race.txt',
+      url: 'pending://adapter-race',
+      createdAt: '2026-06-01T00:00:00.000Z',
+    }, { operationId: 'attachment-import-operation', ownerFence });
+
+    expect(result).toBe(false);
+    expect(ownerFence.isCurrent).toHaveBeenCalledTimes(2);
+    expect(context.mockActionQueueService().enqueueDurably).not.toHaveBeenCalled();
+    expect(context.getProjects()[0]?.tasks[0]?.attachments ?? []).toEqual([]);
+  });
+
   it('project-scoped 附件写入找不到任务时应返回 false 且不触发同步', async () => {
     context.setProjects([context.createProject({ id: 'target-project', tasks: [] })]);
     context.setActiveProjectId('target-project');
