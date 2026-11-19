@@ -12,6 +12,8 @@ import { LoggerService } from './logger.service';
 import { AuthService } from './auth.service';
 import {
   projectConflictRestoreSnapshot,
+  restoreConflictRestoreSnapshot,
+  validateConflictRestoreSnapshot,
   type DataSafetyConflictRestoreSnapshot,
 } from './data-safety-conflict-restore.helpers';
 
@@ -243,5 +245,60 @@ describe('projectConflictRestoreSnapshot', () => {
         ]),
       }),
     );
+  });
+});
+
+describe('conflict restore rollback contracts', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    localStorage.clear();
+  });
+
+  it('rejects owner/scoped identity mismatches before any restore write', async () => {
+    const invalidRecord = {
+      ...toStoredConflictRecord({
+        ...createConflict('project-a', 'foreign', '2026-06-26T02:00:00.000Z', 1),
+        ownerUserId: 'other-owner',
+      }, 'other-owner'),
+      scopedId: `${OWNER_USER_ID}::project-a`,
+    };
+    const snapshot: DataSafetyConflictRestoreSnapshot = {
+      indexedDbRecords: [invalidRecord],
+      fallbackLocalStorageEntries: {},
+    };
+
+    expect(validateConflictRestoreSnapshot(OWNER_USER_ID, snapshot)).toEqual([
+      'indexedDbRecords[0].ownerUserId does not match restore owner',
+    ]);
+    localStorage.setItem('sentinel', 'untouched');
+    vi.stubGlobal('indexedDB', undefined);
+
+    await expect(restoreConflictRestoreSnapshot(OWNER_USER_ID, snapshot))
+      .rejects.toThrow('conflict rollback snapshot is invalid');
+    expect(localStorage.getItem('sentinel')).toBe('untouched');
+  });
+
+  it('compensates a fallback write failure and retains the original diagnostic', async () => {
+    vi.stubGlobal('indexedDB', undefined);
+    const key = getConflictFallbackKey('project-a', OWNER_USER_ID);
+    const existing = createConflict('project-a', 'before rollback', '2026-06-26T02:00:00.000Z', 1);
+    const incoming = createConflict('project-a', 'rollback target', '2026-06-26T02:01:00.000Z', 2);
+    localStorage.setItem(key, JSON.stringify(existing));
+    const originalSetItem = localStorage.setItem.bind(localStorage);
+    let shouldFail = true;
+    vi.spyOn(localStorage, 'setItem').mockImplementation((storageKey, value) => {
+      if (storageKey === key && value.includes('rollback target') && shouldFail) {
+        shouldFail = false;
+        throw new Error('simulated fallback write failure');
+      }
+      originalSetItem(storageKey, value);
+    });
+
+    await expect(restoreConflictRestoreSnapshot(OWNER_USER_ID, {
+      indexedDbRecords: null,
+      fallbackLocalStorageEntries: { [key]: JSON.stringify(incoming) },
+    })).rejects.toThrow('conflict rollback failed and was compensated: simulated fallback write failure');
+
+    expect(JSON.parse(localStorage.getItem(key) ?? 'null')).toEqual(existing);
   });
 });

@@ -2,6 +2,7 @@ import type { DataSafetyExportPackage } from './data-safety-package';
 import {
   CONFLICT_FALLBACK_KEY_PREFIX,
   getConflictFallbackKey,
+  getScopedConflictId,
   mergeConflictOperationEvidence,
   mergeConflictRecords,
   selectPreferredConflictRecord,
@@ -160,10 +161,117 @@ export async function restoreConflicts(pkg: DataSafetyExportPackage): Promise<vo
   );
 }
 
+export function validateConflictRestoreSnapshot(
+  ownerUserId: string,
+  snapshot: DataSafetyConflictRestoreSnapshot,
+): string[] {
+  const errors: string[] = [];
+  if (!isUnknownRecord(snapshot)) {
+    return ['snapshot is not an object'];
+  }
+
+  if (snapshot.indexedDbRecords !== null && !Array.isArray(snapshot.indexedDbRecords)) {
+    errors.push('indexedDbRecords must be null or an array');
+  }
+
+  const seenScopedIds = new Set<string>();
+  for (const [index, record] of (snapshot.indexedDbRecords ?? []).entries()) {
+    if (!isStoredConflictRecord(record)) {
+      errors.push(`indexedDbRecords[${index}] is invalid`);
+      continue;
+    }
+    if (record.ownerUserId !== ownerUserId) {
+      errors.push(`indexedDbRecords[${index}].ownerUserId does not match restore owner`);
+    }
+    const expectedScopedId = getScopedConflictId(record.projectId, ownerUserId);
+    if (record.scopedId !== expectedScopedId) {
+      errors.push(`indexedDbRecords[${index}].scopedId does not match owner/project identity`);
+    }
+    if (seenScopedIds.has(record.scopedId)) {
+      errors.push(`indexedDbRecords[${index}].scopedId is duplicated`);
+    }
+    seenScopedIds.add(record.scopedId);
+  }
+
+  if (!isUnknownRecord(snapshot.fallbackLocalStorageEntries)) {
+    errors.push('fallbackLocalStorageEntries must be an object');
+    return errors;
+  }
+
+  for (const [key, rawValue] of Object.entries(snapshot.fallbackLocalStorageEntries)) {
+    if (typeof rawValue !== 'string') {
+      errors.push(`fallbackLocalStorageEntries[${key}] is not a string`);
+      continue;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(rawValue);
+    } catch {
+      errors.push(`fallbackLocalStorageEntries[${key}] is not valid JSON`);
+      continue;
+    }
+    if (!isUnknownRecord(parsed)
+      || parsed['ownerUserId'] !== ownerUserId
+      || typeof parsed['projectId'] !== 'string'
+      || parsed['projectId'].length === 0) {
+      errors.push(`fallbackLocalStorageEntries[${key}] owner/project identity is invalid`);
+      continue;
+    }
+    if (getConflictFallbackKey(parsed['projectId'], ownerUserId, CONFLICT_FALLBACK_KEY_PREFIX) !== key) {
+      errors.push(`fallbackLocalStorageEntries[${key}] key does not match project identity`);
+    }
+  }
+
+  return errors;
+}
+
 export async function restoreConflictRestoreSnapshot(
   ownerUserId: string,
   snapshot: DataSafetyConflictRestoreSnapshot,
 ): Promise<void> {
+  const validationErrors = validateConflictRestoreSnapshot(ownerUserId, snapshot);
+  if (validationErrors.length > 0) {
+    throw new Error(`conflict rollback snapshot is invalid: ${validationErrors.join('; ')}`);
+  }
+
+  let preImage: DataSafetyConflictRestoreSnapshot | null = null;
+  let preImageReadError: string | null = null;
+  try {
+    preImage = await readConflictRestoreSnapshot(ownerUserId);
+  } catch (error) {
+    preImageReadError = formatConflictRestoreError(error);
+  }
+
+  try {
+    await writeConflictRestoreSnapshot(ownerUserId, snapshot, 'forward');
+  } catch (error) {
+    if (!preImage) {
+      throw new Error(
+        `conflict rollback failed: ${formatConflictRestoreError(error)}; `
+        + `compensation unavailable because pre-image read failed: ${preImageReadError ?? 'unknown error'}`,
+      );
+    }
+    try {
+      await writeConflictRestoreSnapshot(ownerUserId, preImage, 'reverse');
+    } catch (compensationError) {
+      throw new Error(
+        `conflict rollback failed: ${formatConflictRestoreError(error)}; `
+        + `compensation failed: ${formatConflictRestoreError(compensationError)}`,
+      );
+    }
+    throw new Error(`conflict rollback failed and was compensated: ${formatConflictRestoreError(error)}`);
+  }
+}
+
+async function writeConflictRestoreSnapshot(
+  ownerUserId: string,
+  snapshot: DataSafetyConflictRestoreSnapshot,
+  order: 'forward' | 'reverse',
+): Promise<void> {
+  if (order === 'reverse') {
+    replaceOwnerFallbackEntries(ownerUserId, snapshot.fallbackLocalStorageEntries);
+  }
+
   const db = await openConflictDatabase();
   if (snapshot.indexedDbRecords !== null) {
     if (!db) {
@@ -177,7 +285,14 @@ export async function restoreConflictRestoreSnapshot(
   } else {
     db?.close();
   }
-  replaceOwnerFallbackEntries(ownerUserId, snapshot.fallbackLocalStorageEntries);
+
+  if (order === 'forward') {
+    replaceOwnerFallbackEntries(ownerUserId, snapshot.fallbackLocalStorageEntries);
+  }
+}
+
+function formatConflictRestoreError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 export function normalizeConflictRestoreSnapshot(
