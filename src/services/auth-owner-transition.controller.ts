@@ -1,3 +1,5 @@
+export type AuthOwnerTransitionCommittedListener = (ownerUserId: string | null) => void;
+
 export interface AuthOwnerTransitionTicket {
   readonly ticketId: number;
   readonly capturedGeneration: number;
@@ -32,8 +34,15 @@ export class AuthOwnerTransitionController {
   private destroyed = false;
   private readonly activeTickets = new Map<number, AuthOwnerTransitionTicket>();
   private readonly consumedTickets = new WeakSet<AuthOwnerTransitionTicket>();
+  private readonly committedListeners = new Set<AuthOwnerTransitionCommittedListener>();
 
   constructor(private readonly options: AuthOwnerTransitionControllerOptions) {}
+
+  onCommitted(listener: AuthOwnerTransitionCommittedListener): () => void {
+    if (this.destroyed) return () => undefined;
+    this.committedListeners.add(listener);
+    return () => this.committedListeners.delete(listener);
+  }
 
   capture(targetOwnerUserId: string | null): AuthOwnerTransitionTicket {
     if (this.destroyed) {
@@ -93,6 +102,7 @@ export class AuthOwnerTransitionController {
       return { status: 'stale', reason: 'reentrant-change' };
     }
     this.options.publishTargetOwner(ticket.targetOwnerUserId);
+    this.notifyCommittedListeners(ticket.targetOwnerUserId);
     return { status: 'committed', generation: committedGeneration };
   }
 
@@ -116,7 +126,18 @@ export class AuthOwnerTransitionController {
   destroy(): void {
     if (this.destroyed) return;
     this.advanceGeneration();
+    this.committedListeners.clear();
     this.destroyed = true;
+  }
+
+  private notifyCommittedListeners(ownerUserId: string | null): void {
+    for (const listener of this.committedListeners) {
+      try {
+        listener(ownerUserId);
+      } catch {
+        // Listener failures must not alter the committed owner transition.
+      }
+    }
   }
 
   private consume(ticket: AuthOwnerTransitionTicket): void {

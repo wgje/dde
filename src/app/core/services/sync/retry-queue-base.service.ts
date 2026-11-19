@@ -154,6 +154,11 @@ export abstract class RetryQueueBase {
 
   /** 操作处理器 */
   protected operationHandler: RetryOperationHandler | null = null;
+
+  /** Exposes the guarded legacy operation boundary to capability-gated adapters. */
+  getOperationHandler(): RetryOperationHandler | null {
+    return this.operationHandler;
+  }
   /** 队列处理锁 */
   protected isProcessingQueue = false;
   /** 当前可见队列视图代次；切账号清空时递增以作废旧处理锁 */

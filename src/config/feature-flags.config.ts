@@ -29,7 +29,8 @@ type RuntimeBootFlag =
   | 'BLACKBOX_WATERMARK_PROBE_V1'
   | 'WORKSPACE_SHELL_COMPOSITION_V3'
   | 'RESUME_COMPOSITE_PROBE_RPC_V1'
-  | 'RESUME_METRICS_GATE_V1';
+  | 'RESUME_METRICS_GATE_V1'
+  | 'OFFLINE_COMMAND_CAPTURE_V1';
 
 function readRuntimeBooleanFlag(flag: RuntimeBootFlag, fallback: boolean): boolean {
   if (typeof window === 'undefined') {
@@ -104,6 +105,8 @@ export const FEATURE_FLAGS = {
   SYNC_UNIFIED_QUEUE_SEMANTICS_ENABLED: true,
   /** 离线快照使用 IndexedDB 替代 localStorage（缓解 5MB 上限） */
   OFFLINE_SNAPSHOT_IDB_ENABLED: false,
+  /** 离线领域命令 capture 灰度入口，默认关闭 */
+  OFFLINE_COMMAND_CAPTURE_V1: readRuntimeBooleanFlag('OFFLINE_COMMAND_CAPTURE_V1', false),
   // ==================== PWA 生命周期与体验 ====================
   /** 生命周期恢复编排（前后台切换自愈） */
   LIFECYCLE_RECOVERY_V1: true,

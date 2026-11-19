@@ -38,6 +38,8 @@ export type SyncRpcStatus =
   | 'client-version-rejected'
   | 'tombstoned'
   | 'quarantined'
+  | 'accepted-shadow'
+  | 'rejected'
   | 'unauthorized';
 
 export interface SyncRpcResult {
@@ -69,6 +71,11 @@ export interface SyncRpcResult {
   minProtocolVersion?: number;
   /** `applied` / `idempotent-replay` 时返回的实体 ID。 */
   entityId?: string;
+  /** Shadow command ingest reports whether a server field-LWW projection was updated. */
+  projectionApplied?: boolean;
+  domainApplyStatus?: string;
+  domainApplyResult?: unknown;
+  appliedToDomainTables?: boolean;
   /** 服务端判定 payload 陈旧并保留了远端权威状态。 */
   stalePayload?: boolean;
   /** delete/batch RPC 返回的影响行数。 */
@@ -86,6 +93,8 @@ export interface SyncRpcResult {
 export interface SyncProtocolInfo {
   minProtocolVersion: number;
   deploymentEpoch: number;
+  /** Optional additive capabilities; absent on legacy servers. */
+  capabilities?: string[];
 }
 
 export type TaskWriteIntent =
@@ -105,7 +114,10 @@ export type SyncRpcName =
   | 'sync_upsert_routine_task'
   | 'sync_increment_routine_completion'
   | 'sync_delete_project'
-  | 'sync_delete_tasks';
+  | 'sync_delete_tasks'
+  | 'sync_apply_offline_command'
+  | 'sync_pull_offline_projections'
+  | 'sync_get_offline_command_status';
 
 const SYNC_RPC_NAMES: ReadonlySet<string> = new Set<SyncRpcName>([
   'sync_upsert_task',
@@ -118,6 +130,9 @@ const SYNC_RPC_NAMES: ReadonlySet<string> = new Set<SyncRpcName>([
   'sync_increment_routine_completion',
   'sync_delete_project',
   'sync_delete_tasks',
+  'sync_apply_offline_command',
+  'sync_pull_offline_projections',
+  'sync_get_offline_command_status',
 ]);
 
 function isSyncRpcName(name: string): name is SyncRpcName {
@@ -471,6 +486,38 @@ export class SyncRpcClientService {
 
   // ---------------- internals ----------------
 
+  /** Owner-scoped field-LWW projection pull; callers must gate this by field-lww capability. */
+  async pullOfflineProjections(): Promise<unknown[]> {
+    const client = await this.supabase.clientAsync();
+    if (client == null) return [];
+    const { data, error } = await client.rpc('sync_pull_offline_projections' as never);
+    if (error) throw error;
+    return Array.isArray(data) ? data : [];
+  }
+
+  /** Additive command-envelope ingest. The server keeps this shadow-only until capabilities are explicitly enabled. */
+  async applyOfflineCommand(params: {
+    operationId: string;
+    command: Record<string, unknown>;
+  }): Promise<SyncRpcResult> {
+    return this.invokeRpc('sync_apply_offline_command', {
+      ...params.command,
+      operationId: params.operationId,
+      operation_id: params.operationId,
+      protocol_version: this.clientProtocolVersion(),
+      ...this.buildAuditFields(),
+    });
+  }
+
+  /** Owner-scoped readback; accepted-shadow alone is never treated as a domain ACK. */
+  async getOfflineCommandStatus(params: { operationId: string }): Promise<SyncRpcResult> {
+    return this.invokeRpc('sync_get_offline_command_status', {
+      operation_id: params.operationId,
+      protocol_version: this.clientProtocolVersion(),
+      ...this.buildAuditFields(),
+    });
+  }
+
   private async invokeRpc(
     name: SyncRpcName,
     payload: Record<string, unknown>,
@@ -526,6 +573,14 @@ export class SyncRpcClientService {
     if (typeof obj['updated_at'] === 'string') result.serverUpdatedAt = obj['updated_at'] as string;
     if (typeof obj['minProtocolVersion'] === 'number') result.minProtocolVersion = obj['minProtocolVersion'] as number;
     if (typeof obj['stale_payload'] === 'boolean') result.stalePayload = obj['stale_payload'] as boolean;
+    if (typeof obj['projectionApplied'] === 'boolean') result.projectionApplied = obj['projectionApplied'];
+    else if (typeof obj['projection_applied'] === 'boolean') result.projectionApplied = obj['projection_applied'];
+    const domainApplyStatus = obj['domainApplyStatus'] ?? obj['domain_apply_status'];
+    if (typeof domainApplyStatus === 'string') result.domainApplyStatus = domainApplyStatus;
+    if (Object.prototype.hasOwnProperty.call(obj, 'domainApplyResult')) result.domainApplyResult = obj['domainApplyResult'];
+    else if (Object.prototype.hasOwnProperty.call(obj, 'domain_apply_result')) result.domainApplyResult = obj['domain_apply_result'];
+    const appliedToDomainTables = obj['appliedToDomainTables'] ?? obj['applied_to_domain_tables'];
+    if (typeof appliedToDomainTables === 'boolean') result.appliedToDomainTables = appliedToDomainTables;
     if (typeof obj['task_id'] === 'string') result.entityId = obj['task_id'] as string;
     else if (typeof obj['connection_id'] === 'string') result.entityId = obj['connection_id'] as string;
     else if (typeof obj['entry_id'] === 'string') result.entityId = obj['entry_id'] as string;
@@ -569,6 +624,8 @@ export class SyncRpcClientService {
       'client-version-rejected',
       'tombstoned',
       'quarantined',
+      'accepted-shadow',
+      'rejected',
       'unauthorized',
     ];
     if (typeof raw === 'string' && (known as string[]).includes(raw)) {
@@ -583,9 +640,14 @@ export class SyncRpcClientService {
     const min = obj['minProtocolVersion'];
     const epoch = obj['deploymentEpoch'];
     if (typeof min !== 'number') return null;
+    const rawCapabilities = obj['capabilities'] ?? obj['supportedCapabilities'];
+    const capabilities = Array.isArray(rawCapabilities)
+      ? rawCapabilities.filter((value): value is string => typeof value === 'string')
+      : undefined;
     return {
       minProtocolVersion: min,
       deploymentEpoch: typeof epoch === 'number' ? epoch : 0,
+      ...(capabilities === undefined ? {} : { capabilities }),
     };
   }
 
