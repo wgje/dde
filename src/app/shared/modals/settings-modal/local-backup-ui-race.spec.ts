@@ -134,9 +134,19 @@ describe('LocalBackupUIService restore race boundaries', () => {
     });
   });
 
-  it('captures one immutable byte snapshot for hashing, validation, parsing, and restore identity', async () => {
+  it('captures one immutable byte snapshot and carries offline command store restore intent', async () => {
     const backup = createBackupData({
-      dataSafety: { ownerUserId: 'user-1' },
+      dataSafety: {
+        ownerUserId: 'user-1',
+        offlineCommandStore: {
+          schemaVersion: 1,
+          ownerUserId: 'user-1',
+          projections: [],
+          commands: [],
+          audits: [],
+          quarantine: [],
+        },
+      },
       actionQueue: [makeQueuedAction()],
     } as BackupData['localState']);
     const file = createBackupFile(backup);
@@ -164,6 +174,7 @@ describe('LocalBackupUIService restore race boundaries', () => {
       restoredActionQueueItems: [expect.objectContaining({
         operationId: makeQueuedAction().operationId,
       })],
+      captureOfflineCommandStore: true,
     }));
     expect(restoreStages.createOperations).toHaveBeenCalledWith(expect.objectContaining({
       actionQueueRestore,

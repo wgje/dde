@@ -315,6 +315,7 @@ export class LocalBackupUIService {
           context.rawBackupData.localState?.actionQueue,
         ),
         blackBoxBackup: context.rawBackupData,
+        captureOfflineCommandStore: context.rawBackupData.localState?.dataSafety?.offlineCommandStore !== undefined,
       });
       prepared = true;
       this.requireRestoreContextCurrent(context);
