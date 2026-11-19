@@ -18,6 +18,8 @@ import {
   type DataSafetyReplayEntry,
 } from './data-safety-package';
 import { createDerivedSyncOperationId } from '../utils/sync-operation-id';
+import { createOfflineSyncCommand } from './sync/offline-sync-command-envelope';
+import { createOfflineCommandStore } from './sync/offline-command-store';
 import { registerDataSafetyMalformedRestoreSpecs } from './data-safety-indexeddb-adapter-malformed-restore.spec-helpers';
 import { registerDataSafetyRestoreRollbackSpecs } from './data-safety-indexeddb-adapter-restore-rollback.spec-helpers';
 import { registerDataSafetyRestoreMarkerRaceSpecs } from './data-safety-indexeddb-adapter-marker-race.spec-helpers';
@@ -124,7 +126,8 @@ describe('data-safety IndexedDB adapter', () => {
     expect(pkg.localData.tasks).toEqual([task]);
     expect(pkg.localData.connections).toEqual([connection]);
     expect(pkg.localData.syncCursors).toEqual([cursor]);
-    expect(pkg.localData.meta).toEqual(meta);
+    expect(pkg.localData.meta).toEqual(expect.objectContaining(meta));
+    expect(pkg.localData.meta).toEqual(expect.objectContaining({ offlineCommandStore: expect.any(Object) }));
     expect(pkg.localState.retryQueue).toHaveLength(1);
     expect(pkg.replayPlan.summary).toMatchObject({
       replayable: 2,
@@ -148,6 +151,106 @@ describe('data-safety IndexedDB adapter', () => {
       actionQueue: 1,
       deadLetters: 0,
     });
+  });
+
+  it('exports and restores the complete owner-scoped offline command store', async () => {
+    const store = createOfflineCommandStore();
+    const command = createOfflineSyncCommand({
+      ownerUserId: 'user-1',
+      installationId: 'installation-1',
+      deviceId: 'device-1',
+      entityType: 'task',
+      entityId: 'task-offline',
+      projectId: 'project-1',
+      command: 'task.update',
+      intent: { field: 'content' },
+      normalizedResultPatch: { id: 'task-offline', projectId: 'project-1', content: 'offline edit' },
+      operationId: 'offline-op-user-1',
+      nowMs: Date.parse('2026-06-16T00:00:00.000Z'),
+    });
+    const foreignCommand = createOfflineSyncCommand({
+      ownerUserId: 'user-2',
+      installationId: 'installation-2',
+      deviceId: 'device-2',
+      entityType: 'task',
+      entityId: 'task-foreign',
+      command: 'task.update',
+      intent: { field: 'content' },
+      normalizedResultPatch: { id: 'task-foreign', projectId: 'project-1', content: 'foreign owner data' },
+      operationId: 'offline-op-user-2',
+      nowMs: Date.parse('2026-06-16T00:01:00.000Z'),
+    });
+    const writeCommand = async (ownerUserId: string, envelope: typeof command): Promise<void> => {
+      await store.commitLocalChange({
+        ownerUserId,
+        projection: {
+          ownerUserId,
+          entityType: 'task',
+          entityId: envelope.entityId,
+          value: envelope.normalizedResultPatch,
+          version: 1,
+          updatedAt: envelope.createdAtIso,
+        },
+        command: {
+          ownerUserId,
+          operationId: envelope.operationId,
+          entityType: 'task',
+          entityId: envelope.entityId,
+          command: envelope,
+          status: 'pending',
+          createdAt: envelope.createdAtIso,
+          updatedAt: envelope.createdAtIso,
+        },
+        audit: {
+          ownerUserId,
+          operationId: envelope.operationId,
+          entityType: 'task',
+          entityId: envelope.entityId,
+          operation: envelope.command,
+          localTimestamp: envelope.createdAtIso,
+          queueResult: 'pending',
+        },
+      });
+    };
+    await writeCommand('user-1', command);
+    await writeCommand('user-2', foreignCommand);
+    await putStoreValue(db, DB_CONFIG.stores.projects, project);
+
+    const pkg = await exportDataSafetyPackageFromIndexedDb(db, {
+      exportedAt: '2026-06-16T00:02:00.000Z',
+      ownerUserId: 'user-1',
+      app: { appVersion: '1.0.0', syncProtocolVersion: 1, deploymentEpoch: 0 },
+    });
+    const exportedStore = (pkg.localData.meta as Record<string, unknown> | null)?.['offlineCommandStore'] as {
+      ownerUserId: string;
+      commands: Array<{ operationId: string; ownerUserId: string }>;
+      projections: Array<{ entityId: string; ownerUserId: string }>;
+      audits: Array<{ operationId: string; ownerUserId: string }>;
+    };
+    expect(exportedStore).toMatchObject({
+      ownerUserId: 'user-1',
+      commands: [{ operationId: 'offline-op-user-1', ownerUserId: 'user-1' }],
+      projections: [{ entityId: 'task-offline', ownerUserId: 'user-1' }],
+      audits: [{ operationId: 'offline-op-user-1', ownerUserId: 'user-1' }],
+    });
+    expect(pkg.localData.tasks).toEqual([expect.objectContaining({ id: 'task-offline', content: 'offline edit' })]);
+    expect(pkg.localState.retryQueue).toEqual([expect.objectContaining({ operationId: 'offline-op-user-1', sourceUserId: 'user-1' })]);
+    expect(pkg.replayPlan.summary.retryQueue).toBe(1);
+
+    const restore = await restoreDataSafetyPackageToIndexedDb(db, pkg);
+    expect(restore.success).toBe(true);
+    const restoredOwner = await store.exportOwner('user-1');
+    const preservedForeignOwner = await store.exportOwner('user-2');
+    expect(restoredOwner.commands).toEqual(expect.arrayContaining([
+      expect.objectContaining({ operationId: 'offline-op-user-1', ownerUserId: 'user-1', command }),
+    ]));
+    expect(restoredOwner.projections).toEqual(expect.arrayContaining([
+      expect.objectContaining({ entityId: 'task-offline', ownerUserId: 'user-1' }),
+    ]));
+    expect(preservedForeignOwner.commands).toEqual([
+      expect.objectContaining({ operationId: 'offline-op-user-2', ownerUserId: 'user-2' }),
+    ]);
+    expect(restoredOwner.commands.some(item => item.ownerUserId !== 'user-1')).toBe(false);
   });
 
   it('skips malformed entity and cursor records during export', async () => {

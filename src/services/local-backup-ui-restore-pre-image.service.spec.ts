@@ -193,6 +193,8 @@ describe('captureLocalBackupUiRestorePreImage', () => {
     expect(readers.readMetadata).toHaveBeenCalledWith(
       OWNER_USER_ID,
       new Set(['project-1', 'project-new']),
+      undefined,
+      undefined,
     );
     expect(readers.readExternalPendingLinks).toHaveBeenCalledWith(OWNER_USER_ID);
   });
@@ -229,6 +231,23 @@ describe('captureLocalBackupUiRestorePreImage', () => {
 
     expect((preImage.retryQueue as Record<string, unknown>).legacyReviewLocalStorageValue)
       .toBe(legacyReviewRaw);
+  });
+
+  it('captures the command-store export when requested for a backup rollback pre-image', async () => {
+    const readers = makeReaders();
+    await captureLocalBackupUiRestorePreImage({
+      ownerUserId: OWNER_USER_ID,
+      touchedProjectIds: [],
+      retryQueueRestoreItems: [],
+      captureOfflineCommandStore: true,
+    }, readers, RETRY_QUEUE_POLICY);
+
+    expect(readers.readMetadata).toHaveBeenCalledWith(
+      OWNER_USER_ID,
+      new Set(),
+      undefined,
+      { captureOfflineCommandStore: true },
+    );
   });
 
   it('binds pending links to the transaction owner across a transient A to B to A auth change', async () => {

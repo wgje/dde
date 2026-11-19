@@ -59,6 +59,13 @@ describe('LocalBackupUiRestoreWriterQuiescenceService', () => {
     await handle.abortBeforeMutation();
   });
 
+  it('allows an active ordinary writer continuation when no restore sentinel exists', async () => {
+    const service = new LocalBackupUiRestoreWriterQuiescenceService({ pollIntervalMs: 1 });
+    const result = await service.runAsync(OWNER_USER_ID, 'project-state', async continuation => (
+      service.runContinuationSync(OWNER_USER_ID, 'project-state', continuation, () => 'written')
+    ));
+    expect(result).toBe('written');
+  });
   it('blocks new sync and async writers without running their callbacks', async () => {
     const service = new LocalBackupUiRestoreWriterQuiescenceService({ pollIntervalMs: 1 });
     const handle = await service.prepare(OWNER_USER_ID);

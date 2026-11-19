@@ -1,5 +1,7 @@
 import { Injectable, inject } from '@angular/core';
 import type { BackupData } from '../../supabase/functions/_shared/backup-utils';
+import { createOfflineCommandStore, type OfflineCommandStoreExport } from './sync/offline-command-store';
+import type { OfflineSyncCommandEnvelope } from './sync/offline-sync-command-envelope';
 import {
   DB_CONFIG,
   IndexedDBService,
@@ -63,6 +65,7 @@ interface BackupMetadataRestoreMarker {
   taskTombstonesRaw: string | null;
   connectionTombstonesRaw: string | null;
   auditRaw: string | null;
+  offlineCommandStoreExport?: OfflineCommandStoreExport<OfflineSyncCommandEnvelope, unknown>;
 }
 
 class BackupMetadataRestoreMarkerOwnershipLostError extends Error {
@@ -99,6 +102,7 @@ export class BackupDataSafetyMetadataRestoreService implements DataSafetyMetadat
   private readonly syncState = inject(SyncStateService);
   private readonly tombstones = inject(TombstoneService);
   private readonly auditPersistence = new DataSafetyAuditPersistence();
+  private readonly offlineCommandStore = createOfflineCommandStore();
 
   async preview(backup: BackupData, ownerUserId: string): Promise<DataSafetyMetadataRestorePlan> {
     return withBackupMetadataRestoreLock(() => this.previewUnlocked(backup, ownerUserId));
@@ -121,8 +125,8 @@ export class BackupDataSafetyMetadataRestoreService implements DataSafetyMetadat
       backup,
       ownerUserId,
       {
-        readCurrent: (userId, visibleProjectIds) => (
-          this.readCurrentUnlocked(userId, visibleProjectIds)
+        readCurrent: (userId, visibleProjectIds, _checkpoint, options) => (
+          this.readCurrentUnlocked(userId, visibleProjectIds, NOOP_RESTORE_CHECKPOINT, options?.captureOfflineCommandStore ?? false)
         ),
         replaceAtomically: (userId, target, rollbackState) => (
           this.replaceAtomicallyUnlocked(userId, target, rollbackState)
@@ -135,9 +139,10 @@ export class BackupDataSafetyMetadataRestoreService implements DataSafetyMetadat
     ownerUserId: string,
     visibleProjectIds: ReadonlySet<string>,
     checkpoint: BackupMetadataRestoreCheckpoint = NOOP_RESTORE_CHECKPOINT,
+    options: { captureOfflineCommandStore?: boolean } = {},
   ): Promise<DataSafetyMetadataRestoreState> {
     return withBackupMetadataRestoreLock(() => (
-      this.readCurrentUnlocked(ownerUserId, visibleProjectIds, checkpoint)
+      this.readCurrentUnlocked(ownerUserId, visibleProjectIds, checkpoint, options.captureOfflineCommandStore ?? false)
     ));
   }
 
@@ -145,6 +150,7 @@ export class BackupDataSafetyMetadataRestoreService implements DataSafetyMetadat
     ownerUserId: string,
     visibleProjectIds: ReadonlySet<string>,
     checkpoint: BackupMetadataRestoreCheckpoint = NOOP_RESTORE_CHECKPOINT,
+    captureOfflineCommandStore = false,
   ): Promise<DataSafetyMetadataRestoreState> {
     await checkpoint();
     await this.recoverInterruptedRestore(ownerUserId);
@@ -165,6 +171,9 @@ export class BackupDataSafetyMetadataRestoreService implements DataSafetyMetadat
       ...readCurrentAudit(ownerUserId),
       taskTombstones: readCurrentTaskTombstones(visibleProjectIds),
       connectionTombstones: readCurrentConnectionTombstones(visibleProjectIds),
+      ...(captureOfflineCommandStore ? {
+        offlineCommandStoreExport: await this.offlineCommandStore.exportOwner<OfflineSyncCommandEnvelope, unknown>(ownerUserId),
+      } : {}),
     };
   }
 
@@ -192,7 +201,12 @@ export class BackupDataSafetyMetadataRestoreService implements DataSafetyMetadat
     await checkpoint();
     const touchedProjectIds = collectTouchedProjectIds(target, rollbackState);
     await checkpoint();
-    const marker = await this.captureRestoreMarker(db, ownerUserId, touchedProjectIds);
+    const marker = await this.captureRestoreMarker(
+      db,
+      ownerUserId,
+      touchedProjectIds,
+      target.offlineCommandStoreExport !== undefined,
+    );
     writeRestoreMarker(marker);
     const markerHeartbeat = startRestoreMarkerHeartbeat(marker);
 
@@ -231,6 +245,10 @@ export class BackupDataSafetyMetadataRestoreService implements DataSafetyMetadat
       db, ownerUserId, target, touchedProjectIds, marker, markerHeartbeat, checkpoint,
     } = context;
     await checkpoint();
+    if (target.offlineCommandStoreExport) {
+      await this.offlineCommandStore.restoreOwner(target.offlineCommandStoreExport);
+    }
+    await checkpoint();
     writeScopedTaskTombstones(target.taskTombstones, touchedProjectIds);
     await checkpoint();
     writeScopedConnectionTombstones(target.connectionTombstones, touchedProjectIds);
@@ -260,6 +278,7 @@ export class BackupDataSafetyMetadataRestoreService implements DataSafetyMetadat
     db: IDBDatabase,
     ownerUserId: string,
     touchedProjectIds: ReadonlySet<string>,
+    captureOfflineCommandStore = false,
   ): Promise<BackupMetadataRestoreMarker> {
     const cursorRecords = await readScopedCursorRows(db, ownerUserId, touchedProjectIds);
     return {
@@ -271,6 +290,9 @@ export class BackupDataSafetyMetadataRestoreService implements DataSafetyMetadat
       taskTombstonesRaw: readStorageValue(TASK_TOMBSTONES_STORAGE_KEY),
       connectionTombstonesRaw: readStorageValue(CONNECTION_TOMBSTONES_STORAGE_KEY),
       auditRaw: readStorageValue(getAuditStorageKey(ownerUserId)),
+      ...(captureOfflineCommandStore ? {
+        offlineCommandStoreExport: await this.offlineCommandStore.exportOwner<OfflineSyncCommandEnvelope, unknown>(ownerUserId),
+      } : {}),
     };
   }
 
@@ -321,6 +343,12 @@ export class BackupDataSafetyMetadataRestoreService implements DataSafetyMetadat
     if (!ensureRestoreMarkerOwnership(errors, marker)) return errors;
     await attemptRollback(errors, 'connection tombstones', () => {
       restoreScopedConnectionTombstones(marker.connectionTombstonesRaw, touchedProjectIds);
+    });
+    if (!ensureRestoreMarkerOwnership(errors, marker)) return errors;
+    await attemptRollback(errors, 'offline command store', async () => {
+      if (marker.offlineCommandStoreExport) {
+        await this.offlineCommandStore.restoreOwner(marker.offlineCommandStoreExport);
+      }
     });
     if (!ensureRestoreMarkerOwnership(errors, marker)) return errors;
     await attemptRollback(errors, 'data-safety audit', () => {
@@ -703,9 +731,28 @@ function hasValidRestoreMarkerSnapshot(
     && (typeof record['lastSyncTime'] === 'string' || record['lastSyncTime'] === null)
     && (typeof record['taskTombstonesRaw'] === 'string' || record['taskTombstonesRaw'] === null)
     && (typeof record['connectionTombstonesRaw'] === 'string' || record['connectionTombstonesRaw'] === null)
-    && (typeof record['auditRaw'] === 'string' || record['auditRaw'] === null);
+    && (typeof record['auditRaw'] === 'string' || record['auditRaw'] === null)
+    && (record['offlineCommandStoreExport'] === undefined
+      || isOfflineCommandStoreExportForOwner(record['offlineCommandStoreExport'], ownerUserId));
 }
 
+function isOfflineCommandStoreExportForOwner(value: unknown, ownerUserId: string): value is OfflineCommandStoreExport<OfflineSyncCommandEnvelope, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  if (record['schemaVersion'] !== 1 || record['ownerUserId'] !== ownerUserId
+    || !Array.isArray(record['projections']) || !Array.isArray(record['commands'])
+    || !Array.isArray(record['audits']) || !Array.isArray(record['quarantine'])
+    || (record['conflictEvidence'] !== undefined && !Array.isArray(record['conflictEvidence']))) return false;
+  const businessRecords = [
+    ...record['projections'], ...record['commands'], ...record['audits'],
+    ...(Array.isArray(record['conflictEvidence']) ? record['conflictEvidence'] : []),
+  ];
+  return businessRecords.every(item => !!item && typeof item === 'object' && !Array.isArray(item)
+    && (item as Record<string, unknown>)['ownerUserId'] === ownerUserId)
+    && record['quarantine'].every(item => !!item && typeof item === 'object' && !Array.isArray(item)
+      && ((item as Record<string, unknown>)['ownerUserId'] === null
+        || (item as Record<string, unknown>)['ownerUserId'] === ownerUserId));
+}
 function normalizeRestoreMarkerIdentity(
   record: Record<string, unknown>,
 ): Pick<BackupMetadataRestoreMarker, 'runId' | 'leaseExpiresAt'> | null {

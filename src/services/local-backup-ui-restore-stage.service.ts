@@ -3,6 +3,12 @@ import { Injectable, inject } from '@angular/core';
 import { SYNC_CONFIG } from '../config';
 import type { Project } from '../models';
 import type { BackupData } from '../../supabase/functions/_shared/backup-utils';
+
+type BackupDataWithOfflineCommandStore = BackupData & {
+  localState?: BackupData['localState'] & {
+    dataSafety?: NonNullable<NonNullable<BackupData['localState']>['dataSafety']> & { offlineCommandStore?: unknown };
+  };
+};
 import type { ExportData } from './export.service';
 import { ProjectStateService } from './project-state.service';
 import { ProjectDataService, RetryQueueService } from '../core-bridge';
@@ -214,7 +220,11 @@ export class LocalBackupUiRestoreStageService {
       ),
       metadata: createStageEffect<LocalBackupUiRestoreStageSnapshots['metadata']>(
         (context, snapshots) => this.applyMetadata(input, snapshots.metadata, context),
-        context => this.readMetadata(input.ownerUserId, context),
+        context => this.readMetadata(
+          input.ownerUserId,
+          context,
+          (input.backup as BackupDataWithOfflineCommandStore).localState?.dataSafety?.offlineCommandStore !== undefined,
+        ),
         (snapshot, context) => this.restoreMetadata(input.ownerUserId, snapshot, context),
       ),
     };
@@ -683,11 +693,13 @@ export class LocalBackupUiRestoreStageService {
   private async readMetadata(
     ownerUserId: string,
     context: LocalBackupUiRestoreStageOperationContext,
+    captureOfflineCommandStore = false,
   ): Promise<LocalBackupUiRestoreStageSnapshots['metadata']> {
     const result = await this.metadataRestore.readCurrent(
       ownerUserId,
       new Set(context.marker().touchedProjectIds),
       context.checkpoint,
+      { captureOfflineCommandStore },
     );
     await context.checkpoint();
     return result;
@@ -698,7 +710,11 @@ export class LocalBackupUiRestoreStageService {
     snapshot: LocalBackupUiRestoreStageSnapshots['metadata'],
     context: LocalBackupUiRestoreStageOperationContext,
   ): Promise<void> {
-    const current = await this.readMetadata(ownerUserId, context);
+    const current = await this.readMetadata(
+      ownerUserId,
+      context,
+      snapshot.offlineCommandStoreExport !== undefined,
+    );
     await this.metadataRestore.replaceAtomically(
       ownerUserId,
       snapshot,

@@ -6,6 +6,8 @@ import { normalizeParkedTaskCacheRestoreSnapshot } from './data-safety-indexeddb
 import { DisasterBackupLocalStateReader } from './disaster-backup-local-state.reader';
 import { DisasterBackupService } from './disaster-backup.service';
 import { seedStore } from './disaster-backup.service.spec-helpers';
+import { createOfflineCommandStore } from './sync/offline-command-store';
+import { createOfflineSyncCommand } from './sync/offline-sync-command-envelope';
 
 const TEST_DBS = [
   'nanoflow-offline-snapshots',
@@ -14,6 +16,7 @@ const TEST_DBS = [
   'nanoflow-queue-backup',
   'keyval-store',
   'nanoflow-store-cache',
+  'nanoflow-offline-command-store',
 ];
 
 async function deleteDb(name: string): Promise<void> {
@@ -183,9 +186,54 @@ describe('DisasterBackupLocalStateReader', () => {
   beforeEach(async () => {
     localStorage.clear();
     sessionStorage.clear();
-    await Promise.all(TEST_DBS.map(deleteDb));
+    await Promise.all([...TEST_DBS, 'nanoflow-offline-command-store'].map(deleteDb));
   });
 
+  it('exports only the captured owner offline command store including conflict evidence', async () => {
+    const store = createOfflineCommandStore();
+    const losingCommand = createOfflineSyncCommand({
+      ownerUserId: 'user-1', installationId: 'install-1', deviceId: 'device-a',
+      entityType: 'task', entityId: 'task-1', command: 'task.update', intent: { field: 'content' },
+      normalizedResultPatch: { content: 'losing' }, operationId: 'operation-loser', nowMs: 10,
+    });
+    const winningCommand = createOfflineSyncCommand({
+      ownerUserId: 'user-1', installationId: 'install-2', deviceId: 'device-b',
+      entityType: 'task', entityId: 'task-1', command: 'task.update', intent: { field: 'content' },
+      normalizedResultPatch: { content: 'winning' }, operationId: 'operation-winner', nowMs: 20,
+    });
+    const conflictEvidence = {
+      ownerUserId: 'user-1', conflictId: 'conflict-1', entityType: 'task', entityId: 'task-1',
+      losingOperationId: losingCommand.operationId, winningOperationId: winningCommand.operationId,
+      capturedAt: '2026-03-11T00:00:00.000Z',
+      evidence: { losingCommand, winningCommand, losingValue: 'losing', winningValue: 'winning' },
+    };
+    await store.commitLocalChange({
+      ownerUserId: 'user-1',
+      projection: { ownerUserId: 'user-1', entityType: 'task', entityId: 'task-1', value: { content: 'winning' }, version: 1, updatedAt: winningCommand.createdAtIso },
+      command: { ownerUserId: 'user-1', operationId: winningCommand.operationId, entityType: 'task', entityId: 'task-1', command: winningCommand, status: 'pending', createdAt: winningCommand.createdAtIso, updatedAt: winningCommand.createdAtIso },
+      audit: { ownerUserId: 'user-1', operationId: winningCommand.operationId, entityType: 'task', entityId: 'task-1', operation: winningCommand.command, localTimestamp: winningCommand.createdAtIso, queueResult: 'pending', conflictEvidenceKeys: ['user-1:conflict:conflict-1'] },
+      conflictEvidence: [conflictEvidence],
+    });
+    const foreignCommand = createOfflineSyncCommand({
+      ownerUserId: 'user-2', installationId: 'install-2', deviceId: 'device-c',
+      entityType: 'task', entityId: 'foreign-task', command: 'task.update', intent: { field: 'content' },
+      normalizedResultPatch: { content: 'foreign' }, operationId: 'foreign-operation', nowMs: 30,
+    });
+    await store.commitLocalChange({
+      ownerUserId: 'user-2',
+      projection: { ownerUserId: 'user-2', entityType: 'task', entityId: 'foreign-task', value: { content: 'foreign' }, version: 1, updatedAt: foreignCommand.createdAtIso },
+      command: { ownerUserId: 'user-2', operationId: foreignCommand.operationId, entityType: 'task', entityId: 'foreign-task', command: foreignCommand, status: 'pending', createdAt: foreignCommand.createdAtIso, updatedAt: foreignCommand.createdAtIso },
+      audit: { ownerUserId: 'user-2', operationId: foreignCommand.operationId, entityType: 'task', entityId: 'foreign-task', operation: foreignCommand.command, localTimestamp: foreignCommand.createdAtIso },
+    });
+
+    const localState = await createReader().readLocalState('user-1', new Set(['project-1']));
+    const exported = (localState.dataSafety as (typeof localState.dataSafety & { offlineCommandStore?: unknown }) | undefined)?.offlineCommandStore as { ownerUserId: string; commands: Array<{ operationId: string }>; conflictEvidence: Array<{ evidence: { losingCommand: unknown; winningCommand: unknown } }> };
+
+    expect(exported.ownerUserId).toBe('user-1');
+    expect(exported.commands.map(item => item.operationId)).toEqual(['operation-winner']);
+    expect(exported.commands.some(item => item.operationId === 'foreign-operation')).toBe(false);
+    expect(exported.conflictEvidence[0]?.evidence).toEqual(expect.objectContaining({ losingCommand, winningCommand }));
+  });
   it('reads owner-scoped local state and filters project-scoped artifacts', async () => {
     localStorage.setItem('nanoflow.offline-cache-v2.user-1', JSON.stringify({
       projects: [{ id: 'offline-project' }],

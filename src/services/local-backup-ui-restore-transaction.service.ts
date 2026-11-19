@@ -61,6 +61,7 @@ export interface PrepareLocalBackupUiRestoreTransactionInput {
   retryQueueRestoreItems: readonly unknown[];
   restoredActionQueueItems: readonly QueuedAction[];
   blackBoxBackup: BackupData;
+  captureOfflineCommandStore?: boolean;
 }
 
 export interface PreparedLocalBackupUiRestoreTransaction {
@@ -158,6 +159,7 @@ export async function prepareLocalBackupUiRestoreTransaction(
       ownerUserId: input.ownerUserId,
       touchedProjectIds,
       retryQueueRestoreItems: input.retryQueueRestoreItems,
+      ...(input.captureOfflineCommandStore ? { captureOfflineCommandStore: true } : {}),
     });
     const blackBox = await dependencies.prepareBlackBox({
       ownerUserId: input.ownerUserId,

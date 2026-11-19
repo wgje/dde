@@ -444,10 +444,22 @@ function decodeMetadata(value: unknown, ownerUserId: string): DataSafetyMetadata
     || !Array.isArray(replayLog) || !replayLog.every(isRecord)
     || (record['lastWriteExplain'] !== null && !isRecord(record['lastWriteExplain']))
     || !isRecord(record['taskTombstones'])
-    || !Array.isArray(connectionTombstones) || !connectionTombstones.every(isRecord)) {
+    || !Array.isArray(connectionTombstones) || !connectionTombstones.every(isRecord)
+    || (record['offlineCommandStoreExport'] !== undefined && !isOfflineCommandStoreExport(record['offlineCommandStoreExport'], ownerUserId))) {
     throw invalidSlot('metadata');
   }
   return record as unknown as DataSafetyMetadataRestoreState;
+}
+
+function isOfflineCommandStoreExport(value: unknown, ownerUserId: string): boolean {
+  if (!isRecord(value) || value['schemaVersion'] !== 1 || value['ownerUserId'] !== ownerUserId
+    || !Array.isArray(value['projections']) || !Array.isArray(value['commands'])
+    || !Array.isArray(value['audits']) || !Array.isArray(value['quarantine'])) return false;
+  const records = [...value['projections'], ...value['commands'], ...value['audits'],
+    ...(Array.isArray(value['conflictEvidence']) ? value['conflictEvidence'] : [])];
+  return records.every(record => isRecord(record) && record['ownerUserId'] === ownerUserId)
+    && value['quarantine'].every(record => isRecord(record)
+      && (record['ownerUserId'] === null || record['ownerUserId'] === ownerUserId));
 }
 
 function isProject(value: unknown, projectId: string): value is Project {

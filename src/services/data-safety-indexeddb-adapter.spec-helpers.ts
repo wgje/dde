@@ -17,6 +17,7 @@ export async function resetDataSafetyAdapterStorage(): Promise<IDBDatabase> {
   await deleteRawIndexedDbDatabase('nanoflow-queue-backup').catch(() => undefined);
   await deleteRawIndexedDbDatabase('nanoflow-conflicts').catch(() => undefined);
   await deleteRawIndexedDbDatabase('nanoflow-offline-snapshots').catch(() => undefined);
+  await deleteRawIndexedDbDatabase('nanoflow-offline-command-store').catch(() => undefined);
   await deleteDataSafetyRestoreMarkerJournalDatabaseForTests().catch(() => undefined);
   localStorage.clear();
   return openDatabase(DATA_SAFETY_ADAPTER_TEST_DB_NAME);
@@ -36,6 +37,7 @@ export async function cleanupDataSafetyAdapterStorage(
   await deleteRawIndexedDbDatabase('nanoflow-queue-backup').catch(() => undefined);
   await deleteRawIndexedDbDatabase('nanoflow-conflicts').catch(() => undefined);
   await deleteRawIndexedDbDatabase('nanoflow-offline-snapshots').catch(() => undefined);
+  await deleteRawIndexedDbDatabase('nanoflow-offline-command-store').catch(() => undefined);
   await deleteDataSafetyRestoreMarkerJournalDatabaseForTests().catch(() => undefined);
 }
 
