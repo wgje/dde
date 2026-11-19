@@ -26,7 +26,7 @@ The UI restore path is coordinated by `LocalBackupUiRestoreJournal` and its tran
 
 Startup recovery accepts only owner, run, source, queue, marker, and quiescence evidence that agree and whose lease is expired. Mismatched or active evidence produces a blocked result with zero data writes. Entity IDs and `operationId` values remain unchanged; cursors and tombstones remain monotonic.
 
-Settings restore and session startup already route through the journal transaction and writer-quiescence/ActionQueue fences. Focused settings, startup, transaction, quiescence, and user-session coverage must remain green before release.
+Settings restore and session startup already route through the journal transaction and writer-quiescence/ActionQueue fences. Published C258 keeps the dynamic settings inputs compatible with `ComponentRef.setInput`; when `BackupData.localState.dataSafety.offlineCommandStore` is present, the UI opts into owner-scoped capture and the B248 transaction/pre-image/stage path performs owner/read-back validation. This describes local behavior and focused tests; it is not production proof. Focused settings, startup, transaction, quiescence, and user-session coverage must remain green before release.
 
 ## Attachment identity and owner fences
 

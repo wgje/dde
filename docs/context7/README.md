@@ -71,6 +71,7 @@ This directory is the canonical, machine-readable documentation corpus for NanoF
 | --- | --- |
 | [runbooks/sync-debugging.md](runbooks/sync-debugging.md) | stale data, retry loops, tombstone issues, field loss |
 | [runbooks/data-recovery.md](runbooks/data-recovery.md) | missing data, IndexedDB fallback, imports, rejected writes |
+| [restore-attachment-safety-closeout.md](restore-attachment-safety-closeout.md) | owner-scoped restore, journal/quiescence fences, attachment and queue safety |
 | [runbooks/context7-publishing.md](runbooks/context7-publishing.md) | publishing, refreshing, and troubleshooting Context7 indexing |
 
 ## Decisions, Schemas, Quality

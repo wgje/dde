@@ -1,7 +1,7 @@
 {
   "$schema": "https://nanoflow.local/schemas/context7-catalog.schema.json",
   "project": "NanoFlow",
-  "lastVerified": "2026-06-09",
+  "lastVerified": "2026-11-19",
   "purpose": "Machine-readable catalog for Context7 and AI retrieval.",
   "canonicalRoot": "docs/context7",
   "categories": {
@@ -90,7 +90,8 @@
     "runbooks": [
       "docs/context7/runbooks/sync-debugging.md",
       "docs/context7/runbooks/data-recovery.md",
-      "docs/context7/runbooks/context7-publishing.md"
+      "docs/context7/runbooks/context7-publishing.md",
+      "docs/context7/restore-attachment-safety-closeout.md"
     ],
     "decisions": [
       "docs/context7/adr/0001-context7-canonical-corpus.md",
@@ -164,7 +165,7 @@
       ]
     },
     {
-    "query": "Context7 publishing, refresh, indexing, private source",
+      "query": "Context7 publishing, refresh, indexing, private source",
       "primary": "docs/context7/runbooks/context7-publishing.md",
       "secondary": [
         "docs/context7/context7-maintenance.md",
@@ -235,6 +236,15 @@
         "docs/context7/08-migration/versioning.md",
         "docs/context7/08-migration/schema-migrations.md",
         "docs/context7/08-migration/docs-migrations.md"
+      ]
+    },
+    {
+      "query": "restore protocol, owner fences, journal, quiescence, attachment safety, ActionQueue",
+      "primary": "docs/context7/restore-attachment-safety-closeout.md",
+      "secondary": [
+        "docs/context7/runbooks/data-recovery.md",
+        "docs/context7/contracts/sync-contract.md",
+        "docs/context7/operations-security.md"
       ]
     }
   ]

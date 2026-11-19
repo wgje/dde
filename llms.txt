@@ -26,6 +26,7 @@ NanoFlow is an offline-first personal task workflow PWA. Use this file as the en
 - UI lifecycle contract: `docs/context7/contracts/ui-lifecycle-contract.md`
 - Sync debugging runbook: `docs/context7/runbooks/sync-debugging.md`
 - Data recovery runbook: `docs/context7/runbooks/data-recovery.md`
+- Restore and attachment safety closeout: `docs/context7/restore-attachment-safety-closeout.md`
 - Context7 publishing runbook: `docs/context7/runbooks/context7-publishing.md`
 - ADR for Context7 corpus: `docs/context7/adr/0001-context7-canonical-corpus.md`
 - ADR for offline-first LWW sync: `docs/context7/adr/0002-offline-first-lww-sync.md`
@@ -136,3 +137,5 @@ NanoFlow is an offline-first personal task workflow PWA. Use this file as the en
 ## Live Consistency Intent
 
 When source, configuration, schema, migration, Supabase function, sync, security, or UI lifecycle behavior changes, the same change must update the relevant Context7 page. `npm run docs:context7:guard` enforces this by combining the structural validator with `scripts/contracts/check-context7-coupled-changes.cjs`.
+
+- Restore owner, journal, quiescence, and attachment fences -> `docs/context7/restore-attachment-safety-closeout.md`
