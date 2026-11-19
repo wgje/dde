@@ -1,0 +1,735 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <script>try{document.documentElement.dataset.theme=localStorage.getItem('quota-monitor-theme')||'dark'}catch{document.documentElement.dataset.theme='dark'}</script>
+  <title>额度观察簿 · 本地监控</title>
+  <style>
+    :root { color-scheme: light; --paper:#f3eddf; --ink:#302c27; --muted:#756656; --rule:#c7b69d; --accent:#896246; --alert:#984c3a; --good:#596847; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--paper); color:var(--ink); font:15px/1.65 Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; }
+    main { width:min(1180px,calc(100% - 40px)); margin:0 auto; padding:34px 0 28px; }
+    .kicker,.section-label,.meta { color:#7b6045; font-size:.72rem; letter-spacing:.15em; text-transform:uppercase; }
+    header { padding-bottom:24px; border-bottom:1px solid #ad9679; }
+    .headline { display:flex; justify-content:space-between; align-items:flex-start; gap:24px; margin-top:8px; }
+    h1,h2,h3 { font-family:Georgia,"Times New Roman","Noto Serif SC",serif; font-weight:500; letter-spacing:.01em; }
+    h1 { margin:0; font-size:clamp(2.5rem,6vw,5rem); line-height:1; color:#352b22; }
+    h2 { margin:5px 0 10px; font-size:clamp(1.7rem,3vw,2.45rem); }
+    h3 { margin:5px 0 8px; font-size:1.25rem; }
+    .subtitle { margin:13px 0 0; color:#685848; }
+    .stamp { padding:8px 11px; border:1px solid #a48768; color:#8a6246; font-size:.7rem; letter-spacing:.12em; line-height:1.4; text-align:center; }
+    .intro { max-width:790px; margin:18px 0 0; color:#625549; }
+    .toolbar { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px; padding:14px 0; border-bottom:1px solid var(--rule); }
+    .tabs,.actions { display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
+    button { appearance:none; border:1px solid #c4b398; border-radius:2px; background:transparent; color:#5a4939; padding:8px 12px; font:inherit; cursor:pointer; transition:background-color .15s ease,color .15s ease; }
+    button:hover { background:#e9decc; border-color:var(--accent); }
+    button.active,.primary { background:var(--accent); border-color:var(--accent); color:#fffaf0; }
+    button:disabled { opacity:.6; cursor:wait; }
+    .section { margin-top:24px; padding:20px 0; border-bottom:1px solid var(--rule); }
+    .setup-copy { max-width:820px; margin:0; color:#6f5f50; }
+    .links { display:flex; gap:12px 20px; flex-wrap:wrap; margin:12px 0; }
+    a { color:var(--accent); text-underline-offset:3px; }
+    .form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:13px 18px; margin-top:14px; }
+    label { display:grid; gap:5px; color:#705e4e; font-size:.8rem; }
+    input { width:100%; padding:9px 10px; border:1px solid #c4b398; border-radius:2px; background:#f8f2e6; color:#3e342b; font:inherit; }
+    input:focus { outline:2px solid #89624644; border-color:var(--accent); }
+    .setup-actions { display:flex; align-items:center; flex-wrap:wrap; gap:12px 18px; margin-top:15px; }
+    .remember-credentials { display:flex; align-items:center; gap:7px; }
+    .remember-credentials input { width:auto; margin:0; }
+    .muted { color:var(--muted); font-size:.86rem; }
+    .notice { margin-top:16px; padding:12px 14px; border-left:3px solid var(--alert); background:#eee1cc; color:#5f4736; white-space:pre-wrap; }
+    .notice[hidden] { display:none; }
+    .summary { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); margin:22px 0 12px; border-block:1px solid var(--rule); }
+    .summary > div { padding:13px 16px; border-right:1px solid var(--rule); }
+    .summary > div:last-child { border:0; }
+    .summary strong { display:block; margin-top:6px; overflow-wrap:anywhere; }
+    .collector-line { display:flex; gap:9px 18px; flex-wrap:wrap; color:#675748; font-size:.85rem; }
+    .table-wrap { overflow-x:auto; }
+    table { width:100%; min-width:900px; border-collapse:collapse; text-align:left; }
+    th { padding:9px 11px; border-bottom:2px solid #9e886e; color:#715b47; font-size:.72rem; letter-spacing:.08em; text-transform:uppercase; }
+    td { padding:14px 11px; border-bottom:1px solid #d4c5af; vertical-align:top; }
+    tbody tr:hover { background:#deceb733; }
+    .metric-name { font-weight:650; color:#43382d; }
+    details { margin-top:5px; color:#746456; font-size:.82rem; }
+    summary { cursor:pointer; color:var(--accent); }
+    details p { max-width:380px; margin:6px 0; }
+    .status { display:inline-block; margin-top:4px; padding:1px 5px; border:1px solid #c7b69d; color:#76614e; font-size:.68rem; }
+    .metric-status-detail { display:block; max-width:260px; margin-top:4px; color:var(--muted); font-size:.7rem; line-height:1.35; }
+    .coverage-summary { max-width:980px; margin:5px 0 7px; font-size:.76rem; line-height:1.45; }
+    .coverage-breakdown { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:0 22px; margin:2px 0 8px; }
+    .coverage-group { min-width:0; padding:6px 8px 6px 0; border-top:1px solid var(--rule); }
+    .coverage-head { display:flex; align-items:baseline; justify-content:space-between; gap:8px; color:var(--ink); font-size:.76rem; }
+    .coverage-count { color:var(--muted); font-variant-numeric:tabular-nums; white-space:nowrap; }
+    .coverage-next { margin:3px 0; color:var(--muted); font-size:.72rem; line-height:1.4; }
+    .coverage-group details { margin-top:3px; font-size:.7rem; }
+    .coverage-group details summary { width:max-content; }
+    .coverage-group ul { margin:3px 0 0; padding-left:17px; color:var(--muted); }
+    .coverage-group li { padding:1px 0; overflow-wrap:anywhere; }
+    @media(max-width:700px) { .coverage-breakdown { grid-template-columns:1fr; } }
+    .metrics-note { max-width:980px; margin:5px 0 9px; font-size:.76rem; line-height:1.45; }
+    .dashboard-form { margin:10px 0 14px; padding:10px 0; border-block:1px solid var(--rule); }
+    .dashboard-form .form-grid { grid-template-columns:repeat(3,minmax(0,1fr)); }
+    .manual-source { color:var(--muted); font-size:.74rem; }
+    .observation-meta { display:block; margin-top:3px; color:var(--muted); font-size:.68rem; }
+    .status[data-status="warning"],.status[data-status="exceeded"] { border-color:#a9684c; color:var(--alert); }
+    .status[data-status="normal"] { border-color:#7b8a6a; color:var(--good); }
+    .mapping { max-width:340px; color:#6f5f50; font-size:.84rem; }
+    .event { padding:16px 0; border-bottom:1px solid #d2c1a8; }
+    .event-meta { display:flex; justify-content:space-between; gap:12px; color:#7b6045; font-size:.72rem; letter-spacing:.08em; }
+    .event ul { padding-left:20px; color:#5e5144; }
+    .secondary-metrics { margin:0; padding:6px 0 0; }
+    .secondary-metrics table { min-width:0; margin-top:8px; font-size:.82rem; }
+    .secondary-metrics th,.secondary-metrics td { padding:7px 8px; }
+    .quiet { color:#786b5d; }
+    footer { display:flex; justify-content:space-between; gap:18px; padding-top:20px; color:#887765; font-size:.78rem; }
+    @media(max-width:700px) { main{width:calc(100% - 30px);padding-top:22px}.headline{flex-direction:column}.form-grid,.summary{grid-template-columns:1fr}.summary>div{border-right:0;border-bottom:1px solid var(--rule)}.summary>div:last-child{border:0}footer{flex-direction:column;gap:6px}.actions button{flex:1} }
+    @media(prefers-reduced-motion:reduce){button{transition:none}}
+
+    /* Compact editorial layout: keep the glossary and evidence visible without a tall setup panel. */
+    main { width:min(1240px,calc(100% - 32px)); padding:16px 0 16px; }
+    header { padding-bottom:10px; }
+    .headline { margin-top:3px; gap:14px; align-items:center; }
+    h1 { font-size:clamp(2.05rem,4vw,3.15rem); }
+    h2 { margin:2px 0 4px; font-size:1.45rem; }
+    h3 { margin:3px 0 6px; font-size:1.05rem; }
+    .subtitle { margin:5px 0 0; font-size:.9rem; }
+    .intro { max-width:none; margin:6px 0 0; font-size:.82rem; line-height:1.45; }
+    .stamp { padding:5px 8px; }
+    .toolbar { gap:8px; padding:8px 0; }
+    button { padding:6px 10px; font-size:.83rem; }
+    .section { margin-top:12px; padding:10px 0; }
+    .auth-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+    .auth-buttons { display:flex; align-items:center; flex-wrap:wrap; gap:8px; margin-top:7px; }
+    .auth-hint { margin:5px 0 0; color:#8b4e3b; font-size:.75rem; }
+    .auth-buttons button { min-width:170px; }
+    .auth-buttons button:disabled { opacity:.45; cursor:not-allowed; }
+    .quiet-action { padding:4px 7px; border-color:transparent; color:var(--muted); font-size:.72rem; }
+    .selection-row { display:flex; align-items:end; gap:8px; margin-top:7px; }
+    .selection-row[hidden] { display:none; }
+    .selection-row label { min-width:min(360px,100%); }
+    select { border:1px solid var(--rule); border-radius:2px; background:#f8f2e6; color:var(--ink); padding:6px 8px; font:inherit; }
+    .oauth-app-setup { margin-top:7px; font-size:.78rem; }
+    .oauth-app-setup summary { width:max-content; }
+    .oauth-app-setup .oauth-client-grid { grid-template-columns:repeat(3,minmax(0,1fr)); }
+    .oauth-app-setup input { padding:6px 8px; font-size:.82rem; }
+    .scope-readonly { display:grid; gap:3px; min-height:52px; padding:6px 8px; border:1px solid var(--rule); border-radius:2px; background:#f8f2e6; color:var(--ink); }
+    .scope-readonly code { font: .78rem ui-monospace,SFMono-Regular,Consolas,monospace; }
+    .scope-readonly small { font-size:.68rem; line-height:1.35; }
+    :root[data-theme="dark"] .scope-readonly { background:#2b2926; }
+    .oauth-app-setup p { margin:4px 0; }
+    .oauth-app-setup .callback-hint { color:#80664f; font-size:.72rem; overflow-wrap:anywhere; }
+    .oauth-guide { margin:6px 0 8px; padding-bottom:7px; border-bottom:1px solid #ddcfbb; }
+    .oauth-guide summary { color:#6c533d; }
+    .oauth-guide ol { margin:5px 0; padding-left:20px; color:#5e5144; }
+    .oauth-guide li { padding:2px 0; }
+    .oauth-guide code,.callback-item code { overflow-wrap:anywhere; font: .73rem ui-monospace,SFMono-Regular,Consolas,monospace; }
+    .callback-list { display:grid; gap:4px; margin:7px 0; }
+    .callback-item { display:flex; align-items:center; flex-wrap:wrap; gap:5px 9px; }
+    .callback-item strong { min-width:132px; color:#705e4e; font-size:.72rem; }
+    .callback-item code { color:#4d4135; }
+    .callback-copy { padding:2px 7px; font-size:.68rem; }
+    .oauth-guide .links { margin:5px 0; gap:10px 16px; }
+    .oauth-troubleshoot { margin:6px 0; padding:6px 9px; border-left:2px solid #a47752; background:#eee3d2; color:#5c4c3c; font-size:.76rem; }
+    .oauth-troubleshoot strong { color:#8b503d; }
+    :root[data-theme="dark"] .oauth-troubleshoot { border-left-color:#c39a72; background:#342f29; color:#e0d4c4; }
+    :root[data-theme="dark"] .oauth-troubleshoot strong { color:#e1a58c; }
+    .manual-config { margin-top:8px; font-size:.8rem; }
+    .manual-config summary { width:max-content; }
+    .manual-config .form-grid { grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px 12px; margin-top:8px; }
+    .manual-config input { padding:6px 8px; font-size:.82rem; }
+    .manual-config p { margin:4px 0; }
+    .manual-config .links { margin:6px 0; gap:10px; }
+    .summary { grid-template-columns:1.1fr 1.3fr .6fr; margin:0 0 7px; }
+    .summary > div { padding:5px 10px; }
+    .summary strong { margin-top:1px; font-size:.85rem; }
+    .collector-line { gap:4px 12px; font-size:.76rem; }
+    .section-label { font-size:.65rem; }
+    table { min-width:650px; }
+    th { padding:6px 8px; }
+    td { padding:7px 8px; font-size:.83rem; line-height:1.4; }
+    .metric-name { font-weight:600; }
+    details { margin-top:2px; font-size:.74rem; }
+    details p { max-width:620px; margin:4px 0; }
+    .metric-details { display:flex; flex-wrap:wrap; gap:2px 12px; }
+    .metric-details details { margin:3px 0 0; }
+    .status { margin-top:2px; font-size:.64rem; }
+    .event { padding:9px 0; }
+    .event-meta { font-size:.65rem; }
+    .event-summary { margin:3px 0; font-size:.83rem; }
+    .event ul { margin:4px 0; padding-left:17px; font-size:.8rem; }
+    .event p { margin:4px 0; font-size:.78rem; }
+    footer { padding-top:10px; font-size:.7rem; }
+    .notice { margin-top:8px; padding:7px 10px; font-size:.82rem; }
+    @media(max-width:700px) { main{width:calc(100% - 24px);padding-top:12px}.oauth-app-setup .oauth-client-grid,.manual-config .form-grid{grid-template-columns:1fr}.auth-heading{align-items:flex-start;flex-direction:column}.summary{grid-template-columns:1fr 1fr}.summary>div{border-bottom:1px solid var(--rule)}.summary>div:nth-child(2){border-right:0}.summary>div:last-child{grid-column:1/-1;border:0}.actions button{flex:0 1 auto}.selection-row{align-items:stretch;flex-direction:column} }
+
+    /* Warm charcoal theme: lower luminance without pure black or saturated accents. */
+    :root[data-theme="dark"] { color-scheme:dark; --paper:#22211f; --ink:#e6ded2; --muted:#b2a797; --rule:#504940; --accent:#c39a72; --alert:#dc9278; --good:#a9b68f; }
+    :root[data-theme="dark"] body { background:var(--paper); color:var(--ink); }
+    :root[data-theme="dark"] .kicker,:root[data-theme="dark"] .section-label,:root[data-theme="dark"] .meta { color:#b89a79; }
+    :root[data-theme="dark"] header { border-bottom-color:#5a4c3e; }
+    :root[data-theme="dark"] h1 { color:#eee4d6; }
+    :root[data-theme="dark"] .subtitle,:root[data-theme="dark"] .intro { color:#c0b4a4; }
+    :root[data-theme="dark"] .stamp { border-color:#766149; color:#d0a77e; }
+    :root[data-theme="dark"] button { border-color:#62584b; color:#e0d4c3; background:transparent; }
+    :root[data-theme="dark"] button:hover { background:#38342e; border-color:#a98a68; }
+    :root[data-theme="dark"] button.active,:root[data-theme="dark"] .primary { background:#896746; border-color:#a17d58; color:#fff5e8; }
+    :root[data-theme="dark"] input,:root[data-theme="dark"] select { border-color:#5e554a; background:#2b2926; color:#e8dfd3; }
+    :root[data-theme="dark"] input::placeholder { color:#9d9284; }
+    :root[data-theme="dark"] input:focus { outline-color:#c39a7255; border-color:#c39a72; }
+    :root[data-theme="dark"] .notice { background:#392d28; color:#f0d2c3; }
+    :root[data-theme="dark"] .auth-hint { color:#dfa18a; }
+    :root[data-theme="dark"] .collector-line { color:#c8bcac; }
+    :root[data-theme="dark"] th { border-bottom-color:#75624d; color:#c9ad8b; }
+    :root[data-theme="dark"] td { border-bottom-color:#46413a; }
+    :root[data-theme="dark"] tbody tr:hover { background:#39342d; }
+    :root[data-theme="dark"] .metric-name { color:#e6dac9; }
+    :root[data-theme="dark"] details { color:#c4b8a7; }
+    :root[data-theme="dark"] summary { color:#d0aa80; }
+    :root[data-theme="dark"] .status { border-color:#62584a; color:#c9b69d; }
+    :root[data-theme="dark"] .status[data-status="warning"],:root[data-theme="dark"] .status[data-status="exceeded"] { border-color:#a66f5a; color:#e2a18a; }
+    :root[data-theme="dark"] .status[data-status="normal"] { border-color:#748466; color:#b2c296; }
+    :root[data-theme="dark"] .mapping,:root[data-theme="dark"] .setup-copy { color:#c0b4a4; }
+    :root[data-theme="dark"] .event { border-bottom-color:#48423a; }
+    :root[data-theme="dark"] .event-meta { color:#bea180; }
+    :root[data-theme="dark"] .event ul { color:#d2c7b9; }
+    :root[data-theme="dark"] .secondary-metrics { border-top-color:#504940; }
+    :root[data-theme="dark"] .quiet,:root[data-theme="dark"] footer { color:#a99d8e; }
+    :root[data-theme="dark"] .oauth-guide { border-bottom-color:#48423a; }
+    :root[data-theme="dark"] .oauth-guide summary { color:#c9a57e; }
+    :root[data-theme="dark"] .oauth-guide ol { color:#d1c6b7; }
+    :root[data-theme="dark"] .callback-item strong { color:#cbbca9; }
+    :root[data-theme="dark"] .callback-item code,:root[data-theme="dark"] .oauth-guide code { color:#e2d5c3; }
+    :root[data-theme="dark"] .oauth-app-setup .callback-hint { color:#c2a17d; }
+    :root[data-theme="dark"] a { color:#d1a87f; }
+    :root[data-theme="dark"] .oauth-guide a { color:#d1a87f; }
+    :root[data-theme="dark"] .summary { border-color:#504940; }
+    :root[data-theme="dark"] .summary > div { border-color:#504940; }
+    /* Compact reading mode: keep the paper layout, remove dashboard sprawl. */
+    main { width:min(1020px,calc(100% - 32px)); padding-top:22px; }
+    header { padding-bottom:14px; }
+    h1 { font-size:clamp(2.1rem,5vw,3.6rem); }
+    .intro { margin:9px 0 0; max-width:700px; font-size:.88rem; }
+    .toolbar { padding:9px 0; }
+    .section { margin-top:14px; padding:13px 0; }
+    .auth-heading h2, .section h2 { font-size:clamp(1.35rem,2.6vw,1.85rem); margin:2px 0 6px; }
+    .summary { margin:9px 0 7px; }
+    .coverage-panel { margin:7px 0 0; border-top:1px solid var(--rule); padding-top:6px; }
+    .coverage-panel > summary { font-size:.78rem; }
+    .coverage-breakdown { margin-top:7px; }
+    .coverage-group { padding:6px 0; border-bottom:1px solid var(--rule); }
+    .coverage-group:last-child { border-bottom:0; }
+    .metrics-note { margin:5px 0 7px; }
+    .table-wrap { margin-top:4px; }
+    @media(prefers-reduced-motion:reduce) { button { transition:none; } }
+    /* Compact first view: details remain available, but the dashboard opens on the decision surface. */
+    main { width:min(1040px,calc(100% - 32px)); padding:20px 0 22px; }
+    header { padding-bottom:12px; }
+    .headline { align-items:center; margin-top:3px; gap:14px; }
+    h1 { font-size:clamp(2rem,4vw,3.3rem); }
+    .subtitle { margin:5px 0 0; font-size:.92rem; }
+    .stamp, .intro { display:none; }
+    .toolbar { padding:9px 0; gap:8px; }
+    .toolbar .tabs, .toolbar .actions { gap:5px; }
+    button { padding:6px 10px; font-size:.83rem; }
+    .section { margin-top:14px; padding:12px 0; }
+    .auth-section { padding-top:10px; }
+    .auth-heading { gap:12px; }
+    .auth-heading h2, .section h2 { font-size:1.55rem; margin:2px 0 5px; }
+    .auth-buttons { margin-top:4px; gap:6px; }
+    .auth-buttons .muted { flex:1 1 260px; }
+    .auth-hint { margin:5px 0 0; font-size:.78rem; }
+    .summary { margin:10px 0 6px; }
+    .summary > div { padding:8px 10px; }
+    .summary strong { margin-top:2px; font-size:.9rem; }
+    .collector-details { margin-top:4px; }
+    .collector-details > summary { width:max-content; font-size:.76rem; }
+    .collector-details .collector-line { margin-top:6px; font-size:.76rem; }
+    .collector-details > .muted { margin:5px 0 0; font-size:.76rem; }
+    .metrics-note { margin:6px 0; font-size:.76rem; }
+    .coverage-summary { margin:3px 0 5px; font-size:.76rem; }
+    .coverage-breakdown { margin:2px 0 5px; }
+    table { min-width:720px; }
+    th { padding:7px 8px; }
+    td { padding:9px 8px; }
+    .metric-details { gap:2px 8px; }
+    .metric-status-detail { max-width:230px; }
+    .dashboard-form { margin:6px 0 8px; }
+    footer { margin-top:12px; font-size:.75rem; }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="kicker">LOCAL · READ ONLY · 额度监控</div>
+    <div class="headline"><div><h1>额度观察簿</h1><p class="subtitle">把免费额度的变化，翻译成可以复核的证据。</p></div><div class="stamp">PRIVATE<br>ON THIS DEVICE</div></div>
+    <p class="intro">独立运行在本机：只把可靠读数放进主表，未知项按原因折叠，绝不把未观测伪装成 0。</p>
+  </header>
+  <div class="toolbar">
+    <div class="tabs" role="tablist" aria-label="平台筛选">
+      <button class="active" data-provider="all" role="tab" aria-selected="true">全部平台</button>
+      <button data-provider="Cloudflare" role="tab" aria-selected="false">Cloudflare</button>
+      <button data-provider="Supabase" role="tab" aria-selected="false">Supabase</button>
+    </div>
+    <div class="actions">
+      <button class="primary" id="collect">立即取样</button>
+      <button id="export-md">导出 AI 分析日志</button>
+      <button id="export-json">导出 JSON</button>
+      <button id="theme-toggle" type="button" aria-label="切换明暗主题" aria-pressed="true">浅色界面</button>
+    </div>
+  </div>
+  <section class="section auth-section" aria-labelledby="setup-heading">
+    <div class="auth-heading"><div><div class="section-label">授权 / 本机进程</div><h2 id="setup-heading">连接额度来源</h2></div><span class="muted" id="provider-config">正在读取连接状态…</span></div>
+    <div class="auth-buttons">
+      <button class="primary" id="oauth-cloudflare" type="button">Cloudflare 浏览器授权</button>
+      <button class="primary" id="oauth-supabase" type="button">Supabase 浏览器授权</button>
+      <span class="muted">授权状态与采集凭证只留在本机监控进程内存。</span>
+      <button id="disconnect-cloudflare" type="button" class="quiet-action" hidden>清除 Cloudflare 本机授权</button>
+      <button id="disconnect-supabase" type="button" class="quiet-action" hidden>清除 Supabase 本机授权</button>
+    </div>
+    <p class="auth-hint" id="oauth-hint">首次需配置 OAuth App 回调。注意：Supabase 的 Secrets:Read 可读取项目全部 API Keys 与 Secrets；不接受此权限时请勿授权 Supabase OAuth，可改用专用 Metrics Secret Key。</p>
+    <details class="oauth-app-setup" id="oauth-app-setup">
+      <summary>一次性设置：OAuth App 客户端信息</summary>
+      <p class="muted">授权弹窗会复用当前浏览器的登录会话。这里登记已创建 OAuth App 的 Client ID；Client ID 与 Cloudflare Account ID 保存到本机忽略目录。Client Secret 只保存在本次进程内存；需要跨重启时放入未提交的 .env.local。</p>
+      <p class="muted">先按下面的步骤在平台控制台创建或核对 OAuth App，再回到本机填写 Client 信息。浏览器已登录的平台会话可复用，但仍须逐项同意本机请求的权限。</p>
+      <div class="callback-list" id="oauth-redirects" aria-label="本机 OAuth 回调地址">
+        <div class="callback-item"><strong>Cloudflare 回调</strong><code id="cloudflare-redirect-uri"></code><button class="callback-copy" type="button" data-copy-target="cloudflare-redirect-uri">复制</button></div>
+        <div class="callback-item"><strong>Supabase 回调</strong><code id="supabase-redirect-uri"></code><button class="callback-copy" type="button" data-copy-target="supabase-redirect-uri">复制</button></div>
+      </div>
+      <details class="oauth-guide">
+        <summary>Cloudflare：创建并核对 OAuth Client</summary>
+        <ol>
+          <li>在 Cloudflare 账户中打开 <b>Manage Account → OAuth clients → Create client</b>，创建仅供本机使用的客户端。</li>
+          <li>选择 <b>Authorization Code</b>、响应类型 <code>code</code>；按浏览器/桌面应用方式启用 <b>PKCE（S256）</b>，Token authentication 选 <code>none</code>。这种 PKCE 公共客户端不需要 Client Secret，下面的 Secret 可留空。</li>
+          <li>把上方 Cloudflare 回调地址原样加入 Redirect URLs（不要换成 Supabase 的回调，也不要改端口或路径）。</li>
+          <li>只选账户分析只读权限：在 OAuth Client 的 Scopes 中勾选 <b>Account Analytics Read</b>。额度观察簿固定请求 <code>account-analytics.read</code>，本页无需编辑授权范围。若 App 未允许该范围，请先在控制台调整并保存，然后重新发起授权。</li>
+          <li>创建后复制 Client ID；Cloudflare Account ID 可从所选账户主页 URL 中取得。填入下方并保存。</li>
+        </ol>
+        <div class="links"><a href="https://developers.cloudflare.com/fundamentals/oauth/create-an-oauth-client/" target="_blank" rel="noopener noreferrer">Cloudflare 官方创建指南</a><a href="https://dash.cloudflare.com/?to=/:account/oauth-clients" target="_blank" rel="noopener noreferrer">打开 OAuth Clients</a></div>
+      </details>
+      <details class="oauth-guide">
+        <summary>Supabase：创建并核对 OAuth App</summary>
+        <ol>
+          <li>在 Supabase 组织设置打开 <b>OAuth Apps → Add application</b>，创建或选择一个供本机监控器使用的 App。本机回调使用 <code>localhost</code> 主机名以符合 HTTPS/loopback 校验；主页面仍可从 <code>127.0.0.1</code> 打开。</li>
+          <li>把上方 Supabase 回调地址原样登记为 Redirect URL；权限仅选 <b>Projects: Read</b> 与 <b>Secrets: Read</b>，它们分别用于列出项目和读取 Metrics API 所需的项目 Secret API Key。</li>
+          <li>保存后复制 Client ID 与 Client Secret，填入下方并保存。Secret 不会写入本地配置文件；重启监控器后需重新填写，或按本页外的本地 .env.local 说明配置。</li>
+        </ol>
+        <p class="auth-hint">重要：Secrets: Read 可读取该项目全部 API Keys 和 Secrets，不是 Metrics-only 权限。若不接受此范围，不要授权 Supabase OAuth；请改用备用方式中的专用 Metrics Secret Key。</p>
+        <p class="oauth-troubleshoot"><strong>遇到“OAuth endpoint returned 403”：</strong>该错误发生在授权回调后的 token 兑换阶段。请确认编辑表单点过 <b>Confirm</b> 保存；Supabase OAuth App 已按官方流程 <b>Publish</b>；本地 Client ID 与 Client Secret 属于同一个 App；并且已选 <b>Projects: Read</b>、<b>Secrets: Read</b>。上方显示的完整回调地址必须逐字登记。失败的授权码是一次性的，请修正后回到本页重新发起，不要重用旧回调链接。</p>
+        <div class="links"><a href="https://supabase.com/docs/guides/integrations/build-a-supabase-oauth-integration" target="_blank" rel="noopener noreferrer">Supabase 官方 OAuth App 指南</a><a href="https://supabase.com/docs/guides/integrations/build-a-supabase-oauth-integration/oauth-scopes" target="_blank" rel="noopener noreferrer">Supabase 权限范围说明</a><a href="https://supabase.com/dashboard/org/_/apps" target="_blank" rel="noopener noreferrer">打开 OAuth Apps</a></div>
+      </details>
+      <form id="oauth-app-form" autocomplete="off">
+        <div class="form-grid oauth-client-grid">
+          <label>Cloudflare OAuth Client ID<input name="CLOUDFLARE_OAUTH_CLIENT_ID" placeholder="Client ID" autocomplete="off"></label>
+          <label>Cloudflare Account ID<input name="CLOUDFLARE_ACCOUNT_ID" placeholder="Account ID" autocomplete="off"></label>
+          <label>Cloudflare 固定授权范围<div class="scope-readonly"><code>account-analytics.read</code><small class="muted">只读 Account Analytics；不会请求其他数据权限。</small></div></label>
+          <label class="oauth-refresh-option"><span>Cloudflare 自动续期<div class="scope-readonly"><input id="cloudflare-refresh-token" name="CLOUDFLARE_OAUTH_REFRESH_TOKEN" type="checkbox" value="true"><span>我已在 OAuth Client 开启 Refresh Token</span><small class="muted">勾选后下一次授权才会请求 <code>offline_access</code>；未勾选不会触发无效 scope。</small></div></span></label>
+          <label>Cloudflare Client Secret（私有客户端）<input name="CLOUDFLARE_OAUTH_CLIENT_SECRET" type="password" placeholder="PKCE 公共客户端可留空" autocomplete="new-password"></label>
+          <label>Supabase OAuth Client ID<input name="SUPABASE_OAUTH_CLIENT_ID" placeholder="Client ID" autocomplete="off"></label>
+          <label>Supabase OAuth Client Secret<input name="SUPABASE_OAUTH_CLIENT_SECRET" type="password" placeholder="仅保存在本机" autocomplete="new-password"></label>
+        </div>
+        <div class="setup-actions"><button class="primary" id="save-oauth-apps">保存 OAuth App</button></div>
+      </form>
+    </details>
+    <div class="selection-row" id="cloudflare-selection" hidden><label>Cloudflare 账户<select id="cloudflare-account"></select></label><button id="select-cloudflare" type="button">使用此账户</button></div>
+    <div class="selection-row" id="supabase-selection" hidden><label>Supabase 项目<select id="supabase-project"></select></label><button id="select-supabase" type="button">使用此项目</button></div>
+    <details class="manual-config">
+      <summary>备用：手动配置 API 凭证</summary>
+      <p class="muted">推荐：使用单独创建的 Metrics Secret API Key。默认仅发到本机回环接口并保存在当前进程内存，不写入快照或导出日志。若勾选“记住”，Cloudflare / Supabase 手动凭证会以明文存入 Git 忽略的 .quota-monitor/credentials.json；仅适用于你信任的本机账户，OAuth 访问与刷新令牌不会保存。</p>
+      <div class="links"><a href="https://dash.cloudflare.com/profile/api-tokens" target="_blank" rel="noreferrer">Cloudflare API Tokens</a><a href="https://supabase.com/dashboard/project/_/settings/api-keys" target="_blank" rel="noreferrer">Supabase API Keys</a></div>
+      <form id="credentials-form" autocomplete="off">
+        <div class="form-grid">
+          <label>Cloudflare Account ID<input name="CLOUDFLARE_ACCOUNT_ID" placeholder="Account ID" autocomplete="off"></label>
+          <label>Cloudflare API Token<input name="CLOUDFLARE_API_TOKEN" type="password" placeholder="粘贴后不会回显" autocomplete="new-password"></label>
+          <label>Worker 名称（可选）<input name="CLOUDFLARE_WORKER_NAME" placeholder="留空表示账户聚合" autocomplete="off"></label>
+          <label>Supabase Project Ref<input name="SUPABASE_PROJECT_REF" placeholder="Project ref" autocomplete="off"></label>
+          <label>Supabase Secret API Key<input name="SUPABASE_METRICS_SECRET" type="password" placeholder="sb_secret_…" autocomplete="new-password"></label>
+        </div>
+        <div class="setup-actions"><label class="remember-credentials"><input id="persist-local-credentials" type="checkbox">重启后记住本机手动凭证（明文保存）</label><button class="primary" id="save-credentials">保存并取样</button></div>
+      </form>
+    </details>
+  </section>
+  <div id="notice" class="notice" role="alert" hidden></div>
+  <section class="section" aria-label="采集摘要">
+    <div class="summary">
+      <div><span class="section-label">最近采集</span><strong id="collected-at">尚无快照</strong></div>
+      <div><span class="section-label">时间窗</span><strong id="window">等待第一次取样</strong></div>
+      <div><span class="section-label">突变候选</span><strong id="anomaly-count">0 项</strong></div>
+    </div>
+    <details class="collector-details">
+      <summary>查看采集详情</summary>
+      <div class="collector-line" id="collector-status">等待本地采集。</div>
+      <p class="muted">监控进程运行期间每 5 分钟自动取样；关闭进程后不会后台采样。Cloudflare 当前采 Workers、D1、KV、R2 的账户级分析，不能归因到本项目；本仓库是静态资源 Worker 且无 D1/KV/R2 绑定。R2 Class A/B 为含不同存储层级的账户操作上界，仅按官方 actionType 归类；未知操作保持未映射。R2 存储只显示当前快照，不冒充 GB-month。</p>
+    </details>
+    <p class="metrics-note" id="collector-guidance" role="status" hidden></p>
+  </section>
+  <section class="section" aria-labelledby="metrics-heading">
+    <div class="section-label">01 / 额度词典</div><h2 id="metrics-heading">免费额度与项目映射</h2>
+    <p class="muted coverage-summary" id="coverage-summary">等待额度覆盖统计…</p>
+    <details class="coverage-panel" id="coverage-panel">
+      <summary>展开覆盖分类、未观测原因与下一步</summary>
+      <div class="coverage-breakdown" id="coverage-breakdown" aria-label="未采样原因与下一步" aria-live="polite" hidden></div>
+    </details>
+    <details class="metrics-caveat">
+      <summary>口径与项目映射说明</summary>
+      <p class="muted metrics-note">Cloudflare D1 / KV 为账户级聚合；当前仓库未发现对应 Wrangler 绑定，账户读数可能来自其他项目。R2 标准层 Free 基线为 10 GB-month、Class A 100 万次、Class B 1,000 万次；Class A/B 仅按已知 actionType 计数，遇到未知类型会 fail-closed，存储仍只显示当前快照而不是账期 GB-month。Supabase Metrics API 返回的 Prometheus 指标中，目前只把数据库大小映射到额度；Egress、Storage、MAU、Edge Function 和 Realtime 账期指标尚未映射，不能靠技术序列数推算，也不会估成 0。</p>
+    </details>
+    <details class="dashboard-form" id="dashboard-observation-panel">
+      <summary>从 Supabase Usage Dashboard 记录账期读数</summary>
+      <p class="muted">仅作为人工记录，不替代 Metrics API 快照。每条保留项目、账期、来源、读数的原始显示字符串与录入时间；Dashboard 值可能四舍五入。空白仍表示未观测，Dashboard 明确显示 0 才是零。请先在 Usage 页选择目标项目与账期；Storage 输入框记录 Dashboard 当前 GB 摘要，不等同于账期 GB-hours；Logs Query 是 allowance 参考而非直接计费。</p>
+      <form id="dashboard-observation-form" autocomplete="off">
+        <div class="form-grid">
+          <label>Usage 页所选项目 Ref<input id="dashboard-project-ref" name="projectRef" required readonly pattern="[a-z0-9]{20}" placeholder="20 位 Project Ref" autocomplete="off"></label>
+          <label>账期开始（UTC）<input id="dashboard-period-start" type="date" required></label>
+          <label>账期结束（UTC）<input id="dashboard-period-end" type="date" required></label>
+                     <label>未缓存 Egress（Dashboard 显示 GB）<input name="supabase.egress" type="number" min="0" step="any" placeholder="Usage 页读数"></label>
+           <label>Cached Egress（Dashboard 显示 GB）<input name="supabase.egress.cached" type="number" min="0" step="any" placeholder="Usage 页读数"></label>
+           <label>Storage Size（当前 GB 快照；非 GB-hours 账期值）<input name="supabase.storage.size" type="number" min="0" step="any" placeholder="Usage 页读数"></label>
+           <label>Logs Ingest（Dashboard 显示 GB）<input name="supabase.logs.ingestion" type="number" min="0" step="any" placeholder="Usage 页读数"></label>
+           <label>Logs Query（Dashboard 显示 GB；非直接计费 allowance）<input name="supabase.logs.query.allowance" type="number" min="0" step="any" placeholder="Usage 页读数"></label>
+          <label>MAU（人，整数）<input name="supabase.auth.mau" type="number" min="0" step="1" placeholder="Usage 页读数"></label>
+          <label>Edge Function 调用（次，整数）<input name="supabase.edge_functions.invocations" type="number" min="0" step="1" placeholder="Usage 页读数"></label>
+          <label>Realtime 消息（条，整数）<input name="supabase.realtime.messages" type="number" min="0" step="1" placeholder="Usage 页读数"></label>
+          <label>Realtime 峰值连接（个，整数）<input name="supabase.realtime.connections" type="number" min="0" step="1" placeholder="Usage 页读数"></label>
+        </div>
+        <div class="setup-actions"><span class="manual-source">来源固定为 Supabase Usage Dashboard · 仅提交非空读数</span><button class="primary" id="save-dashboard-observation">记录 Dashboard 读数</button></div>
+      </form>
+      <div id="dashboard-observation-history" class="metrics-note" aria-live="polite"></div>
+    </details>
+    <p class="muted metrics-note" id="metrics-visible-note">主表只显示已有可靠读数的额度；未观测项目已归入上方折叠区。</p>
+    <div class="table-wrap"><table><thead><tr><th>当前重要额度 / 项目映射</th><th>当前观测</th><th>免费基线</th><th>使用率</th></tr></thead><tbody id="metrics-body"><tr><td colspan="4" class="quiet">正在读取额度词典…</td></tr></tbody></table></div>
+  </section>
+  <section class="section" aria-labelledby="events-heading">
+    <div class="section-label">02 / 异常候选</div><h2 id="events-heading">突变额度的解释线索</h2>
+    <div id="events-body" class="quiet">暂无满足阈值的突变。阈值是“相对上次至少增加 50%”或“增加达到免费基线的 5%”，仅用于筛查，不等于账单结论。</div>
+  </section>
+  <footer><span>纸面记录，不替代平台账单。</span><span>本地快照仅存于此设备，不进入 NanoFlow 项目数据。</span></footer>
+</main>
+<script>
+  const $ = (id) => document.getElementById(id);
+  const themeToggle=$('theme-toggle');
+  function applyTheme(theme,persist=true) {
+    const isDark=theme==='dark';
+    document.documentElement.dataset.theme=isDark?'dark':'light';
+    themeToggle.textContent=isDark?'浅色界面':'深色界面';
+    themeToggle.setAttribute('aria-pressed',String(isDark));
+    if(persist) { try { localStorage.setItem('quota-monitor-theme',isDark?'dark':'light'); } catch {} }
+  }
+  applyTheme(document.documentElement.dataset.theme||'dark',false);
+  themeToggle.addEventListener('click',()=>applyTheme(document.documentElement.dataset.theme==='dark'?'light':'dark'));
+  let providerFilter = 'all';
+  let catalog = [];
+  let lastSnapshot = null;
+  let manualObservations = [];
+  let manualAnomalies = [];
+  const monitoredSupabaseProjectRef = new URLSearchParams(location.search).get('supabaseProjectRef') || '';
+  const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+  const bytes = (value) => { if(value === null || value === undefined) return '未观测'; const units=['B','KB','MB','GB','TB']; let n=value,i=0; while(n>=1000&&i<units.length-1){n/=1000;i++;} return `${new Intl.NumberFormat('zh-CN',{maximumFractionDigits:2}).format(n)} ${units[i]}`; };
+  const valueText = (value, unit) => value === null || value === undefined ? '未观测' : unit === 'bytes' ? bytes(value) : unit === 'gb' ? `${new Intl.NumberFormat('zh-CN',{maximumFractionDigits:2}).format(value)} GB` : new Intl.NumberFormat('zh-CN',{maximumFractionDigits:2}).format(value);
+  const limitText = (metric) => { const amount = metric.unit === 'bytes' ? bytes(metric.limit) : valueText(metric.limit,metric.unit); const unit = {bytes:'',gb:'GB','gb-hours':'GB-hours',requests:'次','requests/invocation':'次/调用',users:'人',invocations:'次',messages:'条',connections:'个',rows:'行',operations:'次'}[metric.unit] ?? metric.unit; return `${amount}${unit ? ` ${unit}` : ''}`; };
+  const statusText = (status,reason='',kind='') => kind==='reference-snapshot' || status==='reference' ? '参考快照（非账期）' : kind==='quota-upper-bound' ? '账户上界（非项目归因）' : status==='manual' ? '手动 Dashboard 记录' : kind==='non_cumulative' || status==='non_cumulative' ? (kind==='non_cumulative' ? '非累计快照参考' : '非累计运行时限制') : status==='unavailable' ? ({'billing metric not exposed by Metrics API':'数据源未覆盖','runtime limit is not an account usage counter':'非累计额度','collector error':'采集失败','collector credentials not configured':'缺少凭证','no analytics observations returned':'接口无观测点','OAuth refresh failed':'授权续期失败','authorization denied':'授权范围/账户不匹配','provider returned no numeric value':'无有效数值'}[reason] || '未观测') : ({normal:'在基线内',warning:'接近基线',exceeded:'超过基线',observed:'已观测'}[status] || '未观测');
+  const reasonText = (metric) => { if(metric.status==='manual') return ''; if(metric.kind==='non_cumulative' || metric.kind==='non_cumulative' || metric.kind==='reference-snapshot' || metric.status==='reference') return '这是当前平台快照，不是完整账期 GB-month；只能用于容量参考。'; if(metric.kind==='quota-upper-bound') return '这是账户级保守上界，可能包含其他项目或 Infrequent Access 操作，不能归因到当前项目，也不代表 Standard 实际使用量。'; if(metric.status==='non_cumulative') return '这是运行时上限，不是账号累计额度，不能产生实际使用量读数。'; if(metric.status!=='unavailable') return ''; return ({'billing metric not exposed by Metrics API':'该项是平台账期用量，但当前 Supabase Metrics API 不暴露对应口径；填入 API Key 也不会让本接口提供该指标，这不代表用量为 0。','runtime limit is not an account usage counter':'这是单次调用的运行时上限，不是账户累计用量，所以不会产生额度读数。','collector error':'此平台采集失败，请查看上方连接摘要。','collector credentials not configured':'尚未配置此平台的读取凭证。','no analytics observations returned':'接口未返回观测点；这不代表用量为 0。','OAuth refresh failed':'OAuth 续期失败，请重新连接。','authorization denied':'Cloudflare GraphQL 拒绝当前授权；常见原因是缺少 Account Analytics Read，或 Token 与当前 Account ID 不匹配。','provider returned no numeric value':'接口没有返回可用的数值。'}[metric.reason] || '暂无可靠读数；本监控不会按 0 处理。'); };
+  function coverageBucket(metric) {
+    if(metric.kind==='non_cumulative' || metric.kind==='non_cumulative' || metric.kind==='reference-snapshot' || metric.status==='reference') return 'reference';
+    if(metric.kind==='quota-upper-bound') return 'account-telemetry';
+    if(metric.status==='manual') return 'manual-record';
+    if(Number.isFinite(metric.observed)) return 'observed';
+    const reason=String(metric.reason||'');
+    if(reason==='runtime limit is not an account usage counter') return 'non-cumulative';
+    if(reason==='billing metric not exposed by Metrics API') return 'not-integrated';
+    const providerKey=metric.provider==='Cloudflare'?'cloudflare':'supabase';
+    const collector=lastSnapshot?.collectors?.[providerKey]||{};
+    const diagnostic=`${collector.code||''} ${collector.message||''}`;
+    if(['collector credentials not configured','authorization denied','OAuth refresh failed'].includes(reason)
+      ||collector.status==='not_configured'
+      ||/authorization denied|not authorized|unauthori[sz]ed|\b401\b|\b403\b/i.test(diagnostic)) return 'needs-credentials';
+    return 'no-data';
+  }
+  function coverageNextStep(kind, metrics) {
+    if(kind==='observed') return '已取得本次 API 读数；按页面时间窗与平台账单继续复核。';
+    if(kind==='reference') return '只作当前容量参考，不参与账期使用率；R2 存储需通过完整时间序列折算 GB-month。';
+    if(kind==='account-telemetry') return '这是账户操作遥测；不能归因到当前项目，且不能单独证明 Standard / Infrequent Access 的额度用量。';
+    if(kind==='manual-record') return '这是用户从当前项目 Usage Dashboard 人工抄录的圆整值；核对项目筛选、时间和账期后，再采集新读数。';
+    if(kind==='not-integrated') return '当前采集端点不提供该账期口径；查看平台 Usage / 账单，接入可靠来源前不作推算。';
+    if(kind==='non-cumulative') return metrics.some(metric=>metric.id==='cloudflare.r2.storage.snapshot') ? 'R2 Storage 只提供当前 payload/metadata 快照，非账期 GB-month；完整账期需另有连续时间序列，当前值不能代替账单。' : '这是单次调用上限，只作运行时参考，不参与累计用量或额度使用率。';
+    const providers=[...new Set(metrics.map(metric=>metric.provider))];
+    return providers.map(provider=>{
+      const providerKey=provider==='Cloudflare'?'cloudflare':'supabase';
+      const collector=lastSnapshot?.collectors?.[providerKey]||{};
+      const providerMetrics=metrics.filter(metric=>metric.provider===provider);
+      const reasons=new Set(providerMetrics.map(metric=>String(metric.reason||'')));
+      const diagnostic=`${collector.code||''} ${collector.message||''}`;
+      if(kind==='needs-credentials') {
+        if(reasons.has('collector credentials not configured')||collector.status==='not_configured')
+          return `${provider}：完成上方浏览器授权，或配置备用只读凭证。`;
+        if(reasons.has('OAuth refresh failed')) return `${provider}：重新发起浏览器授权并确认平台登录状态。`;
+        return `${provider}：${collector.nextStep||'核对 OAuth 同意范围、账户/项目归属及读取权限后重新连接。'}`;
+      }
+      if(kind==='no-data') {
+        const fallback=/authorization denied|not authorized|unauthori[sz]ed|\b401\b|\b403\b/i.test(diagnostic)
+          ? '检查读取权限和账户/项目是否匹配。'
+          : '查看上方采集摘要，核对账号、时间窗与接口错误后再次取样。';
+        return `${provider}：${collector.nextStep||fallback}`;
+      }
+      return `${provider}：查看采集摘要后重试。`;
+    }).join(' ');
+  }
+  function renderCoverage(metrics, visibleMetrics = metrics.filter(metric => Number.isFinite(metric.observed))) {
+    const summary=$('coverage-summary');
+    const breakdown=$('coverage-breakdown');
+    if(!lastSnapshot) {
+      summary.textContent='尚无采样快照；点击“立即取样”后，会按原因统计项目数并给出下一步。';
+      breakdown.hidden=true;
+      breakdown.replaceChildren();
+      return;
+    }
+    const definitions=[
+      {key:'observed',label:'API 已观测'},
+      {key:'manual-record',label:'手动 Dashboard 记录'},
+      {key:'reference',label:'参考快照'},
+      {key:'account-telemetry',label:'账户级遥测'},
+      {key:'needs-credentials',label:'缺凭证 / 授权'},
+      {key:'no-data',label:'接口无数据'},
+      {key:'not-integrated',label:'未接入'},
+      {key:'non-cumulative',label:'非累计口径'},
+    ];
+    const groups=Object.fromEntries(definitions.map(definition=>[definition.key,[]]));
+    metrics.forEach(metric=>groups[coverageBucket(metric)].push(metric));
+    const counts=definitions.filter(definition=>groups[definition.key].length).map(definition=>`${definition.label} ${groups[definition.key].length}`).join(' · ');
+    const visibleCount=visibleMetrics.length;
+    const hiddenCount=Math.max(0,metrics.length-visibleCount);
+    summary.textContent=metrics.length?`主表 ${visibleCount} 项；其余 ${hiddenCount} 项按原因折叠。${counts ? ` ${counts}。` : ''}未观测不等于 0。`:'当前平台筛选没有额度项目。';
+    breakdown.innerHTML=definitions.filter(definition=>groups[definition.key].length).map(definition=>{
+      const items=groups[definition.key];
+      const metricList=`<details><summary>查看 ${items.length} 项指标</summary><ul>${items.map(metric=>`<li>${esc(metric.provider)} / ${esc(metric.label)}</li>`).join('')}</ul></details>`;
+      const action=`<p class="coverage-next">下一步：${esc(coverageNextStep(definition.key,items))}</p>`;
+      return `<section class="coverage-group" aria-label="${esc(definition.label)}"><div class="coverage-head"><strong>${esc(definition.label)}</strong><span class="coverage-count">${items.length} 项</span></div>${action}${metricList}</section>`;
+    }).join('');
+    breakdown.hidden=metrics.length===0;
+    $('coverage-panel').hidden=metrics.length===0;
+  }
+  const showError = (message) => { $('notice').textContent=message; $('notice').hidden=!message; };
+  async function api(path, options={}) { const response=await fetch(path,{...options,credentials:'omit',headers:{Accept:'application/json',...(options.headers||{})}}); if(!response.ok) { const body=await response.json().catch(()=>({})); throw new Error(body.error || `本地监控请求失败（${response.status}）`); } return response.json(); }
+
+  function manualObservationFor(id) { return manualObservations.find(item=>item.metricId===id)||null; }
+  function observationDisplayMetric(metric) {
+    const manual=manualObservations.find(item=>item.metricId===metric.id);
+    if(!manual || Number.isFinite(metric.observed)) return metric;
+    return {...metric,observed:manual.value,remaining:manual.remaining,usageRatio:manual.usageRatio,status:'manual',manualSource:manual.source,manualProjectRef:manual.projectRef,manualCapturedAt:manual.capturedAt,manualPeriodStart:manual.periodStart,manualPeriodEnd:manual.periodEnd,manualDisplayValue:manual.displayedValue,manualDisplayUnit:manual.displayUnit};
+  }
+  function renderDashboardObservations() {
+    const host=$('dashboard-observation-history');
+    if(!manualObservations.length){host.textContent='尚无手动 Dashboard 记录。此处记录与自动采样分开显示。';return;}
+    host.innerHTML='<strong>手动 Dashboard 记录（与自动 API 采样分离）</strong>'+manualObservations.map(item=>`<div class="observation-meta">${esc(item.label)}：${esc(item.displayedValue)} ${esc(item.displayUnit)} · ${esc(item.exactness)} · ${esc(item.source)} · Project ${esc(item.projectRef)} · 账期 ${esc(item.periodStart)} 至 ${esc(item.periodEnd)} · 读取 ${esc(new Date(item.capturedAt).toLocaleString('zh-CN'))}</div>`).join('');
+  }
+  function renderMetricRow(metric) {
+    const detail=reasonText(metric);
+    return `<tr><td><div class="metric-name">${esc(metric.provider)} / ${esc(metric.label)}</div><div class="metric-details"><details><summary>额度说明</summary><p>${esc(metric.explanation)}</p><small>口径：${esc(metric.period)} · 来源：${esc(metric.source)}</small>${metric.manualCapturedAt?`<span class="observation-meta">Dashboard 手动记录：${esc(new Date(metric.manualCapturedAt).toLocaleString('zh-CN'))} · 账期 ${esc(metric.manualPeriodStart)} 至 ${esc(metric.manualPeriodEnd)}</span>`:''}</details><details><summary>项目映射</summary><p>${esc(metric.mapping)}</p></details></div></td><td><strong>${esc(valueText(metric.observed,metric.unit))}</strong><br><span class="status" data-status="${esc(metric.status)}">${esc(statusText(metric.status,metric.reason,metric.kind))}</span>${metric.manualCapturedAt?`<small class="metric-status-detail">Dashboard 显示 ${esc(metric.manualDisplayValue)} ${esc(metric.manualDisplayUnit)} · 项目 ${esc(metric.manualProjectRef)} · 账期 ${esc(metric.manualPeriodStart)} 至 ${esc(metric.manualPeriodEnd)} · 读取 ${esc(new Date(metric.manualCapturedAt).toLocaleString('zh-CN'))} · 按页面精度记录</small>`:''}${detail?`<small class="metric-status-detail">${esc(detail)}</small>`:''}</td><td>${esc(limitText(metric))}</td><td>${metric.usageRatio===null?'—':`${Math.round(metric.usageRatio*100)}%`}</td></tr>`;
+  }
+  function renderMetrics() {
+    const collectorMessage=String(lastSnapshot?.collectors?.cloudflare?.message||'');
+    const cloudflareAuthorizationDenied=/authorization denied|not authorized|unauthori[sz]ed|\b401\b|\b403\b/i.test(collectorMessage);
+    const supabaseNotCoveredIds=new Set(['supabase.egress','supabase.storage.size','supabase.auth.mau','supabase.edge_functions.invocations','supabase.realtime.messages','supabase.realtime.connections']);
+    const metrics=(lastSnapshot?.metrics || catalog).map(metric=>{
+      if(metric.id==='cloudflare.workers.subrequests.external.invocation') return {...metric,observed:null,remaining:null,usageRatio:null,status:'unavailable',reason:'runtime limit is not an account usage counter'};
+      if(metric.id==='cloudflare.workers.requests.daily'&&cloudflareAuthorizationDenied) return {...metric,observed:null,remaining:null,usageRatio:null,status:'unavailable',reason:'authorization denied'};
+      if(supabaseNotCoveredIds.has(metric.id)) return {...metric,observed:null,remaining:null,usageRatio:null,status:'unavailable',reason:'billing metric not exposed by Metrics API'};
+      return metric;
+    }).map(observationDisplayMetric).filter(metric=>providerFilter==='all'||metric.provider===providerFilter);
+    const importantMetrics=metrics.filter(metric=>Number.isFinite(metric.observed));
+    const primaryMetrics=importantMetrics.slice().sort((a,b)=>{
+      const manualWeight=metric=>metric.manualCapturedAt?0:1;
+      const providerWeight=metric=>metric.provider==='Supabase'?0:1;
+      return manualWeight(a)-manualWeight(b)||providerWeight(a)-providerWeight(b);
+    }).slice(0,12);
+    const secondaryMetrics=importantMetrics.filter(metric=>!primaryMetrics.includes(metric));
+    renderCoverage(metrics,primaryMetrics);
+    $('metrics-visible-note').textContent=primaryMetrics.length
+      ? `主表显示 ${primaryMetrics.length} 项可靠读数；其余 ${Math.max(0,metrics.length-primaryMetrics.length)} 项已收起，可展开查看。`
+      : '当前没有可靠读数；请先完成授权或展开覆盖分类查看缺口。';
+    if(!primaryMetrics.length) {
+      $('metrics-body').innerHTML='<tr><td colspan="4" class="quiet">没有可靠读数；授权或展开覆盖分类查看原因。</td></tr>';
+      return;
+    }
+    const secondaryBlock=secondaryMetrics.length?`<tr><td colspan="4"><details class="secondary-metrics"><summary>查看其余 ${secondaryMetrics.length} 项可靠读数</summary><table><thead><tr><th>额度</th><th>当前观测</th><th>免费基线</th><th>使用率</th></tr></thead><tbody>${secondaryMetrics.map(renderMetricRow).join('')}</tbody></table></details></td></tr>`:'';
+    $('metrics-body').innerHTML=primaryMetrics.map(renderMetricRow).join('')+secondaryBlock;
+  }  function renderEvents(events=[]) {
+    $('anomaly-count').textContent=`${events.length} 项`;
+    $('events-body').className=events.length?'':'quiet';
+    $('events-body').innerHTML=events.length ? events.map(event=>`<article class="event"><div class="event-meta"><span>${esc(event.provider)}</span><time>${esc(new Date(event.detectedAt).toLocaleString('zh-CN'))}</time></div><h3>${esc(event.label)}</h3><p class="event-summary">${esc(valueText(event.previous,'count'))} → ${esc(valueText(event.current,'count'))}，增加 ${esc(valueText(event.delta,'count'))}</p><details><summary>查看突变分析过程与复核建议</summary><ul>${event.reasoning.map(line=>`<li>${esc(line)}</li>`).join('')}</ul><p><strong>建议复核：</strong>${event.nextChecks.map(esc).join(' · ')}</p></details></article>`).join('') : '目前没有满足阈值的突变。阈值是“相对上次至少增加 50%”或“增加达到免费基线的 5%”，仅用于筛查，不等于账单结论。';
+  }
+  function renderProviderConfig(config) {
+    const cloudflare=config.oauth?.cloudflare || {};
+    const supabase=config.oauth?.supabase || {};
+    const cfButton=$('oauth-cloudflare');
+    const sbButton=$('oauth-supabase');
+    const manualSupabaseConfigured=Boolean(config.providers?.supabase&&config.sources?.supabase&&config.sources.supabase!=='missing');
+    cfButton.disabled=false;
+    sbButton.disabled=false;
+    cfButton.textContent=cloudflare.connected?'Cloudflare 已连接 · 重连':(cloudflare.enabled?'Cloudflare 浏览器授权':'配置 Cloudflare OAuth');
+    sbButton.textContent=supabase.connected?'Supabase 已连接 · 重连':(manualSupabaseConfigured?'Supabase OAuth（可选）':(supabase.enabled?'Supabase 浏览器授权':'配置 Supabase OAuth'));
+    $('disconnect-cloudflare').hidden=!cloudflare.authorized;
+    $('disconnect-supabase').hidden=!supabase.authorized;
+    const sourceNames={oauth:'浏览器 OAuth','env-local':'.env.local','saved-local':'本机保存文件','browser-memory':'本机临时输入',missing:'未配置'};
+    const cloudflareSource=sourceNames[config.sources?.cloudflare] || '本机配置';
+    const supabaseSource=sourceNames[config.sources?.supabase] || '本机配置';
+    const cloudflareRefreshState=config.oauth?.refresh?.cloudflare;
+    const cloudflareRefreshNote=cloudflare.refreshRequested ? (cloudflareRefreshState ? ' · 自动续期已启用' : ' · 本次会话尚未拿到续期令牌') : '';
+    const cfAccount=cloudflare.connected?`Cloudflare OAuth 已授权${cloudflareRefreshNote}`:(config.sources?.cloudflare&&config.sources.cloudflare!=='missing'?`Cloudflare 凭证已配置（${cloudflareSource}）`:'Cloudflare 未授权');
+    const sbProject=supabase.connected?'Supabase OAuth 已授权':(supabase.authorized?'Supabase 已授权，等待项目凭证':(config.sources?.supabase&&config.sources.supabase!=='missing'?`Supabase 凭证已配置（${supabaseSource}）`:'Supabase 未授权'));
+    $('provider-config').textContent=`${cfAccount} · ${sbProject} · 每 ${Math.round(config.intervalMs/60000)} 分钟`;
+    const accountInput=$('oauth-app-form').elements.CLOUDFLARE_ACCOUNT_ID;
+    if(document.activeElement!==accountInput) accountInput.value=config.oauth?.cloudflareAccountIdConfigured ? (config.oauth?.cloudflare?.selectedAccountId || '') : '';
+    const manualForm=$('credentials-form');
+    if(document.activeElement!==manualForm.elements.CLOUDFLARE_ACCOUNT_ID) manualForm.elements.CLOUDFLARE_ACCOUNT_ID.value=config.oauth?.cloudflare?.selectedAccountId || '';
+    if(document.activeElement!==manualForm.elements.SUPABASE_PROJECT_REF) manualForm.elements.SUPABASE_PROJECT_REF.value=supabase.selectedProjectRef || config.oauth?.supabase?.selectedProjectRef || '';
+    $('persist-local-credentials').checked=Boolean(config.savedCredentials?.cloudflare || config.savedCredentials?.supabase);
+    const refreshToggle=$('cloudflare-refresh-token');
+    if(refreshToggle) refreshToggle.checked=Boolean(config.oauth?.cloudflare?.refreshRequested);
+    $('cloudflare-redirect-uri').textContent=cloudflare.redirectUri || config.oauth?.redirectUris?.cloudflare || 'http://127.0.0.1:4180/oauth/cloudflare/callback';
+    $('supabase-redirect-uri').textContent=supabase.redirectUri || config.oauth?.redirectUris?.supabase || 'http://localhost:4180/oauth/supabase/callback';
+    const setup=[];
+    if(!cloudflare.clientIdConfigured) setup.push('Cloudflare Client ID');
+    if(!cloudflare.accountIdConfigured) setup.push('Cloudflare Account ID');
+    if(!manualSupabaseConfigured&&!supabase.clientIdConfigured) setup.push('Supabase OAuth Client ID');
+    if(!manualSupabaseConfigured&&!supabase.clientSecretConfigured) setup.push('Supabase OAuth Client Secret');
+    const warning='Supabase OAuth 的 Secrets:Read 可读取项目所有 API Keys 与 Secrets；若不接受此授权，请用备用表单中的专用 Metrics Secret Key。';
+    const oauthGuidance=manualSupabaseConfigured?'Supabase 本机 Metrics API 凭证已填入；OAuth 是可选的另一种连接方式。':`${setup.length?`需完成一次性设置：${setup.join('；')}。`:'授权弹窗会复用当前浏览器会话。'}回调地址与所需权限必须和 OAuth App 配置一致。Cloudflare 固定请求只读 Account Analytics；${cloudflare.refreshRequested?(cloudflareRefreshState?'offline_access 已返回续期令牌，本机可自动续期。':'已请求 offline_access，但当前会话未返回续期令牌，过期后仍需重新授权。'):'offline_access 未启用。'}`;
+    $('oauth-hint').textContent=`${oauthGuidance} ${warning}`;
+    const accountSelect=$('cloudflare-account');
+    accountSelect.innerHTML=(cloudflare.accounts||[]).map(item=>`<option value="${esc(item.id)}">${esc(item.name)} · ${esc(item.id)}</option>`).join('');
+    if(cloudflare.selectedAccountId) accountSelect.value=cloudflare.selectedAccountId;
+    $('cloudflare-selection').hidden=!(cloudflare.accounts?.length>1);
+    const projectSelect=$('supabase-project');
+    projectSelect.innerHTML=(supabase.projects||[]).map(item=>`<option value="${esc(item.ref)}">${esc(item.name)} · ${esc(item.ref)}</option>`).join('');
+    if(supabase.selectedProjectRef) projectSelect.value=supabase.selectedProjectRef;
+    $('supabase-selection').hidden=!(supabase.projects?.length>1);
+    const errors=[cloudflare.error && `Cloudflare OAuth：${cloudflare.error}`,supabase.error && `Supabase OAuth：${supabase.error}`].filter(Boolean);
+    if(errors.length) showError(errors.join('\n'));
+  }
+  async function renderConfig() { const config=await api('/api/config'); renderProviderConfig(config); const projectRef=config.oauth?.supabase?.selectedProjectRef||''; if(projectRef){$('dashboard-project-ref').value=projectRef;$('dashboard-project-ref').readOnly=true;} return config; }
+  async function startOAuth(provider) {
+    // Open synchronously inside the click gesture so popup blockers do not silently eat the OAuth flow.
+    const popup=window.open('about:blank',`quota-oauth-${provider}`,'popup,width=560,height=720');
+    if(!popup) { showError('浏览器拦截了授权窗口。请允许本机监控页打开弹窗后，再点一次浏览器授权。'); return; }
+    try {
+      const config=await api('/api/config');
+      const missing=provider==='cloudflare'
+        ? ['clientIdConfigured','accountIdConfigured'].filter(key=>!config.oauth.cloudflare[key])
+        : ['clientIdConfigured','clientSecretConfigured'].filter(key=>!config.oauth.supabase[key]);
+      if(missing.length) {
+        popup.close();
+        const details=$('oauth-app-setup'); details.open=true; details.scrollIntoView({behavior:'smooth',block:'nearest'});
+        const target=provider==='cloudflare'
+          ? $('oauth-app-form').elements[!config.oauth.cloudflare.clientIdConfigured?'CLOUDFLARE_OAUTH_CLIENT_ID':'CLOUDFLARE_ACCOUNT_ID']
+          : $('oauth-app-form').elements[!config.oauth.supabase.clientIdConfigured?'SUPABASE_OAUTH_CLIENT_ID':'SUPABASE_OAUTH_CLIENT_SECRET'];
+        target.focus();
+        showError(`${provider==='cloudflare'?'Cloudflare':'Supabase'} OAuth 尚未配置：${missing.map(key=>({clientIdConfigured:'Client ID',accountIdConfigured:'Account ID',clientSecretConfigured:'Client Secret'}[key])).join('、')}。填写一次性客户端信息后即可授权。`);
+        return;
+      }
+      const started=await api('/api/oauth/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider})});
+      popup.location.href=started.authorizationUrl;
+      showError('');
+    } catch(error) {
+      popup.close();
+      showError(error.message || '本地 OAuth 配置读取失败');
+    }
+  }
+  async function selectOAuthResource(provider, value) {
+    const payload=provider==='cloudflare'?{provider,id:value}:{provider,ref:value};
+    await api('/api/oauth/select',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    await collect();
+  }
+  function renderSnapshot(snapshot) {
+    lastSnapshot=snapshot;
+    if(snapshot){
+      $('collected-at').textContent=new Date(snapshot.collectedAt).toLocaleString('zh-CN');
+      $('window').textContent=snapshot.window;
+      const entries=Object.entries(snapshot.collectors);
+      const cloudflareState=snapshot.collectors.cloudflare||{};
+      const inferredAuthorizationDenied=!cloudflareState.code&&/authorization denied|not authorized|unauthori[sz]ed|\b401\b|\b403\b/i.test(String(cloudflareState.message||''));
+      $('collector-status').innerHTML=entries.map(([name,state])=>{
+        const code=state.code||(name==='cloudflare'&&inferredAuthorizationDenied?'AUTHORIZATION_DENIED':'');
+        return `<span><strong>${esc(name)}</strong> · ${esc(state.status)}${code?` / ${esc(code)}`:''} · ${esc(state.message)}</span>`;
+      }).join('　');
+      const guidance=entries.map(([name,state])=>{
+        const nextStep=state.nextStep||(name==='cloudflare'&&inferredAuthorizationDenied?'Cloudflare 当前凭证被 GraphQL 拒绝。请核对 Account Analytics Read 是否已授予，并确认 Token 与 Account ID 属于同一账户。':null);
+        return nextStep?`${name==='cloudflare'?'Cloudflare':'Supabase'} 建议：${nextStep}`:null;
+      }).filter(Boolean);
+      $('collector-guidance').hidden=!guidance.length;
+      $('collector-guidance').textContent=guidance.join('　');
+      if(cloudflareState.code==='AUTHORIZATION_DENIED'||inferredAuthorizationDenied) $('oauth-cloudflare').textContent='改用浏览器 OAuth 连接';
+      renderEvents([...(snapshot.anomalies||[]),...manualAnomalies]);
+    } else {
+      $('collected-at').textContent='尚无快照';
+      $('window').textContent='等待第一次取样';
+      $('collector-status').textContent='等待本地采集。';
+      $('collector-guidance').hidden=true;
+      renderEvents([]);
+    }
+    renderMetrics();
+  }
+  async function refresh() {
+    try { const config=await renderConfig(); const result=await api('/api/snapshot'); catalog=result.catalog||[]; manualObservations=result.manualObservations||[]; manualAnomalies=result.manualAnomalies||[]; if(monitoredSupabaseProjectRef && !$('dashboard-project-ref').value) $('dashboard-project-ref').value=monitoredSupabaseProjectRef; renderDashboardObservations(); renderSnapshot(result.snapshot); if(!config.oauth?.cloudflare?.error&&!config.oauth?.supabase?.error) showError(''); }
+    catch(error) { showError(`${error.message}\n请确认本地监控器正在运行，并使用 http://127.0.0.1:${location.port || 4180}/ 打开本页。`); }
+  }
+  async function collect() {
+    const button=$('collect'); button.disabled=true; button.textContent='正在取样…'; showError('');
+    try { const result=await api('/api/collect',{method:'POST'}); renderSnapshot(result.snapshot); await renderConfig(); }
+    catch(error) { showError(error.message); }
+    finally { button.disabled=false; button.textContent='立即取样'; }
+  }
+  document.querySelectorAll('[data-copy-target]').forEach(button=>button.addEventListener('click',async()=>{
+    const target=$(button.dataset.copyTarget);
+    try { await navigator.clipboard.writeText(target.textContent); const label=button.textContent; button.textContent='已复制'; setTimeout(()=>{button.textContent=label;},1400); }
+    catch { showError('剪贴板不可用，请手动选择并复制回调地址。'); }
+  }));
+  $('collect').addEventListener('click',()=>void collect());
+
+  $('dashboard-observation-form').addEventListener('submit',async(event)=>{
+    event.preventDefault();
+    const form=event.currentTarget;
+    const button=$('save-dashboard-observation');
+    const observations=[];
+    for(const input of form.querySelectorAll('input[name^="supabase."]')) {
+      const value=input.value.trim();
+      if(!value) continue;
+      const numeric=Number(value);
+      if(!Number.isFinite(numeric)||numeric<0){showError(`${input.previousSibling?.textContent||input.name} 必须是非负数。`);input.focus();return;}
+      observations.push({metricId:input.name,value:numeric});
+    }
+    if(!observations.length){showError('请至少填写一个 Dashboard 读数；留空项目会继续显示未观测。');return;}
+    button.disabled=true;button.textContent='正在记录…';
+    try {
+      const result=await api('/api/observations/supabase',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({projectRef:$('dashboard-project-ref').value.trim(),periodStart:$('dashboard-period-start').value,periodEnd:$('dashboard-period-end').value,observations:observations.map(item=>({metricId:item.metricId,displayedValue:form.querySelector(`[name="${item.metricId}"]`).value.trim()}))})});
+      manualObservations=result.manualObservations||[]; manualAnomalies=result.manualAnomalies||[];
+      renderDashboardObservations();
+      await refresh();
+      form.querySelectorAll('input[type="number"]').forEach(input=>input.value='');
+      showError(result.message);
+    } catch(error) { showError(error.message); }
+    finally { button.disabled=false;button.textContent='记录 Dashboard 读数'; }
+  });
+
+  $('oauth-cloudflare').addEventListener('click',()=>void startOAuth('cloudflare').catch(error=>showError(error.message)));
+  $('oauth-supabase').addEventListener('click',()=>void startOAuth('supabase').catch(error=>showError(error.message)));
+  $('disconnect-cloudflare').addEventListener('click',async()=>{try{await api('/api/oauth/disconnect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:'cloudflare'})});await refresh();}catch(error){showError(error.message);}});
+  $('disconnect-supabase').addEventListener('click',async()=>{try{await api('/api/oauth/disconnect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:'supabase'})});await refresh();}catch(error){showError(error.message);}});
+  $('supabase-project').addEventListener('change',event=>void selectOAuthResource('supabase',event.target.value).catch(error=>showError(error.message)));
+  window.addEventListener('message',event=>{
+    const callbackOrigin=event.data?.provider==='supabase'?`http://localhost:${location.port||4180}`:`http://127.0.0.1:${location.port||4180}`;
+    if(event.origin!==callbackOrigin||event.data?.type!=='quota-oauth-complete') return;
+    void refresh().then(()=>collect());
+  });
+  window.addEventListener('focus',()=>{ void refresh(); });
+  $('credentials-form').addEventListener('submit',async(event)=>{event.preventDefault(); const formElement=event.currentTarget; const button=$('save-credentials'); button.disabled=true; button.textContent='正在保存并取样…'; const form=new FormData(formElement); const credentials=Object.fromEntries([...form.entries()].map(([key,value])=>[key,String(value)])); try { credentials.persistLocally=$('persist-local-credentials').checked; const saved=await api('/api/configure',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(credentials)}); formElement.elements.CLOUDFLARE_API_TOKEN.value=''; formElement.elements.SUPABASE_METRICS_SECRET.value=''; await collect(); if(saved.savedLocally) showError(saved.message); } catch(error) { showError(error.message); } finally { button.disabled=false; button.textContent='保存并取样'; } });
+  $('oauth-app-form').addEventListener('submit',async(event)=>{event.preventDefault(); const formElement=event.currentTarget; const button=$('save-oauth-apps'); button.disabled=true; button.textContent='正在保存…'; const fields=Object.fromEntries([...new FormData(formElement).entries()].map(([key,value])=>[key,String(value)])); fields.CLOUDFLARE_OAUTH_REFRESH_TOKEN=String(Boolean($('cloudflare-refresh-token')?.checked)); try { await api('/api/oauth-apps',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(fields)}); formElement.elements.SUPABASE_OAUTH_CLIENT_SECRET.value=''; formElement.elements.CLOUDFLARE_OAUTH_CLIENT_SECRET.value=''; await renderConfig(); showError('OAuth App 客户端信息已保存到本机 .quota-monitor/ 目录。'); } catch(error) { showError(error.message); } finally { button.disabled=false; button.textContent='保存 OAuth App'; } });
+  document.querySelectorAll('[data-provider]').forEach(button=>button.addEventListener('click',()=>{providerFilter=button.dataset.provider;document.querySelectorAll('[data-provider]').forEach(item=>{const active=item===button;item.classList.toggle('active',active);item.setAttribute('aria-selected',String(active));});renderMetrics();}));
+  $('export-md').addEventListener('click',()=>{location.href='/api/export?format=markdown';});
+  $('export-json').addEventListener('click',()=>{location.href='/api/export';});
+  void refresh();
+  window.setInterval(()=>{ if(document.visibilityState==='visible') void refresh(); },30000);
+</script>
+</body>
+</html>

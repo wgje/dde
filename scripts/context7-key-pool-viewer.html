@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Context7 · 账号用量</title>
+  <style nonce="__CSP_NONCE__">
+    :root {
+      color-scheme: light;
+      --paper: #f3ecdc;
+      --paper-shadow: #e9dfcc;
+      --ink: #2d2a24;
+      --muted: #746c5e;
+      --line: #c9beaa;
+      --accent: #8a4936;
+      --accent-wash: #ead9cd;
+      --sage: #536b50;
+      --sage-wash: #dce4d6;
+      --amber: #93652c;
+      --amber-wash: #eee1c6;
+      --red: #944c3f;
+      --red-wash: #efd9d2;
+      --serif: Georgia, "Noto Serif SC", "Songti SC", "STSong", serif;
+      --sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    html { min-height: 100%; background: var(--paper); }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--ink);
+      font-family: var(--sans);
+      background-color: var(--paper);
+      background-image: radial-gradient(rgba(83, 69, 48, .055) .55px, transparent .55px);
+      background-size: 5px 5px;
+    }
+    button { font: inherit; }
+    .page { width: min(100% - 40px, 1040px); margin: 0 auto; padding: 26px 0 38px; }
+    .masthead { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-bottom: 12px; border-bottom: 1px solid var(--ink); }
+    .brand { font: 600 13px var(--serif); letter-spacing: .16em; text-transform: uppercase; }
+    .issue { color: var(--muted); font-size: 11px; letter-spacing: .08em; }
+    .intro { max-width: 700px; margin: 42px auto 30px; text-align: center; }
+    .eyebrow { color: var(--accent); font-size: 11px; letter-spacing: .22em; text-transform: uppercase; }
+    h1 { margin: 10px 0 8px; font: 500 clamp(34px, 6vw, 54px)/1.15 var(--serif); letter-spacing: .035em; }
+    .subtitle { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.8; }
+    .rule { display: flex; align-items: center; gap: 12px; margin: 22px auto 0; color: var(--accent); font-size: 11px; letter-spacing: .2em; }
+    .rule::before, .rule::after { content: ""; width: 45px; height: 1px; background: var(--line); }
+
+    .overview { display: grid; grid-template-columns: 1.2fr 1fr 1fr; gap: 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+    .metric { min-height: 105px; padding: 19px 22px 17px; border-right: 1px solid var(--line); }
+    .metric:first-child { padding-left: 4px; }
+    .metric:last-child { border-right: 0; }
+    .metric-label { color: var(--muted); font-size: 11px; letter-spacing: .1em; }
+    .metric-value { display: block; margin-top: 8px; font: 500 27px/1.15 var(--serif); font-variant-numeric: tabular-nums; }
+    .metric-note { display: block; margin-top: 6px; color: var(--muted); font-size: 11px; }
+
+    .section-head { display: flex; align-items: end; justify-content: space-between; gap: 16px; margin: 37px 0 13px; }
+    h2 { margin: 0; font: 500 24px/1.2 var(--serif); }
+    .section-note { color: var(--muted); font-size: 12px; }
+    .account-list { border-top: 1px solid var(--ink); }
+    .account { display: grid; grid-template-columns: minmax(140px, .8fr) minmax(220px, 1.5fr) minmax(130px, .8fr) minmax(130px, .75fr); align-items: center; gap: 18px; padding: 19px 4px; border-bottom: 1px solid var(--line); }
+    .account-name { display: flex; align-items: center; gap: 11px; }
+    .slot-number { display: grid; place-items: center; width: 31px; height: 31px; border: 1px solid var(--line); border-radius: 50%; font: 500 14px var(--serif); }
+    .slot-label { font: 500 17px var(--serif); }
+    .slot-sub { display: block; margin-top: 3px; color: var(--muted); font-size: 10px; letter-spacing: .04em; }
+    .usage-top { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 8px; font-size: 12px; font-variant-numeric: tabular-nums; }
+    .usage-count { color: var(--ink); font-weight: 600; }
+    .usage-remaining { color: var(--muted); }
+    .meter { width: 100%; height: 7px; appearance: none; overflow: hidden; background: #e3dac9; border: 0; border-radius: 1px; }
+    .meter::-webkit-progress-bar { background: #e3dac9; }
+    .meter::-webkit-progress-value { background: var(--meter-color, var(--accent)); transition: width .25s ease; }
+    .meter::-moz-progress-bar { background: var(--meter-color, var(--accent)); }
+    .account[data-status="cooldown"] .meter { --meter-color: var(--amber); }
+    .account[data-status="auth-invalid"] .meter,
+    .account[data-status="quota-exhausted"] .meter,
+    .account[data-status="soft-exhausted"] .meter { --meter-color: var(--red); }
+    .status-wrap { display: flex; align-items: center; gap: 8px; }
+    .status-mark { width: 7px; height: 7px; background: var(--sage); border-radius: 50%; }
+    .account[data-status="uninitialized"] .status-mark { background: var(--line); }
+    .account[data-status="cooldown"] .status-mark { background: var(--amber); }
+    .account[data-status="auth-invalid"] .status-mark,
+    .account[data-status="quota-exhausted"] .status-mark,
+    .account[data-status="soft-exhausted"] .status-mark { background: var(--red); }
+    .status-text { font-size: 12px; }
+    .status-detail { margin-top: 4px; color: var(--muted); font-size: 10px; }
+    .success-count { text-align: right; font-size: 12px; font-variant-numeric: tabular-nums; }
+    .success-count strong { display: block; font: 500 20px var(--serif); }
+    .success-count span { display: block; margin-top: 3px; color: var(--muted); font-size: 10px; }
+
+    .notice { margin-top: 28px; padding: 13px 15px; border-left: 2px solid var(--accent); background: rgba(234, 217, 205, .48); color: #55473d; font-size: 12px; line-height: 1.7; }
+    .notice strong { color: var(--ink); font-weight: 600; }
+    .toolbar { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-top: 25px; padding-top: 13px; border-top: 1px solid var(--line); }
+    .freshness { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+    .refresh-button { padding: 8px 13px; color: var(--ink); background: transparent; border: 1px solid var(--line); border-radius: 2px; cursor: pointer; font-size: 12px; transition: background-color .15s ease, border-color .15s ease; }
+    .refresh-button:hover { background: var(--accent-wash); border-color: var(--accent); }
+    .refresh-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .message { min-height: 20px; margin-top: 8px; color: var(--muted); font-size: 11px; }
+    .message[data-kind="error"] { color: var(--red); }
+    footer { display: flex; justify-content: space-between; gap: 12px; margin-top: 38px; padding-top: 12px; border-top: 1px solid var(--ink); color: var(--muted); font-size: 10px; letter-spacing: .05em; }
+
+    @media (max-width: 720px) {
+      .page { width: min(100% - 28px, 560px); padding-top: 18px; }
+      .intro { margin: 31px auto 24px; }
+      .overview { grid-template-columns: 1fr 1fr; }
+      .metric { padding: 15px 12px; border-bottom: 1px solid var(--line); }
+      .metric:first-child { grid-column: 1 / -1; padding-left: 12px; border-right: 0; }
+      .metric:nth-child(2) { border-left: 0; }
+      .metric:last-child { border-bottom: 0; }
+      .account { grid-template-columns: 1fr auto; gap: 13px 10px; padding: 17px 2px; }
+      .account-name { grid-column: 1; }
+      .status-wrap { grid-column: 2; justify-self: end; }
+      .usage { grid-column: 1 / -1; grid-row: 2; }
+      .success-count { grid-column: 1 / -1; display: flex; align-items: baseline; justify-content: space-between; text-align: left; }
+      .success-count strong { display: inline; margin-left: auto; }
+      .success-count span { margin: 0 0 0 6px; }
+      .section-head { align-items: start; flex-direction: column; }
+      footer { flex-direction: column; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header class="masthead">
+      <div class="brand">Context7 · Local Ledger</div>
+      <div class="issue">个人本地用量页</div>
+    </header>
+
+    <section class="intro" aria-labelledby="page-title">
+      <div class="eyebrow">A quiet account of requests</div>
+      <h1 id="page-title">账号用量</h1>
+      <p class="subtitle">四个账号按顺序接力。用量每 5 秒从本机账本更新；不读取、不接触或展示凭据。</p>
+      <div class="rule">本月记录</div>
+    </section>
+
+    <section class="overview" aria-label="本月概览">
+      <div class="metric">
+        <span class="metric-label">计数周期</span>
+        <strong class="metric-value" id="period-value">—</strong>
+        <span class="metric-note" id="reset-value">等待本地状态</span>
+      </div>
+      <div class="metric">
+        <span class="metric-label">总尝试次数</span>
+        <strong class="metric-value" id="attempted-value">—</strong>
+        <span class="metric-note">包含未成功请求</span>
+      </div>
+      <div class="metric">
+        <span class="metric-label">总成功次数</span>
+        <strong class="metric-value" id="successful-value">—</strong>
+        <span class="metric-note">按账号分别累计</span>
+      </div>
+    </section>
+
+    <section aria-labelledby="accounts-title">
+      <div class="section-head">
+        <h2 id="accounts-title">四个账号</h2>
+        <div class="section-note" id="route-note">正在读取本地账本</div>
+      </div>
+      <div class="account-list" id="account-list" aria-live="polite">
+        <div class="account"><div class="slot-label">读取中…</div></div>
+      </div>
+    </section>
+
+    <aside class="notice">
+      <strong>计数说明：</strong>尝试次数在请求派发前保守预留，所以失败或中断的请求也会计入月度软上限；成功次数仅统计得到成功结果的请求。数据来自本机持久状态，每 5 秒刷新。
+    </aside>
+
+    <div class="toolbar">
+      <div class="freshness" id="freshness">尚未读取</div>
+      <button class="refresh-button" id="refresh-button" type="button">现在更新</button>
+    </div>
+    <div class="message" id="message" role="status"></div>
+
+    <footer>
+      <span>只读 · 本机 · 不显示凭据</span>
+      <span id="health-value">账本状态：等待中</span>
+    </footer>
+  </main>
+
+  <script nonce="__CSP_NONCE__">
+    const quotaLimit = 950;
+    const accountList = document.getElementById('account-list');
+    const message = document.getElementById('message');
+    const refreshButton = document.getElementById('refresh-button');
+    const labels = {
+      healthy: '可用',
+      cooldown: '冷却中',
+      'auth-invalid': '凭据失效',
+      'quota-exhausted': '额度耗尽',
+      'soft-exhausted': '本月到限',
+      uninitialized: '尚无记录',
+    };
+    const reasonLabels = {
+      'all-keyed-slots-unavailable': '所有账号暂不可用，当前请求将尝试匿名路由',
+      'state-unavailable-fail-closed': '账本不可用，已按保护策略切换',
+      'outcome-persistence-failed': '结果持久化异常，已切换到保护路由',
+      'credentials-not-applied': '独立查看器只读账本；实际路由以 MCP 进程为准',
+    };
+    const healthLabels = {
+      healthy: '正常',
+      'recovered-replica': '已从备份副本恢复',
+      uninitialized: '尚未初始化',
+      'fail-closed': '保护模式',
+    };
+
+    function formatNumber(value) {
+      return new Intl.NumberFormat('zh-CN').format(value);
+    }
+
+    function formatDate(value, timeZone) {
+      if (!value) return '—';
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return '—';
+      return new Intl.DateTimeFormat('zh-CN', {
+        timeZone: timeZone || 'UTC',
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+      }).format(date);
+    }
+
+    function makeElement(tag, className, text) {
+      const element = document.createElement(tag);
+      if (className) element.className = className;
+      if (text !== undefined) element.textContent = text;
+      return element;
+    }
+
+    function renderAccount(account, limit) {
+      const attempts = Number.isSafeInteger(account.attemptedCalls) ? account.attemptedCalls : 0;
+      const successes = Number.isSafeInteger(account.successfulCalls) ? account.successfulCalls : 0;
+      const recorded = Number.isSafeInteger(account.attemptedCalls);
+      const remaining = recorded ? Math.max(0, limit - attempts) : null;
+      const status = recorded ? (labels[account.status] || '状态未知') : '尚无记录';
+
+      const row = makeElement('article', 'account');
+      row.dataset.status = account.status || 'unknown';
+
+      const name = makeElement('div', 'account-name');
+      name.append(makeElement('span', 'slot-number', String(account.slot)));
+      const nameText = makeElement('div');
+      nameText.append(makeElement('span', 'slot-label', `账号 ${account.slot}`));
+      nameText.append(makeElement('span', 'slot-sub', '按槽位顺序接力'));
+      name.append(nameText);
+
+      const usage = makeElement('div', 'usage');
+      const usageTop = makeElement('div', 'usage-top');
+      usageTop.append(makeElement('span', 'usage-count', recorded
+        ? `${formatNumber(attempts)} / ${formatNumber(limit)} 次尝试`
+        : `暂无本月记录 / ${formatNumber(limit)} 次`));
+      usageTop.append(makeElement('span', 'usage-remaining', recorded ? `余 ${formatNumber(remaining)} 次` : '等待首次用量'));
+      const meter = document.createElement('progress');
+      meter.className = 'meter';
+      meter.max = limit;
+      meter.value = Math.min(attempts, limit);
+      meter.setAttribute('aria-label', `账号 ${account.slot} 本月尝试用量`);
+      usage.append(usageTop, meter);
+
+      const statusWrap = makeElement('div', 'status-wrap');
+      statusWrap.append(makeElement('span', 'status-mark'));
+      const statusText = makeElement('div');
+      statusText.append(makeElement('div', 'status-text', status));
+      const detail = !recorded
+        ? '此周期尚未使用'
+        : account.cooldownUntil
+          ? `至 ${formatDate(account.cooldownUntil, 'UTC')} UTC`
+          : account.lastErrorClass
+            ? `最近结果：${account.lastErrorClass}`
+            : '状态正常';
+      statusText.append(makeElement('div', 'status-detail', detail));
+      statusWrap.append(statusText);
+
+      const success = makeElement('div', 'success-count');
+      success.append(makeElement('span', '', '成功请求'));
+      success.append(makeElement('strong', '', recorded ? formatNumber(successes) : '—'));
+      success.append(makeElement('span', '', '次'));
+      row.append(name, usage, statusWrap, success);
+      return row;
+    }
+
+    function render(data) {
+      const limit = Number.isSafeInteger(data.quotaLimit) && data.quotaLimit > 0 ? data.quotaLimit : quotaLimit;
+      const accounts = Array.isArray(data.accounts) ? data.accounts : [];
+      document.getElementById('period-value').textContent = data.periodId || '—';
+      document.getElementById('reset-value').textContent = data.nextResetAt
+        ? `下次重置 ${formatDate(data.nextResetAt, data.timeZone)} · ${data.timeZone || 'UTC'}`
+        : '本月尚无计数记录';
+      document.getElementById('attempted-value').textContent = formatNumber(accounts.reduce((sum, item) => sum + (item.attemptedCalls || 0), 0));
+      document.getElementById('successful-value').textContent = formatNumber(accounts.reduce((sum, item) => sum + (item.successfulCalls || 0), 0));
+      document.getElementById('health-value').textContent = `账本状态：${healthLabels[data.stateHealth] || '未知'}`;
+
+      const routing = data.routing || {};
+      const routeMessage = routing.mode === 'keyed'
+        ? `账本当前建议账号 ${routing.nextSlot}`
+        : routing.reason
+          ? (reasonLabels[routing.reason] || `本地记录路由：${routing.mode || '未知'}`)
+          : routing.mode === 'stored-unreconciled'
+            ? '当前路由请以 Context7 MCP 实际调用结果为准'
+            : `本地记录路由：${routing.mode || '等待中'}`;
+      document.getElementById('route-note').textContent = routeMessage;
+
+      const fragment = document.createDocumentFragment();
+      const accountBySlot = new Map(accounts.map(account => [account.slot, account]));
+      for (const slot of [1, 2, 3, 4]) {
+        fragment.append(renderAccount(accountBySlot.get(slot) || { slot, status: 'uninitialized' }, limit));
+      }
+      accountList.replaceChildren(fragment);
+      const ledgerTime = data.ledgerUpdatedAt ? `账本写入 ${formatDate(data.ledgerUpdatedAt, data.timeZone)} · ` : '';
+      document.getElementById('freshness').textContent = `${ledgerTime}最近读取 ${formatDate(data.observedAt, data.timeZone)} · 每 5 秒更新`;
+      message.textContent = '';
+      message.dataset.kind = '';
+    }
+
+    async function refresh() {
+      if (refreshButton.disabled) return;
+      refreshButton.disabled = true;
+      try {
+        const response = await fetch('/api/status', { cache: 'no-store', credentials: 'same-origin' });
+        if (!response.ok) throw new Error('status-unavailable');
+        render(await response.json());
+      } catch {
+        message.textContent = '暂时无法读取本机账本，请确认本地查看服务仍在运行。';
+        message.dataset.kind = 'error';
+      } finally {
+        refreshButton.disabled = false;
+      }
+    }
+
+    refreshButton.addEventListener('click', refresh);
+    refresh();
+    window.setInterval(refresh, 5_000);
+  </script>
+</body>
+</html>
