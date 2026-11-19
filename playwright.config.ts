@@ -1,4 +1,6 @@
 import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { defineConfig, devices } from '@playwright/test';
 import * as dotenv from 'dotenv';
@@ -55,6 +57,43 @@ function resolvePlaywrightDevServer(): ResolvedDevServerInfo {
 
   return resolved;
 }
+
+function firstExistingPath(candidates: readonly string[]): string | undefined {
+  return candidates.find(candidate => fs.existsSync(candidate));
+}
+
+function resolvePlaywrightChromiumExecutablePath(): string | undefined {
+  const explicit = process.env['PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH'];
+  if (explicit && fs.existsSync(explicit)) return explicit;
+
+  const systemChrome = firstExistingPath(process.platform === 'win32'
+    ? [
+      'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+      'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+    ]
+    : process.platform === 'darwin'
+      ? ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome']
+      : ['/usr/bin/google-chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser']);
+  if (systemChrome) return systemChrome;
+
+  const browserRoot = process.env['PLAYWRIGHT_BROWSERS_PATH']
+    || (process.platform === 'win32'
+      ? path.join(os.homedir(), 'AppData', 'Local', 'ms-playwright')
+      : path.join(os.homedir(), '.cache', 'ms-playwright'));
+  if (!fs.existsSync(browserRoot)) return undefined;
+
+  const cachedBrowsers = fs.readdirSync(browserRoot)
+    .filter(entry => /^chromium-\d+$/.test(entry))
+    .sort((left, right) => right.localeCompare(left, undefined, { numeric: true }));
+  const cachedExecutable = process.platform === 'win32'
+    ? cachedBrowsers.map(entry => path.join(browserRoot, entry, 'chrome-win64', 'chrome.exe'))
+    : process.platform === 'darwin'
+      ? cachedBrowsers.map(entry => path.join(browserRoot, entry, 'chrome-mac', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'))
+      : cachedBrowsers.map(entry => path.join(browserRoot, entry, 'chrome-linux', 'chrome'));
+  return firstExistingPath(cachedExecutable);
+}
+
+const playwrightChromiumExecutablePath = resolvePlaywrightChromiumExecutablePath();
 
 function normalizeProxyServer(server: string | undefined): string | undefined {
   if (!server) {
@@ -154,6 +193,7 @@ export default defineConfig({
     /* 容器环境下避免 /dev/shm 过小导致 Chromium 页面崩溃 */
     launchOptions: {
       args: ['--disable-dev-shm-usage'],
+      ...(playwrightChromiumExecutablePath ? { executablePath: playwrightChromiumExecutablePath } : {}),
     },
     /* 收集失败测试的trace */
     trace: 'on-first-retry',
