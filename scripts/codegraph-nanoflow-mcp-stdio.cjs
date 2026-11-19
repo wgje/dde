@@ -5,6 +5,14 @@ const { spawn } = require('node:child_process');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
+let OverlayQueryWorkerPool = null;
+try {
+  ({ OverlayQueryWorkerPool } = require('./lib/codegraph-overlay-worker-pool.cjs'));
+} catch (error) {
+  const optionalWorkerPoolMissing = error?.code === 'MODULE_NOT_FOUND'
+    && error?.message?.includes("Cannot find module './lib/codegraph-overlay-worker-pool.cjs'");
+  if (!optionalWorkerPoolMissing) throw error;
+}
 const {
   CODEGRAPH_DEDUP_MAINTENANCE_FOCUSED_QUERY,
 } = require('./codegraph-nanoflow-dedup-query.cjs');
@@ -56,6 +64,10 @@ const WRAPPER_START_OBSERVED_ENV_KEYS = [...new Set([
   'CODEGRAPH_MCP_DEBUG',
   'NANOFLOW_CODEGRAPH_OVERLAY_QUERY_TIMEOUT_MS',
   'NANOFLOW_CODEGRAPH_OVERLAY_QUERY_MAX_BUFFER_BYTES',
+  'NANOFLOW_CODEGRAPH_OVERLAY_WORKER_ENABLED',
+  'NANOFLOW_CODEGRAPH_OVERLAY_WORKER_POOL_SIZE',
+  'NANOFLOW_CODEGRAPH_OVERLAY_WORKER_MAX_QUEUE_SIZE',
+  'NANOFLOW_CODEGRAPH_OVERLAY_PREWARM',
   'NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS',
   'NANOFLOW_CODEGRAPH_REFRESH_ON_STARTUP',
   'NANOFLOW_CODEGRAPH_CHILD_RESTART_BACKOFF_AFTER',
@@ -112,6 +124,10 @@ const OVERLAY_QUERY_MAX_BUFFER_BYTES = parsePositiveIntegerEnv(
   16 * 1024 * 1024,
 );
 const OVERLAY_QUERY_KILL_GRACE_MS = 1000;
+const OVERLAY_QUERY_WORKER_POOL_SIZE = Math.min(8, parsePositiveIntegerEnv('NANOFLOW_CODEGRAPH_OVERLAY_WORKER_POOL_SIZE', 2));
+const OVERLAY_QUERY_WORKER_MAX_QUEUE_SIZE = Math.min(1024, parsePositiveIntegerEnv('NANOFLOW_CODEGRAPH_OVERLAY_WORKER_MAX_QUEUE_SIZE', 32));
+const OVERLAY_QUERY_WORKER_ENABLED = process.env.NANOFLOW_CODEGRAPH_OVERLAY_WORKER_ENABLED === '1'
+  && OverlayQueryWorkerPool !== null;
 const CONTEXT_PACK_TIMEOUT_MS = parsePositiveIntegerEnv(
   'NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS',
   30_000,
@@ -594,6 +610,7 @@ let nextOverlayQueryId = 1;
 let nextClientRequestId = 1;
 const activeClientRequests = new Map();
 let activeOverlayRefreshLockPath = null;
+let overlayQueryWorkerPool = null;
 let lastInitializeParams = null;
 let clientInitialized = false;
 
@@ -642,6 +659,7 @@ let fatalShutdownLogged = false;
 installProcessFatalDiagnostics();
 installProcessStdioDiagnostics();
 spawnManagedCodegraph('startup');
+if (OVERLAY_QUERY_WORKER_ENABLED && process.env.NANOFLOW_CODEGRAPH_OVERLAY_PREWARM === '1') prewarmOverlayQueryWorkerPool('startup');
 
 process.stdin.on('data', chunk => {
   const modeBefore = clientMode;
@@ -1926,6 +1944,7 @@ function requestClientStdinShutdown(streamEvent) {
   clearChildRestartTimer();
   clearSharedDaemonFallbackRecoveryTimer();
   clearStaleWrapperRecycleTimer();
+  closeOverlayQueryWorkerPool('client-stdin');
   requestChildShutdown('client-stdin');
 }
 
@@ -1990,6 +2009,7 @@ function requestClientStdioShutdown({
   clearChildRestartTimer();
   clearSharedDaemonFallbackRecoveryTimer();
   clearStaleWrapperRecycleTimer();
+  closeOverlayQueryWorkerPool('client-stdio');
   requestChildShutdown(transportClosedBy);
 }
 
@@ -2010,6 +2030,7 @@ function shutdownAndExit() {
   clearChildRestartTimer();
   clearSharedDaemonFallbackRecoveryTimer();
   clearStaleWrapperRecycleTimer();
+  closeOverlayQueryWorkerPool('signal');
   requestChildShutdown('signal');
   terminateChildTree(child.pid);
 }
@@ -4224,7 +4245,316 @@ function writeInvalidParamsResponse(id, message, source = 'nanoflow-overlay') {
   });
 }
 
+function prewarmOverlayQueryWorkerPool(reason = 'startup') {
+  try {
+    getOverlayQueryWorkerPool().prewarm(Math.max(OVERLAY_QUERY_TIMEOUT_MS, CONTEXT_PACK_TIMEOUT_MS), { reason })
+      .catch(error => diagnostics.log('overlay.worker.prewarm.failed', {
+        reason, failureClass: error?.failureClass ?? 'overlay-prewarm-failed',
+        error: serializeDiagnosticError(error), runtime: summarizeRuntimeStateSafely(),
+      }));
+  } catch (error) {
+    diagnostics.log('overlay.worker.prewarm.failed', {
+      reason, failureClass: 'overlay-prewarm-setup-failed',
+      error: serializeDiagnosticError(error), runtime: summarizeRuntimeStateSafely(),
+    });
+  }
+}
+
+function overlayQueryWorkerEnvironment() {
+  return {
+    ...process.env,
+    NANOFLOW_OVERLAY_QUERY_PROFILE: process.env.NANOFLOW_OVERLAY_QUERY_PROFILE ?? '1',
+    NANOFLOW_OVERLAY_SKIP_REFRESH: process.env.NANOFLOW_OVERLAY_SKIP_REFRESH ?? '1',
+  };
+}
+
+function createLocalOverlayQueryWorkerPool(scriptPath, env) {
+  return new OverlayQueryWorkerPool({
+    root: projectRoot,
+    scriptPath,
+    size: OVERLAY_QUERY_WORKER_POOL_SIZE,
+    maxBufferBytes: OVERLAY_QUERY_MAX_BUFFER_BYTES,
+    maxQueueSize: OVERLAY_QUERY_WORKER_MAX_QUEUE_SIZE,
+    env,
+    onEvent: (event, data) => diagnostics.log(event, { ...data, runtime: summarizeRuntimeStateSafely() }),
+  });
+}
+
+function getOverlayQueryWorkerPool() {
+  if (!overlayQueryWorkerPool) {
+    overlayQueryWorkerPool = createLocalOverlayQueryWorkerPool(
+      path.join(projectRoot, 'scripts', 'query-codegraph-nanoflow-overlay.mjs'),
+      overlayQueryWorkerEnvironment(),
+    );
+    diagnostics.log('overlay.worker.pool.selected', {
+      mode: 'process-local', size: OVERLAY_QUERY_WORKER_POOL_SIZE,
+      maxQueueSize: OVERLAY_QUERY_WORKER_MAX_QUEUE_SIZE,
+      maxBufferBytes: OVERLAY_QUERY_MAX_BUFFER_BYTES,
+      runtime: summarizeRuntimeStateSafely(),
+    });
+  }
+  return overlayQueryWorkerPool;
+}
+
+function requestOverlayQueryWorker(args, timeoutMs, metadata) {
+  return getOverlayQueryWorkerPool().request(args, timeoutMs, metadata);
+}
+
+function closeOverlayQueryWorkerPool(reason) {
+  if (!overlayQueryWorkerPool) return;
+  diagnostics.log('overlay.worker.pool.close', {
+    reason, mode: 'process-local', runtime: summarizeRuntimeStateSafely(),
+  });
+  overlayQueryWorkerPool.close();
+  overlayQueryWorkerPool = null;
+}
+
 function runNanoFlowOverlayQuery(query, limit, options = {}) {
+  if (!OVERLAY_QUERY_WORKER_ENABLED) return runNanoFlowOverlayQueryLegacy(query, limit, options);
+
+  const script = path.join(projectRoot, 'scripts', 'query-codegraph-nanoflow-overlay.mjs');
+  const toolArgs = ['--root', projectRoot, '--query', query, '--limit', String(limit)];
+  const queryId = `${diagnostics.runId}:overlay-${nextOverlayQueryId++}`;
+  const startedAtMs = Date.now();
+  const overlayFile = getOverlayFileDiagnostics(projectRoot);
+  const timeoutMs = Number.isInteger(options.timeoutMs) && options.timeoutMs > 0
+    ? options.timeoutMs
+    : OVERLAY_QUERY_TIMEOUT_MS;
+  const outputMode = options.nativeJson
+    ? WRAPPER_OUTPUT_MODES.nativeJson
+    : (options.nativeMarkdown
+        ? WRAPPER_OUTPUT_MODES.nativeMarkdown
+        : (options.contextJson
+            ? WRAPPER_OUTPUT_MODES.contextOverlayQueryCompact
+            : (options.json ? WRAPPER_OUTPUT_MODES.contextOverlayQuery : WRAPPER_OUTPUT_MODES.overlayTool)));
+  const jsonOutput = Boolean(options.json || options.contextJson || options.nativeJson);
+  const requestFields = requestTraceDiagnostics(options.requestTrace ?? null);
+  if (options.contextJson) toolArgs.push('--context-json');
+  else if (options.json) toolArgs.push('--json');
+  if (options.skipRefresh !== false) toolArgs.push('--skip-refresh');
+  if (options.nativeJson) toolArgs.push('--native-json');
+  if (options.nativeMarkdown) toolArgs.push('--native-markdown');
+
+  diagnostics.log('overlay.query.start', {
+    queryId,
+    ...requestFields,
+    contextId: options.contextId,
+    query,
+    limit,
+    script,
+    args: toolArgs,
+    cwd: path.dirname(projectRoot),
+    startedAtMs,
+    overlayFile,
+    json: jsonOutput,
+    contextJson: Boolean(options.contextJson),
+    nativeJson: Boolean(options.nativeJson),
+    nativeMarkdown: Boolean(options.nativeMarkdown),
+    outputMode,
+    timeoutMs,
+    maxBufferBytes: OVERLAY_QUERY_MAX_BUFFER_BYTES,
+    workerPoolSize: OVERLAY_QUERY_WORKER_POOL_SIZE,
+    runtime: summarizeRuntimeState(),
+  });
+
+  return requestOverlayQueryWorker(toolArgs.slice(2), timeoutMs, { queryId })
+    .then(workerResult => {
+      const stdout = workerResult.ok ? workerResult.outputText : '';
+      const stderr = [
+        ...(Array.isArray(workerResult.profileEvents) ? workerResult.profileEvents : []),
+        ...(workerResult.error ? [{ event: 'nanoflow.overlay.worker.error', error: workerResult.error }] : []),
+      ].map(event => JSON.stringify(event)).join('\n');
+      const rawText = workerResult.ok
+        ? stdout.trim()
+        : (workerResult.error || workerResult.stderrTail || 'NanoFlow overlay worker failed.').trim();
+      let data = null;
+      let jsonParseOk = null;
+      let jsonParseError = null;
+      let jsonShapeError = null;
+      const emptyJsonResponse = workerResult.ok && jsonOutput && rawText.length === 0;
+      if (workerResult.ok && jsonOutput) {
+        if (emptyJsonResponse) {
+          jsonParseOk = false;
+        } else {
+          try {
+            data = JSON.parse(rawText);
+            jsonParseOk = true;
+            jsonShapeError = validateOverlayJsonResponseShape(data, options);
+          } catch (parseError) {
+            jsonParseOk = false;
+            jsonParseError = errorToMessage(parseError);
+          }
+        }
+      }
+      const timedOut = workerResult.timedOut === true || workerResult.failureClass === 'overlay-timeout';
+      const outputLimitExceeded = workerResult.failureClass === 'overlay-max-buffer';
+      const status = workerResult.ok ? 0 : (timedOut ? null : 2);
+      const signal = timedOut ? 'timeout' : (workerResult.ok ? null : null);
+      const effectiveError = workerResult.ok ? null : new Error(rawText);
+      const failureClass = classifyOverlayQueryFailure({
+        status,
+        signal,
+        error: effectiveError,
+        timedOut,
+        outputLimitExceeded,
+        jsonOutput,
+        jsonParseError,
+        jsonShapeError,
+        emptyJsonResponse,
+        stderr,
+      });
+      const text = failureClass === OVERLAY_STALE_SKIP_REFRESH
+        ? OVERLAY_STALE_SKIP_REFRESH
+        : (failureClass === 'overlay-empty-response'
+            ? 'NanoFlow overlay query returned no text content.'
+            : rawText);
+      const isError = !workerResult.ok || failureClass !== 'success';
+      const runtime = summarizeRuntimeState();
+      const processSummary = summarizeOverlayProcessBuffers(stdout, stderr);
+      const resultStats = summarizeOverlayToolResultStats(stdout, {
+        jsonExpected: jsonOutput,
+        nativeJson: options.nativeJson === true,
+        nativeMarkdown: options.nativeMarkdown === true,
+      });
+      const elapsedMs = workerResult.elapsedMs ?? Date.now() - startedAtMs;
+      const responseBytes = workerResult.responseBytes ?? Buffer.byteLength(stdout, 'utf8');
+      const workerDiagnostics = {
+        workerPid: workerResult.pid ?? null,
+        cacheHit: workerResult.cacheHit ?? null,
+        generationId: workerResult.generationId ?? null,
+        cacheMetrics: workerResult.cacheMetrics ?? null,
+        workerPoolSize: OVERLAY_QUERY_WORKER_POOL_SIZE,
+        responseBytes,
+      };
+      diagnostics.log('overlay.query.exit', {
+        queryId,
+        ...requestFields,
+        contextId: options.contextId,
+        query,
+        limit,
+        pid: workerResult.pid ?? null,
+        worker: true,
+        ...workerDiagnostics,
+        startedAtMs,
+        elapsedMs,
+        status,
+        signal,
+        error: effectiveError?.message,
+        timedOut,
+        outputLimitExceeded,
+        failureClass,
+        jsonExpected: jsonOutput,
+        jsonParseOk,
+        jsonParseError,
+        jsonShapeError,
+        outputMode,
+        overlayFile,
+        stderrTail: workerResult.stderrTail,
+        resultStats,
+        investigation: buildOverlayInvestigation(failureClass),
+        rootCauseSnapshot: failureClass === 'success' ? undefined : buildRootCauseSnapshot(runtime),
+        runtime,
+        ...processSummary,
+      });
+      return {
+        isError,
+        text,
+        data,
+        diagnostics: {
+          queryId,
+          pid: workerResult.pid ?? null,
+          startedAtMs,
+          elapsedMs,
+          outputMode,
+          timedOut,
+          outputLimitExceeded,
+          failureClass,
+          jsonExpected: jsonOutput,
+          jsonParseOk,
+          jsonParseError,
+          overlayFile,
+          ...workerDiagnostics,
+          ...processSummary,
+        },
+      };
+    })
+    .catch(error => {
+      const failureClass = error?.failureClass ?? 'overlay-process-error';
+      const fallbackEligible = failureClass === 'overlay-worker-exit'
+        || failureClass === 'overlay-json-parse'
+        || failureClass === 'overlay-worker-protocol'
+        || /overlay-worker-(spawn|write)-failed/.test(String(error?.message ?? ''));
+      if (fallbackEligible && !shuttingDown) {
+        diagnostics.log('overlay.worker.fallback', {
+          queryId,
+          ...requestFields,
+          contextId: options.contextId,
+          failureClass,
+          error: serializeDiagnosticError(error),
+          runtime: summarizeRuntimeStateSafely(),
+        });
+        closeOverlayQueryWorkerPool('worker-query-fallback');
+        return runNanoFlowOverlayQueryLegacy(query, limit, options);
+      }
+
+      const timedOut = error?.timedOut === true || failureClass === 'overlay-timeout';
+      const outputLimitExceeded = failureClass === 'overlay-max-buffer';
+      const text = timedOut
+        ? `NanoFlow overlay query timed out after ${timeoutMs}ms.`
+        : String(error?.message ?? error);
+      const runtime = summarizeRuntimeStateSafely();
+      const elapsedMs = Number.isFinite(error?.elapsedMs) ? error.elapsedMs : Date.now() - startedAtMs;
+      diagnostics.log('overlay.query.exit', {
+        queryId,
+        ...requestFields,
+        contextId: options.contextId,
+        query,
+        limit,
+        pid: error?.pid ?? null,
+        worker: true,
+        workerPoolSize: OVERLAY_QUERY_WORKER_POOL_SIZE,
+        startedAtMs,
+        elapsedMs,
+        status: null,
+        signal: timedOut ? 'timeout' : null,
+        error: error?.message,
+        timedOut,
+        outputLimitExceeded,
+        failureClass,
+        outputMode,
+        overlayFile,
+        stderrTail: error?.stderrTail ?? '',
+        investigation: buildOverlayInvestigation(failureClass),
+        rootCauseSnapshot: buildRootCauseSnapshot(runtime),
+        runtime,
+      });
+      return {
+        isError: true,
+        text,
+        data: null,
+        diagnostics: {
+          queryId,
+          pid: error?.pid ?? null,
+          startedAtMs,
+          elapsedMs,
+          outputMode,
+          timedOut,
+          outputLimitExceeded,
+          failureClass,
+          jsonExpected: jsonOutput,
+          jsonParseOk: null,
+          jsonParseError: null,
+          overlayFile,
+          worker: true,
+          workerPoolSize: OVERLAY_QUERY_WORKER_POOL_SIZE,
+          responseBytes: error?.responseBytes ?? 0,
+          stderrTail: error?.stderrTail ?? '',
+        },
+      };
+    });
+}
+
+function runNanoFlowOverlayQueryLegacy(query, limit, options = {}) {
   const script = path.join(projectRoot, 'scripts', 'query-codegraph-nanoflow-overlay.mjs');
   const args = [script, '--root', projectRoot, '--query', query, '--limit', String(limit)];
   const queryId = `${diagnostics.runId}:overlay-${nextOverlayQueryId++}`;

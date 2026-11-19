@@ -283,16 +283,79 @@ Object.assign(overlayQueryRuntime, {
 
 const PROFILE_OVERLAY_QUERY = process.env.NANOFLOW_OVERLAY_QUERY_PROFILE === '1';
 ignoreBrokenStdoutPipe();
-const args = profilePhase('parseArgs', () => parseArgs(process.argv.slice(2)));
-const root = path.resolve(args.root ?? process.cwd());
-const currentReceipt = profilePhase(
-  'readOverlayCurrentReceipt',
-  () => readOverlayCurrentReceipt(root),
-);
-if (!currentReceipt.ok) {
-  fs.writeSync(process.stderr.fd, `overlay-current-${currentReceipt.errorCode.toLowerCase().replaceAll('_', '-')}\n`);
-  process.exit(2);
+if (process.argv[2] === '--worker') {
+  const workerRoot = parseOverlayWorkerRoot(process.argv.slice(3));
+  void runOverlayQueryWorker(workerRoot).catch(error => {
+    process.stderr.write(`[CodeGraph overlay worker] ${error?.message ?? String(error)}\n`);
+    process.exitCode = 1;
+  });
+} else {
+  const args = profilePhase('parseArgs', () => parseArgs(process.argv.slice(2)));
+  const root = path.resolve(args.root ?? process.cwd());
+  const result = executeOverlayQuery(args, root);
+  if (!result.ok) {
+    fs.writeSync(process.stderr.fd, `overlay-current-${result.errorCode.toLowerCase().replaceAll('_', '-')}\n`);
+    process.exit(2);
+  }
+  process.stdout.write(result.outputText);
 }
+
+function parseOverlayWorkerRoot(rawArgs) {
+  let root = process.cwd();
+  for (let index = 0; index < rawArgs.length; index += 1) {
+    if (rawArgs[index] !== '--root') throw new Error('Overlay worker accepts only --root at startup.');
+    const value = rawArgs[index + 1];
+    if (!value || value.startsWith('--')) throw new Error('Overlay worker requires a valid --root.');
+    root = value;
+    index += 1;
+  }
+  return path.resolve(root);
+}
+
+async function runOverlayQueryWorker(root) {
+  const readline = await import('node:readline');
+  const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+  for await (const line of input) {
+    if (!line.trim()) continue;
+    let request;
+    try {
+      request = JSON.parse(line);
+      if (!request || (typeof request.id !== 'string' && !Number.isSafeInteger(request.id))
+        || !Array.isArray(request.args) || !request.args.every(value => typeof value === 'string')) {
+        throw new Error('overlay-worker-request-invalid');
+      }
+      if (request.args.includes('--prewarm')) {
+        const receipt = profilePhase('readOverlayCurrentReceipt', () => readOverlayCurrentReceipt(root));
+        const response = receipt.ok
+          ? { id: request.id, ok: true, outputText: '', generationId: receipt.current.generationId, cacheHit: false, profileEvents: [] }
+          : { id: request.id, ok: false, error: `overlay-current-${receipt.errorCode.toLowerCase().replaceAll('_', '-')}`, failureClass: 'overlay-current-invalid', profileEvents: [] };
+        process.stdout.write(`${JSON.stringify(response)}\n`);
+        continue;
+      }
+      const args = profilePhase('parseArgs', () => parseArgs(request.args));
+      const requestedRoot = path.resolve(args.root ?? root);
+      if (requestedRoot !== root) throw new Error('overlay-worker-root-mismatch');
+      const result = executeOverlayQuery(args, root);
+      const response = result.ok
+        ? { id: request.id, ...result, cacheHit: false, profileEvents: [] }
+        : { id: request.id, ok: false, error: `overlay-current-${result.errorCode.toLowerCase().replaceAll('_', '-')}`, failureClass: 'overlay-current-invalid', profileEvents: [] };
+      process.stdout.write(`${JSON.stringify(response)}\n`);
+    } catch (error) {
+      const response = {
+        id: request?.id ?? null,
+        ok: false,
+        error: String(error?.message ?? error),
+        failureClass: 'overlay-worker-query-error',
+        profileEvents: [],
+      };
+      process.stdout.write(`${JSON.stringify(response)}\n`);
+    }
+  }
+}
+
+function executeOverlayQuery(args, root) {
+  const currentReceipt = profilePhase('readOverlayCurrentReceipt', () => readOverlayCurrentReceipt(root));
+  if (!currentReceipt.ok) return { ok: false, errorCode: currentReceipt.errorCode };
 const overlay = currentReceipt.overlay;
 const overlaySource = toPosix(path.join(
   '.codegraph',
@@ -362,7 +425,8 @@ if (args.contextJson) {
     blastRadius,
     coverage,
   };
-  profilePhase('writeContextJson', () => process.stdout.write(`${JSON.stringify(response, null, 2)}\n`));
+  const outputText = profilePhase('writeContextJson', () => `${JSON.stringify(response, null, 2)}\n`);
+  return { ok: true, outputText, generationId: currentReceipt.current.generationId };
 } else {
   const outputBudget = getExploreOutputBudget(coverage.typescriptFiles ?? graphNodes.length);
   const sourceBlocks = profilePhase('buildSourceBlocks', () => buildSourceBlocks(
@@ -417,7 +481,9 @@ if (args.contextJson) {
   const outputText = args.json
     ? `${JSON.stringify(outputResponse, null, 2)}\n`
     : `${args.nativeMarkdown ? nativeMarkdown : response.markdown}\n`;
-  profilePhase(args.json ? 'writeJson' : 'writeMarkdown', () => process.stdout.write(outputText));
+  profilePhase(args.json ? 'writeJson' : 'writeMarkdown', () => undefined);
+  return { ok: true, outputText, generationId: currentReceipt.current.generationId };
+}
 }
 
 function parseArgs(rawArgs) {

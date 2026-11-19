@@ -291,17 +291,45 @@ function makeConfigBackedAdapterProject(): string {
     path.join(repoRoot, 'scripts', 'lib', 'codegraph-context-outcome.cjs'),
     path.join(libraryRoot, 'codegraph-context-outcome.cjs'),
   );
+  fs.copyFileSync(
+    path.join(repoRoot, 'scripts', 'lib', 'codegraph-overlay-worker-pool.cjs'),
+    path.join(libraryRoot, 'codegraph-overlay-worker-pool.cjs'),
+  );
   fs.writeFileSync(
     path.join(scriptsRoot, 'query-codegraph-nanoflow-overlay.mjs'),
     [
       '#!/usr/bin/env node',
-      'process.stdout.write(JSON.stringify({',
-      "  query: 'sync-rule-keyword',",
-      '  matches: [],',
-      '  nodes: [],',
-      '  relationshipGroups: {},',
-      '  coverage: { graphNodes: 1, graphEdges: 0 }',
-      '}));',
+      "import fs from 'node:fs';",
+      "import readline from 'node:readline';",
+      'const argv = process.argv.slice(2);',
+      "const trace = value => process.env.OVERLAY_WORKER_TEST_TRACE && fs.appendFileSync(process.env.OVERLAY_WORKER_TEST_TRACE, value + '\\n');",
+      "const payload = query => ({ query, matches: [], nodes: [], relationshipGroups: {}, coverage: { graphNodes: 1, graphEdges: 0 } });",
+      "if (argv[0] === '--worker') {",
+      "  trace('worker-start');",
+      "  const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });",
+      '  input.on(\"line\", line => {',
+      '    if (!line.trim()) return;',
+      '    const request = JSON.parse(line);',
+      "    if (process.env.OVERLAY_WORKER_TEST_FAIL_ONCE === '1' && !fs.existsSync(process.env.OVERLAY_WORKER_TEST_CRASH_MARKER)) {",
+      "      fs.writeFileSync(process.env.OVERLAY_WORKER_TEST_CRASH_MARKER, 'crashed');",
+      "      trace('worker-failure');",
+      "      process.stderr.write('synthetic worker failure\\n');",
+      '      process.exit(19);',
+      '    }',
+      '    const args = request.args || [];',
+      "    const queryIndex = args.indexOf('--query');",
+      "    const query = queryIndex >= 0 ? args[queryIndex + 1] ?? '' : '';",
+      "    trace('worker-query:' + query);",
+      "    const prewarm = args.includes('--prewarm');",
+      "    const outputText = prewarm ? '' : JSON.stringify(payload(query));",
+      "    process.stdout.write(JSON.stringify({ id: request.id, ok: true, outputText, generationId: 'smoke-generation', cacheHit: false, profileEvents: [] }) + '\\n');",
+      '  });',
+      '} else {',
+      "  const queryIndex = argv.indexOf('--query');",
+      "  const query = queryIndex >= 0 ? argv[queryIndex + 1] ?? '' : '';",
+      "  trace('legacy-query:' + query);",
+      '  process.stdout.write(JSON.stringify(payload(query)));',
+      '}',
       '',
     ].join('\n'),
   );
@@ -362,6 +390,46 @@ function writeCodexConfig(
   return configPath;
 }
 
+function runLocalWorkerPoolSmoke(failWorkerOnce: boolean) {
+  const projectRoot = makeConfigBackedAdapterProject();
+  const fakeCodegraph = makeFakeCodegraph();
+  const tracePath = path.join(projectRoot, 'worker-trace.log');
+  const crashMarker = path.join(projectRoot, 'worker-crashed.marker');
+  const codexConfigPath = writeCodexConfig(projectRoot, fakeCodegraph, {
+    NANOFLOW_CODEGRAPH_OVERLAY_WORKER_ENABLED: '1',
+    OVERLAY_WORKER_TEST_TRACE: tracePath,
+    OVERLAY_WORKER_TEST_CRASH_MARKER: crashMarker,
+    ...(failWorkerOnce ? { OVERLAY_WORKER_TEST_FAIL_ONCE: '1' } : {}),
+  });
+  const logRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-codegraph-smoke-worker-log-'));
+  tempRoots.push(logRoot);
+  const wrapperLog = path.join(logRoot, 'wrapper.log');
+  const result = spawnSync(process.execPath, [
+    smokeScriptPath,
+    '--root', projectRoot,
+    '--query', 'ProjectShellComponent',
+    '--overlay-query', 'sync-rule-keyword',
+    '--overlay-limit', '1',
+    '--overlay-query-limit', '1',
+    '--timeout-ms', '15000',
+  ], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    maxBuffer: 16 * 1024 * 1024,
+    timeout: 30_000,
+    env: {
+      ...process.env,
+      NANOFLOW_CODEGRAPH_CODEX_CONFIG: codexConfigPath,
+      NANOFLOW_CODEGRAPH_MCP_LOG: wrapperLog,
+    },
+  });
+  return {
+    result,
+    trace: fs.existsSync(tracePath) ? fs.readFileSync(tracePath, 'utf8') : '',
+    wrapperLog: fs.existsSync(wrapperLog) ? fs.readFileSync(wrapperLog, 'utf8') : '',
+  };
+}
+
 describe('smoke-codegraph-mcp-wrapper', () => {
   afterEach(() => {
     while (tempRoots.length > 0) {
@@ -378,6 +446,28 @@ describe('smoke-codegraph-mcp-wrapper', () => {
     expect(pkg.scripts?.['codegraph:mcp:smoke']).toBe('node scripts/smoke-codegraph-mcp-wrapper.cjs');
     expect(pkg.scripts?.['codegraph:adapter:context']).toBe('node scripts/codegraph-adapter-context.cjs');
   });
+
+  it('uses the process-local worker pool for a normal overlay query', () => {
+    const { result, trace, wrapperLog } = runLocalWorkerPoolSmoke(false);
+    expect(result.status, `stdout: ${result.stdout}\nstderr: ${result.stderr}`).toBe(0);
+    expect(JSON.parse(result.stdout).contextOutcome.overlay).toMatchObject({ status: 'available', isError: false });
+    expect(trace.match(/^worker-start$/gm)).toHaveLength(1);
+    expect(trace).toContain('worker-query:ProjectShellComponent');
+    expect(trace).toContain('worker-query:sync-rule-keyword');
+    expect(trace).not.toContain('legacy-query:');
+    expect(wrapperLog).toContain('overlay.worker.pool.selected');
+    expect(wrapperLog).toContain('process-local');
+  }, 60_000);
+
+  it('falls back to the one-shot CLI after a worker process failure', () => {
+    const { result, trace, wrapperLog } = runLocalWorkerPoolSmoke(true);
+    expect(result.status, `stdout: ${result.stdout}\nstderr: ${result.stderr}`).toBe(0);
+    expect(JSON.parse(result.stdout).contextOutcome.overlay).toMatchObject({ status: 'available', isError: false });
+    expect(trace).toContain('worker-failure');
+    expect(trace).toContain('legacy-query:ProjectShellComponent');
+    expect(trace).toContain('worker-query:sync-rule-keyword');
+    expect(wrapperLog).toContain('overlay.worker.fallback');
+  }, 60_000);
 
   it('prefers Codex MCP config over a stale VS Code MCP config for smoke verification', () => {
     const projectRoot = makeConfigBackedAdapterProject();
