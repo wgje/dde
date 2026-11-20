@@ -1,0 +1,258 @@
+'use strict';
+
+const fs = require('node:fs');
+const path = require('node:path');
+const { spawnSync } = require('node:child_process');
+
+const REQUIRED_RUNTIME_CLOSURE = Object.freeze([
+  'scripts/codegraph-nanoflow-mcp-stdio.cjs',
+  'scripts/query-codegraph-nanoflow-overlay.mjs',
+  'scripts/run-codegraph-overlay-stability.cjs',
+  'scripts/generate-codegraph-nanoflow-overlay.mjs',
+  'scripts/lib/codegraph-overlay-candidate-search-text.mjs',
+  'scripts/lib/codegraph-overlay-immutable-cache.mjs',
+  'scripts/lib/codegraph-overlay-generation-cache.cjs',
+  'scripts/lib/codegraph-overlay-worker-pool.cjs',
+  'scripts/lib/codegraph-overlay-resident-worker-prototype.cjs',
+  'scripts/codegraph-overlay-resident-worker-prototype.cjs',
+  'scripts/lib/agent-file-lease-store.cjs',
+  'scripts/lib/codegraph-overlay-current-receipt.cjs',
+  'scripts/lib/codegraph-overlay-generation-format.cjs',
+  'scripts/lib/codegraph-overlay-generation-publisher.cjs',
+  'scripts/lib/codegraph-overlay-baseline.cjs',
+  'scripts/lib/codegraph-source-policy.cjs',
+  'scripts/lib/codegraph-nanoflow-overlay-v1-schema.cjs',
+  'scripts/lib/codegraph-nanoflow-overlay-v1-schema-angular-support.cjs',
+  'scripts/lib/codegraph-nanoflow-overlay-v1-schema-graph.cjs',
+  'scripts/lib/codegraph-nanoflow-overlay-v1-schema-supabase-android.cjs',
+  'scripts/lib/codegraph-nanoflow-overlay-v1-schema-typescript.cjs',
+  'scripts/contracts/codegraph-nanoflow-overlay-v1.json',
+  'scripts/contracts/codegraph-overlay-generation-v1.json',
+  'src/tests/fixtures/agent-file-lease-worker.cjs',
+  'src/tests/fixtures/codegraph-overlay-resident-worker.fake.cjs',
+  'src/tests/scripts/agent-file-lease.spec.ts',
+]);
+const CURRENT_RELATIVE_PATH = path.join('.codegraph', 'nanoflow-generations', 'CURRENT.json');
+const BOOTSTRAP_BLOCKED_EXIT = 78;
+
+function parseArgs(argv) {
+  const parsed = {
+    root: process.cwd(),
+    sourceRoot: process.env.NANOFLOW_CODEGRAPH_BOOTSTRAP_SOURCE_ROOT || null,
+    json: false,
+    requireReady: false,
+    generate: true,
+    bootstrapIndex: true,
+    overwrite: false,
+  };
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === '--root') parsed.root = path.resolve(requireValue(argv, ++index, arg));
+    else if (arg === '--source-root') parsed.sourceRoot = path.resolve(requireValue(argv, ++index, arg));
+    else if (arg === '--json') parsed.json = true;
+    else if (arg === '--require-ready') parsed.requireReady = true;
+    else if (arg === '--no-generate') parsed.generate = false;
+    else if (arg === '--no-index') parsed.bootstrapIndex = false;
+    else if (arg === '--sync-clean') parsed.syncClean = true;
+    else if (arg === '--overwrite') parsed.overwrite = true;
+    else if (arg === '--help' || arg === '-h') return { help: true };
+    else throw new Error(`unknown argument: ${arg}`);
+  }
+  parsed.root = path.resolve(parsed.root);
+  if (parsed.sourceRoot) parsed.sourceRoot = path.resolve(parsed.sourceRoot);
+  return parsed;
+}
+
+function requireValue(argv, index, flag) {
+  const value = argv[index];
+  if (!value || value.startsWith('--')) throw new Error(`${flag} requires a value`);
+  return value;
+}
+
+function existsFile(root, relativePath) {
+  try { return fs.statSync(path.join(root, relativePath)).isFile(); } catch { return false; }
+}
+
+function hashFile(filePath) {
+  try {
+    return require('node:crypto').createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
+  } catch { return null; }
+}
+
+function currentPath(root) { return path.join(root, CURRENT_RELATIVE_PATH); }
+
+function currentState(root) {
+  const filePath = currentPath(root);
+  if (!fs.existsSync(filePath)) return { status: 'missing', path: filePath };
+  try {
+    const value = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    if (!value || typeof value.generationId !== 'string' || typeof value.sequence !== 'string') {
+      return { status: 'invalid', path: filePath };
+    }
+    return { status: 'ready', path: filePath, generationId: value.generationId, sequence: value.sequence };
+  } catch (error) {
+    return { status: 'invalid', path: filePath, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function targetIsClean(root, relativePath) {
+  const result = spawnSync('git', ['-C', root, 'status', '--porcelain', '--', relativePath], { cwd: root, encoding: 'utf8' });
+  return result.status === 0 && String(result.stdout ?? '').trim() === '';
+}
+function copyMissingClosure(root, sourceRoot, overwrite, syncClean = false) {
+  const missingBefore = REQUIRED_RUNTIME_CLOSURE.filter(relativePath => !existsFile(root, relativePath));
+  const copied = [];
+  const skippedSourceMissing = [];
+  const overwritten = [];
+  const staleBefore = [];
+  const dirtyConflicts = [];
+  if (!sourceRoot) return { missingBefore, copied, overwritten, staleBefore, staleAfter: [], dirtyConflicts, skippedSourceMissing };
+  for (const relativePath of missingBefore) {
+    const sourcePath = path.join(sourceRoot, relativePath);
+    const targetPath = path.join(root, relativePath);
+    if (!existsFile(sourceRoot, relativePath)) { skippedSourceMissing.push(relativePath); continue; }
+    fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+    fs.copyFileSync(sourcePath, targetPath);
+    copied.push({ path: relativePath, sha256: hashFile(targetPath) });
+  }
+  if (overwrite || syncClean) {
+    for (const relativePath of REQUIRED_RUNTIME_CLOSURE) {
+      const sourcePath = path.join(sourceRoot, relativePath);
+      const targetPath = path.join(root, relativePath);
+      if (!existsFile(sourceRoot, relativePath) || !existsFile(root, relativePath)) continue;
+      if (hashFile(sourcePath) === hashFile(targetPath)) continue;
+      staleBefore.push(relativePath);
+      if (syncClean && !targetIsClean(root, relativePath)) { dirtyConflicts.push(relativePath); continue; }
+      fs.copyFileSync(sourcePath, targetPath);
+      overwritten.push({ path: relativePath, sha256: hashFile(targetPath) });
+    }
+  }
+  const staleAfter = REQUIRED_RUNTIME_CLOSURE.filter(relativePath => existsFile(sourceRoot, relativePath)
+    && existsFile(root, relativePath)
+    && hashFile(path.join(sourceRoot, relativePath)) !== hashFile(path.join(root, relativePath)));
+  return { missingBefore, copied, overwritten, staleBefore, staleAfter, dirtyConflicts, skippedSourceMissing };
+}
+function ensureNativeIndex(root, sourceRoot = null) {
+  const databasePath = path.join(root, '.codegraph', 'codegraph.db');
+  if (fs.existsSync(databasePath)) return { status: 'ready', path: databasePath, bootstrapped: false };
+  const npmCache = process.env.npm_config_cache || process.env.NANOFLOW_CODEGRAPH_NPM_CACHE || 'D:/Code/tools/codegraph-npm-cache';
+  const npxCommand = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+  const result = spawnSync(npxCommand, ['-y', '@colbymchenry/codegraph@1.6.2', 'init', '--yes', root], {
+    cwd: root, encoding: 'utf8', timeout: 20 * 60 * 1000, maxBuffer: 16 * 1024 * 1024,
+    env: { ...process.env, npm_config_cache: npmCache }, windowsHide: true,
+  });
+  const ready = fs.existsSync(databasePath);
+  return { status: ready ? 'ready' : 'failed', path: databasePath, bootstrapped: ready,
+    exitCode: result.status ?? 1, stderrTail: String(result.stderr ?? '').slice(-4000), stdoutTail: String(result.stdout ?? '').slice(-4000) };
+}
+function runGeneration(root, sourceRoot = null) {
+  const executionRoot = sourceRoot && existsFile(sourceRoot, 'scripts/run-codegraph-overlay-stability.cjs') ? sourceRoot : root;
+  const result = spawnSync(process.execPath, [path.join(executionRoot, 'scripts', 'run-codegraph-overlay-stability.cjs'), '--root', root], {
+    cwd: executionRoot,
+    encoding: 'utf8',
+    timeout: 20 * 60 * 1000,
+    maxBuffer: 16 * 1024 * 1024,
+    env: { ...process.env, NANOFLOW_CODEGRAPH_REFRESH_ON_STARTUP: '0' },
+  });
+  return {
+    exitCode: result.status ?? 1,
+    signal: result.signal,
+    stdoutTail: String(result.stdout ?? '').slice(-4000),
+    stderrTail: String(result.stderr ?? '').slice(-4000),
+  };
+}
+
+function printHelp() {
+  process.stdout.write([
+    'Prepare a CodeGraph worktree before adapter-dependent tests.',
+    '',
+    'Usage: node scripts/codegraph-worktree-bootstrap.cjs --root <worktree> --source-root <prepared-source> [--json] [--require-ready]',
+    '',
+    'Default behavior is non-blocking: missing setup is reported as ENVIRONMENT_BLOCKED and exits 0.',
+    '--require-ready exits 78 for ENVIRONMENT_BLOCKED so a gate can stop before running unrelated specs.',
+  ].join('\n') + '\n');
+}
+
+function main() {
+  const args = parseArgs(process.argv.slice(2));
+  if (args.help) return printHelp();
+  const report = {
+    schemaVersion: 1,
+    root: args.root,
+    sourceRoot: args.sourceRoot,
+    status: 'READY',
+    taskImpact: 'adapter-dependent tasks may run',
+    independentTasksMayProceed: true,
+    currentBefore: currentState(args.root),
+    runtimeClosure: null,
+    generation: null,
+    blockingReason: null,
+  };
+  if (!fs.existsSync(args.root)) {
+    report.status = 'ENVIRONMENT_BLOCKED';
+    report.taskImpact = 'adapter-dependent tasks blocked; unrelated tasks may proceed';
+    report.blockingReason = 'requested worktree root does not exist';
+  } else {
+    report.runtimeClosure = copyMissingClosure(args.root, args.sourceRoot, args.overwrite, args.syncClean);
+    const missingAfter = REQUIRED_RUNTIME_CLOSURE.filter(relativePath => !existsFile(args.root, relativePath));
+    const staleAfter = report.runtimeClosure.staleAfter ?? [];
+    report.runtimeClosure.missingAfter = missingAfter;
+    const dirtyConflicts = report.runtimeClosure.dirtyConflicts ?? [];
+    const unresolvedStale = staleAfter.filter(relativePath => !dirtyConflicts.includes(relativePath));
+    if (missingAfter.length > 0 || unresolvedStale.length > 0) {
+      report.status = 'ENVIRONMENT_BLOCKED';
+      report.taskImpact = 'adapter-dependent tasks blocked; unrelated tasks may proceed';
+      const unresolved = [...missingAfter, ...unresolvedStale, ...dirtyConflicts];
+      report.blockingReason = args.sourceRoot
+        ? `runtime dependency closure is incomplete or stale: ${unresolved.join(', ')}`
+        : 'runtime dependency closure is incomplete and no bootstrap source root was supplied';
+    } else if (dirtyConflicts.length > 0) {
+      report.status = 'READY_WITH_LOCAL_RUNTIME_CHANGES';
+      report.taskImpact = 'adapter-dependent tasks may run; changed runtime files require task-local review; unrelated tasks may proceed';
+      report.blockingReason = `local runtime changes preserved for review: ${dirtyConflicts.join(', ')}`;
+      report.currentAfter = currentState(args.root);
+      if (report.currentAfter.status !== 'ready') {
+        report.status = 'ENVIRONMENT_BLOCKED';
+        report.taskImpact = 'adapter-dependent tasks blocked; unrelated tasks may proceed';
+        report.blockingReason = `local runtime changes exist and CURRENT.json is ${report.currentAfter.status}`;
+      }
+    } else if (args.generate && report.currentBefore.status !== 'ready') {
+      if (args.bootstrapIndex) {
+        report.index = ensureNativeIndex(args.root, args.sourceRoot);
+        if (report.index.status !== 'ready') {
+          report.status = 'ENVIRONMENT_BLOCKED';
+          report.taskImpact = 'adapter-dependent tasks blocked; unrelated tasks may proceed';
+          report.blockingReason = `native CodeGraph index bootstrap failed (exit=${report.index.exitCode ?? 'unknown'})`;
+        }
+      }
+      if (report.status === 'READY') report.generation = runGeneration(args.root, args.sourceRoot);
+      report.currentAfter = currentState(args.root);
+      if (report.status === 'READY' && (report.generation.exitCode !== 0 || report.currentAfter.status !== 'ready')) {
+        report.status = 'ENVIRONMENT_BLOCKED';
+        report.taskImpact = 'adapter-dependent tasks blocked; unrelated tasks may proceed';
+        report.blockingReason = `immutable generation bootstrap failed (exit=${report.generation.exitCode})`;
+      }
+    } else {
+      report.currentAfter = report.currentBefore;
+      if (report.currentAfter.status !== 'ready') {
+        report.status = 'ENVIRONMENT_BLOCKED';
+        report.taskImpact = 'adapter-dependent tasks blocked; unrelated tasks may proceed';
+        report.blockingReason = 'immutable generation selector CURRENT.json is missing or invalid';
+      }
+    }
+  }
+  if (report.status === 'ENVIRONMENT_BLOCKED' && args.requireReady) {
+    report.exitCode = BOOTSTRAP_BLOCKED_EXIT;
+  } else {
+    report.exitCode = 0;
+  }
+  const text = JSON.stringify(report, null, 2);
+  if (args.json) process.stdout.write(`${text}\n`);
+  else process.stdout.write(`[codegraph-worktree-bootstrap] ${report.status}: ${report.blockingReason ?? 'ready'}\n${text}\n`);
+  process.exitCode = report.exitCode;
+}
+
+try { main(); } catch (error) {
+  process.stderr.write(`[codegraph-worktree-bootstrap] ENVIRONMENT_BLOCKED: ${error instanceof Error ? error.message : String(error)}\n`);
+  process.exitCode = 78;
+}
