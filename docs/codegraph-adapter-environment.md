@@ -23,8 +23,10 @@ It never treats a source-root wrapper or source-root index as target-root eviden
 
 ## Status contract
 
-- `READY`: adapter-dependent tests may run.\n- `READY_WITH_LOCAL_RUNTIME_CHANGES`: adapter-dependent tests may run, but the receipt lists locally changed closure files; review those task-owned changes separately. Unrelated tasks may proceed.
-- `ENVIRONMENT_BLOCKED`: only adapter-dependent tasks are blocked. Unrelated tasks may proceed. Do not count these as correctness failures or request integration review for them.\n- A missing/dirty closure file is never reported as a product/spec failure; it is listed under `runtimeClosure.dirtyConflicts` or `runtimeClosure.missingAfter`.
+- `READY`: adapter-dependent tests may run.
+- `READY_WITH_LOCAL_RUNTIME_CHANGES`: adapter-dependent tests may run, but the receipt lists locally changed closure files; review those task-owned changes separately. Unrelated tasks may proceed.
+- `ENVIRONMENT_BLOCKED`: only adapter-dependent tasks are blocked. Unrelated tasks may proceed. Do not count these as correctness failures or request integration review for them.
+- A missing/dirty closure file is never reported as a product/spec failure; it is listed under `runtimeClosure.dirtyConflicts` or `runtimeClosure.missingAfter`.
 - `ADAPTER_REGRESSION`: a prepared target still fails runtime/schema/gate checks; this is reviewable.
 
 For a release gate, add `--require-ready`. Exit code `78` means environment blocked; it is intentionally distinct from an implementation/test failure.
