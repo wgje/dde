@@ -83,6 +83,11 @@ describe('legacy-offline-command-adapter', () => {
       .toThrow('missing an entity id');
   });
 
+  it('fails closed when a RetryQueue item has an empty entity id', () => {
+    expect(() => retryQueueItemToOfflineCommand(retryItem({ data: { id: '' } as unknown as RetryQueueItem['data'] }), context))
+      .toThrow('missing an entity id');
+  });
+
   it('fails closed when an ActionQueue action has no entity id', () => {
     expect(() => queuedActionToOfflineCommand(action({ entityId: undefined }), context))
       .toThrow(/entity id/i);

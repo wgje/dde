@@ -3,6 +3,7 @@ import { describe, expect, it, vi, type Mock } from 'vitest';
 import type { Task } from '../models';
 import type { ActionQueueService, EnqueueParams } from './action-queue.service';
 import type { QueuedAction } from './action-queue.types';
+import { configureOfflineSyncActionCaptureHooks } from './sync/offline-sync-action-capture-registry';
 
 export interface ActionQueuePersistenceSpecContext {
   service(): ActionQueueService;
@@ -356,6 +357,37 @@ export function registerActionQueuePersistenceSpecs(context: ActionQueuePersiste
       ]);
     });
 
+    it('批量 current-owner durable 入队 captures generated operation ids after persistence', async () => {
+      setNetworkStatus(false);
+      const captured: QueuedAction[] = [];
+      configureOfflineSyncActionCaptureHooks({ enabled: true, captureQueuedAction: async (_owner, action) => { captured.push(action); } });
+      try {
+        const actionIds = await service().enqueueManyDurably([
+          { ...createTestTaskAction(), entityId: 'bulk-capture-task-a' },
+          { ...createTestTaskAction(), entityId: 'bulk-capture-task-b' },
+        ]);
+        expect(actionIds).toHaveLength(2);
+        expect(captured).toHaveLength(2);
+        expect(captured.map(action => action.id).sort()).toEqual(actionIds.slice().sort());
+        expect(captured.every(action => action.operationId.length > 0)).toBe(true);
+      } finally { configureOfflineSyncActionCaptureHooks(null); }
+    });
+
+    it('foreign-owner bulk durable enqueue captures the actual persisted queued records', async () => {
+      setNetworkStatus(false);
+      const captured: Array<{ owner: string; action: QueuedAction }> = [];
+      configureOfflineSyncActionCaptureHooks({ enabled: true, captureQueuedAction: async (owner, action) => { captured.push({ owner, action }); } });
+      try {
+        const actionIds = await service().enqueueManyDurablyForOwner('owner-capture-bulk', [
+          { ...createTestTaskAction(), entityId: 'foreign-capture-task-a', payload: { task: createMockTask({ id: 'foreign-capture-task-a' }), projectId: 'proj-owner-b', sourceUserId: 'owner-capture-bulk' } } as EnqueueParams,
+          { ...createTestTaskAction(), entityId: 'foreign-capture-task-b', payload: { task: createMockTask({ id: 'foreign-capture-task-b' }), projectId: 'proj-owner-b', sourceUserId: 'owner-capture-bulk' } } as EnqueueParams,
+        ]);
+        expect(actionIds).toHaveLength(2);
+        expect(captured).toHaveLength(2);
+        expect(captured.every(item => item.owner === 'owner-capture-bulk')).toBe(true);
+        expect(captured.map(item => item.action.id).sort()).toEqual(actionIds.slice().sort());
+      } finally { configureOfflineSyncActionCaptureHooks(null); }
+    });
     it('批量 durable 入队中任一操作被拒绝时不应留下部分持久化 action', async () => {
       setNetworkStatus(false);
       setPersistedQueue(Array.from({ length: 499 }, (_, index): QueuedAction => ({

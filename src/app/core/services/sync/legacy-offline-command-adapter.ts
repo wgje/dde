@@ -152,7 +152,7 @@ function queuedActionStatus(action: QueuedAction): OfflineSyncCommandStatus {
 }
 
 function readEntityId(data: RetryQueueItem['data']): string {
-  if (typeof data === 'object' && data !== null && 'id' in data && typeof data.id === 'string') {
+  if (typeof data === 'object' && data !== null && 'id' in data && typeof data.id === 'string' && data.id.length > 0) {
     return data.id;
   }
   throw new Error('RetryQueue item is missing an entity id');

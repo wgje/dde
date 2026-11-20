@@ -38,6 +38,7 @@ export interface ActionQueueDurableEnqueueRuntime {
     updater: (queue: QueuedAction[]) => QueuedAction[],
   ) => Promise<QueuedAction[] | null>;
   persistQueueMutationWithRetrySupersession?: PersistQueueMutationWithRetrySupersession;
+  capturePersistedActions?: (ownerUserId: string, acceptedMutations: Array<{ action: EnqueueParams; queuedAction: QueuedAction; mutation: EnqueueMutationResult }>, persistedQueue: QueuedAction[]) => void;
   applyPersistedCurrentOwnerQueue: (queue: QueuedAction[]) => void;
   completeDurableEnqueueSideEffects: (
     action: EnqueueParams,
@@ -95,6 +96,8 @@ export class ActionQueueEnqueueMutationService {
         runtime.persistQueueMutationWithRetrySupersession,
       applyPersistedCurrentOwnerQueue: runtime.applyPersistedCurrentOwnerQueue,
       completeDurableEnqueueSideEffects: runtime.completeDurableEnqueueSideEffects,
+      capturePersistedActions: (ownerUserId, acceptedMutations, persistedQueue) =>
+        this.capturePersistedActionsIfEnabled(ownerUserId, acceptedMutations, persistedQueue),
       isOnline: runtime.isOnline,
       processQueue: runtime.processQueue,
       warn: runtime.warn,
@@ -127,7 +130,7 @@ export class ActionQueueEnqueueMutationService {
     resolvedActionId: string,
   ): void {
     const hooks = getOfflineSyncActionCaptureHooks();
-    if (!hooks?.enabled || !action.operationId || !resolvedActionId) return;
+    if (!hooks?.enabled || !resolvedActionId) return;
     const queuedAction = { ...this.createQueuedAction(action), id: resolvedActionId };
     void hooks.captureQueuedAction(ownerUserId, queuedAction).catch(error => {
       this.logger.warn('离线 ActionQueue command capture 失败，保留现有 ActionQueue 结果', {
@@ -143,7 +146,9 @@ export class ActionQueueEnqueueMutationService {
     runtime: ActionQueueDurableEnqueueRuntime,
   ): Promise<string[]> {
     if (actions.length === 0) return [];
-    if (ownerUserId === runtime.getCurrentOwnerUserId()) return runtime.enqueueManyCurrent(actions);
+    if (ownerUserId === runtime.getCurrentOwnerUserId()) {
+      return this.enqueueManyDurably(actions, runtime);
+    }
     if (actions.length === 1) {
       const actionId = await runtime.enqueueForOwner(ownerUserId, actions[0]);
       return actionId ? [actionId] : [];
@@ -157,6 +162,8 @@ export class ActionQueueEnqueueMutationService {
       buildCurrentOwnerEnqueueMutation: (queue, action, queuedAction) =>
         this.buildForeignOwnerEnqueueMutation(queue, action, queuedAction, ownerUserId),
       persistQueueMutationForOwner: runtime.persistQueueMutationForOwner,
+      capturePersistedActions: (targetOwner, acceptedMutations, persistedQueue) =>
+        this.capturePersistedActionsIfEnabled(targetOwner, acceptedMutations, persistedQueue),
     });
     if (outcome.error || !outcome.persistedQueue || outcome.resolvedActionIds.length !== actions.length) {
       runtime.warn('ActionQueue owner-scoped bulk durable enqueue 未能完成原子持久化', {
@@ -174,6 +181,23 @@ export class ActionQueueEnqueueMutationService {
       actionCount: actions.length,
     });
     return [...outcome.resolvedActionIds];
+  }
+
+  private capturePersistedActionsIfEnabled(
+    ownerUserId: string,
+    acceptedMutations: Array<{ action: EnqueueParams; queuedAction: QueuedAction; mutation: EnqueueMutationResult }>,
+    persistedQueue: QueuedAction[],
+  ): void {
+    const hooks = getOfflineSyncActionCaptureHooks();
+    if (!hooks?.enabled) return;
+    for (const record of acceptedMutations) {
+      const resolvedId = record.mutation.resolvedActionId || record.queuedAction.id;
+      const actual = persistedQueue.find(item => item.id === resolvedId);
+      if (!actual) continue;
+      void hooks.captureQueuedAction(ownerUserId, actual).catch(error => {
+        this.logger.warn('离线 ActionQueue bulk command capture 失败，保留现有 ActionQueue 结果', { error, operationId: actual.operationId });
+      });
+    }
   }
 
   notifyQueuePressureOnce(title: string, message: string): void {

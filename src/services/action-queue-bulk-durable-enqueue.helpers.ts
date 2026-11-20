@@ -37,6 +37,7 @@ export interface PersistBulkDurableEnqueueMutationOptions {
     mutateQueue: (queue: QueuedAction[]) => QueuedAction[],
   ) => Promise<QueuedAction[] | null>;
   persistQueueMutationWithRetrySupersession?: PersistQueueMutationWithRetrySupersession;
+  capturePersistedActions?: (ownerUserId: string, acceptedMutations: BulkDurableEnqueueMutationRecord[], persistedQueue: QueuedAction[]) => void;
 }
 
 export interface RunBulkDurableEnqueueOptions
@@ -52,6 +53,7 @@ export interface RunBulkDurableEnqueueOptions
   ) => void;
   isOnline: () => boolean;
   processQueue: () => Promise<unknown>;
+  capturePersistedActions?: (ownerUserId: string, acceptedMutations: BulkDurableEnqueueMutationRecord[], persistedQueue: QueuedAction[]) => void;
   warn: (message: string, context: unknown) => void;
 }
 
@@ -128,6 +130,7 @@ export async function persistBulkDurableEnqueueMutation(
       )
       : await persistWithoutSupersession();
 
+    options.capturePersistedActions?.(ownerUserId, state.acceptedMutations, persistedQueue ?? []);
     return { ...state, persistedQueue, error: null };
   } catch (error) {
     return { ...state, persistedQueue: null, error };
