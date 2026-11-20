@@ -33,6 +33,8 @@ import type { TaskWriteIntent } from '../../../../services/sync-rpc-client.servi
 import { SyncStateService } from './sync-state.service';
 import { RECOVERABLE_SYNC_ERROR_MESSAGES } from '../../../../config/sync.config';
 import { nowISO } from '../../../../utils/date';
+import type { RetryQueueItem } from './retry-queue.types';
+import { getOfflineSyncCaptureHooks } from './offline-sync-capture-registry';
 
 @Injectable({ providedIn: 'root' })
 export class RetryQueueEnqueueService {
@@ -96,14 +98,7 @@ export class RetryQueueEnqueueService {
     lastFailure?: RetryQueueLastFailure,
   ): Promise<boolean> {
     if (this.syncState().sessionExpired && type !== 'project') return false;
-    if (!data?.id) {
-      this.logger.warn('addToRetryQueueDurably: 跳过无效数据（缺少 id）', { type, operation });
-      return false;
-    }
-    if ((type === 'task' || type === 'connection') && !projectId) {
-      this.logger.warn('addToRetryQueueDurably: 跳过无效数据（缺少 projectId）', { type, operation, id: data.id });
-      return false;
-    }
+    if (!this.validateRetryQueueInput(type, operation, data, projectId)) return false;
 
     const addArgs = [
       type,
@@ -120,12 +115,79 @@ export class RetryQueueEnqueueService {
       ? await this.retryQueueService.addDurably(...addArgs)
       : await this.retryQueueService.addDurably(...addArgs, lastFailure);
     if (enqueued) {
-      this.syncStateService.update({ pendingCount: this.retryQueueService.length });
+      this.handleRetryQueueEnqueued({
+        operationId,
+        type,
+        operation,
+        data,
+        projectId,
+        sourceUserId,
+        taskIdsToDelete,
+        writeIntent,
+        taskDeleteBaseUpdatedAtMap,
+        lastFailure,
+      });
     } else {
       this.syncStateService.setSyncError(RECOVERABLE_SYNC_ERROR_MESSAGES.RETRY_QUEUE_FULL);
     }
 
     return enqueued;
+  }
+
+  private validateRetryQueueInput(
+    type: RetryableEntityType,
+    operation: RetryableOperation,
+    data: Task | Project | Connection | { id: string },
+    projectId?: string,
+  ): boolean {
+    if (!data?.id) {
+      this.logger.warn('addToRetryQueueDurably: 跳过无效数据（缺少 id）', { type, operation });
+      return false;
+    }
+    if ((type === 'task' || type === 'connection') && !projectId) {
+      this.logger.warn('addToRetryQueueDurably: 跳过无效数据（缺少 projectId）', { type, operation, id: data.id });
+      return false;
+    }
+    return true;
+  }
+
+  private handleRetryQueueEnqueued(input: {
+    operationId?: string;
+    type: RetryableEntityType;
+    operation: RetryableOperation;
+    data: Task | Project | Connection | { id: string };
+    projectId?: string;
+    sourceUserId?: string;
+    taskIdsToDelete?: string[];
+    writeIntent?: TaskWriteIntent;
+    taskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap;
+    lastFailure?: RetryQueueLastFailure;
+  }): void {
+    this.syncStateService.update({ pendingCount: this.retryQueueService.length });
+    if (!input.operationId) return;
+    this.captureOfflineCommandIfEnabled({
+      id: input.operationId,
+      type: input.type,
+      operation: input.operation,
+      data: input.data,
+      projectId: input.projectId,
+      retryCount: 0,
+      createdAt: Date.now(),
+      operationId: input.operationId,
+      sourceUserId: input.sourceUserId,
+      taskIdsToDelete: input.taskIdsToDelete,
+      writeIntent: input.writeIntent,
+      taskDeleteBaseUpdatedAtMap: input.taskDeleteBaseUpdatedAtMap,
+      lastFailure: input.lastFailure,
+    });
+  }
+
+  private captureOfflineCommandIfEnabled(item: RetryQueueItem): void {
+    const hooks = getOfflineSyncCaptureHooks();
+    if (!hooks?.enabled) return;
+    void hooks.captureRetryQueueItem(item).catch(error => {
+      this.logger.warn('离线 command capture 失败，保留现有 RetryQueue 结果', { error, operationId: item.operationId });
+    });
   }
 
   clearRetryQueue(): void {

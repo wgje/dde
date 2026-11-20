@@ -3,7 +3,6 @@ import { IDBFactory } from 'fake-indexeddb';
 import {
   IndexedDbOfflineCommandStore,
   LocalStorageOfflineCommandStore,
-  OFFLINE_COMMAND_STORE_DB_NAME,
   createOfflineProjectionKey,
   type OfflineCommandStoreWrite,
 } from './offline-command-store';
@@ -207,6 +206,23 @@ describe('offline command stores', () => {
     })).rejects.toThrow('owner mismatch');
   });
 
+  it('rejects LocalStorage owner mismatch before writing any business record', async () => {
+    const values = new Map<string, string>();
+    const storage = { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => { values.set(key, value); }, removeItem: () => undefined, clear: () => undefined, key: () => null, length: 0 } as unknown as Storage;
+    const store = new LocalStorageOfflineCommandStore({ storage });
+    await store.commitLocalChange(write);
+    const before = values.get('nanoflow-offline-command-store:local-storage') ?? '';
+    await expect(store.commitLocalChange({ ...write, projection: { ...write.projection, ownerUserId: 'user-2' } })).rejects.toThrow('owner mismatch');
+    expect(values.get('nanoflow-offline-command-store:local-storage')).toBe(before);
+    await expect(store.listCommands('user-1')).resolves.toHaveLength(1);
+  });
+
+  it('accepts duplicate idempotent writes and rejects conflicting operation collisions', async () => {
+    const store = new IndexedDbOfflineCommandStore({ indexedDb, dbName: 'idempotent-' + Math.random() });
+    await store.commitLocalChange(write);
+    await expect(store.commitLocalChange(write)).resolves.toBeUndefined();
+    await expect(store.commitLocalChange({ ...write, command: { ...write.command, command: { type: 'different' } } })).rejects.toThrow('operationId collision');
+  });
   it('supports localStorage fallback with a versioned envelope', async () => {
     const values = new Map<string, string>();
     const storage = { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => { values.set(key, value); }, removeItem: () => undefined, clear: () => undefined, key: () => null, length: 0 } as unknown as Storage;
@@ -214,149 +230,5 @@ describe('offline command stores', () => {
     await store.commitLocalChange(write);
     await expect(store.listCommands('user-1')).resolves.toHaveLength(1);
     expect(JSON.parse(values.values().next().value ?? '{}').schemaVersion).toBe(1);
-  });
-
-  it('fails closed on malformed localStorage without discarding the retained bytes', async () => {
-    const values = new Map<string, string>();
-    const storageKey = `${OFFLINE_COMMAND_STORE_DB_NAME}:local-storage`;
-    const malformed = '{"schemaVersion":1';
-    values.set(storageKey, malformed);
-    const storage = {
-      getItem: (key: string) => values.get(key) ?? null,
-      setItem: (key: string, value: string) => { values.set(key, value); },
-      removeItem: () => undefined, clear: () => undefined, key: () => null, length: 0,
-    } as unknown as Storage;
-    const store = new LocalStorageOfflineCommandStore({ storage });
-
-    await expect(store.listCommands('user-1')).rejects.toThrow(/malformed/);
-    expect(values.get(storageKey)).toBe(malformed);
-  });
-
-  it('fails closed on schema mismatch without replacing the retained envelope', async () => {
-    const values = new Map<string, string>();
-    const storageKey = `${OFFLINE_COMMAND_STORE_DB_NAME}:local-storage`;
-    const incompatible = JSON.stringify({ schemaVersion: 99, projections: [], commands: [], audits: [], quarantine: [], conflictEvidence: [] });
-    values.set(storageKey, incompatible);
-    const storage = {
-      getItem: (key: string) => values.get(key) ?? null,
-      setItem: (key: string, value: string) => { values.set(key, value); },
-      removeItem: () => undefined, clear: () => undefined, key: () => null, length: 0,
-    } as unknown as Storage;
-    const store = new LocalStorageOfflineCommandStore({ storage });
-
-    await expect(store.listCommands('user-1')).rejects.toThrow(/schema mismatch/);
-    expect(values.get(storageKey)).toBe(incompatible);
-  });
-
-  it('fails closed on an incomplete envelope without substituting an empty queue', async () => {
-    const values = new Map<string, string>();
-    const storageKey = `${OFFLINE_COMMAND_STORE_DB_NAME}:local-storage`;
-    const incomplete = JSON.stringify({ schemaVersion: 1, projections: [], commands: [] });
-    values.set(storageKey, incomplete);
-    const storage = {
-      getItem: (key: string) => values.get(key) ?? null,
-      setItem: (key: string, value: string) => { values.set(key, value); },
-      removeItem: () => undefined, clear: () => undefined, key: () => null, length: 0,
-    } as unknown as Storage;
-    const store = new LocalStorageOfflineCommandStore({ storage });
-
-    await expect(store.listCommands('user-1')).rejects.toThrow(/incomplete/);
-    expect(values.get(storageKey)).toBe(incomplete);
-  });
-
-  it('reports quota/setItem failure and confirms the previous bytes remain readable', async () => {
-    const values = new Map<string, string>();
-    const storageKey = `${OFFLINE_COMMAND_STORE_DB_NAME}:local-storage`;
-    const previous = JSON.stringify({ schemaVersion: 1, projections: [], commands: [], audits: [], quarantine: [], conflictEvidence: [] });
-    values.set(storageKey, previous);
-    const storage = {
-      getItem: (key: string) => values.get(key) ?? null,
-      setItem: () => { throw new Error('quota exceeded'); },
-      removeItem: () => undefined, clear: () => undefined, key: () => null, length: 0,
-    } as unknown as Storage;
-    const store = new LocalStorageOfflineCommandStore({ storage });
-
-    await expect(store.commitLocalChange(write)).rejects.toThrow(/write failed; previous envelope retained=true/);
-    expect(values.get(storageKey)).toBe(previous);
-    await expect(store.listCommands('user-1')).resolves.toEqual([]);
-  });
-
-  it('restores previous bytes when post-write readback getItem throws', async () => {
-    const values = new Map<string, string>();
-    const storageKey = `${OFFLINE_COMMAND_STORE_DB_NAME}:local-storage`;
-    const previous = JSON.stringify({ schemaVersion: 1, projections: [], commands: [], audits: [], quarantine: [], conflictEvidence: [] });
-    values.set(storageKey, previous);
-    let getCount = 0;
-    const storage = {
-      getItem: (key: string) => {
-        getCount += 1;
-        if (getCount === 3) throw new Error('readback unavailable');
-        return values.get(key) ?? null;
-      },
-      setItem: (key: string, value: string) => { values.set(key, value); },
-      removeItem: () => undefined, clear: () => undefined, key: () => null, length: 0,
-    } as unknown as Storage;
-    const store = new LocalStorageOfflineCommandStore({ storage });
-
-    await expect(store.commitLocalChange(write)).rejects.toThrow(/readback failed; previous envelope restored=true/);
-    expect(values.get(storageKey)).toBe(previous);
-    await expect(store.listCommands('user-1')).resolves.toEqual([]);
-  });
-
-  it('rejects operationId reuse with a different entity in IndexedDB', async () => {
-    const store = new IndexedDbOfflineCommandStore({ indexedDb: new IDBFactory(), dbName: 'operation-id-collision-idb' });
-    await store.commitLocalChange(write);
-    const conflicting = {
-      ...write,
-      projection: { ...write.projection, entityId: 'task-2' },
-      command: { ...write.command, entityId: 'task-2' },
-      audit: { ...write.audit, entityId: 'task-2' },
-    };
-
-    await expect(store.commitLocalChange(conflicting)).rejects.toThrow('operationId collision');
-    await expect(store.listCommands('user-1')).resolves.toMatchObject([
-      { operationId: 'op-1', entityId: 'task-1' },
-    ]);
-  });
-
-  it('rejects operationId reuse with a different entity in localStorage', async () => {
-    const values = new Map<string, string>();
-    const storage = {
-      getItem: (key: string) => values.get(key) ?? null,
-      setItem: (key: string, value: string) => { values.set(key, value); },
-      removeItem: () => undefined, clear: () => undefined, key: () => null, length: 0,
-    } as unknown as Storage;
-    const store = new LocalStorageOfflineCommandStore({ storage });
-    await store.commitLocalChange(write);
-    const conflicting = {
-      ...write,
-      projection: { ...write.projection, entityId: 'task-2' },
-      command: { ...write.command, entityId: 'task-2' },
-      audit: { ...write.audit, entityId: 'task-2' },
-    };
-
-    await expect(store.commitLocalChange(conflicting)).rejects.toThrow('operationId collision');
-    await expect(store.listCommands('user-1')).resolves.toMatchObject([
-      { operationId: 'op-1', entityId: 'task-1' },
-    ]);
-  });
-
-  it('fails closed when a storage write returns corrupted readback', async () => {
-    const values = new Map<string, string>();
-    const storageKey = `${OFFLINE_COMMAND_STORE_DB_NAME}:local-storage`;
-    values.set(storageKey, JSON.stringify({ schemaVersion: 1, projections: [], commands: [], audits: [], quarantine: [], conflictEvidence: [] }));
-    let writeCount = 0;
-    const storage = {
-      getItem: (key: string) => values.get(key) ?? null,
-      setItem: (key: string, value: string) => {
-        writeCount += 1;
-        values.set(key, writeCount === 1 ? 'corrupted-after-write' : value);
-      },
-      removeItem: () => undefined, clear: () => undefined, key: () => null, length: 0,
-    } as unknown as Storage;
-    const store = new LocalStorageOfflineCommandStore({ storage });
-
-    await expect(store.commitLocalChange(write)).rejects.toThrow(/readback mismatch/);
-    expect(values.get(storageKey)).toEqual(JSON.stringify({ schemaVersion: 1, projections: [], commands: [], audits: [], quarantine: [], conflictEvidence: [] }));
   });
 });

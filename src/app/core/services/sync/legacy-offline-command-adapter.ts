@@ -69,6 +69,9 @@ export function queuedActionToOfflineCommand(
   context: LegacyOfflineCommandAdapterContext,
 ): LegacyOfflineCommandAdapterResult {
   const entityType = mapActionEntityType(action.entityType);
+  if (typeof action.entityId !== 'string' || action.entityId.length === 0) {
+    throw new Error('ActionQueue action is missing an entity id');
+  }
   const payload = toJsonObject(action.payload);
   const sourceUserId = readSourceUserId(action.payload) ?? context.ownerUserId;
   return {

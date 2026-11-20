@@ -78,6 +78,15 @@ describe('legacy-offline-command-adapter', () => {
     expect(result.command.entityType).toBe('task');
   });
 
+  it('fails closed when a RetryQueue item has no entity id', () => {
+    expect(() => retryQueueItemToOfflineCommand(retryItem({ data: { content: 'missing-id' } as unknown as RetryQueueItem['data'] }), context))
+      .toThrow('missing an entity id');
+  });
+
+  it('fails closed when an ActionQueue action has no entity id', () => {
+    expect(() => queuedActionToOfflineCommand(action({ entityId: undefined }), context))
+      .toThrow(/entity id/i);
+  });
   it('maps ActionQueue payload and sync state into a replayable command', () => {
     const result = queuedActionToOfflineCommand(action({ syncState: 'syncing' }), context);
 

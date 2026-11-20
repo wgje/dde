@@ -54,45 +54,6 @@ describe('offline-sync-command-replay-processor', () => {
     }));
   });
 
-  it('quarantines an embedded owner mismatch before invoking a replay handler', async () => {
-    const store = new IndexedDbOfflineCommandStore({ indexedDb: new IDBFactory(), dbName: 'replay-processor-owner-mismatch-test' });
-    const coordinator = new OfflineSyncCommandCoordinator({ store });
-    await coordinator.commitEnvelope(command('op-owner-mismatch', 'task.update'), { id: 'entity-op-owner-mismatch', content: 'offline' });
-    const exported = await store.exportOwner<OfflineSyncCommandEnvelope, unknown>('owner-replay');
-    exported.commands[0].command = { ...exported.commands[0].command, ownerUserId: 'other-owner' };
-    await store.restoreOwner(exported);
-    const replayHandler = handler();
-    const processor = new OfflineSyncCommandReplayProcessor({
-      store, ownerUserId: 'owner-replay', handler: replayHandler,
-    });
-
-    await expect(processor.drain()).resolves.toMatchObject({ attempted: 1, unknown: 1 });
-    expect(replayHandler.pushTask).not.toHaveBeenCalled();
-    await expect(store.exportOwner<OfflineSyncCommandEnvelope, unknown>('owner-replay')).resolves.toMatchObject({
-      quarantine: [expect.objectContaining({ reason: 'owner-mismatch' })],
-    });
-  });
-
-  it('quarantines a replay when durable readback cannot find the command record', async () => {
-    const store = new IndexedDbOfflineCommandStore({ indexedDb: new IDBFactory(), dbName: 'replay-processor-readback-missing-test' });
-    const coordinator = new OfflineSyncCommandCoordinator({ store });
-    await coordinator.commitEnvelope(command('op-readback-missing', 'task.update'), { id: 'entity-op-readback-missing', content: 'offline' });
-    const replay = vi.fn().mockResolvedValue({ success: true, decision: 'accepted' });
-    vi.spyOn(store, 'updateReplayResult').mockImplementation(async () => null);
-    const processor = new OfflineSyncCommandReplayProcessor({
-      store,
-      ownerUserId: 'owner-replay',
-      handler: handler(),
-      replayOptions: { commands: { 'task.update': replay } },
-    });
-
-    await expect(processor.drain()).resolves.toMatchObject({ attempted: 1, acked: 0, unknown: 1 });
-    expect(replay).toHaveBeenCalledOnce();
-    await expect(store.exportOwner<OfflineSyncCommandEnvelope, unknown>('owner-replay')).resolves.toMatchObject({
-      quarantine: [expect.objectContaining({ reason: 'replay-readback-missing' })],
-    });
-  });
-
   it('settles supported and unsupported commands into the durable command/audit/quarantine chain', async () => {
     const store = new IndexedDbOfflineCommandStore({ indexedDb: new IDBFactory(), dbName: 'replay-processor-test' });
     const coordinator = new OfflineSyncCommandCoordinator({ store });

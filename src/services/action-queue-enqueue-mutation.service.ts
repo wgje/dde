@@ -18,6 +18,7 @@ import {
   enqueueActionQueueForForeignOwner,
   type PersistQueueMutationWithRetrySupersession,
 } from './action-queue-owner-view.helpers';
+import { getOfflineSyncActionCaptureHooks } from './sync/offline-sync-action-capture-registry';
 
 export interface EnqueueMutationResult {
   nextQueue: QueuedAction[];
@@ -100,22 +101,39 @@ export class ActionQueueEnqueueMutationService {
     });
   }
 
-  enqueueDurablyForOwner(
+  async enqueueDurablyForOwner(
     ownerUserId: string,
     action: EnqueueParams,
     runtime: ActionQueueDurableEnqueueRuntime,
   ): Promise<string> {
-    if (ownerUserId === runtime.getCurrentOwnerUserId()) {
-      return runtime.enqueueCurrent(action, false);
-    }
-    return enqueueActionQueueForForeignOwner({
-      ownerUserId,
-      action,
-      createQueuedAction: currentAction => this.createQueuedAction(currentAction),
-      persistQueueMutationForOwner: runtime.persistQueueMutationForOwner,
-      buildForeignOwnerEnqueueMutation: (queue, currentAction, queuedAction, targetOwnerUserId) =>
-        this.buildForeignOwnerEnqueueMutation(queue, currentAction, queuedAction, targetOwnerUserId),
-      logInfo: runtime.info,
+    const resolvedActionId = ownerUserId === runtime.getCurrentOwnerUserId()
+      ? await runtime.enqueueCurrent(action, false)
+      : await enqueueActionQueueForForeignOwner({
+        ownerUserId,
+        action,
+        createQueuedAction: currentAction => this.createQueuedAction(currentAction),
+        persistQueueMutationForOwner: runtime.persistQueueMutationForOwner,
+        buildForeignOwnerEnqueueMutation: (queue, currentAction, queuedAction, targetOwnerUserId) =>
+          this.buildForeignOwnerEnqueueMutation(queue, currentAction, queuedAction, targetOwnerUserId),
+        logInfo: runtime.info,
+      });
+    this.captureQueuedActionIfEnabled(ownerUserId, action, resolvedActionId);
+    return resolvedActionId;
+  }
+
+  private captureQueuedActionIfEnabled(
+    ownerUserId: string,
+    action: EnqueueParams,
+    resolvedActionId: string,
+  ): void {
+    const hooks = getOfflineSyncActionCaptureHooks();
+    if (!hooks?.enabled || !action.operationId || !resolvedActionId) return;
+    const queuedAction = { ...this.createQueuedAction(action), id: resolvedActionId };
+    void hooks.captureQueuedAction(ownerUserId, queuedAction).catch(error => {
+      this.logger.warn('离线 ActionQueue command capture 失败，保留现有 ActionQueue 结果', {
+        error,
+        operationId: queuedAction.operationId,
+      });
     });
   }
 

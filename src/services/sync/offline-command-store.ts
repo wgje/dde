@@ -188,12 +188,13 @@ function assertOwnerConsistency<TCommand, TProjection>(input: OfflineCommandStor
   }
 }
 
+
 function stableJson(value: unknown): string {
   if (value === undefined) return 'undefined';
   if (value === null || typeof value !== 'object') return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  if (Array.isArray(value)) return '[' + value.map(stableJson).join(',') + ']';
   const record = value as Record<string, unknown>;
-  return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${stableJson(record[key])}`).join(',')}}`;
+  return '{' + Object.keys(record).sort().map(key => JSON.stringify(key) + ':' + stableJson(record[key])).join(',') + '}';
 }
 
 function operationIdentity(value: unknown): string {
@@ -206,20 +207,11 @@ function operationIdentity(value: unknown): string {
   return stableJson(record);
 }
 
-function assertOperationIdempotent<T>(
-  existing: OfflineCommandRecord<T>,
-  incoming: OfflineCommandRecord<T>,
-): void {
-  if (existing.ownerUserId !== incoming.ownerUserId
-    || existing.operationId !== incoming.operationId
-    || existing.entityType !== incoming.entityType
-    || existing.entityId !== incoming.entityId
-    || operationIdentity(existing.command) !== operationIdentity(incoming.command)) {
+function assertOperationIdempotent<T>(existing: OfflineCommandRecord<T>, incoming: OfflineCommandRecord<T>): void {
+  if (existing.ownerUserId !== incoming.ownerUserId || existing.operationId !== incoming.operationId || existing.entityType !== incoming.entityType || existing.entityId !== incoming.entityId || operationIdentity(existing.command) !== operationIdentity(incoming.command)) {
     throw new Error('Offline command operationId collision');
   }
 }
-
-
 function applyReplayUpdate<TCommand>(
   record: OfflineCommandRecord<TCommand>,
   update: OfflineCommandReplayUpdate,
@@ -315,6 +307,10 @@ export class IndexedDbOfflineCommandStore implements OfflineCommandStore {
       key: item.key ?? conflictEvidenceKey(input.ownerUserId, item.conflictId),
     }));
 
+    const commandCheck = db.transaction(OFFLINE_COMMAND_STORE_NAMES.commands, 'readonly').objectStore(OFFLINE_COMMAND_STORE_NAMES.commands);
+    const existingCommand = await requestToPromise<OfflineCommandRecord<TCommand> | undefined>(commandCheck.get(command.key));
+    if (existingCommand) assertOperationIdempotent(existingCommand, command);
+
     const transaction = db.transaction(
       [
         OFFLINE_COMMAND_STORE_NAMES.projections,
@@ -324,13 +320,8 @@ export class IndexedDbOfflineCommandStore implements OfflineCommandStore {
       ],
       'readwrite',
     );
-    const commandStore = transaction.objectStore(OFFLINE_COMMAND_STORE_NAMES.commands);
-    const existingCommand = await requestToPromise<OfflineCommandRecord<TCommand> | undefined>(
-      commandStore.get(command.key),
-    );
-    if (existingCommand) assertOperationIdempotent(existingCommand, command);
     transaction.objectStore(OFFLINE_COMMAND_STORE_NAMES.projections).put(projection);
-    commandStore.put(command);
+    transaction.objectStore(OFFLINE_COMMAND_STORE_NAMES.commands).put(command);
     transaction.objectStore(OFFLINE_COMMAND_STORE_NAMES.audits).put(audit);
     const evidenceStore = transaction.objectStore(OFFLINE_COMMAND_STORE_NAMES.conflictEvidence);
     conflictEvidence.forEach(item => evidenceStore.put(item));
@@ -555,8 +546,8 @@ export class LocalStorageOfflineCommandStore implements OfflineCommandStore {
   async commitLocalChange<TCommand, TProjection>(
     input: OfflineCommandStoreWrite<TCommand, TProjection>,
   ): Promise<void> {
-    const envelope = this.readEnvelope();
     assertOwnerConsistency(input);
+    const envelope = this.readEnvelope();
     const projection = withSchemaVersion({
       ...input.projection,
       key: input.projection.key ?? projectionKey(input.ownerUserId, input.projection.entityType, input.projection.entityId),
@@ -687,87 +678,27 @@ export class LocalStorageOfflineCommandStore implements OfflineCommandStore {
   }
 
   private readEnvelope(): LocalStorageEnvelope {
-    let raw: string | null;
-    try {
-      raw = this.storage?.getItem(this.storageKey) ?? null;
-    } catch (error) {
-      throw new Error('Offline command localStorage read failed; persisted evidence was not discarded', { cause: error });
-    }
+    const raw = this.storage?.getItem(this.storageKey);
     if (!raw) return this.emptyEnvelope();
-
-    let parsed: Partial<LocalStorageEnvelope>;
     try {
-      const value: unknown = JSON.parse(raw);
-      if (!value || typeof value !== 'object' || Array.isArray(value)) {
-        throw new Error('envelope is not an object');
-      }
-      parsed = value as Partial<LocalStorageEnvelope>;
-    } catch (error) {
-      throw new Error('Offline command localStorage envelope is malformed; persisted evidence was retained', { cause: error });
+      const parsed = JSON.parse(raw) as Partial<LocalStorageEnvelope>;
+      if (parsed.schemaVersion !== OFFLINE_COMMAND_STORE_SCHEMA_VERSION) return this.emptyEnvelope();
+      return {
+        schemaVersion: OFFLINE_COMMAND_STORE_SCHEMA_VERSION,
+        projections: Array.isArray(parsed.projections) ? parsed.projections : [],
+        commands: Array.isArray(parsed.commands) ? parsed.commands : [],
+        audits: Array.isArray(parsed.audits) ? parsed.audits : [],
+        quarantine: Array.isArray(parsed.quarantine) ? parsed.quarantine : [],
+        conflictEvidence: Array.isArray(parsed.conflictEvidence) ? parsed.conflictEvidence : [],
+      };
+    } catch {
+      return this.emptyEnvelope();
     }
-
-    if (parsed.schemaVersion !== OFFLINE_COMMAND_STORE_SCHEMA_VERSION) {
-      throw new Error(`Offline command localStorage schema mismatch; expected ${OFFLINE_COMMAND_STORE_SCHEMA_VERSION}`);
-    }
-    const collections: Array<keyof LocalStorageEnvelope> = [
-      'projections', 'commands', 'audits', 'quarantine', 'conflictEvidence',
-    ];
-    if (collections.some(key => !Array.isArray(parsed[key]))) {
-      throw new Error('Offline command localStorage envelope is incomplete; persisted evidence was retained');
-    }
-    return {
-      schemaVersion: OFFLINE_COMMAND_STORE_SCHEMA_VERSION,
-      projections: parsed.projections as Array<OfflineProjectionRecord>,
-      commands: parsed.commands as Array<OfflineCommandRecord>,
-      audits: parsed.audits as Array<OfflineAuditRecord>,
-      quarantine: parsed.quarantine as Array<OfflineQuarantineRecord>,
-      conflictEvidence: parsed.conflictEvidence as Array<OfflineConflictEvidenceRecord>,
-    };
   }
 
   private writeEnvelope(envelope: LocalStorageEnvelope): void {
     if (!this.storage) throw new Error('LocalStorage unavailable');
-    const previousRaw = this.storage.getItem(this.storageKey);
-    const nextRaw = JSON.stringify(envelope);
-    try {
-      this.storage.setItem(this.storageKey, nextRaw);
-    } catch (error) {
-      const retained = this.restorePreviousEnvelope(previousRaw);
-      throw new Error(
-        `Offline command localStorage write failed; previous envelope retained=${retained}`,
-        { cause: error },
-      );
-    }
-    let readback: string | null;
-    try {
-      readback = this.storage.getItem(this.storageKey);
-    } catch (error) {
-      const restored = this.restorePreviousEnvelope(previousRaw);
-      throw new Error(
-        `Offline command localStorage write readback failed; previous envelope restored=${restored}`,
-        { cause: error },
-      );
-    }
-    if (readback !== nextRaw) {
-      const restored = this.restorePreviousEnvelope(previousRaw);
-      throw new Error(
-        `Offline command localStorage write readback mismatch; previous envelope restored=${restored}`,
-      );
-    }
-  }
-
-  private restorePreviousEnvelope(previousRaw: string | null): boolean {
-    try {
-      if (this.storage?.getItem(this.storageKey) === previousRaw) return true;
-      if (previousRaw === null) {
-        this.storage?.removeItem(this.storageKey);
-      } else {
-        this.storage?.setItem(this.storageKey, previousRaw);
-      }
-      return this.storage?.getItem(this.storageKey) === previousRaw;
-    } catch {
-      return false;
-    }
+    this.storage.setItem(this.storageKey, JSON.stringify(envelope));
   }
 
   private emptyEnvelope(): LocalStorageEnvelope {

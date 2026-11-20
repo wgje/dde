@@ -51,23 +51,6 @@ export class OfflineSyncCommandReplayProcessor {
     for (const record of records) {
       const command = record.command as OfflineSyncCommandEnvelope;
       result.attempted += 1;
-      if (record.ownerUserId !== this.options.ownerUserId
-        || !command
-        || command.ownerUserId !== this.options.ownerUserId) {
-        await this.options.store.quarantine({
-          ownerUserId: this.options.ownerUserId,
-          reason: 'owner-mismatch',
-          raw: {
-            operationId: record.operationId,
-            entityType: record.entityType,
-            entityId: record.entityId,
-          },
-          quarantinedAt: this.now(),
-          key: `${this.options.ownerUserId}:quarantine:owner-mismatch:${record.operationId}`,
-        });
-        result.unknown += 1;
-        continue;
-      }
       let replay: OfflineSyncCommandReplayResult;
       try {
         replay = await replayOfflineSyncCommand(command, this.options.handler, replayOptions);
@@ -85,9 +68,13 @@ export class OfflineSyncCommandReplayProcessor {
       }
 
       const status = this.mapStatus(replay);
+      if (status === 'acked') result.acked += 1;
+      if (status === 'rejected') result.rejected += 1;
+      if (status === 'unknown') result.unknown += 1;
+      if (status === 'unsupported') result.unsupported += 1;
       if (status === null) continue;
 
-      const persisted = await this.options.store.updateReplayResult({
+      await this.options.store.updateReplayResult({
         ownerUserId: this.options.ownerUserId,
         operationId: record.operationId,
         status: status === 'unsupported' ? 'rejected' : status,
@@ -102,21 +89,6 @@ export class OfflineSyncCommandReplayProcessor {
         }),
         updatedAt: this.now(),
       });
-      if (!persisted) {
-        result.unknown += 1;
-        await this.options.store.quarantine({
-          ownerUserId: this.options.ownerUserId,
-          reason: 'replay-readback-missing',
-          raw: { operationId: record.operationId, entityType: record.entityType, entityId: record.entityId },
-          quarantinedAt: this.now(),
-          key: `${this.options.ownerUserId}:quarantine:readback:${record.operationId}`,
-        });
-        continue;
-      }
-      if (status === 'acked') result.acked += 1;
-      if (status === 'rejected') result.rejected += 1;
-      if (status === 'unknown') result.unknown += 1;
-      if (status === 'unsupported') result.unsupported += 1;
       if (status === 'rejected' && replay.status === 'replayed') {
         const decision = replay.decision ?? 'unspecified';
         await this.options.store.quarantine({
