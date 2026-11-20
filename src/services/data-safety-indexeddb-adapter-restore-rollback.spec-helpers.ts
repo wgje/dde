@@ -69,6 +69,44 @@ export function registerDataSafetyRestoreRollbackSpecs(): void {
       queueBackupDb = null;
     });
 
+  it('accepts legacy offline command-store marker payloads without conflictEvidence', async () => {
+    const markerKey = `${DATA_SAFETY_RESTORE_MARKER_STORAGE_KEY_PREFIX}.user-1`;
+    const legacyMarker = {
+      schemaVersion: 1,
+      ownerUserId: 'user-1',
+      runId: 'legacy-offline-store-marker',
+      createdAt: new Date(Date.now() - 1_000).toISOString(),
+      leaseExpiresAt: new Date(Date.now() - 60_000).toISOString(),
+      primaryStoreSnapshot: {
+        projects: [project],
+        tasks: [],
+        connections: [],
+        syncCursors: [],
+        meta: null,
+      },
+      localStateSnapshot: {
+        retryQueueIndexedDbItems: null,
+        retryQueueLocalStorageValue: null,
+        actionQueueBackupRecord: null,
+        actionQueueLocalStorageValue: null,
+        deadLetterBackupRecord: null,
+        deadLetterLocalStorageValue: null,
+        auditLocalStorageValue: null,
+        offlineCommandStoreExport: {
+          schemaVersion: 1,
+          ownerUserId: 'user-1',
+          projections: [],
+          commands: [],
+          audits: [],
+          quarantine: [],
+        },
+      },
+    };
+    localStorage.setItem(markerKey, JSON.stringify(legacyMarker));
+
+    await expect(readDataSafetyRestoreMarker('user-1')).resolves.toEqual(legacyMarker);
+  });
+
   it('does not recover an unexpired restore marker owned by another run', async () => {
     const markerKey = `${DATA_SAFETY_RESTORE_MARKER_STORAGE_KEY_PREFIX}.user-1`;
     const currentProject = { ...project, name: 'current project while another restore is active' };

@@ -3,12 +3,6 @@ import { Injectable, inject } from '@angular/core';
 import { SYNC_CONFIG } from '../config';
 import type { Project } from '../models';
 import type { BackupData } from '../../supabase/functions/_shared/backup-utils';
-
-type BackupDataWithOfflineCommandStore = BackupData & {
-  localState?: BackupData['localState'] & {
-    dataSafety?: NonNullable<NonNullable<BackupData['localState']>['dataSafety']> & { offlineCommandStore?: unknown };
-  };
-};
 import type { ExportData } from './export.service';
 import { ProjectStateService } from './project-state.service';
 import { ProjectDataService, RetryQueueService } from '../core-bridge';
@@ -223,7 +217,7 @@ export class LocalBackupUiRestoreStageService {
         context => this.readMetadata(
           input.ownerUserId,
           context,
-          (input.backup as BackupDataWithOfflineCommandStore).localState?.dataSafety?.offlineCommandStore !== undefined,
+          input.backup.localState?.dataSafety?.offlineCommandStore !== undefined,
         ),
         (snapshot, context) => this.restoreMetadata(input.ownerUserId, snapshot, context),
       ),

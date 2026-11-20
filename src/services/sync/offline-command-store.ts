@@ -188,6 +188,37 @@ function assertOwnerConsistency<TCommand, TProjection>(input: OfflineCommandStor
   }
 }
 
+function stableJson(value: unknown): string {
+  if (value === undefined) return 'undefined';
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${stableJson(record[key])}`).join(',')}}`;
+}
+
+function operationIdentity(value: unknown): string {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return stableJson(value);
+  const record = { ...(value as Record<string, unknown>) };
+  delete record.status;
+  delete record.decision;
+  delete record.rawResponse;
+  delete record.serverUpdatedAt;
+  return stableJson(record);
+}
+
+function assertOperationIdempotent<T>(
+  existing: OfflineCommandRecord<T>,
+  incoming: OfflineCommandRecord<T>,
+): void {
+  if (existing.ownerUserId !== incoming.ownerUserId
+    || existing.operationId !== incoming.operationId
+    || existing.entityType !== incoming.entityType
+    || existing.entityId !== incoming.entityId
+    || operationIdentity(existing.command) !== operationIdentity(incoming.command)) {
+    throw new Error('Offline command operationId collision');
+  }
+}
+
 
 function applyReplayUpdate<TCommand>(
   record: OfflineCommandRecord<TCommand>,
@@ -293,8 +324,13 @@ export class IndexedDbOfflineCommandStore implements OfflineCommandStore {
       ],
       'readwrite',
     );
+    const commandStore = transaction.objectStore(OFFLINE_COMMAND_STORE_NAMES.commands);
+    const existingCommand = await requestToPromise<OfflineCommandRecord<TCommand> | undefined>(
+      commandStore.get(command.key),
+    );
+    if (existingCommand) assertOperationIdempotent(existingCommand, command);
     transaction.objectStore(OFFLINE_COMMAND_STORE_NAMES.projections).put(projection);
-    transaction.objectStore(OFFLINE_COMMAND_STORE_NAMES.commands).put(command);
+    commandStore.put(command);
     transaction.objectStore(OFFLINE_COMMAND_STORE_NAMES.audits).put(audit);
     const evidenceStore = transaction.objectStore(OFFLINE_COMMAND_STORE_NAMES.conflictEvidence);
     conflictEvidence.forEach(item => evidenceStore.put(item));
@@ -520,6 +556,7 @@ export class LocalStorageOfflineCommandStore implements OfflineCommandStore {
     input: OfflineCommandStoreWrite<TCommand, TProjection>,
   ): Promise<void> {
     const envelope = this.readEnvelope();
+    assertOwnerConsistency(input);
     const projection = withSchemaVersion({
       ...input.projection,
       key: input.projection.key ?? projectionKey(input.ownerUserId, input.projection.entityType, input.projection.entityId),
@@ -536,6 +573,8 @@ export class LocalStorageOfflineCommandStore implements OfflineCommandStore {
       ...item,
       key: item.key ?? conflictEvidenceKey(input.ownerUserId, item.conflictId),
     }));
+    const existingCommand = envelope.commands.find(item => item.key === command.key);
+    if (existingCommand) assertOperationIdempotent(existingCommand, command);
     envelope.projections = envelope.projections.filter(item => item.key !== projection.key);
     envelope.commands = envelope.commands.filter(item => item.key !== command.key);
     envelope.audits = envelope.audits.filter(item => item.key !== audit.key);

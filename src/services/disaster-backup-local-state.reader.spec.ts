@@ -227,7 +227,7 @@ describe('DisasterBackupLocalStateReader', () => {
     });
 
     const localState = await createReader().readLocalState('user-1', new Set(['project-1']));
-    const exported = (localState.dataSafety as (typeof localState.dataSafety & { offlineCommandStore?: unknown }) | undefined)?.offlineCommandStore as { ownerUserId: string; commands: Array<{ operationId: string }>; conflictEvidence: Array<{ evidence: { losingCommand: unknown; winningCommand: unknown } }> };
+    const exported = localState.dataSafety?.offlineCommandStore as { ownerUserId: string; commands: Array<{ operationId: string }>; conflictEvidence: Array<{ evidence: { losingCommand: unknown; winningCommand: unknown } }> };
 
     expect(exported.ownerUserId).toBe('user-1');
     expect(exported.commands.map(item => item.operationId)).toEqual(['operation-winner']);

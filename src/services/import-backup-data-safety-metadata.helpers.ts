@@ -5,14 +5,6 @@ import type {
 } from '../../supabase/functions/_shared/backup-utils';
 import type { OfflineCommandStoreExport } from './sync/offline-command-store';
 import type { OfflineSyncCommandEnvelope } from './sync/offline-sync-command-envelope';
-
-type BackupDataSafetyWithOfflineCommandStore = NonNullable<NonNullable<BackupData['localState']>['dataSafety']> & {
-  offlineCommandStore?: unknown;
-};
-
-function readBackupDataSafety(backup: BackupData): BackupDataSafetyWithOfflineCommandStore | undefined {
-  return backup.localState?.dataSafety as BackupDataSafetyWithOfflineCommandStore | undefined;
-}
 import {
   compareProjectSyncCursor,
   isProjectSyncCursor,
@@ -141,8 +133,7 @@ export async function restoreDataSafetyMetadataFromBackup(
       .filter(project => project.userId === ownerUserId)
       .map(project => project.id),
   );
-  const dataSafety = readBackupDataSafety(backup);
-  const captureOfflineCommandStore = dataSafety?.offlineCommandStore !== undefined;
+  const captureOfflineCommandStore = backup.localState?.dataSafety?.offlineCommandStore !== undefined;
   const current = captureOfflineCommandStore
     ? await adapter.readCurrent(ownerUserId, visibleProjectIds, undefined, { captureOfflineCommandStore: true })
     : await adapter.readCurrent(ownerUserId, visibleProjectIds);
@@ -155,7 +146,7 @@ function readIncomingDataSafetyMetadata(
   backup: BackupData,
   ownerUserId: string,
 ): DataSafetyMetadataRestoreState {
-  const snapshot = readBackupDataSafety(backup);
+  const snapshot = backup.localState?.dataSafety;
   if (!snapshot) {
     throw new DataSafetyMetadataValidationError('localState.dataSafety is required');
   }

@@ -303,6 +303,44 @@ describe('offline command stores', () => {
     await expect(store.listCommands('user-1')).resolves.toEqual([]);
   });
 
+  it('rejects operationId reuse with a different entity in IndexedDB', async () => {
+    const store = new IndexedDbOfflineCommandStore({ indexedDb: new IDBFactory(), dbName: 'operation-id-collision-idb' });
+    await store.commitLocalChange(write);
+    const conflicting = {
+      ...write,
+      projection: { ...write.projection, entityId: 'task-2' },
+      command: { ...write.command, entityId: 'task-2' },
+      audit: { ...write.audit, entityId: 'task-2' },
+    };
+
+    await expect(store.commitLocalChange(conflicting)).rejects.toThrow('operationId collision');
+    await expect(store.listCommands('user-1')).resolves.toMatchObject([
+      { operationId: 'op-1', entityId: 'task-1' },
+    ]);
+  });
+
+  it('rejects operationId reuse with a different entity in localStorage', async () => {
+    const values = new Map<string, string>();
+    const storage = {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => { values.set(key, value); },
+      removeItem: () => undefined, clear: () => undefined, key: () => null, length: 0,
+    } as unknown as Storage;
+    const store = new LocalStorageOfflineCommandStore({ storage });
+    await store.commitLocalChange(write);
+    const conflicting = {
+      ...write,
+      projection: { ...write.projection, entityId: 'task-2' },
+      command: { ...write.command, entityId: 'task-2' },
+      audit: { ...write.audit, entityId: 'task-2' },
+    };
+
+    await expect(store.commitLocalChange(conflicting)).rejects.toThrow('operationId collision');
+    await expect(store.listCommands('user-1')).resolves.toMatchObject([
+      { operationId: 'op-1', entityId: 'task-1' },
+    ]);
+  });
+
   it('fails closed when a storage write returns corrupted readback', async () => {
     const values = new Map<string, string>();
     const storageKey = `${OFFLINE_COMMAND_STORE_DB_NAME}:local-storage`;

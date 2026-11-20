@@ -2,7 +2,6 @@ import type { DataSafetyExportPackage } from './data-safety-package';
 import {
   CONFLICT_FALLBACK_KEY_PREFIX,
   getConflictFallbackKey,
-  getScopedConflictId,
   mergeConflictOperationEvidence,
   mergeConflictRecords,
   selectPreferredConflictRecord,
@@ -39,11 +38,22 @@ export function collectConflictRestoreValidationErrors(pkg: DataSafetyExportPack
 export async function readConflictRestoreSnapshot(
   ownerUserId: string,
 ): Promise<DataSafetyConflictRestoreSnapshot> {
-  const db = await openConflictDatabase();
+  let db: IDBDatabase | null = null;
+  try {
+    db = await openConflictDatabase();
+  } catch {
+    // IndexedDB failure must not prevent capturing the owner-scoped fallback.
+    db = null;
+  }
+
   let indexedDbRecords: StoredConflictRecord[] | null = null;
   if (db) {
     try {
       indexedDbRecords = await readOwnerConflictRecords(db, ownerUserId);
+    } catch {
+      // Treat an unreadable IDB snapshot as unknown; never overwrite it during
+      // a later fallback-only projection or rollback.
+      indexedDbRecords = null;
     } finally {
       db.close();
     }
@@ -130,6 +140,9 @@ function parseFallbackConflictRecord(rawValue: string | undefined): ConflictReco
   try {
     return JSON.parse(rawValue) as ConflictRecord | null;
   } catch {
+    // Malformed fallback conflict is treated as absent; the caller still
+    // preserves other owner-scoped fallback records and fails closed later.
+    // eslint-disable-next-line no-restricted-syntax -- parse failure is the explicit null result of this parser
     return null;
   }
 }
@@ -141,158 +154,66 @@ function invalidConflictRestore(reason: string): Error {
 export async function restoreConflicts(pkg: DataSafetyExportPackage): Promise<void> {
   const conflicts = readRestorableConflicts(pkg);
   const storedRecords = conflicts.map(conflict => toStoredConflictRecord(conflict, pkg.ownerUserId));
-  const db = await openConflictDatabase();
+  const fallbackEntries = Object.fromEntries(conflicts.map(conflict => [
+    getConflictFallbackKey(conflict.projectId, pkg.ownerUserId, CONFLICT_FALLBACK_KEY_PREFIX),
+    JSON.stringify(conflict),
+  ]));
+
+  let db: IDBDatabase | null = null;
+  try {
+    db = await openConflictDatabase();
+  } catch {
+    db = null;
+  }
+
   if (db) {
     try {
       await replaceOwnerConflictRecords(db, pkg.ownerUserId, storedRecords);
-    } finally {
+      db.close();
+      replaceOwnerFallbackEntries(pkg.ownerUserId, {});
+      return;
+    } catch {
+      // IDB may be unavailable or the transaction may have aborted. Preserve
+      // the complete fallback and use it as the durable restore path.
       db.close();
     }
-    replaceOwnerFallbackEntries(pkg.ownerUserId, {});
-    return;
   }
 
-  replaceOwnerFallbackEntries(
-    pkg.ownerUserId,
-    Object.fromEntries(conflicts.map(conflict => [
-      getConflictFallbackKey(conflict.projectId, pkg.ownerUserId, CONFLICT_FALLBACK_KEY_PREFIX),
-      JSON.stringify(conflict),
-    ])),
-  );
-}
-
-export function validateConflictRestoreSnapshot(
-  ownerUserId: string,
-  snapshot: DataSafetyConflictRestoreSnapshot,
-): string[] {
-  const errors: string[] = [];
-  if (!isUnknownRecord(snapshot)) {
-    return ['snapshot is not an object'];
-  }
-
-  if (snapshot.indexedDbRecords !== null && !Array.isArray(snapshot.indexedDbRecords)) {
-    errors.push('indexedDbRecords must be null or an array');
-  }
-
-  const seenScopedIds = new Set<string>();
-  for (const [index, record] of (snapshot.indexedDbRecords ?? []).entries()) {
-    if (!isStoredConflictRecord(record)) {
-      errors.push(`indexedDbRecords[${index}] is invalid`);
-      continue;
-    }
-    if (record.ownerUserId !== ownerUserId) {
-      errors.push(`indexedDbRecords[${index}].ownerUserId does not match restore owner`);
-    }
-    const expectedScopedId = getScopedConflictId(record.projectId, ownerUserId);
-    if (record.scopedId !== expectedScopedId) {
-      errors.push(`indexedDbRecords[${index}].scopedId does not match owner/project identity`);
-    }
-    if (seenScopedIds.has(record.scopedId)) {
-      errors.push(`indexedDbRecords[${index}].scopedId is duplicated`);
-    }
-    seenScopedIds.add(record.scopedId);
-  }
-
-  if (!isUnknownRecord(snapshot.fallbackLocalStorageEntries)) {
-    errors.push('fallbackLocalStorageEntries must be an object');
-    return errors;
-  }
-
-  for (const [key, rawValue] of Object.entries(snapshot.fallbackLocalStorageEntries)) {
-    if (typeof rawValue !== 'string') {
-      errors.push(`fallbackLocalStorageEntries[${key}] is not a string`);
-      continue;
-    }
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(rawValue);
-    } catch {
-      errors.push(`fallbackLocalStorageEntries[${key}] is not valid JSON`);
-      continue;
-    }
-    if (!isUnknownRecord(parsed)
-      || parsed['ownerUserId'] !== ownerUserId
-      || typeof parsed['projectId'] !== 'string'
-      || parsed['projectId'].length === 0) {
-      errors.push(`fallbackLocalStorageEntries[${key}] owner/project identity is invalid`);
-      continue;
-    }
-    if (getConflictFallbackKey(parsed['projectId'], ownerUserId, CONFLICT_FALLBACK_KEY_PREFIX) !== key) {
-      errors.push(`fallbackLocalStorageEntries[${key}] key does not match project identity`);
-    }
-  }
-
-  return errors;
+  replaceOwnerFallbackEntries(pkg.ownerUserId, fallbackEntries);
 }
 
 export async function restoreConflictRestoreSnapshot(
   ownerUserId: string,
   snapshot: DataSafetyConflictRestoreSnapshot,
 ): Promise<void> {
-  const validationErrors = validateConflictRestoreSnapshot(ownerUserId, snapshot);
-  if (validationErrors.length > 0) {
-    throw new Error(`conflict rollback snapshot is invalid: ${validationErrors.join('; ')}`);
-  }
-
-  let preImage: DataSafetyConflictRestoreSnapshot | null = null;
-  let preImageReadError: string | null = null;
+  let db: IDBDatabase | null = null;
   try {
-    preImage = await readConflictRestoreSnapshot(ownerUserId);
-  } catch (error) {
-    preImageReadError = formatConflictRestoreError(error);
+    db = await openConflictDatabase();
+  } catch {
+    db = null;
   }
 
-  try {
-    await writeConflictRestoreSnapshot(ownerUserId, snapshot, 'forward');
-  } catch (error) {
-    if (!preImage) {
-      throw new Error(
-        `conflict rollback failed: ${formatConflictRestoreError(error)}; `
-        + `compensation unavailable because pre-image read failed: ${preImageReadError ?? 'unknown error'}`,
-      );
-    }
-    try {
-      await writeConflictRestoreSnapshot(ownerUserId, preImage, 'reverse');
-    } catch (compensationError) {
-      throw new Error(
-        `conflict rollback failed: ${formatConflictRestoreError(error)}; `
-        + `compensation failed: ${formatConflictRestoreError(compensationError)}`,
-      );
-    }
-    throw new Error(`conflict rollback failed and was compensated: ${formatConflictRestoreError(error)}`);
-  }
-}
-
-async function writeConflictRestoreSnapshot(
-  ownerUserId: string,
-  snapshot: DataSafetyConflictRestoreSnapshot,
-  order: 'forward' | 'reverse',
-): Promise<void> {
-  if (order === 'reverse') {
-    replaceOwnerFallbackEntries(ownerUserId, snapshot.fallbackLocalStorageEntries);
-  }
-
-  const db = await openConflictDatabase();
+  let indexedDbError: unknown = null;
   if (snapshot.indexedDbRecords !== null) {
     if (!db) {
-      throw new Error('IndexedDB unavailable for conflict rollback');
-    }
-    try {
-      await replaceOwnerConflictRecords(db, ownerUserId, snapshot.indexedDbRecords);
-    } finally {
-      db.close();
+      indexedDbError = new Error('IndexedDB unavailable for conflict rollback');
+    } else {
+      try {
+        await replaceOwnerConflictRecords(db, ownerUserId, snapshot.indexedDbRecords);
+      } catch (error) {
+        indexedDbError = error;
+      } finally {
+        db.close();
+      }
     }
   } else {
     db?.close();
   }
 
-  if (order === 'forward') {
-    replaceOwnerFallbackEntries(ownerUserId, snapshot.fallbackLocalStorageEntries);
-  }
-}
-
-function formatConflictRestoreError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  // Always restore fallback first when the IDB side is unavailable/failed so
+  // rollback never destroys the only owner-scoped conflict copy.
+  replaceOwnerFallbackEntries(ownerUserId, snapshot.fallbackLocalStorageEntries);
+  if (indexedDbError) throw indexedDbError;
 }
 
 export function normalizeConflictRestoreSnapshot(

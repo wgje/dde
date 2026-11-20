@@ -12,10 +12,12 @@ import { LoggerService } from './logger.service';
 import { AuthService } from './auth.service';
 import {
   projectConflictRestoreSnapshot,
+  readConflictRestoreSnapshot,
   restoreConflictRestoreSnapshot,
-  validateConflictRestoreSnapshot,
+  restoreConflicts,
   type DataSafetyConflictRestoreSnapshot,
 } from './data-safety-conflict-restore.helpers';
+import type { DataSafetyExportPackage } from './data-safety-package';
 
 const OWNER_USER_ID = 'restore-owner';
 
@@ -143,6 +145,49 @@ function createConflictStorageService(): ConflictStorageService {
   return runInInjectionContext(injector, () => injector.get(ConflictStorageService));
 }
 
+
+function stubIndexedDbOpenFailure(): void {
+  vi.stubGlobal('indexedDB', {
+    open: vi.fn(() => {
+      const request: { onerror?: () => void; result?: unknown } = {};
+      queueMicrotask(() => request.onerror?.());
+      return request;
+    }),
+  });
+}
+
+function createMinimalConflictPackage(conflict: ConflictRecord): DataSafetyExportPackage {
+  return {
+    schemaVersion: 1,
+    exportedAt: '2026-06-26T02:00:00.000Z',
+    ownerUserId: OWNER_USER_ID,
+    app: { appVersion: 'test', syncProtocolVersion: 1, deploymentEpoch: 1 },
+    localData: {
+      projects: [{ ...conflict.localProject }],
+      tasks: [],
+      connections: [],
+      syncCursors: [],
+    },
+    localState: {
+      retryQueue: [],
+      actionQueue: [],
+      deadLetters: [],
+      conflicts: [conflict],
+      taskTombstones: [],
+      connectionTombstones: [],
+    },
+    syncSnapshot: {
+      syncState: { lastSyncTime: null, pendingCount: 0 },
+      projectCursors: [],
+      queueCounts: { retryQueue: 0, actionQueue: 0, deadLetters: 0 },
+    },
+    replayLog: [],
+    replayPlan: { planId: 'test-plan', generatedAt: 0, summary: { retryQueue: 0, actionQueue: 0, auditLog: 0 }, steps: [] },
+    lastWriteExplain: null,
+    integrity: { tableCounts: {}, checksum: 'test-checksum' },
+  } as unknown as DataSafetyExportPackage;
+}
+
 describe('projectConflictRestoreSnapshot', () => {
   let service: ConflictStorageService | null = null;
 
@@ -248,57 +293,45 @@ describe('projectConflictRestoreSnapshot', () => {
   });
 });
 
-describe('conflict restore rollback contracts', () => {
+
+describe('conflict restore IDB fallback failures', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     localStorage.clear();
   });
 
-  it('rejects owner/scoped identity mismatches before any restore write', async () => {
-    const invalidRecord = {
-      ...toStoredConflictRecord({
-        ...createConflict('project-a', 'foreign', '2026-06-26T02:00:00.000Z', 1),
-        ownerUserId: 'other-owner',
-      }, 'other-owner'),
-      scopedId: `${OWNER_USER_ID}::project-a`,
-    };
-    const snapshot: DataSafetyConflictRestoreSnapshot = {
-      indexedDbRecords: [invalidRecord],
-      fallbackLocalStorageEntries: {},
-    };
+  it('captures owner fallback when IndexedDB open fails during pre-image read', async () => {
+    const conflict = createConflict('project-fallback-read', 'fallback', '2026-06-26T02:00:00.000Z', 1, 'op-fallback-read');
+    const key = getConflictFallbackKey(conflict.projectId, OWNER_USER_ID);
+    localStorage.setItem(key, JSON.stringify(conflict));
+    stubIndexedDbOpenFailure();
 
-    expect(validateConflictRestoreSnapshot(OWNER_USER_ID, snapshot)).toEqual([
-      'indexedDbRecords[0].ownerUserId does not match restore owner',
-    ]);
-    localStorage.setItem('sentinel', 'untouched');
-    vi.stubGlobal('indexedDB', undefined);
+    const snapshot = await readConflictRestoreSnapshot(OWNER_USER_ID);
 
-    await expect(restoreConflictRestoreSnapshot(OWNER_USER_ID, snapshot))
-      .rejects.toThrow('conflict rollback snapshot is invalid');
-    expect(localStorage.getItem('sentinel')).toBe('untouched');
+    expect(snapshot.indexedDbRecords).toBeNull();
+    expect(snapshot.fallbackLocalStorageEntries[key]).toBe(JSON.stringify(conflict));
   });
 
-  it('compensates a fallback write failure and retains the original diagnostic', async () => {
-    vi.stubGlobal('indexedDB', undefined);
-    const key = getConflictFallbackKey('project-a', OWNER_USER_ID);
-    const existing = createConflict('project-a', 'before rollback', '2026-06-26T02:00:00.000Z', 1);
-    const incoming = createConflict('project-a', 'rollback target', '2026-06-26T02:01:00.000Z', 2);
-    localStorage.setItem(key, JSON.stringify(existing));
-    const originalSetItem = localStorage.setItem.bind(localStorage);
-    let shouldFail = true;
-    vi.spyOn(localStorage, 'setItem').mockImplementation((storageKey, value) => {
-      if (storageKey === key && value.includes('rollback target') && shouldFail) {
-        shouldFail = false;
-        throw new Error('simulated fallback write failure');
-      }
-      originalSetItem(storageKey, value);
-    });
+  it('restores the fallback path when IndexedDB open fails during forward restore', async () => {
+    const conflict = createConflict('project-fallback-restore', 'restore', '2026-06-26T02:01:00.000Z', 1);
+    const key = getConflictFallbackKey(conflict.projectId, OWNER_USER_ID);
+    stubIndexedDbOpenFailure();
+
+    await restoreConflicts(createMinimalConflictPackage(conflict));
+
+    expect(localStorage.getItem(key)).toBe(JSON.stringify(conflict));
+  });
+
+  it('restores fallback before failing closed when IDB rollback is unavailable', async () => {
+    const conflict = createConflict('project-fallback-rollback', 'rollback', '2026-06-26T02:02:00.000Z', 1, 'op-fallback-rollback');
+    const key = getConflictFallbackKey(conflict.projectId, OWNER_USER_ID);
+    const raw = JSON.stringify(conflict);
+    stubIndexedDbOpenFailure();
 
     await expect(restoreConflictRestoreSnapshot(OWNER_USER_ID, {
-      indexedDbRecords: null,
-      fallbackLocalStorageEntries: { [key]: JSON.stringify(incoming) },
-    })).rejects.toThrow('conflict rollback failed and was compensated: simulated fallback write failure');
-
-    expect(JSON.parse(localStorage.getItem(key) ?? 'null')).toEqual(existing);
+      indexedDbRecords: [toStoredConflictRecord(conflict, OWNER_USER_ID)],
+      fallbackLocalStorageEntries: { [key]: raw },
+    })).rejects.toThrow('IndexedDB unavailable');
+    expect(localStorage.getItem(key)).toBe(raw);
   });
 });
