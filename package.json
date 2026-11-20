@@ -149,9 +149,7 @@
     "smoke:cloudflare-playwright": "node scripts/smoke/cloudflare-playwright-smoke.cjs",
     "perf:guard": "npm run build:stats && npm run perf:guard:nojit && npm run perf:guard:startup && npm run quality:guard:font-contract && npm run quality:guard:supabase-ready",
     "test:baseline:update": "node scripts/update-test-duration-baseline.cjs --baseline=scripts/test-duration-baseline.json --quarantine=scripts/test-quarantine.json",
-    "test:quarantine:update": "node scripts/update-test-quarantine.cjs --quarantine=scripts/test-quarantine.json",
-    "quota-monitor": "node --use-env-proxy scripts/quota-monitor.cjs",
-    "codegraph:adapter:prepare": "node scripts/codegraph-worktree-bootstrap.cjs"
+    "test:quarantine:update": "node scripts/update-test-quarantine.cjs --quarantine=scripts/test-quarantine.json"
   },
   "dependencies": {
     "@angular/cdk": "^19.2.19",

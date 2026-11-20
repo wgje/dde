@@ -6,19 +6,10 @@
 
 - 代码、配置、调试、审查或实现任务在简短进度说明后，首个仓库事实动作必须使用 CodeGraph MCP。本仓库广泛上下文优先 `nanoflow_context_pack`，精确 NanoFlow 语义使用 `nanoflow_overlay_query`。
 - `functions.exec` 返回 `Script running...` 仍在运行；下一步只能对同一 `cell_id` 等待明确终态。仅明确 timeout/transport/failure/unavailable 才触发 fallback，运行中禁止并行 fallback 或绕过检查。
-- MCP 明确失败后下一事实动作必须是 `npm run codegraph:adapter:context -- --root "<absolute-root>" --query "<query>" --json`；精确 overlay 可用 `npm run codegraph:overlay:query -- --query "<symbol-or-relation>" --skip-refresh`。两者失败后原生 `@colbymchenry/codegraph@1.6.2` 仅作 locator。
+- MCP 明确失败后下一事实动作必须是 `npm run codegraph:adapter:context -- --query "<query>" --json`；精确 overlay 可用 `npm run codegraph:overlay:query -- --query "<symbol-or-relation>" --skip-refresh`。两者失败后原生 `@colbymchenry/codegraph@1.5.0` 仅作 locator。
 - MCP 与 adapter 都失败前禁止普通搜索、文件、git、Context7 或 web。建立 CodeGraph 事实后，外部框架/API/安全/数据库/同步/离线问题再用 Context7并精读定位文件。
-- 在运行任何依赖 CodeGraph 的 worker/spec 前，先执行 `npm run codegraph:adapter:prepare -- --root "<absolute-root>" --source-root "<prepared-source-root>" --json`。该步骤负责补齐缺失的本地 runtime dependency closure、初始化 exact-root CodeGraph index 并发布 `CURRENT.json`；只有回执 `status=READY` 或 `status=READY_WITH_LOCAL_RUNTIME_CHANGES` 才运行 adapter-dependent tests；后者必须把 `runtimeClosure.dirtyConflicts` 交给当前任务审查。回执 `ENVIRONMENT_BLOCKED` 只阻塞依赖 CodeGraph 的任务，必须把 `taskImpact=adapter-dependent tasks blocked; unrelated tasks may proceed` 原样记录；不得把它计为业务 spec correctness failure、不得要求无关任务停摆或进入 integration review。门禁使用 `--require-ready`，失败码 78 解释为环境阻塞而非实现回归。
 - 项目 MCP 配置是 `D:\Code\dde\.codex\config.toml`；用户配置仅 fallback，`.vscode/mcp.json` 无效。wrapper/config 改后须 fresh adapter/wrapper 验证并重启 session。
 - 写入前检查 bytes、`git status`、lease/barrier、CodeGraph freshness；保留并发改动，不越权 stage/commit/push/release/cleanup。
-
-### Worktree MCP bootstrap
-
-- The live DDE CodeGraph MCP server stays rooted at `D:\Code\dde` with the canonical `@colbymchenry/codegraph@1.6.2` shared-daemon/proxy contract. Do not rewrite its live server `--path` to a worker worktree. A live wrapper rooted at DDE is not evidence that a worker worktree was queried.
-- For an exact-root adapter call, the adapter must execute `<requested-root>/scripts/codegraph-nanoflow-mcp-stdio.cjs` from that same root and pass CodeGraph `--path <requested-root>`. A user/explicit Codex config may inform package target and environment under the existing checks, but its wrapper script path must never be launched as worker-root evidence. If the root-local wrapper is missing, resolves outside the root, or runtime evidence mismatches, fail closed rather than falling back to `D:\Code\dde`.
-- Accept adapter output as exact-root evidence only when `exactRootEvidence.rootIdentityVerified=true` and runtime `wrapper.start.scriptPath`, `projectRoot`, CodeGraph `codegraphArgs --path`, and `overlay.query.start.overlayFile.path` all match the requested root. Base context text alone, a DDE wrapper log, or an `appliesToRoot=false` user config is not sufficient. If evidence is missing/mismatched, or the exact-root overlay/index is unavailable, mark dependent environment preparation and follow-on worker tasks `BLOCKED`; do not guess values or dispatch as if the root were verified.
-- Before dispatching a worker, run `npm run codegraph:adapter:doctor -- --root "<absolute-root>" --json`. For roots other than `D:\Code\dde`, run the direct MCP probe first, then the exact-root adapter fallback. If an index is missing/unusable, use only the repository-authorized pinned exact-root CLI bootstrap; never initialize a different root or treat a wrapper from DDE as proof for the worker.
-- A worktree `.codex/config.toml` that declares the live CodeGraph server must match the canonical DDE target/root. Normalize stale or partial copies before starting a turn, then restart the worker MCP/session when config changed. When a provider switch may have rewritten user config, `NANOFLOW_CODEGRAPH_CODEX_CONFIG=D:\Code\dde\.codex\config.toml` may select the canonical target/env for adapter fallback, but does not relax the local-wrapper and runtime exact-root evidence rules above.
 
 ### Worker evidence contract
 
