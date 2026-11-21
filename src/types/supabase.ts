@@ -1348,6 +1348,74 @@ export type Database = {
         }
         Relationships: []
       }
+      widget_focus_action_receipts: {
+        Row: {
+          action: string
+          binding_generation: number
+          canonical_response: Json
+          created_at: string
+          device_id: string
+          expires_at: string
+          focus_session_id: string
+          operation_id: string
+          payload_digest: string
+          status: string
+          task_id: string | null
+          task_patch_base_updated_at: string | null
+          task_patch_id: string | null
+          task_patch_kind: string | null
+          task_patch_wait_minutes: number | null
+          user_id: string
+          wait_minutes: number | null
+        }
+        Insert: {
+          action: string
+          binding_generation: number
+          canonical_response: Json
+          created_at?: string
+          device_id: string
+          expires_at?: string
+          focus_session_id: string
+          operation_id: string
+          payload_digest: string
+          status?: string
+          task_id?: string | null
+          task_patch_base_updated_at?: string | null
+          task_patch_id?: string | null
+          task_patch_kind?: string | null
+          task_patch_wait_minutes?: number | null
+          user_id: string
+          wait_minutes?: number | null
+        }
+        Update: {
+          action?: string
+          binding_generation?: number
+          canonical_response?: Json
+          created_at?: string
+          device_id?: string
+          expires_at?: string
+          focus_session_id?: string
+          operation_id?: string
+          payload_digest?: string
+          status?: string
+          task_id?: string | null
+          task_patch_base_updated_at?: string | null
+          task_patch_id?: string | null
+          task_patch_kind?: string | null
+          task_patch_wait_minutes?: number | null
+          user_id?: string
+          wait_minutes?: number | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "widget_focus_action_receipts_device_id_fkey"
+            columns: ["device_id"]
+            isOneToOne: false
+            referencedRelation: "widget_devices"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       widget_instances: {
         Row: {
           binding_generation: number
@@ -1866,6 +1934,10 @@ export type Database = {
       cleanup_old_deleted_tasks: { Args: never; Returns: number }
       cleanup_old_logs: { Args: never; Returns: number }
       cleanup_personal_retention_artifacts: { Args: never; Returns: Json }
+      cleanup_widget_focus_action_receipts: {
+        Args: { p_batch_size?: number; p_retention?: string }
+        Returns: number
+      }
       consume_widget_rate_limit: {
         Args: {
           p_block_seconds?: number
@@ -2002,6 +2074,27 @@ export type Database = {
         Returns: undefined
       }
       soft_delete_project: { Args: { p_project_id: string }; Returns: boolean }
+      apply_widget_focus_action: {
+        Args: {
+          p_user_id: string
+          p_device_id: string
+          p_binding_generation: number
+          p_operation_id: string
+          p_action: string
+          p_task_id: string | null
+          p_wait_minutes: number | null
+          p_apply: boolean
+          p_focus_session_id: string | null
+          p_expected_updated_at: string | null
+          p_next_session_state: Json | null
+          p_action_result: Json | null
+          p_action_now: string | null
+          p_task_patch_id: string | null
+          p_task_patch_kind: string | null
+          p_task_patch_wait_minutes: number | null
+        }
+        Returns: Json
+      }
       sync_canonical_payload_digest: {
         Args: { p_payload: Json }
         Returns: string

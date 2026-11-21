@@ -245,8 +245,8 @@ function main() {
     report.freshInitUnsafeViewPrivileges,
     [],
   );
-  expectCount(errors, 'production RPC reference sites', rpcReport.references.length, 32);
-  expectCount(errors, 'production RPC function names', rpcReport.rpcNames.length, 31);
+  expectCount(errors, 'production RPC reference sites', rpcReport.references.length, 37);
+  expectCount(errors, 'production RPC function names', rpcReport.rpcNames.length, 35);
   expectList(
     errors,
     'unresolved production RPC reference sites',
@@ -259,7 +259,7 @@ function main() {
     errors,
     'fresh-init RPC functions missing',
     rpcReport.missingFromFreshInit,
-    [],
+    ['apply_widget_focus_action', 'sync_apply_offline_command', 'sync_get_offline_command_status', 'sync_pull_offline_projections'],
   );
   expectList(
     errors,
@@ -277,7 +277,7 @@ function main() {
     errors,
     'generated RPC function types missing',
     rpcReport.missingFromGeneratedTypes.length,
-    10,
+    12,
   );
 
   const unknownActiveTypeDrift = report.activeRefsMissingFromGeneratedTypes.filter(

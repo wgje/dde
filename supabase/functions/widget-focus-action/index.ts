@@ -42,11 +42,20 @@ interface RequestBody {
   action?: string;
   taskId?: string;
   waitMinutes?: number;
+  operationId?: string;
 }
 
 interface FocusSessionUpdateRow {
   id: string;
   updated_at: string | null;
+}
+
+interface WidgetFocusActionRpcResult {
+  ok: boolean;
+  status?: number;
+  code?: string;
+  error?: string;
+  [key: string]: unknown;
 }
 
 type SupabaseAdminClient = ReturnType<typeof createServiceRoleClient>;
@@ -238,6 +247,12 @@ async function handleRequest(req: Request): Promise<Response> {
   ) {
     return errorResponse(responseHeaders, 400, 'INVALID_WAIT_MINUTES', 'waitMinutes must be a positive number');
   }
+  const operationId = typeof body.operationId === 'string' && body.operationId.trim().length > 0
+    ? body.operationId.trim()
+    : null;
+  if (operationId && !isUuidLike(operationId)) {
+    return errorResponse(responseHeaders, 400, 'INVALID_OPERATION_ID', 'operationId must be a UUID');
+  }
 
   if (!hasServiceRoleConfig()) {
     return jsonResponse({ ok: false, ...serviceNotConfiguredPayload() }, responseHeaders, 503);
@@ -260,6 +275,39 @@ async function handleRequest(req: Request): Promise<Response> {
   }
   if (new Date(device.expires_at).getTime() <= Date.now()) {
     return errorResponse(responseHeaders, 401, 'TOKEN_EXPIRED', 'Widget token has expired');
+  }
+
+  if (operationId) {
+    const replayProbe = await client.rpc<WidgetFocusActionRpcResult>('apply_widget_focus_action', {
+      p_user_id: device.user_id,
+      p_device_id: device.id,
+      p_binding_generation: device.binding_generation,
+      p_operation_id: operationId,
+      p_action: action,
+      p_task_id: requestedTaskId ?? null,
+      p_wait_minutes: requestedWaitMinutes ?? null,
+      p_apply: false,
+      p_focus_session_id: null,
+      p_expected_updated_at: null,
+      p_next_session_state: null,
+      p_action_result: null,
+      p_action_now: null,
+      p_task_patch_id: null,
+      p_task_patch_kind: null,
+      p_task_patch_wait_minutes: null,
+    });
+    if (replayProbe.error) {
+      console.error('[widget-focus-action] durable replay probe failed', replayProbe.error);
+      return errorResponse(responseHeaders, 503, 'RECEIPT_LOOKUP_FAILED', 'Failed to verify operation receipt');
+    }
+    const replay = replayProbe.data as Record<string, unknown> | null;
+    if (replay?.ok === true) return jsonResponse(replay, responseHeaders, 200);
+    if (replay?.code !== 'RECEIPT_NOT_FOUND') {
+      const status = typeof replay?.status === 'number' ? replay.status : 409;
+      const code = typeof replay?.code === 'string' ? replay.code : 'DURABLE_REPLAY_REJECTED';
+      const error = typeof replay?.error === 'string' ? replay.error : 'Durable focus action replay was rejected';
+      return errorResponse(responseHeaders, status, code, error);
+    }
   }
 
   let session: FocusSessionRow | null = null;
@@ -296,6 +344,54 @@ async function handleRequest(req: Request): Promise<Response> {
   })();
   if (!actionResult.ok) {
     return errorResponse(responseHeaders, actionErrorStatus(actionResult.code), actionResult.code, actionResult.error);
+  }
+
+  if (operationId) {
+    const taskPatchId = readOptionalStringField(actionResult, 'completedTaskId')
+      ?? readOptionalStringField(actionResult, 'suspendedTaskId');
+    const responseTaskId = taskPatchId ?? body.taskId ?? null;
+    const taskPatchKind = action === 'complete-front' && taskPatchId
+      ? 'complete'
+      : action === 'wait-front' && taskPatchId
+        ? 'wait'
+        : null;
+    const rpcResult = await client.rpc<WidgetFocusActionRpcResult>('apply_widget_focus_action', {
+      p_user_id: device.user_id,
+      p_device_id: device.id,
+      p_binding_generation: device.binding_generation,
+      p_operation_id: operationId,
+      p_action: action,
+      p_task_id: requestedTaskId ?? null,
+      p_wait_minutes: requestedWaitMinutes ?? null,
+      p_apply: true,
+      p_focus_session_id: session.id,
+      p_expected_updated_at: session.updated_at,
+      p_next_session_state: actionResult.snapshot,
+      p_action_result: {
+        action,
+        taskId: responseTaskId,
+        mainTaskId: actionResult.mainTaskId,
+        comboSelectIds: actionResult.comboSelectIds,
+        backupIds: actionResult.backupIds,
+        ...('waitEndAt' in actionResult && actionResult.waitEndAt ? { waitEndAt: actionResult.waitEndAt } : {}),
+      },
+      p_action_now: nowIso,
+      p_task_patch_id: taskPatchId,
+      p_task_patch_kind: taskPatchKind,
+      p_task_patch_wait_minutes: taskPatchKind === 'wait' ? requestedWaitMinutes : null,
+    });
+    if (rpcResult.error) {
+      console.error('[widget-focus-action] durable action RPC failed', rpcResult.error);
+      return errorResponse(responseHeaders, 503, 'DURABLE_ACTION_FAILED', 'Failed to commit durable focus action');
+    }
+    const result = rpcResult.data as Record<string, unknown> | null;
+    if (!result || result.ok !== true) {
+      const status = typeof result?.status === 'number' ? result.status : 409;
+      const code = typeof result?.code === 'string' ? result.code : 'DURABLE_ACTION_REJECTED';
+      const error = typeof result?.error === 'string' ? result.error : 'Durable focus action was rejected';
+      return errorResponse(responseHeaders, status, code, error);
+    }
+    return jsonResponse(result, responseHeaders, 200);
   }
 
   const update = await client

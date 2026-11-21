@@ -65,6 +65,7 @@ const generatedTypeGaps = [
   'complete_attachment_cleanup_job', 'consume_transcription_quota',
   'fail_attachment_cleanup_job', 'list_project_heads_page',
   'list_widget_notify_devices', 'release_transcription_quota',
+  'sync_apply_offline_command', 'sync_get_offline_command_status',
 ];
 const syncTransportNames = [
   'sync_delete_project', 'sync_delete_tasks',
@@ -102,6 +103,8 @@ const repositoryRpcIdentityRows = [
   'direct-rpc|supabase/functions/widget-notify/index.ts|list_widget_notify_devices',
   'direct-rpc|supabase/functions/transcribe/index.ts|release_transcription_quota',
   'direct-rpc|src/services/sync-rpc-client.service.ts|sync_check_protocol',
+  'sync-rpc-transport|src/services/sync-rpc-client.service.ts|sync_apply_offline_command',
+  'sync-rpc-transport|src/services/sync-rpc-client.service.ts|sync_get_offline_command_status',
   'sync-rpc-transport|src/services/sync-rpc-client.service.ts|sync_delete_project',
   'sync-rpc-transport|src/services/sync-rpc-client.service.ts|sync_delete_tasks',
   'sync-rpc-transport|src/services/sync-rpc-client.service.ts|sync_increment_routine_completion',
@@ -112,6 +115,9 @@ const repositoryRpcIdentityRows = [
   'sync-rpc-transport|src/services/sync-rpc-client.service.ts|sync_upsert_routine_task',
   'sync-rpc-transport|src/services/sync-rpc-client.service.ts|sync_upsert_task',
   'sync-rpc-transport|src/services/sync-rpc-client.service.ts|sync_upsert_user_preferences',
+  'direct-rpc|src/services/sync-rpc-client.service.ts|sync_pull_offline_projections',
+  'direct-rpc|supabase/functions/widget-focus-action/index.ts|apply_widget_focus_action',
+  'direct-rpc|supabase/functions/widget-focus-action/index.ts|apply_widget_focus_action',
   'direct-rpc|supabase/functions/widget-summary/index.ts|widget_summary_wave1',
 ];
 function loadCoverage(): RpcFunctionCoverageModule {
@@ -753,15 +759,15 @@ class ProjectDataService {
     expect(report.missing).toEqual(['alpha']);
   });
 
-  it('binds the current repository to the exact 32-site identity matrix and ten generated-type gaps', () => {
+  it('binds the current repository to the exact 37-site identity matrix and twelve generated-type gaps', () => {
     const report = coverage.analyzeRepositoryRpcFunctionCoverage(projectRoot);
 
     expect(report.references.map(reference =>
       `${reference.kind}|${reference.path}|${reference.name}`
     )).toEqual(repositoryRpcIdentityRows);
-    expect(report.rpcNames).toHaveLength(31);
+    expect(report.rpcNames).toHaveLength(35);
     expect(report.references.filter(reference => reference.kind === 'sync-rpc-transport'))
-      .toHaveLength(10);
+      .toHaveLength(12);
     expect(report.references
       .filter(reference => reference.kind === 'sync-rpc-transport')
       .map(reference => reference.name)).toEqual(syncTransportNames);

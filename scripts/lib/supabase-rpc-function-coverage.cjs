@@ -56,6 +56,7 @@ const FACTORY_RPC_PROOFS = new Map([
   ['supabase/functions/virus-scan/index.ts', { ...SERVICE_ROLE_FACTORY, kind: 'factory', localFactory: 'createServiceRoleClient' }],
   ['supabase/functions/widget-summary/index.ts', { imported: 'createServiceRoleClient', kind: 'factory', module: '../_shared/widget-common.ts' }],
   ['supabase/functions/widget-black-box-action/index.ts', { ...SERVICE_ROLE_FACTORY, kind: 'factory', localFactory: 'createServiceRoleClient' }],
+  ['supabase/functions/widget-focus-action/index.ts', { imported: 'createServiceRoleClient', kind: 'factory', module: '../_shared/widget-common.ts' }],
 ]);
 const PROJECT_PROVIDER_PROOF = {
   ...ANGULAR_INJECT_PROOF,

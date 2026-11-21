@@ -319,15 +319,15 @@ export function registerSupabaseFreshInitRepositorySpecs(
   });
 
   it('keeps the static RPC denominator aligned with fresh-init and generated-type drift', () => {
-    expect(rpcReport.references).toHaveLength(32);
-    expect(rpcReport.rpcNames).toHaveLength(31);
+    expect(rpcReport.references).toHaveLength(37);
+    expect(rpcReport.rpcNames).toHaveLength(35);
     expect(rpcReport.unresolvedDynamicSites).toEqual([]);
     expect(rpcReport.missingFromFreshInit).toEqual([]);
     expect(rpcReport.freshInitRpcDeclarations.indeterminate).toEqual([]);
     expect(rpcReport.missingFromGeneratedTypes).toEqual(
       sortedKeys(manifest.freshInitRpcFunctionsAheadOfGeneratedTypes),
     );
-    expect(rpcReport.missingFromGeneratedTypes).toHaveLength(10);
+    expect(rpcReport.missingFromGeneratedTypes).toHaveLength(12);
   });
 
   it('keeps shared table columns aligned after replay convergence', () => {
@@ -464,10 +464,10 @@ export function registerSupabaseFreshInitRepositorySpecs(
     expect(result.stdout).toContain('- fresh-init unsafe view privilege states: 0');
     expect(result.stdout).toContain('- fresh-init redundant index groups: 0');
     expect(result.stdout).toContain('- migration replay redundant index groups: 0');
-    expect(result.stdout).toContain('- production RPC reference sites: 32');
-    expect(result.stdout).toContain('- production RPC function names: 31');
+    expect(result.stdout).toContain('- production RPC reference sites: 37');
+    expect(result.stdout).toContain('- production RPC function names: 35');
     expect(result.stdout).toContain('- fresh-init RPC functions missing: 0');
-    expect(result.stdout).toContain('- generated RPC function types missing: 10');
+    expect(result.stdout).toContain('- generated RPC function types missing: 12');
 
     const packageJson = JSON.parse(readFileSync(path.join(projectRoot, 'package.json'), 'utf8')) as {
       scripts?: Record<string, string>;
