@@ -2017,6 +2017,46 @@ export type Database = {
         Args: { payload: Json }
         Returns: Json
       }
+      sync_pull_offline_commands: {
+        Args: {
+          p_after_device_id?: string
+          p_after_logical?: number
+          p_after_operation_id?: string
+          p_after_physical_ms?: number
+          p_limit?: number
+        }
+        Returns: {
+          base_updated_at: string | null
+          base_version: number | null
+          command: string
+          dependency_operation_ids: Json
+          device_id: string
+          entity_id: string
+          entity_type: string
+          envelope: Json
+          field_versions: Json
+          installation_id: string
+          intent: Json
+          logical_clock_logical: number
+          logical_clock_physical_ms: number
+          normalized_result_patch: Json
+          operation_id: string
+          received_at: string
+          status: string
+          user_id: string
+        }[]
+      }
+      sync_pull_offline_projections: {
+        Args: never
+        Returns: {
+          entity_id: string
+          entity_type: string
+          field_versions: Json
+          fields: Json
+          tombstone: Json | null
+          updated_at: string
+        }[]
+      }
       sync_upsert_blackbox_entry: { Args: { payload: Json }; Returns: Json }
       sync_upsert_connection: { Args: { payload: Json }; Returns: Json }
       sync_upsert_focus_session: { Args: { payload: Json }; Returns: Json }
