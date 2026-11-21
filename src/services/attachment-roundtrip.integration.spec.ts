@@ -275,31 +275,35 @@ describe('Attachment Export/Import Roundtrip', () => {
         data: new Blob(['two'], { type: 'text/plain' }),
       },
     ];
+    const identity = await resumeService.buildPackageIdentity('project-1', items);
+    const expectedTask2OperationId = 'attachment-import:' + identity.packageDigest + ':1:roundtrip-att-2';
+    const observedOperationIds = new Map<string, string[]>();
     let failSecondItem = true;
     mockAttachmentService.uploadFile.mockImplementation(async (
-      _userId: string,
-      _projectId: string,
-      taskId: string,
+      ...args: Parameters<AttachmentService['uploadFile']>
     ) => {
+      const [, , taskId, , options] = args;
+      const operationId = options?.operationId ?? '';
+      observedOperationIds.set(taskId, [...(observedOperationIds.get(taskId) ?? []), operationId]);
       if (taskId === 'task-2' && failSecondItem) {
         return { success: false, error: '进程中断' };
       }
       return {
         success: true,
         attachment: {
-          id: `uploaded-${taskId}`,
-          name: `${taskId}.txt`,
+          id: 'uploaded-' + taskId,
+          name: taskId + '.txt',
           type: 'document',
-          url: `pending://${taskId}`,
+          url: 'pending://' + taskId,
           mimeType: 'text/plain',
           size: 3,
           createdAt: new Date().toISOString(),
         },
         queuedUpload: {
-          actionId: `action-${taskId}`,
+          actionId: 'action-' + taskId,
           ownerUserId: 'user-1',
-          blobKey: `uploaded-${taskId}`,
-          operationId: `operation-${taskId}`,
+          blobKey: 'uploaded-' + taskId,
+          operationId,
         },
       };
     });
@@ -308,7 +312,6 @@ describe('Attachment Export/Import Roundtrip', () => {
     expect(first.success).toBe(false);
     expect(first.imported).toBe(1);
 
-    const identity = await resumeService.buildPackageIdentity('project-1', items);
     const checkpoint = await resumeService.readCheckpoint('user-1', 'project-1', identity.packageDigest);
     expect(checkpoint?.items.map(item => item.status)).toEqual(['completed', 'failed']);
 
@@ -319,6 +322,7 @@ describe('Attachment Export/Import Roundtrip', () => {
     expect(resumed.success).toBe(true);
     expect(resumed.imported).toBe(2);
     expect(mockAttachmentService.uploadFile.mock.calls.length - callsBeforeResume).toBe(1);
+    expect(observedOperationIds.get('task-2')).toEqual([expectedTask2OperationId, expectedTask2OperationId]);
     expect(await resumeService.readCheckpoint('user-1', 'project-1', identity.packageDigest)).toBeNull();
   });
 });

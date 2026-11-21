@@ -25,7 +25,7 @@ import { TaskOperationAdapterService } from './task-operation-adapter.service';
 import { ActionQueueService } from './action-queue.service';
 import type { AttachmentUploadPayload, QueuedAction } from './action-queue.types';
 import { AttachmentUploadOutboxService, type PendingAttachmentUploadIdentity } from './attachment-upload-outbox.service';
-import { AttachmentImportResumeService } from './attachment-import-resume.service';
+import { AttachmentImportResumeService, type AttachmentImportPackageIdentity } from './attachment-import-resume.service';
 import { ProjectStateService } from './project-state.service';
 import { registerAttachmentImportZipIntegritySpecs } from './attachment-import-zip-integrity.spec-helpers';
 
@@ -79,7 +79,13 @@ describe('AttachmentImportService', () => {
     vi.clearAllMocks();
     
     mockAttachmentService = {
-      uploadFile: vi.fn().mockResolvedValue({
+      uploadFile: vi.fn().mockImplementation(async (
+        _userId: string,
+        _projectId: string,
+        _taskId: string,
+        _file: File,
+        options?: { operationId?: string },
+      ) => ({
         success: true,
         attachment: {
           id: 'att-1',
@@ -94,9 +100,9 @@ describe('AttachmentImportService', () => {
           actionId: 'action-1',
           ownerUserId: 'user-1',
           blobKey: 'att-1',
-          operationId: 'attachment:create:att-1',
+          operationId: options?.operationId ?? 'attachment:create:att-1',
         },
-      }),
+      })),
     };
     
     mockAuthService = {
@@ -343,16 +349,19 @@ describe('AttachmentImportService', () => {
     });
 
     it('上传等待期间任务被删除时应精确补偿旧 operation 并保留新代次与其他 owner', async () => {
-      const receipt = {
-        actionId: 'action-old',
-        ownerUserId: 'user-1',
-        blobKey: 'att-1',
-        operationId: 'operation-old',
-      };
+      const items: AttachmentImportItem[] = [{
+        projectId: 'project-1',
+        taskId: 'task-1',
+        metadata: { id: 'att-1', name: 'late.txt', size: 4, mimeType: 'text/plain' },
+        data: new Blob(['demo'], { type: 'text/plain' }),
+      }];
+      const identity = await resumeService.buildPackageIdentity('project-1', items);
+      const operationId = operationIdFor(identity, 0);
+      const receipt = { actionId: 'action-old', ownerUserId: 'user-1', blobKey: 'att-1', operationId };
       queuedActions = [
-        createQueuedUploadAction('action-old', 'operation-old', 'user-1'),
+        createQueuedUploadAction('action-old', operationId, 'user-1'),
         createQueuedUploadAction('action-new', 'operation-new', 'user-1'),
-        createQueuedUploadAction('action-foreign', 'operation-old', 'user-2'),
+        createQueuedUploadAction('action-foreign', operationId, 'user-2'),
       ];
       mockAttachmentService.uploadFile.mockImplementation(async () => {
         targetProjects = [{ id: 'project-1', tasks: [] }];
@@ -363,14 +372,6 @@ describe('AttachmentImportService', () => {
         };
       });
       mockTaskOpsAdapter.addTaskAttachmentToProject.mockResolvedValue(false);
-      const items: AttachmentImportItem[] = [
-        {
-          projectId: 'project-1',
-          taskId: 'task-1',
-          metadata: { id: 'att-1', name: 'late.txt', size: 4, mimeType: 'text/plain' },
-          data: new Blob(['demo'], { type: 'text/plain' }),
-        },
-      ];
 
       const result = await service.importAttachments('project-1', items);
 
@@ -382,61 +383,65 @@ describe('AttachmentImportService', () => {
       expect(mockUploadOutbox.removePendingUpload).toHaveBeenCalledWith({
         ownerUserId: 'user-1',
         blobKey: 'att-1',
-        operationId: 'operation-old',
+        operationId,
       } satisfies PendingAttachmentUploadIdentity);
     });
 
     it('action 补偿已提交但 owner 代次变化时应继续精确删除 Blob 且不触碰当前队列', async () => {
-      const receipt = { actionId: 'action-held', ownerUserId: 'user-1', blobKey: 'att-1', operationId: 'operation-held' };
-      queuedActions = [createQueuedUploadAction('action-held', 'operation-held', 'user-1')];
+      const items: AttachmentImportItem[] = [{
+        projectId: 'project-1',
+        taskId: 'task-1',
+        metadata: { id: 'att-1', name: 'held.txt', size: 4, mimeType: 'text/plain' },
+        data: new Blob(['demo'], { type: 'text/plain' }),
+      }];
+      const identity = await resumeService.buildPackageIdentity('project-1', items);
+      const operationId = operationIdFor(identity, 0);
+      const receipt = { actionId: 'action-held', ownerUserId: 'user-1', blobKey: 'att-1', operationId };
+      queuedActions = [createQueuedUploadAction('action-held', operationId, 'user-1')];
       mockActionQueue.storage.persistExactQueueMutationForOwner.mockResolvedValue({
         status: 'COMMITTED_HELD', queue: [],
       });
-      mockAttachmentService.uploadFile.mockImplementation(async () => {
-        targetProjects = [{ id: 'project-1', tasks: [] }];
-        return {
-          success: true,
-          attachment: { id: 'att-1', name: 'held.txt', type: 'file', url: 'pending', createdAt: 'now' },
-          queuedUpload: receipt,
-        };
+      mockAttachmentService.uploadFile.mockResolvedValue({
+        success: true,
+        attachment: { id: 'att-1', name: 'held.txt', type: 'file', url: 'pending', createdAt: 'now' },
+        queuedUpload: receipt,
       });
       mockTaskOpsAdapter.addTaskAttachmentToProject.mockResolvedValue(false);
 
-      await service.importAttachments('project-1', [{
-        projectId: 'project-1', taskId: 'task-1',
-        metadata: { id: 'att-1', name: 'held.txt', size: 4, mimeType: 'text/plain' },
-        data: new Blob(['demo'], { type: 'text/plain' }),
-      }]);
+      await service.importAttachments('project-1', items);
 
       expect(mockUploadOutbox.removePendingUpload).toHaveBeenCalledWith({
-        ownerUserId: 'user-1', blobKey: 'att-1', operationId: 'operation-held',
+        ownerUserId: 'user-1', blobKey: 'att-1', operationId,
       });
       expect(mockActionQueue.dequeue).not.toHaveBeenCalled();
     });
 
     it('action 补偿未提交时应保留 Blob 且不触碰当前队列', async () => {
-      const receipt = { actionId: 'action-rejected', ownerUserId: 'user-1', blobKey: 'att-1', operationId: 'operation-rejected' };
+      const items: AttachmentImportItem[] = [{
+        projectId: 'project-1',
+        taskId: 'task-1',
+        metadata: { id: 'att-1', name: 'rejected.txt', size: 4, mimeType: 'text/plain' },
+        data: new Blob(['demo'], { type: 'text/plain' }),
+      }];
+      const identity = await resumeService.buildPackageIdentity('project-1', items);
+      const operationId = operationIdFor(identity, 0);
+      const receipt = { actionId: 'action-rejected', ownerUserId: 'user-1', blobKey: 'att-1', operationId };
       mockActionQueue.storage.persistExactQueueMutationForOwner.mockResolvedValue({ status: 'REJECTED_NO_COMMIT' });
-      mockAttachmentService.uploadFile.mockImplementation(async () => {
-        targetProjects = [{ id: 'project-1', tasks: [] }];
-        return {
-          success: true,
-          attachment: { id: 'att-1', name: 'rejected.txt', type: 'file', url: 'pending', createdAt: 'now' },
-          queuedUpload: receipt,
-        };
+      mockAttachmentService.uploadFile.mockResolvedValue({
+        success: true,
+        attachment: { id: 'att-1', name: 'rejected.txt', type: 'file', url: 'pending', createdAt: 'now' },
+        queuedUpload: receipt,
       });
       mockTaskOpsAdapter.addTaskAttachmentToProject.mockResolvedValue(false);
 
-      await service.importAttachments('project-1', [{
-        projectId: 'project-1', taskId: 'task-1',
-        metadata: { id: 'att-1', name: 'rejected.txt', size: 4, mimeType: 'text/plain' },
-        data: new Blob(['demo'], { type: 'text/plain' }),
-      }]);
+      await service.importAttachments('project-1', items);
 
       expect(mockUploadOutbox.removePendingUpload).not.toHaveBeenCalled();
       expect(mockActionQueue.dequeue).not.toHaveBeenCalled();
+      const checkpoint = await resumeService.readCheckpoint('user-1', 'project-1', identity.packageDigest);
+      expect(checkpoint?.items[0]?.queuedUpload).toEqual(receipt);
     });
-    
+
     it('上传失败应记录错误', async () => {
       mockAttachmentService.uploadFile.mockResolvedValue({
         success: false,
@@ -487,41 +492,44 @@ describe('AttachmentImportService', () => {
           data: new Blob(['one'], { type: 'text/plain' }),
         },
       ];
+      const identity = await resumeService.buildPackageIdentity('project-1', items);
+      const observedOperationIds = new Map<string, string[]>();
       let failOnce = true;
       mockAttachmentService.uploadFile.mockImplementation(async (
-        _userId: string,
-        _projectId: string,
-        taskId: string,
-      ) => taskId === 'task-1' && failOnce
-        ? { success: false, error: '暂时失败' }
-        : {
+        ...args: Parameters<AttachmentService['uploadFile']>
+      ) => {
+        const [, , taskId, , options] = args;
+        const operationId = options?.operationId ?? '';
+        observedOperationIds.set(taskId, [...(observedOperationIds.get(taskId) ?? []), operationId]);
+        if (taskId === 'task-1' && failOnce) return { success: false, error: '暂时失败' };
+        return {
           success: true,
           attachment: {
-            id: `uploaded-${taskId}`,
-            name: `${taskId}.txt`,
+            id: 'uploaded-' + taskId,
+            name: taskId + '.txt',
             type: 'document',
-            url: `pending://${taskId}`,
+            url: 'pending://' + taskId,
             mimeType: 'text/plain',
             size: 4,
             createdAt: new Date().toISOString(),
           },
           queuedUpload: {
-            actionId: `action-${taskId}`,
+            actionId: 'action-' + taskId,
             ownerUserId: 'user-1',
-            blobKey: `uploaded-${taskId}`,
-            operationId: `operation-${taskId}`,
+            blobKey: 'uploaded-' + taskId,
+            operationId,
           },
-        });
+        };
+      });
 
       const first = await service.importAttachments('project-1', items);
       expect(first.success).toBe(false);
       expect(first.imported).toBe(1);
       expect(first.failed).toBe(1);
 
-      const identity = await resumeService.buildPackageIdentity('project-1', items);
       const checkpoint = await resumeService.readCheckpoint('user-1', 'project-1', identity.packageDigest);
       expect(checkpoint?.items.map(item => item.status)).toEqual(['completed', 'failed']);
-      expect(checkpoint?.items[0]?.operationId).toContain('attachment-import:');
+      expect(checkpoint?.items[0]?.operationId).toBe(operationIdFor(identity, 0));
 
       failOnce = false;
       const callsBeforeResume = mockAttachmentService.uploadFile.mock.calls.length;
@@ -530,6 +538,10 @@ describe('AttachmentImportService', () => {
       expect(resumed.success).toBe(true);
       expect(resumed.imported).toBe(2);
       expect(mockAttachmentService.uploadFile.mock.calls.length - callsBeforeResume).toBe(1);
+      expect(observedOperationIds.get('task-1')).toEqual([
+        operationIdFor(identity, 1),
+        operationIdFor(identity, 1),
+      ]);
       expect(await resumeService.readCheckpoint('user-1', 'project-1', identity.packageDigest)).toBeNull();
     });
 
@@ -591,11 +603,18 @@ describe('AttachmentImportService', () => {
     });
 
     it('补偿失败时应保留 checkpoint 中的 receipt 和附件诊断', async () => {
+      const items: AttachmentImportItem[] = [{
+        projectId: 'project-1',
+        taskId: 'task-0',
+        metadata: { id: 'att-diagnostic', name: 'diagnostic.txt', size: 4, mimeType: 'text/plain' },
+        data: new Blob(['demo'], { type: 'text/plain' }),
+      }];
+      const identity = await resumeService.buildPackageIdentity('project-1', items);
       const receipt = {
         actionId: 'action-diagnostic',
         ownerUserId: 'user-1',
         blobKey: 'att-diagnostic',
-        operationId: 'operation-diagnostic',
+        operationId: operationIdFor(identity, 0),
       };
       queuedActions = [createQueuedUploadAction(receipt.actionId, receipt.operationId, receipt.ownerUserId)];
       mockActionQueue.storage.persistExactQueueMutationForOwner.mockResolvedValue({ status: 'REJECTED_NO_COMMIT' });
@@ -614,17 +633,11 @@ describe('AttachmentImportService', () => {
       });
       mockTaskOpsAdapter.addTaskAttachmentToProject.mockResolvedValue(false);
 
-      const items: AttachmentImportItem[] = [{
-        projectId: 'project-1',
-        taskId: 'task-0',
-        metadata: { id: 'att-diagnostic', name: 'diagnostic.txt', size: 4, mimeType: 'text/plain' },
-        data: new Blob(['demo'], { type: 'text/plain' }),
-      }];
       await service.importAttachments('project-1', items);
 
-      const identity = await resumeService.buildPackageIdentity('project-1', items);
       const checkpoint = await resumeService.readCheckpoint('user-1', 'project-1', identity.packageDigest);
       expect(checkpoint?.items[0]?.status).toBe('failed');
+      expect(checkpoint?.items[0]?.operationId).toBe(receipt.operationId);
       expect(checkpoint?.items[0]?.queuedUpload).toEqual(receipt);
       expect(checkpoint?.items[0]?.attachment?.id).toBe('att-diagnostic');
       expect(mockUploadOutbox.removePendingUpload).not.toHaveBeenCalled();
@@ -635,7 +648,7 @@ describe('AttachmentImportService', () => {
         actionId: 'action-retained',
         ownerUserId: 'user-1',
         blobKey: 'att-retained',
-        operationId: 'operation-retained',
+        operationId: '',
       };
       const attachment = {
         id: 'att-retained',
@@ -646,6 +659,15 @@ describe('AttachmentImportService', () => {
         size: 4,
         createdAt: new Date().toISOString(),
       };
+      const item: AttachmentImportItem = {
+        projectId: 'project-1',
+        taskId: 'task-0',
+        metadata: { id: 'att-retained', name: 'retained.txt', size: 4, mimeType: 'text/plain' },
+        data: new Blob(['demo'], { type: 'text/plain' }),
+      };
+      const identity = await resumeService.buildPackageIdentity('project-1', [item]);
+      const expectedOperationId = 'attachment-import:' + identity.packageDigest + ':0:att-retained';
+      receipt.operationId = expectedOperationId;
       const payload = {
         attachment,
         blobKey: 'att-retained',
@@ -656,18 +678,16 @@ describe('AttachmentImportService', () => {
         userId: 'user-1',
         sourceUserId: 'user-1',
       } as AttachmentUploadPayload;
-      const item: AttachmentImportItem = {
-        projectId: 'project-1',
-        taskId: 'task-0',
-        metadata: { id: 'att-retained', name: 'retained.txt', size: 4, mimeType: 'text/plain' },
-        data: new Blob(['demo'], { type: 'text/plain' }),
-      };
       mockAttachmentService.uploadFile.mockResolvedValue({ success: true, attachment, queuedUpload: receipt });
       mockTaskOpsAdapter.addTaskAttachmentToProject.mockResolvedValue(false);
       mockActionQueue.storage.persistExactQueueMutationForOwner.mockResolvedValue({ status: 'REJECTED_NO_COMMIT' });
 
       await service.importAttachments('project-1', [item]);
-      const identity = await resumeService.buildPackageIdentity('project-1', [item]);
+      expect(mockAttachmentService.uploadFile.mock.calls[0]?.[4]).toEqual(
+        expect.objectContaining({ operationId: expectedOperationId }),
+      );
+      const checkpoint = await resumeService.readCheckpoint('user-1', 'project-1', identity.packageDigest);
+      expect(checkpoint?.items[0]?.operationId).toBe(expectedOperationId);
       mockUploadOutbox.readPendingUploadStrictly.mockResolvedValue({
         status: 'found',
         record: {
@@ -693,9 +713,44 @@ describe('AttachmentImportService', () => {
       expect(mockActionQueue.enqueueDurablyForOwner.mock.calls.length).toBe(actionCallsBeforeResume + 1);
       expect(mockActionQueue.enqueueDurablyForOwner).toHaveBeenLastCalledWith(
         'user-1',
-        expect.objectContaining({ operationId: receipt.operationId }),
+        expect.objectContaining({ operationId: expectedOperationId }),
       );
       expect(await resumeService.readCheckpoint('user-1', 'project-1', identity.packageDigest)).toBeNull();
+    });
+
+    it('checkpoint rejects upload receipts with mismatched owner or operationId', async () => {
+      const items: AttachmentImportItem[] = [{
+        projectId: 'project-1',
+        taskId: 'task-0',
+        metadata: { id: 'att-receipt-identity', name: 'receipt.txt', size: 4, mimeType: 'text/plain' },
+        data: new Blob(['demo'], { type: 'text/plain' }),
+      }];
+      const identity = await resumeService.buildPackageIdentity('project-1', items);
+
+      const operationMismatch = resumeService.createCheckpoint('user-1', 'project-1', identity);
+      operationMismatch.items[0]!.queuedUpload = {
+        ownerUserId: 'user-1',
+        actionId: 'action-mismatch',
+        blobKey: 'att-receipt-identity',
+        operationId: 'foreign-operation',
+      };
+      operationMismatch.items[0]!.attachment = {
+        id: 'att-receipt-identity',
+        name: 'receipt.txt',
+        type: 'document',
+        url: 'pending',
+        createdAt: new Date().toISOString(),
+      };
+      await expect(resumeService.saveCheckpoint(operationMismatch)).rejects.toThrow('检查点格式无效');
+
+      const ownerMismatch = resumeService.createCheckpoint('user-1', 'project-1', identity);
+      ownerMismatch.items[0]!.pendingUpload = {
+        ownerUserId: 'user-2',
+        blobKey: 'att-receipt-identity',
+        operationId: ownerMismatch.items[0]!.operationId,
+      };
+      await expect(resumeService.saveCheckpoint(ownerMismatch)).rejects.toThrow('检查点格式无效');
+      expect((await resumeService.inspect('user-1', 'project-1', identity.packageDigest)).status).toBe('new');
     });
 
     it('session generation 在 upload await 期间变化时不进入 task metadata，checkpoint 保留', async () => {
@@ -758,6 +813,8 @@ describe('AttachmentImportService', () => {
         metadata: { id: 'att-queue-owner', name: 'queue-owner.txt', size: 4, mimeType: 'text/plain' },
         data: new Blob(['demo'], { type: 'text/plain' }),
       };
+      const identity = await resumeService.buildPackageIdentity('project-1', [item]);
+      const operationId = operationIdFor(identity, 0);
       let releaseUpload!: (value: unknown) => void;
       mockAttachmentService.uploadFile.mockReturnValueOnce(new Promise(resolve => { releaseUpload = resolve; }));
       const importPromise = service.importAttachments('project-1', [item]);
@@ -767,15 +824,14 @@ describe('AttachmentImportService', () => {
         success: false,
         error: 'owner changed after enqueue',
         attachment: { id: 'att-queue-owner', name: 'queue-owner.txt', type: 'document', url: 'pending', mimeType: 'text/plain', size: 4, createdAt: new Date().toISOString() },
-        queuedUpload: { actionId: 'action-queue-owner', ownerUserId: 'user-1', blobKey: 'att-queue-owner', operationId: 'operation-queue-owner' },
+        queuedUpload: { actionId: 'action-queue-owner', ownerUserId: 'user-1', blobKey: 'att-queue-owner', operationId },
       });
       const result = await importPromise;
       expect(result.success).toBe(false);
       expect(mockUploadOutbox.removePendingUpload).not.toHaveBeenCalled();
-      const identity = await resumeService.buildPackageIdentity('project-1', [item]);
       const checkpoint = await resumeService.readCheckpoint('user-1', 'project-1', identity.packageDigest);
       expect(checkpoint?.items[0]?.queuedUpload).toEqual({
-        actionId: 'action-queue-owner', ownerUserId: 'user-1', blobKey: 'att-queue-owner', operationId: 'operation-queue-owner',
+        actionId: 'action-queue-owner', ownerUserId: 'user-1', blobKey: 'att-queue-owner', operationId,
       });
       mockAuthService.currentUserId.mockReturnValue('user-1');
     });
@@ -889,6 +945,12 @@ describe('AttachmentImportService', () => {
     });
   });
 });
+
+function operationIdFor(identity: AttachmentImportPackageIdentity, descriptorIndex: number): string {
+  const descriptor = identity.descriptors[descriptorIndex];
+  if (!descriptor) throw new Error('attachment import descriptor missing');
+  return `attachment-import:${identity.packageDigest}:${descriptor.index}:${encodeURIComponent(descriptor.attachmentId)}`;
+}
 
 function createQueuedUploadAction(
   id: string,

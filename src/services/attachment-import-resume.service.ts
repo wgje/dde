@@ -445,9 +445,18 @@ function isCheckpoint(candidate: unknown): candidate is AttachmentImportCheckpoi
     || !Array.isArray(value.items)) {
     return false;
   }
-  return value.items.every(item => isCheckpointItem(item)
-    && (!item.queuedUpload || item.queuedUpload.ownerUserId === value.ownerUserId)
-    && (!item.queuedUpload || !item.attachment || item.queuedUpload.blobKey === item.attachment.id));
+  const ownerUserId = value.ownerUserId;
+  const packageDigest = value.packageDigest;
+  return value.items.every(item => {
+    if (!isCheckpointItem(item)) return false;
+    return item.operationId === buildOperationId(packageDigest, item)
+      && (!item.queuedUpload || item.queuedUpload.ownerUserId === ownerUserId)
+      && (!item.queuedUpload || item.queuedUpload.operationId === item.operationId)
+      && (!item.queuedUpload || !item.attachment || item.queuedUpload.blobKey === item.attachment.id)
+      && (!item.pendingUpload || item.pendingUpload.ownerUserId === ownerUserId)
+      && (!item.pendingUpload || item.pendingUpload.operationId === item.operationId)
+      && (!item.pendingUpload || !item.attachment || item.pendingUpload.blobKey === item.attachment.id);
+  });
 }
 
 function isCheckpointItem(candidate: unknown): candidate is AttachmentImportCheckpointItem {
