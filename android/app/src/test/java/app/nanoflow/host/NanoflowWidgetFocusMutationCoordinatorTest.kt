@@ -61,6 +61,35 @@ class NanoflowWidgetFocusMutationCoordinatorTest {
   }
 
   @Test
+  fun `distinct durable focus events with same action task and wait both reach terminal states`() = runBlocking {
+    val firstEvent = NanoflowWidgetReplayEvent(
+      eventId = "event-a", operationId = "00000000-0000-4000-8000-000000000386",
+      kind = "focus-action", appWidgetId = 7, focusAction = "complete-front", taskId = "task-1",
+      waitMinutes = 1, targetIndex = 0, ownerDeviceId = "device-a", bindingGeneration = 3,
+      createdAtMs = 1L, updatedAtMs = 1L,
+    )
+    val secondEvent = firstEvent.copy(
+      eventId = "event-b", operationId = "00000000-0000-4000-8000-000000000387", targetIndex = 1,
+    )
+    val coordinator = coordinator<String>()
+    val terminal = Channel<String>(Channel.UNLIMITED)
+    val mutations = AtomicInteger()
+    fun submit(event: NanoflowWidgetReplayEvent) {
+      coordinator.submit(
+        appWidgetId = event.appWidgetId,
+        mutationId = NanoflowWidgetFocusMutationProcessCoordinator.MutationIdentity(event.focusAction!!, event.taskId, event.waitMinutes!!, event.operationId, event.targetIndex),
+        mutate = { mutations.incrementAndGet(); "finished-${event.operationId.takeLast(3)}" },
+        deliver = {},
+        finish = { terminal.trySend(event.operationId).getOrThrow() },
+      )
+    }
+    submit(firstEvent)
+    submit(secondEvent)
+    assertEquals(setOf(firstEvent.operationId, secondEvent.operationId), setOf(withTimeout(2_000) { terminal.receive() }, withTimeout(2_000) { terminal.receive() }))
+    assertEquals(2, mutations.get())
+  }
+
+  @Test
   fun `different widgets execute concurrently`() = runBlocking {
     val firstStarted = CompletableDeferred<Unit>()
     val secondStarted = CompletableDeferred<Unit>()

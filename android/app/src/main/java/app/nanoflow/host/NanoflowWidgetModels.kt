@@ -129,6 +129,8 @@ data class WidgetFocusPromoteRequestPayload(
   val action: String,
   val taskId: String? = null,
   val waitMinutes: Int? = null,
+  val operationId: String? = null,
+  val originBindingGeneration: Int? = null,
 )
 
 @Serializable
@@ -245,6 +247,10 @@ data class NanoflowWidgetReplayEvent(
   val delta: Int = 0,
   val gateAction: String? = null,
   val entryId: String? = null,
+  val focusAction: String? = null,
+  val taskId: String? = null,
+  val waitMinutes: Int? = null,
+  val targetIndex: Int? = null,
   val ownerDeviceId: String,
   val bindingGeneration: Int,
   val status: String = "pending",

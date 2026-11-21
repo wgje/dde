@@ -102,7 +102,7 @@ internal class NanoflowWidgetReplayStore(
       val now = System.currentTimeMillis()
       val eligible = current.filter {
         it.ownerDeviceId == ownerDeviceId && it.bindingGeneration == bindingGeneration &&
-          (it.kind == "gate-navigation" || it.kind == "gate-action") &&
+          (it.kind == "gate-navigation" || it.kind == "gate-action" || it.kind == "focus-action") &&
           (it.status == "pending" || it.status == "failed" ||
             (it.status == "processing" && it.processingRuntimeId != runtimeId))
       }
@@ -154,6 +154,7 @@ internal class NanoflowWidgetReplayStore(
   private fun sameIdentity(left: NanoflowWidgetReplayEvent, right: NanoflowWidgetReplayEvent): Boolean =
     left.operationId == right.operationId && left.kind == right.kind && left.appWidgetId == right.appWidgetId &&
       left.delta == right.delta && left.gateAction == right.gateAction && left.entryId == right.entryId &&
+      left.focusAction == right.focusAction && left.taskId == right.taskId && left.waitMinutes == right.waitMinutes && left.targetIndex == right.targetIndex &&
       left.ownerDeviceId == right.ownerDeviceId && left.bindingGeneration == right.bindingGeneration
 
   private fun isReplayable(status: String): Boolean = status == "pending" || status == "processing" || status == "failed"

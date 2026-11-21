@@ -9,6 +9,10 @@ import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.robolectric.RuntimeEnvironment
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -109,6 +113,38 @@ class NanoflowWidgetDurableReplayTest {
       assertEquals("event-next", context.widgetDataStore.data.first()[stringPreferencesKey("instance.$appWidgetId.pendingFocusEventId")])
       assertEquals(402L, afterRestart.readPendingFocusActiveHint(appWidgetId)?.revisionMicros)
     }
+  }
+
+  @Test
+  fun `focus action replay preserves operation identity and serializes B371 fields`() = runBlocking {
+    val event = focusActionEvent(
+      eventId = "focus-event",
+      operationId = "00000000-0000-4000-8000-000000000377",
+      appWidgetId = 7,
+      focusAction = NanoflowWidgetActionFactory.FOCUS_ACTION_COMPLETE,
+      taskId = "task-focus",
+      waitMinutes = 1,
+      ownerDeviceId = "device-focus",
+      bindingGeneration = 12,
+    )
+    val replayStore = NanoflowWidgetReplayStore(RuntimeEnvironment.getApplication())
+    replayStore.persist(event)
+    val recovered = replayStore.takeover("device-focus", 12, "runtime-focus").single()
+    assertEquals(event.operationId, recovered.operationId)
+    assertEquals(event.focusAction, recovered.focusAction)
+    assertEquals(event.taskId, recovered.taskId)
+    assertEquals(12, recovered.bindingGeneration)
+
+    val payload = WidgetFocusPromoteRequestPayload(
+      action = event.focusAction!!,
+      taskId = event.taskId,
+      waitMinutes = event.waitMinutes,
+      operationId = event.operationId,
+      originBindingGeneration = event.bindingGeneration,
+    )
+    val json = Json.parseToJsonElement(Json.encodeToString(WidgetFocusPromoteRequestPayload.serializer(), payload)).jsonObject
+    assertEquals(event.operationId, json.getValue("operationId").jsonPrimitive.content)
+    assertEquals("12", json.getValue("originBindingGeneration").jsonPrimitive.content)
   }
 
   @Test
@@ -312,4 +348,29 @@ class NanoflowWidgetDurableReplayTest {
     createdAtMs = System.currentTimeMillis(),
     updatedAtMs = System.currentTimeMillis(),
   )
+  private fun focusActionEvent(
+    eventId: String,
+    operationId: String,
+    appWidgetId: Int,
+    focusAction: String,
+    taskId: String?,
+    waitMinutes: Int,
+    ownerDeviceId: String,
+    bindingGeneration: Int,
+    targetIndex: Int? = null,
+  ) = NanoflowWidgetReplayEvent(
+    eventId = eventId,
+    operationId = operationId,
+    kind = "focus-action",
+    appWidgetId = appWidgetId,
+    focusAction = focusAction,
+    taskId = taskId,
+    waitMinutes = waitMinutes,
+    targetIndex = targetIndex,
+    ownerDeviceId = ownerDeviceId,
+    bindingGeneration = bindingGeneration,
+    createdAtMs = System.currentTimeMillis(),
+    updatedAtMs = System.currentTimeMillis(),
+  )
+
 }

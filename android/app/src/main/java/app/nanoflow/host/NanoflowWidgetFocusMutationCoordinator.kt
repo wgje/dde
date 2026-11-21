@@ -257,11 +257,23 @@ internal object NanoflowWidgetFocusMutationProcessCoordinator {
     taskId: String?,
     waitMinutes: Int,
     finish: () -> Unit,
+  ) = NanoflowWidgetDurableReplayCoordinator.submitFocusAction(context, appWidgetId, focusAction, taskId, waitMinutes, finish)
+
+  internal fun submitFocusActionInternal(
+    context: Context,
+    appWidgetId: Int,
+    focusAction: String?,
+    taskId: String?,
+    waitMinutes: Int,
+    targetIndex: Int? = null,
+    event: NanoflowWidgetReplayEvent,
+    finish: () -> Unit,
+    onResult: (Boolean) -> Unit,
   ) {
     val appContext = context.applicationContext
     coordinator.submit(
       appWidgetId = appWidgetId,
-      mutationId = MutationIdentity("focus:$focusAction", taskId, waitMinutes),
+      mutationId = MutationIdentity("focus:$focusAction", taskId, waitMinutes, event.operationId, targetIndex),
       mutate = { generation ->
         executeFocusAction(
           context = appContext,
@@ -270,9 +282,14 @@ internal object NanoflowWidgetFocusMutationProcessCoordinator {
           taskId = taskId,
           waitMinutes = waitMinutes,
           generation = generation,
+          targetIndex = targetIndex,
+          event = event,
         )
       },
-      afterPersist = { delivery -> runPostPersistence(appContext, appWidgetId, delivery) },
+      afterPersist = { delivery ->
+        onResult(delivery !is NanoflowWidgetFocusMutationDelivery.Refresh || !delivery.reason.endsWith("-retry"))
+        runPostPersistence(appContext, appWidgetId, delivery)
+      },
       deliver = { delivery -> deliverCurrent(appContext, appWidgetId, delivery) },
       finish = finish,
     )
@@ -284,25 +301,7 @@ internal object NanoflowWidgetFocusMutationProcessCoordinator {
     targetIndex: Int,
     taskId: String,
     finish: () -> Unit,
-  ) {
-    val appContext = context.applicationContext
-    coordinator.submit(
-      appWidgetId = appWidgetId,
-      mutationId = MutationIdentity("select-task", taskId, targetIndex),
-      mutate = { generation ->
-        executeSelectTask(
-          context = appContext,
-          appWidgetId = appWidgetId,
-          targetIndex = targetIndex,
-          taskId = taskId,
-          generation = generation,
-        )
-      },
-      afterPersist = { delivery -> runPostPersistence(appContext, appWidgetId, delivery) },
-      deliver = { delivery -> deliverCurrent(appContext, appWidgetId, delivery) },
-      finish = finish,
-    )
-  }
+  ) = NanoflowWidgetDurableReplayCoordinator.submitFocusSelect(context, appWidgetId, targetIndex, taskId, finish)
 
   private suspend fun executeFocusAction(
     context: Context,
@@ -311,6 +310,8 @@ internal object NanoflowWidgetFocusMutationProcessCoordinator {
     taskId: String?,
     waitMinutes: Int,
     generation: NanoflowWidgetFocusMutationGeneration,
+    targetIndex: Int?,
+    event: NanoflowWidgetReplayEvent,
   ): NanoflowWidgetFocusMutationDelivery {
     val repository = NanoflowWidgetRepository(context)
     if (focusAction == NanoflowWidgetActionFactory.FOCUS_ACTION_WAIT) {
@@ -319,6 +320,10 @@ internal object NanoflowWidgetFocusMutationProcessCoordinator {
       return NanoflowWidgetFocusMutationDelivery.ToastOnly(R.string.nanoflow_widget_focus_wait_menu_toast)
     }
 
+    if (focusAction == "promote-secondary") {
+      val requiredTaskId = taskId ?: return NanoflowWidgetFocusMutationDelivery.ToastOnly(R.string.nanoflow_widget_focus_promote_failed_toast)
+      return executeSelectTask(context, appWidgetId, targetIndex ?: 0, requiredTaskId, generation, event.operationId, event.bindingGeneration)
+    }
     val requiredTaskId = taskId ?: return NanoflowWidgetFocusMutationDelivery.ToastOnly(
       R.string.nanoflow_widget_focus_promote_failed_toast,
     )
@@ -329,6 +334,8 @@ internal object NanoflowWidgetFocusMutationProcessCoordinator {
         appWidgetId,
         requiredTaskId,
         generation,
+        event.operationId,
+        event.bindingGeneration,
       )
       NanoflowWidgetActionFactory.FOCUS_ACTION_WAIT_PRESET -> executeWait(
         context,
@@ -337,6 +344,8 @@ internal object NanoflowWidgetFocusMutationProcessCoordinator {
         requiredTaskId,
         waitMinutes.coerceAtLeast(1),
         generation,
+        event.operationId,
+        event.bindingGeneration,
       )
       else -> NanoflowWidgetFocusMutationDelivery.ToastOnly(R.string.nanoflow_widget_focus_promote_failed_toast)
     }
@@ -348,6 +357,8 @@ internal object NanoflowWidgetFocusMutationProcessCoordinator {
     appWidgetId: Int,
     taskId: String,
     generation: NanoflowWidgetFocusMutationGeneration,
+    operationId: String,
+    bindingGeneration: Int,
   ): NanoflowWidgetFocusMutationDelivery {
     val optimisticResult = runCatching {
       repository.applyOptimisticFocusCompletion(appWidgetId, taskId)
@@ -359,7 +370,7 @@ internal object NanoflowWidgetFocusMutationProcessCoordinator {
       WidgetOptimisticResult.RejectedStale -> return noPublication
     }
 
-    val success = runRemote { repository.completeFrontFocusTask(appWidgetId, taskId) }
+    val success = runRemote { repository.completeFrontFocusTask(appWidgetId, taskId, operationId, bindingGeneration) }
     if (success) {
       refreshAfterNonOptimisticSuccess(context, repository, appWidgetId, optimisticSnapshot, generation)
       return refreshDelivery(R.string.nanoflow_widget_focus_complete_toast, "focus-complete-front")
@@ -376,6 +387,8 @@ internal object NanoflowWidgetFocusMutationProcessCoordinator {
     taskId: String,
     waitMinutes: Int,
     generation: NanoflowWidgetFocusMutationGeneration,
+    operationId: String,
+    bindingGeneration: Int,
   ): NanoflowWidgetFocusMutationDelivery {
     val optimisticResult = runCatching {
       repository.applyOptimisticFocusWait(appWidgetId, taskId, waitMinutes)
@@ -388,7 +401,7 @@ internal object NanoflowWidgetFocusMutationProcessCoordinator {
     }
 
     val success = runRemote {
-      repository.suspendFrontFocusTask(appWidgetId, taskId, waitMinutes)
+      repository.suspendFrontFocusTask(appWidgetId, taskId, waitMinutes, operationId, bindingGeneration)
     }
     if (success) {
       refreshAfterNonOptimisticSuccess(context, repository, appWidgetId, optimisticSnapshot, generation)
@@ -405,6 +418,8 @@ internal object NanoflowWidgetFocusMutationProcessCoordinator {
     targetIndex: Int,
     taskId: String,
     generation: NanoflowWidgetFocusMutationGeneration,
+    operationId: String? = null,
+    bindingGeneration: Int? = null,
   ): NanoflowWidgetFocusMutationDelivery {
     val repository = NanoflowWidgetRepository(context)
     val store = NanoflowWidgetStore(context)
@@ -451,7 +466,7 @@ internal object NanoflowWidgetFocusMutationProcessCoordinator {
     }
 
     val success = runRemote {
-      repository.promoteFocusSecondaryTask(appWidgetId, taskId)
+      repository.promoteFocusSecondaryTask(appWidgetId, taskId, operationId, bindingGeneration)
     }
     if (success) {
       refreshAfterNonOptimisticSuccess(
@@ -642,9 +657,11 @@ internal object NanoflowWidgetFocusMutationProcessCoordinator {
     Toast.makeText(context, context.getString(messageRes), Toast.LENGTH_SHORT).show()
   }
 
-  private data class MutationIdentity(
+  internal data class MutationIdentity(
     val action: String,
     val taskId: String?,
     val value: Int,
+    val operationId: String,
+    val targetIndex: Int?,
   )
 }

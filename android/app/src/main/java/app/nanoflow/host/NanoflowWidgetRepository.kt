@@ -982,7 +982,7 @@ class NanoflowWidgetRepository(private val context: Context) {
     remove(pendingFocusMutationIssuedAtKey(appWidgetId))
   }
 
-  suspend fun promoteFocusSecondaryTask(appWidgetId: Int, taskId: String): Boolean {
+  suspend fun promoteFocusSecondaryTask(appWidgetId: Int, taskId: String, operationId: String? = null, originBindingGeneration: Int? = null): Boolean {
     val cached = store.readSummary(appWidgetId)
     val target = cached?.let { summary ->
       resolveVisibleCommandCenterTasks(summary).firstOrNull { visibleTask -> visibleTask.taskId == taskId }
@@ -1016,6 +1016,8 @@ class NanoflowWidgetRepository(private val context: Context) {
       WidgetFocusPromoteRequestPayload(
         action = "promote-secondary",
         taskId = taskId,
+        operationId = operationId,
+        originBindingGeneration = originBindingGeneration,
       ),
     )
 
@@ -1061,23 +1063,27 @@ class NanoflowWidgetRepository(private val context: Context) {
     return true
   }
 
-  suspend fun completeFrontFocusTask(appWidgetId: Int, taskId: String): Boolean {
+  suspend fun completeFrontFocusTask(appWidgetId: Int, taskId: String, operationId: String? = null, originBindingGeneration: Int? = null): Boolean {
     return invokeFocusAction(
       appWidgetId = appWidgetId,
       action = "complete-front",
       taskId = taskId,
       waitMinutes = null,
       telemetryName = "widget_focus_complete",
+      operationId = operationId,
+      originBindingGeneration = originBindingGeneration,
     )
   }
 
-  suspend fun suspendFrontFocusTask(appWidgetId: Int, taskId: String, waitMinutes: Int): Boolean {
+  suspend fun suspendFrontFocusTask(appWidgetId: Int, taskId: String, waitMinutes: Int, operationId: String? = null, originBindingGeneration: Int? = null): Boolean {
     return invokeFocusAction(
       appWidgetId = appWidgetId,
       action = "wait-front",
       taskId = taskId,
       waitMinutes = waitMinutes.coerceAtLeast(1),
       telemetryName = "widget_focus_wait",
+      operationId = operationId,
+      originBindingGeneration = originBindingGeneration,
     )
   }
 
@@ -1087,6 +1093,8 @@ class NanoflowWidgetRepository(private val context: Context) {
     taskId: String,
     waitMinutes: Int?,
     telemetryName: String,
+    operationId: String? = null,
+    originBindingGeneration: Int? = null,
   ): Boolean {
     val binding = store.readBinding()
     if (binding == null) {
@@ -1106,6 +1114,8 @@ class NanoflowWidgetRepository(private val context: Context) {
         action = action,
         taskId = taskId,
         waitMinutes = waitMinutes,
+        operationId = operationId,
+        originBindingGeneration = originBindingGeneration,
       ),
     )
 

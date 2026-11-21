@@ -3,6 +3,10 @@ package app.nanoflow.host
 import android.content.Context
 import android.content.Intent
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.util.UUID
@@ -10,6 +14,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 internal object NanoflowWidgetDurableReplayCoordinator {
   private val replayMutex = Mutex()
+  private val replayScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
   suspend fun submitGateAction(context: Context, appWidgetId: Int, intent: Intent) = replayMutex.withLock {
     val appContext = context.applicationContext
@@ -32,6 +37,68 @@ internal object NanoflowWidgetDurableReplayCoordinator {
     )
     store.persistDurableReplayEvent(event)
     replayPendingLocked(appContext, store, event.ownerDeviceId, event.bindingGeneration)
+  }
+
+  fun submitFocusAction(
+    context: Context,
+    appWidgetId: Int,
+    focusAction: String?,
+    taskId: String?,
+    waitMinutes: Int,
+    finish: () -> Unit,
+  ) {
+    replayScope.launch {
+      try {
+        replayMutex.withLock {
+          val appContext = context.applicationContext
+          val store = NanoflowWidgetStore(appContext)
+          val binding = store.readBinding()
+          val now = System.currentTimeMillis()
+          val event = NanoflowWidgetReplayEvent(
+            eventId = UUID.randomUUID().toString(),
+            operationId = UUID.randomUUID().toString(),
+            kind = "focus-action",
+            appWidgetId = appWidgetId,
+            focusAction = focusAction,
+            taskId = taskId,
+            waitMinutes = waitMinutes.coerceAtLeast(1),
+            ownerDeviceId = binding?.deviceId ?: "unbound",
+            bindingGeneration = binding?.bindingGeneration ?: 0,
+            createdAtMs = now,
+            updatedAtMs = now,
+          )
+          store.persistDurableReplayEvent(event)
+          replayPendingLocked(appContext, store, event.ownerDeviceId, event.bindingGeneration, event.eventId, finish)
+        }
+      } catch (error: CancellationException) {
+        runCatching(finish)
+        throw error
+      } catch (error: Throwable) {
+        reportFailure(error)
+        runCatching(finish)
+      }
+    }
+  }
+
+  fun submitFocusSelect(context: Context, appWidgetId: Int, targetIndex: Int, taskId: String, finish: () -> Unit) {
+    replayScope.launch {
+      try {
+        replayMutex.withLock {
+          val appContext = context.applicationContext
+          val store = NanoflowWidgetStore(appContext)
+          val binding = store.readBinding()
+          val now = System.currentTimeMillis()
+          val event = NanoflowWidgetReplayEvent(
+            eventId = UUID.randomUUID().toString(), operationId = UUID.randomUUID().toString(), kind = "focus-action",
+            appWidgetId = appWidgetId, focusAction = "promote-secondary", taskId = taskId,
+            targetIndex = targetIndex, ownerDeviceId = binding?.deviceId ?: "unbound",
+            bindingGeneration = binding?.bindingGeneration ?: 0, createdAtMs = now, updatedAtMs = now,
+          )
+          store.persistDurableReplayEvent(event)
+          replayPendingLocked(appContext, store, event.ownerDeviceId, event.bindingGeneration, event.eventId, finish)
+        }
+      } catch (error: Throwable) { reportFailure(error); runCatching(finish) }
+    }
   }
 
   suspend fun submitGateNavigation(context: Context, appWidgetId: Int, delta: Int, finish: () -> Unit) {
@@ -91,6 +158,7 @@ internal object NanoflowWidgetDurableReplayCoordinator {
             if (event.eventId == finishEventId) finish else ({ }),
           )
           "gate-action" -> replayGateAction(context, store, event)
+          "focus-action" -> replayFocusAction(context, store, event, if (event.eventId == finishEventId) finish else ({ }))
         }
       }
     } finally {
@@ -134,6 +202,51 @@ internal object NanoflowWidgetDurableReplayCoordinator {
       if (succeeded) "finished" else "failed",
       if (succeeded) null else "remote action was not confirmed",
     )
+  }
+
+  private suspend fun replayFocusAction(
+    context: Context,
+    store: NanoflowWidgetStore,
+    event: NanoflowWidgetReplayEvent,
+    finish: () -> Unit,
+  ) {
+    val claimed = store.claimDurableReplayEvent(event) ?: return
+    val binding = store.readBinding()
+    if (claimed.ownerDeviceId == "unbound" || claimed.bindingGeneration < 1 ||
+      binding?.deviceId != claimed.ownerDeviceId || binding.bindingGeneration != claimed.bindingGeneration
+    ) {
+      store.updateDurableReplayEvent(claimed.eventId, "rejected", "focus binding changed before replay")
+      runCatching(finish)
+      return
+    }
+    val validAction = claimed.focusAction != null &&
+      (claimed.focusAction == NanoflowWidgetActionFactory.FOCUS_ACTION_COMPLETE ||
+        claimed.focusAction == NanoflowWidgetActionFactory.FOCUS_ACTION_WAIT_PRESET ||
+        claimed.focusAction == NanoflowWidgetActionFactory.FOCUS_ACTION_WAIT ||
+        claimed.focusAction == "promote-secondary")
+    if (!validAction) {
+      store.updateDurableReplayEvent(claimed.eventId, "rejected", "focus action identity is incomplete")
+      runCatching(finish)
+      return
+    }
+    NanoflowWidgetFocusMutationProcessCoordinator.submitFocusActionInternal(
+      context = context,
+      appWidgetId = claimed.appWidgetId,
+      focusAction = claimed.focusAction,
+      taskId = claimed.taskId,
+      waitMinutes = claimed.waitMinutes ?: 1,
+      targetIndex = claimed.targetIndex ?: 0,
+      event = claimed,
+      finish = finish,
+    ) { confirmed ->
+      replayScope.launch {
+        store.updateDurableReplayEvent(
+          claimed.eventId,
+          if (confirmed) "finished" else "failed",
+          if (confirmed) null else "focus action was not confirmed",
+        )
+      }
+    }
   }
 
   private suspend fun resolveEntryId(
