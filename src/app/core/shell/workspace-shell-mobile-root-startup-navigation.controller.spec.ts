@@ -689,7 +689,7 @@ describe('WorkspaceShellMobileRootStartupNavigationController', () => {
     expect(controller.shouldNavigateRootStartupToTextProject()).toBe(false);
   });
 
-  it('does not navigate non-root, desktop, or explicit non-workspace startup routes', () => {
+  it('navigates desktop root startup to text without overriding explicit routes or intents', () => {
     const {
       controller,
       navigateToTextProject,
@@ -698,15 +698,19 @@ describe('WorkspaceShellMobileRootStartupNavigationController', () => {
       setStartupEntryIntent,
     } = createController();
 
+    setMobile(false);
     setRouteUrl('/projects/project-1/flow');
     controller.navigateRootStartupToTextProject('project-1');
+    expect(navigateToTextProject).not.toHaveBeenCalled();
+
     setRouteUrl('/projects');
-    setMobile(false);
-    controller.navigateRootStartupToTextProject('project-1');
-    setMobile(true);
     setStartupEntryIntent({ intent: 'open-focus-tools' });
     controller.navigateRootStartupToTextProject('project-1');
-
     expect(navigateToTextProject).not.toHaveBeenCalled();
+
+    setStartupEntryIntent(null);
+    controller.navigateRootStartupToTextProject('project-1');
+    expect(navigateToTextProject).toHaveBeenCalledOnce();
+    expect(navigateToTextProject).toHaveBeenCalledWith('project-1');
   });
 });

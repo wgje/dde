@@ -27,13 +27,27 @@ describe('workspace shell startup route helpers', () => {
     })).toBe('project-1');
   });
 
-  it('only navigates mobile root startup to text once and only for workspace intents', () => {
+  it('navigates the root workspace to text once on every viewport and only for workspace intents', () => {
     expect(shouldNavigateRootStartupToTextProject({
       routeUrl: '/projects',
       isMobile: true,
       rootStartupTextNavigationApplied: false,
       startupEntryIntent: null,
     })).toBe(true);
+
+    expect(shouldNavigateRootStartupToTextProject({
+      routeUrl: '/projects',
+      isMobile: false,
+      rootStartupTextNavigationApplied: false,
+      startupEntryIntent: null,
+    })).toBe(true);
+
+    expect(shouldNavigateRootStartupToTextProject({
+      routeUrl: '/projects',
+      isMobile: false,
+      rootStartupTextNavigationApplied: true,
+      startupEntryIntent: null,
+    })).toBe(false);
 
     expect(shouldNavigateRootStartupToTextProject({
       routeUrl: '/projects?entry=widget&intent=open-workspace',

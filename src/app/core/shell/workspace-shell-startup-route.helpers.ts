@@ -35,7 +35,7 @@ export function shouldNavigateRootStartupToTextProject(input: {
   rootStartupTextNavigationApplied: boolean;
   startupEntryIntent: Pick<StartupEntryIntent, 'intent'> | null;
 }): boolean {
-  if (input.rootStartupTextNavigationApplied || !input.isMobile) {
+  if (input.rootStartupTextNavigationApplied) {
     return false;
   }
 
