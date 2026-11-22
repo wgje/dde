@@ -741,6 +741,55 @@ export function registerSyncRpcClientMutationRpcSpecs(): void {
     expect(result).toMatchObject({ status: 'unauthorized', reason: 'replay_fence_stale' });
     expect(rpc).toHaveBeenCalledOnce();
   });
+
+  it('pullOfflineProjections: reads the owner-scoped field-LWW projection RPC', async () => {
+    const env = syncRpcEnv();
+    env.syncRpcEnabled = true;
+    const rpc = vi.fn(async name => {
+      expect(name).toBe('sync_pull_offline_projections');
+      return { data: [{ entity_type: 'task', entity_id: 'task-1' }], error: null };
+    });
+    const service = buildServiceWithClientAsync(async () => ({ rpc }));
+    await expect(service.pullOfflineProjections()).resolves.toEqual([
+      { entity_type: 'task', entity_id: 'task-1' },
+    ]);
+  });
+
+  it('applyOfflineCommand: sends the envelope through the additive shadow ingest RPC', async () => {
+    const env = syncRpcEnv();
+    env.syncRpcEnabled = true;
+    env.syncProtocolVersion = 1;
+    let rpcName = '';
+    let captured: unknown = null;
+    const rpc = vi.fn(async (name, payload) => {
+      rpcName = name;
+      captured = payload;
+      return { data: { status: 'accepted-shadow', operationId: TEST_OPERATION_ID, appliedToDomainTables: false, projectionApplied: false }, error: null };
+    });
+    const service = buildService(rpc as never);
+    const result = await service.applyOfflineCommand({
+      operationId: TEST_OPERATION_ID,
+      command: {
+        schemaVersion: 1,
+        operationId: TEST_OPERATION_ID,
+        entityType: 'task',
+        entityId: '11111111-1111-4111-8111-111111111111',
+        command: 'task.update',
+        installationId: 'installation-1',
+        deviceId: 'device-1',
+        logicalClock: { physicalMs: 10, logical: 0 },
+        normalizedResultPatch: { content: 'offline' },
+        dependencyOperationIds: [],
+        intent: { fields: ['content'] },
+        status: 'pending',
+        createdAtIso: '2026-11-14T00:00:00.000Z',
+      },
+    });
+    expect(rpcName).toBe('sync_apply_offline_command');
+    expect(result.status).toBe('accepted-shadow');
+    expect(captured).toMatchObject({ operation_id: TEST_OPERATION_ID, entityType: 'task', command: 'task.update' });
+  });
+
 }
 
 function createTaskForFence(id: string): Task {

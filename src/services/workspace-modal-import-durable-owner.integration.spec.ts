@@ -118,6 +118,7 @@ describe('workspace modal import durable owner integration', () => {
   let sessionGeneration = 1;
   let queueBackup: QueueBackupService;
   let actionQueue: ActionQueueService;
+  let actionQueueStorage: ActionQueueStorageService;
   let projectState: ProjectStateService;
   let projectOps: ProjectOperationService;
   let offlineSnapshots: ProjectOfflineSnapshotService;
@@ -219,6 +220,8 @@ describe('workspace modal import durable owner integration', () => {
 
     queueBackup = writerInjector.get(QueueBackupService);
     actionQueue = writerInjector.get(ActionQueueService);
+    actionQueueStorage = writerInjector.get(ActionQueueStorageService);
+    actionQueueStorage.isOnline = false;
     projectState = writerInjector.get(ProjectStateService);
     projectOps = writerInjector.get(ProjectOperationService);
     offlineSnapshots = writerInjector.get(ProjectOfflineSnapshotService);
@@ -275,22 +278,18 @@ describe('workspace modal import durable owner integration', () => {
           extensionStatusMessage: vi.fn(() => ''), extensionStatusClass: vi.fn(() => ''), tokenLabel: vi.fn(() => ''), tokenPlaceholder: vi.fn(() => ''),
         } },
       ],
-    }).overrideComponent(SettingsModalComponent, {
-      set: {
-        providers: [
-          { provide: LocalBackupUIService, useValue: {
-            setProjectsProvider: vi.fn(), handleDownloadDataSafetyPackage: vi.fn(), loadRestorePreviewFromFile: vi.fn(), confirmRestore: vi.fn(),
-            isExportingDataSafetyPackage: vi.fn(() => false), isRestoringFromBackup: vi.fn(() => false), restoreBackupFiles: vi.fn(() => []),
-            restoreError: vi.fn(() => ''), restorePreview: vi.fn(() => null), restoreResultMsg: vi.fn(() => ''), restoreSelectedIndex: vi.fn(() => -1), restoreStep: vi.fn(() => 'idle'),
-          } },
-          { provide: SiyuanSettingsUIService, useValue: {
-            loadConfig: vi.fn().mockResolvedValue(undefined), runtimeMode: vi.fn(() => 'extension-relay'), baseUrl: vi.fn(() => ''), tokenMask: vi.fn(() => ''), connectionStatus: vi.fn(() => ''),
-            defaultBaseUrl: '', extensionStatus: vi.fn(() => undefined), isSavingToExtension: vi.fn(() => false), extensionSupported: vi.fn(() => true),
-            extensionStatusMessage: vi.fn(() => ''), extensionStatusClass: vi.fn(() => ''), tokenLabel: vi.fn(() => ''), tokenPlaceholder: vi.fn(() => ''),
-          } },
-        ],
-      },
-    }).compileComponents();
+    })
+      .overrideProvider(LocalBackupUIService, { useValue: {
+        setProjectsProvider: vi.fn(), handleDownloadDataSafetyPackage: vi.fn(), loadRestorePreviewFromFile: vi.fn(), confirmRestore: vi.fn(),
+        isExportingDataSafetyPackage: vi.fn(() => false), isRestoringFromBackup: vi.fn(() => false), restoreBackupFiles: vi.fn(() => []),
+        restoreError: vi.fn(() => ''), restorePreview: vi.fn(() => null), restoreResultMsg: vi.fn(() => ''), restoreSelectedIndex: vi.fn(() => -1), restoreStep: vi.fn(() => 'idle'),
+      } })
+      .overrideProvider(SiyuanSettingsUIService, { useValue: {
+        loadConfig: vi.fn().mockResolvedValue(undefined), runtimeMode: vi.fn(() => 'extension-relay'), baseUrl: vi.fn(() => ''), tokenMask: vi.fn(() => ''), connectionStatus: vi.fn(() => ''),
+        defaultBaseUrl: '', extensionStatus: vi.fn(() => undefined), isSavingToExtension: vi.fn(() => false), extensionSupported: vi.fn(() => true),
+        extensionStatusMessage: vi.fn(() => ''), extensionStatusClass: vi.fn(() => ''), tokenLabel: vi.fn(() => ''), tokenPlaceholder: vi.fn(() => ''),
+      } })
+      .compileComponents();
 
     dynamicModal = TestBed.inject(DynamicModalService);
     coordinator = TestBed.inject(WorkspaceModalCoordinatorService);
@@ -336,9 +335,12 @@ describe('workspace modal import durable owner integration', () => {
     modalRef.componentRef.changeDetectorRef.detectChanges();
     expect(modalConfig?.inputs?.['importProject']).toEqual(expect.any(Function));
     expect((modalRef.componentRef.instance as SettingsModalComponent).constructor).toBe(SettingsModalComponent);
-    expect((SettingsModalComponent as unknown as { ɵcmp?: { inputs?: Record<string, unknown> } }).ɵcmp?.inputs)
-      .toEqual(expect.objectContaining({ sessionEmail: expect.anything(), projects: expect.anything(), importProject: expect.anything() }));
+    expect(modalConfig?.inputs).toEqual(expect.objectContaining({ sessionEmail: expect.anything(), projects: expect.anything(), importProject: expect.any(Function) }));
     const settings = modalRef.componentRef.instance as SettingsModalComponent;
+    const configuredInputs = modalConfig?.inputs as Record<string, unknown>;
+    expect(settings.sessionEmail()).toBe(configuredInputs['sessionEmail']);
+    expect(settings.projects()).toEqual(configuredInputs['projects']);
+    expect(settings.importProject()).toBe(configuredInputs['importProject']);
     const importedProject = createProject('project-a-imported', 'user-a');
     let release!: () => void;
     let ready!: () => void;
@@ -390,6 +392,10 @@ describe('workspace modal import durable owner integration', () => {
     await coordinator.openSettings();
     modalRef.componentRef.changeDetectorRef.detectChanges();
     const settings = modalRef.componentRef.instance as SettingsModalComponent;
+    const configuredInputs = modalConfig?.inputs as Record<string, unknown>;
+    expect(settings.sessionEmail()).toBe(configuredInputs['sessionEmail']);
+    expect(settings.projects()).toEqual(configuredInputs['projects']);
+    expect(settings.importProject()).toBe(configuredInputs['importProject']);
     const importedProject = createProject('project-a-control', 'user-a');
     importService.executeImport.mockImplementation(async (...args: unknown[]) => {
       const callback = args[3] as (project: ReturnType<typeof createProject>) => Promise<void>;
@@ -397,6 +403,7 @@ describe('workspace modal import durable owner integration', () => {
       return { success: true, importedCount: 1, skippedCount: 0, failedCount: 0, details: [], durationMs: 0 };
     });
 
+    actionQueueStorage.isOnline = false;
     await settings.handleFileSelected(createFileEvent());
 
     const queue = await queueBackup.restoreQueueSnapshot('user-a');

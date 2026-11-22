@@ -246,6 +246,27 @@ describe('AuthOwnerTransitionController', () => {
     expect(harness.publishedOwners).toEqual([]);
   });
 
+  it('notifies committed listeners only after a committed publication', () => {
+    const harness = createHarness();
+    const owners: Array<string | null> = [];
+    const unsubscribe = harness.controller.onCommitted(owner => owners.push(owner));
+    const stale = harness.controller.capture('owner-b');
+    harness.controller.advanceGeneration();
+    expect(harness.controller.commit(stale, () => undefined).status).toBe('stale');
+    const committed = harness.controller.capture(null);
+    expect(harness.controller.commit(committed, () => undefined).status).toBe('committed');
+    expect(owners).toEqual([null]);
+    unsubscribe();
+  });
+
+  it('isolates listener failures from the owner commit result', () => {
+    const harness = createHarness();
+    harness.controller.onCommitted(() => { throw new Error('listener failed'); });
+    const ticket = harness.controller.capture('owner-b');
+    expect(harness.controller.commit(ticket, () => undefined)).toEqual({ status: 'committed', generation: 1 });
+    expect(harness.publishedOwners).toEqual(['owner-b']);
+  });
+
   it('rejects reuse of a committed ticket without invoking cleanup again', () => {
     const harness = createHarness();
     const ticket = harness.controller.capture('owner-b');

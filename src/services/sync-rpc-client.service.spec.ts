@@ -14,6 +14,33 @@ const TEST_OPERATION_ID = '00000000-0000-4000-8000-000000000001';
 describe('SyncRpcClientService', () => {
   installSyncRpcClientSpecEnv();
 
+  it('reads owner-scoped domain apply status separately from command ingestion', async () => {
+    const env = syncRpcEnv();
+    env.syncRpcEnabled = true;
+    const rpc = vi.fn(async () => ({
+      data: {
+        status: 'applied',
+        operation_id: TEST_OPERATION_ID,
+        domainApplyStatus: 'applied',
+        appliedToDomainTables: true,
+        domainApplyResult: { status: 'applied' },
+      },
+      error: null,
+    }));
+    const service = buildService(rpc as never);
+
+    const result = await service.getOfflineCommandStatus({ operationId: TEST_OPERATION_ID });
+
+    expect(rpc).toHaveBeenCalledWith('sync_get_offline_command_status', expect.objectContaining({
+      operation_id: TEST_OPERATION_ID,
+    }));
+    expect(result).toMatchObject({
+      status: 'applied', operationId: TEST_OPERATION_ID,
+      domainApplyStatus: 'applied', appliedToDomainTables: true,
+      domainApplyResult: { status: 'applied' },
+    });
+  });
+
   it('checkProtocol 在 feature 关闭但服务端支持时应自动开启 RPC', async () => {
     const env = syncRpcEnv();
     env.syncRpcEnabled = false;
@@ -133,6 +160,26 @@ describe('SyncRpcClientService', () => {
     expect(service.isClientRejected()).toBe(true);
   });
 
+  it('checkProtocol preserves explicit server capabilities for the command gate', async () => {
+    const env = syncRpcEnv();
+    env.syncRpcEnabled = true;
+    env.syncProtocolVersion = 1;
+
+    const rpc = vi.fn(async () => ({
+      data: {
+        minProtocolVersion: 1,
+        deploymentEpoch: 7,
+        capabilities: ['command-envelope-v1', 'field-lww-v1'],
+      },
+      error: null,
+    }));
+    const service = buildService(rpc as never);
+    await expect(service.checkProtocol()).resolves.toEqual({
+      minProtocolVersion: 1,
+      deploymentEpoch: 7,
+      capabilities: ['command-envelope-v1', 'field-lww-v1'],
+    });
+  });
   it('checkProtocol RPC 错误返回 null（向后兼容）', async () => {
     const env = syncRpcEnv();
     env.syncRpcEnabled = true;
