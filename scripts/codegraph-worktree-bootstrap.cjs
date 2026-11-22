@@ -13,8 +13,6 @@ const REQUIRED_RUNTIME_CLOSURE = Object.freeze([
   'scripts/lib/codegraph-overlay-immutable-cache.mjs',
   'scripts/lib/codegraph-overlay-generation-cache.cjs',
   'scripts/lib/codegraph-overlay-worker-pool.cjs',
-  'scripts/lib/codegraph-overlay-resident-worker-prototype.cjs',
-  'scripts/codegraph-overlay-resident-worker-prototype.cjs',
   'scripts/lib/agent-file-lease-store.cjs',
   'scripts/lib/codegraph-overlay-current-receipt.cjs',
   'scripts/lib/codegraph-overlay-generation-format.cjs',
@@ -28,10 +26,22 @@ const REQUIRED_RUNTIME_CLOSURE = Object.freeze([
   'scripts/lib/codegraph-nanoflow-overlay-v1-schema-typescript.cjs',
   'scripts/contracts/codegraph-nanoflow-overlay-v1.json',
   'scripts/contracts/codegraph-overlay-generation-v1.json',
+]);
+const OPTIONAL_PROTOTYPE_CLOSURE = Object.freeze([
+  'scripts/lib/codegraph-overlay-resident-worker-prototype.cjs',
+  'scripts/codegraph-overlay-resident-worker-prototype.cjs',
+]);
+const TEST_CLOSURE = Object.freeze([
   'src/tests/fixtures/agent-file-lease-worker.cjs',
   'src/tests/fixtures/codegraph-overlay-resident-worker.fake.cjs',
   'src/tests/scripts/agent-file-lease.spec.ts',
+  'src/tests/scripts/codegraph-overlay-resident-worker-prototype.spec.ts',
 ]);
+const CLOSURE_CATEGORIES = Object.freeze({
+  requiredRuntime: REQUIRED_RUNTIME_CLOSURE,
+  optionalPrototype: OPTIONAL_PROTOTYPE_CLOSURE,
+  test: TEST_CLOSURE,
+});
 const CURRENT_RELATIVE_PATH = path.join('.codegraph', 'nanoflow-generations', 'CURRENT.json');
 const BOOTSTRAP_BLOCKED_EXIT = 78;
 
@@ -169,7 +179,7 @@ function printHelp() {
     'Usage: node scripts/codegraph-worktree-bootstrap.cjs --root <worktree> --source-root <prepared-source> [--json] [--require-ready]',
     '',
     'Default behavior is non-blocking: missing setup is reported as ENVIRONMENT_BLOCKED and exits 0.',
-    '--require-ready exits 78 for ENVIRONMENT_BLOCKED so a gate can stop before running unrelated specs.',
+    '--require-ready exits 78 for ENVIRONMENT_BLOCKED or GENERATION_PENDING so a gate can stop before running unrelated specs.',
   ].join('\n') + '\n');
 }
 
@@ -185,8 +195,10 @@ function main() {
     independentTasksMayProceed: true,
     currentBefore: currentState(args.root),
     runtimeClosure: null,
+    closureCategories: CLOSURE_CATEGORIES,
     generation: null,
     blockingReason: null,
+    generationState: null,
   };
   if (!fs.existsSync(args.root)) {
     report.status = 'ENVIRONMENT_BLOCKED';
@@ -197,6 +209,8 @@ function main() {
     const missingAfter = REQUIRED_RUNTIME_CLOSURE.filter(relativePath => !existsFile(args.root, relativePath));
     const staleAfter = report.runtimeClosure.staleAfter ?? [];
     report.runtimeClosure.missingAfter = missingAfter;
+    report.runtimeClosure.missingOptional = OPTIONAL_PROTOTYPE_CLOSURE.filter(relativePath => !existsFile(args.root, relativePath));
+    report.runtimeClosure.missingTests = TEST_CLOSURE.filter(relativePath => !existsFile(args.root, relativePath));
     const dirtyConflicts = report.runtimeClosure.dirtyConflicts ?? [];
     const unresolvedStale = staleAfter.filter(relativePath => !dirtyConflicts.includes(relativePath));
     if (missingAfter.length > 0 || unresolvedStale.length > 0) {
@@ -235,13 +249,18 @@ function main() {
     } else {
       report.currentAfter = report.currentBefore;
       if (report.currentAfter.status !== 'ready') {
-        report.status = 'ENVIRONMENT_BLOCKED';
-        report.taskImpact = 'adapter-dependent tasks blocked; unrelated tasks may proceed';
-        report.blockingReason = 'immutable generation selector CURRENT.json is missing or invalid';
+        report.generationState = report.currentAfter.status === 'missing' ? 'PENDING' : 'INVALID';
+        report.taskImpact = 'runtime closure ready; immutable generation is not usable and adapter-dependent tasks remain blocked; unrelated tasks may proceed';
+        report.blockingReason = report.currentAfter.status === 'missing'
+          ? 'CURRENT_MISSING_WITH_RUNTIME_CLOSURE_READY'
+          : 'CURRENT_INVALID_WITH_RUNTIME_CLOSURE_READY';
+        report.status = args.requireReady ? 'GENERATION_PENDING' : 'CLOSURE_READY_GENERATION_PENDING';
+      } else {
+        report.generationState = 'READY';
       }
     }
   }
-  if (report.status === 'ENVIRONMENT_BLOCKED' && args.requireReady) {
+  if ((report.status === 'ENVIRONMENT_BLOCKED' || report.status === 'GENERATION_PENDING') && args.requireReady) {
     report.exitCode = BOOTSTRAP_BLOCKED_EXIT;
   } else {
     report.exitCode = 0;
@@ -256,3 +275,10 @@ try { main(); } catch (error) {
   process.stderr.write(`[codegraph-worktree-bootstrap] ENVIRONMENT_BLOCKED: ${error instanceof Error ? error.message : String(error)}\n`);
   process.exitCode = 78;
 }
+
+module.exports = Object.freeze({
+  REQUIRED_RUNTIME_CLOSURE,
+  OPTIONAL_PROTOTYPE_CLOSURE,
+  TEST_CLOSURE,
+  CLOSURE_CATEGORIES,
+});

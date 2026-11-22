@@ -15,37 +15,104 @@ afterEach(() => {
   }
 });
 
+function createClosureSource(): string {
+  const sourceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-bootstrap-source-'));
+  tempRoots.push(sourceRoot);
+  const closure = require(bootstrapPath) as {
+    REQUIRED_RUNTIME_CLOSURE: readonly string[];
+  };
+  for (const relativePath of [
+    ...closure.REQUIRED_RUNTIME_CLOSURE,
+  ]) {
+    const target = path.join(sourceRoot, relativePath);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, '// fixture\n', 'utf8');
+  }
+  return sourceRoot;
+}
+
+function runBootstrap(root: string, extraArgs: string[] = []) {
+  return spawnSync(process.execPath, [bootstrapPath, '--root', root, ...extraArgs, '--json'], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+  });
+}
+
 describe('codegraph worktree bootstrap', () => {
-  it('classifies a missing CURRENT as environment blocked without turning it into task failure', () => {
+  it('fails closed when no source root supplies a missing runtime closure', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-bootstrap-blocked-'));
     tempRoots.push(root);
-    const result = spawnSync(process.execPath, [bootstrapPath, '--root', root, '--no-generate', '--require-ready', '--json'], {
-      cwd: repoRoot,
-      encoding: 'utf8',
-    });
+    const result = runBootstrap(root, ['--no-generate', '--require-ready']);
     expect(result.status).toBe(78);
     const report = JSON.parse(result.stdout);
     expect(report.status).toBe('ENVIRONMENT_BLOCKED');
     expect(report.independentTasksMayProceed).toBe(true);
     expect(report.taskImpact).toContain('unrelated tasks may proceed');
-    expect(report.blockingReason).toMatch(/runtime dependency closure|CURRENT\\.json/);
+    expect(report.blockingReason).toContain('no bootstrap source root');
+  }, 15_000);
+
+  it('reports closure READY and generation PENDING when --no-generate skips an absent CURRENT', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-bootstrap-pending-'));
+    const sourceRoot = createClosureSource();
+    tempRoots.push(root);
+    const result = runBootstrap(root, ['--source-root', sourceRoot, '--no-generate', '--require-ready']);
+    expect(result.status, result.stderr || result.stdout).toBe(78);
+    const report = JSON.parse(result.stdout);
+    expect(report.status).toBe('GENERATION_PENDING');
+    expect(report.generationState).toBe('PENDING');
+    expect(report.blockingReason).toBe('CURRENT_MISSING_WITH_RUNTIME_CLOSURE_READY');
+    expect(report.runtimeClosure.missingAfter).toEqual([]);
+  }, 15_000);
+
+  it('distinguishes malformed CURRENT from a missing generation selector', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-bootstrap-invalid-'));
+    const sourceRoot = createClosureSource();
+    const currentPath = path.join(root, '.codegraph', 'nanoflow-generations', 'CURRENT.json');
+    fs.mkdirSync(path.dirname(currentPath), { recursive: true });
+    tempRoots.push(root);
+    fs.writeFileSync(currentPath, '{invalid', 'utf8');
+    const result = runBootstrap(root, ['--source-root', sourceRoot, '--no-generate', '--require-ready']);
+    expect(result.status, result.stderr || result.stdout).toBe(78);
+    const report = JSON.parse(result.stdout);
+    expect(report.status).toBe('GENERATION_PENDING');
+    expect(report.generationState).toBe('INVALID');
+    expect(report.blockingReason).toBe('CURRENT_INVALID_WITH_RUNTIME_CLOSURE_READY');
+  }, 15_000);
+
+  it('keeps test fixtures out of the required runtime category', () => {
+    const bootstrap = require(bootstrapPath) as {
+      REQUIRED_RUNTIME_CLOSURE: readonly string[];
+      TEST_CLOSURE: readonly string[];
+    };
+    expect(bootstrap.REQUIRED_RUNTIME_CLOSURE).not.toEqual(expect.arrayContaining([
+      'src/tests/fixtures/agent-file-lease-worker.cjs',
+      'src/tests/fixtures/codegraph-overlay-resident-worker.fake.cjs',
+      'src/tests/scripts/agent-file-lease.spec.ts',
+      'src/tests/scripts/codegraph-overlay-resident-worker-prototype.spec.ts',
+    ]));
+    expect(bootstrap.TEST_CLOSURE).toEqual(expect.arrayContaining([
+      'src/tests/fixtures/agent-file-lease-worker.cjs',
+      'src/tests/fixtures/codegraph-overlay-resident-worker.fake.cjs',
+      'src/tests/scripts/agent-file-lease.spec.ts',
+      'src/tests/scripts/codegraph-overlay-resident-worker-prototype.spec.ts',
+    ]));
+    expect(bootstrap.REQUIRED_RUNTIME_CLOSURE).toEqual(expect.arrayContaining([
+      'scripts/lib/codegraph-overlay-candidate-search-text.mjs',
+      'scripts/lib/codegraph-overlay-immutable-cache.mjs',
+      'scripts/lib/codegraph-overlay-generation-cache.cjs',
+    ]));
   });
 
-  it('copies only the allow-listed missing closure and remains non-blocking by default', () => {
+  it('copies the allow-listed closure and leaves generation pending without claiming readiness', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-bootstrap-closure-'));
-    const sourceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-bootstrap-source-'));
-    tempRoots.push(root, sourceRoot);
-    const sourceRelative = 'scripts/lib/codegraph-overlay-generation-cache.cjs';
-    fs.mkdirSync(path.join(sourceRoot, 'scripts', 'lib'), { recursive: true });
-    fs.writeFileSync(path.join(sourceRoot, sourceRelative), 'module.exports = { fixture: true };\n', 'utf8');
-    const result = spawnSync(process.execPath, [
-      bootstrapPath, '--root', root, '--source-root', sourceRoot, '--no-generate', '--json',
-    ], { cwd: repoRoot, encoding: 'utf8' });
+    const sourceRoot = createClosureSource();
+    tempRoots.push(root);
+    const result = runBootstrap(root, ['--source-root', sourceRoot, '--no-generate']);
     expect(result.status).toBe(0);
     const report = JSON.parse(result.stdout);
     expect(report.independentTasksMayProceed).toBe(true);
-    expect(report.runtimeClosure.copied.some((entry: { path: string }) => entry.path === sourceRelative)).toBe(true);
-    expect(fs.existsSync(path.join(root, sourceRelative))).toBe(true);
-    expect(report.status).toBe('ENVIRONMENT_BLOCKED');
-  });
+    expect(report.runtimeClosure.copied.some((entry: { path: string }) => entry.path === 'scripts/lib/codegraph-overlay-generation-cache.cjs')).toBe(true);
+    expect(fs.existsSync(path.join(root, 'scripts/lib/codegraph-overlay-generation-cache.cjs'))).toBe(true);
+    expect(report.status).toBe('CLOSURE_READY_GENERATION_PENDING');
+  }, 15_000);
 });
