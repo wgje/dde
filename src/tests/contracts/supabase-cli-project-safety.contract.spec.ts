@@ -361,4 +361,90 @@ describe('Supabase CLI project safety', () => {
     expect(preflightArgs).toEqual({ nowUtc: '2026-11-22T08:21:00Z', currentTargetSha: targetSha });
   });
 
+
+  it('pins the real SQL migration inventory at 232 files', () => {
+    const migrations = fs.readdirSync(path.join(process.cwd(), 'supabase', 'migrations'), { withFileTypes: true })
+      .filter(entry => entry.isFile() && entry.name.endsWith('.sql'));
+    expect(migrations).toHaveLength(232);
+  });
+
+  it('delegates the guard once and executes the CLI once after successful preflight', () => {
+    const safety = loadSafetyModule();
+    if (!safety) return;
+    const projectRef = 'abcdefghijklmnopqrst';
+    const targetSha = 'a'.repeat(40);
+    let guardCalls = 0;
+    let cliCalls = 0;
+    const result = safety.executeCli(['db', 'push', '--linked'], {
+      env: { SUPABASE_PROJECT_REF: projectRef, NANOFLOW_PUSH_TARGET_SHA: targetSha, NANOFLOW_CURRENT_TARGET_SHA: targetSha, NANOFLOW_PREFLIGHT_NOW_UTC: '2026-11-22T08:21:00Z' },
+      root: process.cwd(),
+      readLinkedProjectRef: () => projectRef,
+      loadLedgerSnapshots: () => ({
+        ok: true,
+        ledgers: [{ projectRef, targetOriginMain: targetSha, expectedGitSha: targetSha, capturedAtUtc: '2026-11-22T08:20:00Z', maxAgeSeconds: 60, rows: [], sourceEvidence: { tool: 'mcp__supabase.execute_sql', queryId: 'q', query: 'SELECT', resultRowCount: 0 } }],
+      }),
+      invokeCliCommand: () => { cliCalls += 1; return { status: 0 }; },
+      runMigrationPreflight: () => { guardCalls += 1; return { ok: true, status: 0 }; },
+      logError: () => undefined,
+    });
+    expect(result).toEqual({ exitCode: 0, spawned: true });
+    expect(guardCalls).toBe(1);
+    expect(cliCalls).toBe(1);
+  });
+
+  it('does not spawn or run the guard on project-ref mismatch in executeCli', () => {
+    const safety = loadSafetyModule();
+    if (!safety) return;
+    const projectRef = 'abcdefghijklmnopqrst';
+    const targetSha = 'a'.repeat(40);
+    let guardCalls = 0;
+    let spawnCalls = 0;
+    const result = safety.executeCli(['db', 'push', '--linked'], {
+      env: { SUPABASE_PROJECT_REF: projectRef, NANOFLOW_PUSH_TARGET_SHA: targetSha, NANOFLOW_CURRENT_TARGET_SHA: targetSha, NANOFLOW_PREFLIGHT_NOW_UTC: '2026-11-22T08:21:00Z' },
+      root: process.cwd(),
+      readLinkedProjectRef: () => 'zzzzzzzzzzzzzzzzzzzz',
+      loadLedgerSnapshots: () => ({ ok: true, ledgers: [], expectedProjectRef: projectRef }),
+      invokeCliCommand: () => { spawnCalls += 1; return { status: 0 }; },
+      runMigrationPreflight: () => { guardCalls += 1; return { ok: true, status: 0 }; },
+      logError: () => undefined,
+    });
+    expect(result).toMatchObject({ exitCode: 2, spawned: false });
+    expect(guardCalls).toBe(0);
+    expect(spawnCalls).toBe(0);
+  });
+
+  it.each([
+    ['actual SQL byte drift', 'supabase/migrations/20261121060000_widget_focus_action_durable_receipt.sql', '-- DDE review drift probe\n'],
+    ['alias manifest drift', 'scripts/migration-version-alias-manifest.json', '{"broken":"drift"}\n'],
+  ])('default real loader blocks executeCli on %s without spawn or guard', (_label, relativePath, replacement) => {
+    const safety = loadSafetyModule();
+    if (!safety) return;
+    const probe = makeWrapperProbe();
+    const copiedMigrationDir = path.join(probe.root, 'supabase', 'migrations');
+    fs.mkdirSync(copiedMigrationDir, { recursive: true });
+    const sourceMigrationDir = path.join(process.cwd(), 'supabase', 'migrations');
+    for (const name of fs.readdirSync(sourceMigrationDir).filter(name => name.toLowerCase().endsWith('.sql'))) {
+      fs.copyFileSync(path.join(sourceMigrationDir, name), path.join(copiedMigrationDir, name));
+    }
+    fs.copyFileSync(path.join(process.cwd(), 'scripts', 'migration-version-alias-manifest.json'), path.join(probe.root, 'scripts', 'migration-version-alias-manifest.json'));
+    fs.copyFileSync(path.join(process.cwd(), 'scripts', 'migration-ledger-snapshot.json'), path.join(probe.root, 'scripts', 'migration-ledger-snapshot.json'));
+    fs.writeFileSync(path.join(probe.root, relativePath), replacement, 'utf8');
+    const targetSha = 'a'.repeat(40);
+    let cliCalls = 0;
+    let guardCalls = 0;
+    const result = safety.executeCli(['db', 'push', '--linked'], {
+      env: { SUPABASE_PROJECT_REF: 'fkhihclpghmmtbbywvoj', NANOFLOW_PUSH_TARGET_SHA: targetSha, NANOFLOW_CURRENT_TARGET_SHA: targetSha, NANOFLOW_PREFLIGHT_NOW_UTC: '2026-11-22T08:21:00Z' },
+      root: probe.root,
+      readLinkedProjectRef: () => 'fkhihclpghmmtbbywvoj',
+      invokeCliCommand: () => { cliCalls += 1; return { status: 0 }; },
+      runMigrationPreflight: () => { guardCalls += 1; return { ok: true, status: 0 }; },
+      logError: () => undefined,
+    });
+    expect(result).toMatchObject({ exitCode: 2, spawned: false });
+    expect(['ledger-source-inputs-mismatch', 'ledger-snapshot-target-mismatch', 'ledger-snapshot-not-target-bound']).toContain((result as { reason?: string }).reason);
+    expect(cliCalls).toBe(0);
+    expect(guardCalls).toBe(0);
+    fs.rmSync(probe.root, { recursive: true, force: true });
+  });
+
 });
