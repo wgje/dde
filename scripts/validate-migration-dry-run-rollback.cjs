@@ -1,9 +1,12 @@
 #!/usr/bin/env node
 
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 
 const DEFAULT_MANIFEST = 'scripts/migration-dry-run-manifest.json';
+const DEFAULT_ALIAS_MANIFEST = 'scripts/migration-version-alias-manifest.json';
+const DEFAULT_LEDGER_SNAPSHOT = 'scripts/migration-ledger-snapshot.json';
 const MIGRATION_DIR = 'supabase/migrations';
 const RISK_PATTERNS = [
   {
@@ -59,6 +62,10 @@ function parseArgs(argv) {
   const options = {
     root: process.cwd(),
     manifest: null,
+    aliasManifest: null,
+    ledgerSnapshot: null,
+    now: null,
+    currentTargetSha: null,
     json: false,
   };
 
@@ -74,6 +81,10 @@ function parseArgs(argv) {
       index += 1;
       continue;
     }
+    if (arg === '--alias-manifest') { options.aliasManifest = path.resolve(argv[index + 1] ?? ''); index += 1; continue; }
+    if (arg === '--ledger-snapshot') { options.ledgerSnapshot = path.resolve(argv[index + 1] ?? ''); index += 1; continue; }
+    if (arg === '--now') { options.now = argv[index + 1] ?? ''; index += 1; continue; }
+    if (arg === '--current-target-sha') { options.currentTargetSha = argv[index + 1] ?? ''; index += 1; continue; }
     if (arg === '--json') {
       options.json = true;
       continue;
@@ -81,9 +92,9 @@ function parseArgs(argv) {
     throw new Error(`Unknown argument: ${arg}`);
   }
 
-  if (!options.manifest) {
-    options.manifest = path.join(options.root, DEFAULT_MANIFEST);
-  }
+  if (!options.manifest) options.manifest = path.join(options.root, DEFAULT_MANIFEST);
+  if (!options.aliasManifest) options.aliasManifest = path.join(options.root, DEFAULT_ALIAS_MANIFEST);
+  if (!options.ledgerSnapshot) options.ledgerSnapshot = path.join(options.root, DEFAULT_LEDGER_SNAPSHOT);
 
   return options;
 }
@@ -342,6 +353,183 @@ function validateManifestEntry(entry, expectedCategory) {
   return errors;
 }
 
+function loadJsonFile(filePath, unavailableCode, invalidCode) {
+  let canonicalPath, stats;
+  try {
+    canonicalPath = fs.realpathSync(filePath);
+    stats = fs.statSync(canonicalPath);
+  } catch {
+    throw new Error(unavailableCode);
+  }
+  if (!stats.isFile()) throw new Error(unavailableCode);
+  try {
+    return JSON.parse(fs.readFileSync(canonicalPath, 'utf8'));
+  } catch {
+    throw new Error(invalidCode);
+  }
+}
+
+function loadLedgerSnapshot(snapshotPath, expectedProjectRef = null, currentTargetSha = null, nowUtc = null) {
+  const parsed = loadJsonFile(
+    snapshotPath,
+    'migration-ledger-snapshot-path-unavailable',
+    'migration-ledger-snapshot-invalid-json',
+  );
+  if (!parsed || parsed.format !== 'SUPABASE_SCHEMA_MIGRATIONS_V1'
+    || parsed.source !== 'mcp__supabase.execute_sql'
+    || !/^[A-Z0-9]{64}$/i.test(String(parsed.canonicalRowsSha256 || ''))
+    || !/^[a-z0-9]{20}$/.test(String(parsed.projectRef || ''))
+    || !/^[a-f0-9]{40}$/i.test(String(parsed.targetOriginMain || ''))
+    || !Array.isArray(parsed.rows)
+    || parsed.rowCount !== parsed.rows.length
+    || (nowUtc && (!parsed.sourceEvidence || parsed.sourceEvidence.tool !== 'mcp__supabase.execute_sql'
+      || !['queryId','query','resultRowCount'].every(key => parsed.sourceEvidence[key] !== undefined)
+      || !Number.isInteger(parsed.maxAgeSeconds) || parsed.maxAgeSeconds <= 0
+      || !Number.isFinite(Date.parse(parsed.capturedAtUtc))))) {
+    throw new Error('migration-ledger-snapshot-schema-invalid');
+  }
+  if (expectedProjectRef && parsed.projectRef !== expectedProjectRef) throw new Error('migration-ledger-snapshot-project-mismatch');
+  if (currentTargetSha && String(parsed.expectedGitSha || '').toLowerCase() !== currentTargetSha.toLowerCase()) throw new Error('migration-ledger-snapshot-target-sha-mismatch');
+  if (nowUtc) {
+    if (Date.parse(nowUtc) - Date.parse(parsed.capturedAtUtc) > parsed.maxAgeSeconds * 1000) throw new Error('migration-ledger-snapshot-stale');
+    if (parsed.sourceEvidence.resultRowCount !== parsed.rows.length) throw new Error('migration-ledger-snapshot-capture-evidence-mismatch');
+  }
+  return parsed;
+}
+
+function canonicalRowsSha256(rows) {
+  const ordered = [...rows].sort((a, b) => String(a.version).localeCompare(String(b.version))
+    || String(a.name).localeCompare(String(b.name)));
+  return crypto.createHash('sha256')
+    .update(JSON.stringify(ordered)).digest('hex').toUpperCase();
+}
+
+function validateAliasLedger(root, canonicalDir, aliasManifestPath, ledgerSnapshotPath, migrationFiles, freshness = {}) {
+  const errors = [];
+  const aliasManifest = loadJsonFile(
+    aliasManifestPath,
+    'migration-version-alias-manifest-path-unavailable',
+    'migration-version-alias-manifest-invalid-json',
+  );
+  const ledger = loadLedgerSnapshot(ledgerSnapshotPath, freshness.projectRef, freshness.currentTargetSha, freshness.nowUtc);
+  if (canonicalRowsSha256(ledger.rows) !== String(ledger.canonicalRowsSha256).toUpperCase()) {
+    errors.push('migration-ledger-snapshot-rows-sha-mismatch');
+  }
+  const ledgerPairs = new Map();
+  const ledgerVersions = new Map();
+  for (const row of ledger.rows) {
+    if (!row || !/^[0-9]{14}$/.test(String(row.version || ''))
+      || typeof row.name !== 'string' || row.name.length === 0) {
+      errors.push('migration-ledger-snapshot-row-invalid');
+      continue;
+    }
+    if (ledgerVersions.has(row.version)) errors.push(`migration-ledger-snapshot-duplicate-version:${row.version}`);
+    ledgerVersions.set(row.version, row.name);
+    ledgerPairs.set(`${row.version}:${row.name}`, row);
+  }
+  if (!aliasManifest || aliasManifest.schemaVersion !== 2
+    || aliasManifest.format !== 'MIGRATION_VERSION_ALIASES_V1'
+    || aliasManifest.ledgerSnapshotPath !== DEFAULT_LEDGER_SNAPSHOT
+    || !Array.isArray(aliasManifest.aliases)) {
+    return { errors: errors.concat('migration-version-alias-manifest-schema-invalid'), bySource: new Map(), ledger };
+  }
+  const knownSourcePath = 'supabase/migrations/20261121060000_widget_focus_action_durable_receipt.sql';
+  const knownMigrationPresent = migrationFiles.some(item => relativePath(root, item.filePath) === knownSourcePath);
+  const knownSource = aliasManifest.aliases.find(entry => entry && entry.sourcePath === knownSourcePath);
+  if (knownMigrationPresent && !knownSource) {
+    errors.push('migration-version-alias-known-source-missing');
+  } else if (knownMigrationPresent) {
+    const aliases = Array.isArray(knownSource.appliedAliases) ? knownSource.appliedAliases : [];
+    const exact = aliases.length === 2
+      && aliases.some(alias => alias.version === '20261122053816' && alias.name === 'widget_focus_action_durable_receipt')
+      && aliases.some(alias => alias.version === '20261122053936' && alias.name === 'widget_focus_action_durable_receipt_exact_repair');
+    if (!exact) errors.push('migration-version-alias-known-chain-invalid');
+  }
+  const migrationByRelative = new Map(migrationFiles.map(item => [
+    pathIdentityKey(path, relativePath(root, item.filePath)), item,
+  ]));
+  const bySource = new Map();
+  const globalAliasVersions = new Map();
+  const globalAliasNames = new Map();
+  const declaredPairs = new Map();
+  const sourceVersions = [];
+  for (const alias of aliasManifest.aliases) {
+    const sourcePath = typeof alias?.sourcePath === 'string'
+      ? path.posix.normalize(alias.sourcePath.replace(/\\/g, '/')) : '';
+    const sourceVersion = typeof alias?.sourceVersion === 'string' ? alias.sourceVersion : '';
+    const sourceName = typeof alias?.sourceName === 'string' ? alias.sourceName : '';
+    const sourceSha256 = typeof alias?.sourceSha256 === 'string' ? alias.sourceSha256.toUpperCase() : '';
+    const appliedAliases = alias?.appliedAliases;
+    if (!sourcePath || !/^[0-9]{14}$/.test(sourceVersion) || !sourceName
+      || !/^[A-F0-9]{64}$/.test(sourceSha256)
+      || !Array.isArray(appliedAliases) || appliedAliases.length === 0) {
+      errors.push('migration-version-alias-entry-invalid');
+      continue;
+    }
+    const key = pathIdentityKey(path, sourcePath);
+    if (bySource.has(key)) {
+      errors.push(`${sourcePath}: duplicate migration-version-alias source`);
+      continue;
+    }
+    bySource.set(key, alias);
+    sourceVersions.push(sourceVersion);
+    const migration = migrationByRelative.get(key);
+    if (!migration) { errors.push(`${sourcePath}: migration-version-alias source missing`); continue; }
+    const absolute = path.resolve(root, sourcePath);
+    if (!isPathContained(path, path.join(root, MIGRATION_DIR), absolute)) {
+      errors.push(`${sourcePath}: migration-version-alias source must stay inside ${MIGRATION_DIR}`); continue;
+    }
+    if (!path.basename(sourcePath).startsWith(`${sourceVersion}_`)) {
+      errors.push(`${sourcePath}: migration-version-alias source version does not match filename`);
+    }
+    let canonical;
+    try { canonical = fs.realpathSync(absolute); } catch { errors.push(`${sourcePath}: migration-version-alias source unavailable`); continue; }
+    if (!isPathContained(path, canonicalDir, canonical)) {
+      errors.push(`${sourcePath}: migration-version-alias source canonical target must stay inside migration directory`); continue;
+    }
+    if (sha256File(canonical) !== sourceSha256) {
+      errors.push(`${sourcePath}: migration-version-alias source SHA mismatch`);
+    }
+    const sourcePair = `${sourceVersion}:${sourceName}`;
+    if (!ledgerPairs.has(sourcePair)) errors.push(`${sourcePath}: ledger source row missing or name mismatch`);
+    declaredPairs.set(sourcePair, 'source');
+    for (const applied of appliedAliases) {
+      const version = typeof applied?.version === 'string' ? applied.version : '';
+      const name = typeof applied?.name === 'string' ? applied.name : '';
+      if (!/^[0-9]{14}$/.test(version) || !name) {
+        errors.push(`${sourcePath}: invalid applied migration-version-alias`); continue;
+      }
+      const pair = `${version}:${name}`;
+      if (!ledgerPairs.has(pair)) errors.push(`${sourcePath}: ledger alias missing or name mismatch ${version}`);
+      if (globalAliasVersions.has(version)) errors.push(`${sourcePath}: migration-version-alias version belongs to multiple sources ${version}`);
+      if (globalAliasNames.has(name)) errors.push(`${sourcePath}: migration-version-alias name belongs to multiple sources ${name}`);
+      globalAliasVersions.set(version, sourcePath);
+      globalAliasNames.set(name, sourcePath);
+      declaredPairs.set(pair, 'alias');
+    }
+  }
+  for (const pair of declaredPairs.keys()) {
+    if (!ledgerPairs.has(pair)) errors.push(`migration-ledger-snapshot-missing-declared-row:${pair}`);
+  }
+  if (sourceVersions.length > 0) {
+    const aliasChainFloor = sourceVersions.reduce((min, version) => min < version ? min : version);
+    const ledgerAliasChain = new Set(ledger.rows
+      .filter(row => row.version >= aliasChainFloor)
+      .map(row => `${row.version}:${row.name}`));
+    for (const pair of ledgerAliasChain) {
+      if (!declaredPairs.has(pair)) errors.push(`migration-ledger-snapshot-unexpected-alias-chain-row:${pair}`);
+    }
+    for (const pair of declaredPairs.keys()) {
+      if (!ledgerAliasChain.has(pair)) errors.push(`migration-ledger-snapshot-missing-alias-chain-row:${pair}`);
+    }
+  }
+  return { errors, bySource, ledger };
+}
+
+function sha256File(filePath) {
+  return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex').toUpperCase();
+}
+
 function buildPsqlPlan(transactionSafeFiles) {
   const lines = [
     '\\set ON_ERROR_STOP on',
@@ -357,7 +545,8 @@ function buildPsqlPlan(transactionSafeFiles) {
 function validate(options) {
   const { canonicalDir, files: migrationFiles } = collectMigrationFiles(options.root);
   const manifestState = prepareManifest(options.root, canonicalDir, loadManifest(options.manifest).entries);
-  const errors = [];
+  const aliasState = validateAliasLedger(options.root, canonicalDir, options.aliasManifest, options.ledgerSnapshot, migrationFiles, { projectRef: options.currentTargetSha ? 'fkhihclpghmmtbbywvoj' : null, currentTargetSha: options.currentTargetSha, nowUtc: options.now });
+  const errors = [...aliasState.errors];
   const transactionDryRunFiles = [];
   const manualReview = [];
   const migrationByPath = new Map();
@@ -420,6 +609,8 @@ function validate(options) {
       psql: buildPsqlPlan(transactionDryRunFiles),
     },
     manualReview,
+    aliases: [...aliasState.bySource.values()],
+    ledgerSnapshot: { rowCount: aliasState.ledger.rowCount, projectRef: aliasState.ledger.projectRef, targetOriginMain: aliasState.ledger.targetOriginMain, canonicalRowsSha256: aliasState.ledger.canonicalRowsSha256 },
   };
 
   return { errors, report };
@@ -454,6 +645,10 @@ if (require.main === module) {
 
 module.exports = {
   classifyMigration,
+  canonicalRowsSha256,
+  loadLedgerSnapshot,
+  sha256File,
+  validateAliasLedger,
   isPathContained,
   pathIdentityKey,
   stripSqlCommentsAndStrings,

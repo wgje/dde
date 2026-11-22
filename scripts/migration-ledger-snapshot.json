@@ -1,0 +1,548 @@
+{
+  "format": "SUPABASE_SCHEMA_MIGRATIONS_V1",
+  "source": "mcp__supabase.execute_sql",
+  "capturedAtUtc": "2026-11-22T08:20:00Z",
+  "projectRef": "fkhihclpghmmtbbywvoj",
+  "targetOriginMain": "82980ddab7649a83ed34bcc8b65646d6375e1a9f",
+  "query": "SELECT version, name FROM supabase_migrations.schema_migrations ORDER BY version, name;",
+  "rows": [
+    {
+      "version": "20260126000000",
+      "name": "database_optimization"
+    },
+    {
+      "version": "20260126074130",
+      "name": "remote_commit"
+    },
+    {
+      "version": "20260126100000",
+      "name": "batch_load_optimization"
+    },
+    {
+      "version": "20260202000000",
+      "name": "performance_rpc_functions"
+    },
+    {
+      "version": "20260214000000",
+      "name": "resume_watermark_rpc"
+    },
+    {
+      "version": "20260215000000",
+      "name": "user_projects_watermark_rpc"
+    },
+    {
+      "version": "20260216000000",
+      "name": "recovery_probe_and_blackbox_watermark"
+    },
+    {
+      "version": "20260217000000",
+      "name": "add_user_preferences_extended_columns"
+    },
+    {
+      "version": "20260217100000",
+      "name": "resume_composite_probe_rpc"
+    },
+    {
+      "version": "20260218000000",
+      "name": "manifest_watermark_performance_hardening"
+    },
+    {
+      "version": "20260222000000",
+      "name": "add_parking_meta"
+    },
+    {
+      "version": "20260225000000",
+      "name": "add_user_preferences_dock_snapshot"
+    },
+    {
+      "version": "20260226000000",
+      "name": "add_task_planning_fields"
+    },
+    {
+      "version": "20260228000000",
+      "name": "focus_console_v3_tables"
+    },
+    {
+      "version": "20260303000000",
+      "name": "focus_console_cutover_indexes"
+    },
+    {
+      "version": "20260315100000",
+      "name": "comprehensive_security_hardening"
+    },
+    {
+      "version": "20260315200000",
+      "name": "consolidated_focus_console_and_security"
+    },
+    {
+      "version": "20260315210000",
+      "name": "full_optimization_audit_fixes"
+    },
+    {
+      "version": "20260315220000",
+      "name": "advisor_driven_full_optimization"
+    },
+    {
+      "version": "20260317000000",
+      "name": "security_grant_tightening"
+    },
+    {
+      "version": "20260318073718",
+      "name": "security_sync_and_rpc_unification"
+    },
+    {
+      "version": "20260318073814",
+      "name": "advisor_security_followup_hardening"
+    },
+    {
+      "version": "20260318120000",
+      "name": "security_sync_and_rpc_unification"
+    },
+    {
+      "version": "20260318140000",
+      "name": "mcp_advisor_full_remediation"
+    },
+    {
+      "version": "20260318180000",
+      "name": "final_advisor_unindexed_fk_repair"
+    },
+    {
+      "version": "20260318193000",
+      "name": "readd_backup_fk_covering_indexes"
+    },
+    {
+      "version": "20260319120000",
+      "name": "personal_backend_slimdown"
+    },
+    {
+      "version": "20260319153259",
+      "name": "personal_backend_slimdown"
+    },
+    {
+      "version": "20260320030000",
+      "name": "fix_owner_only_resume_rpcs"
+    },
+    {
+      "version": "20260322033002",
+      "name": "refresh_get_full_project_data_schema_cache"
+    },
+    {
+      "version": "20260322033256",
+      "name": "fix_get_full_project_data_for_personal_backend"
+    },
+    {
+      "version": "20260322090113",
+      "name": "backup_metadata_payload_v2"
+    },
+    {
+      "version": "20260322143921",
+      "name": "remove_cloud_backup_infrastructure"
+    },
+    {
+      "version": "20260322170500",
+      "name": "backup_metadata_payload_v2"
+    },
+    {
+      "version": "20260323120000",
+      "name": "free_tier_index_cleanup"
+    },
+    {
+      "version": "20260323150000",
+      "name": "batch_tombstone_rpc"
+    },
+    {
+      "version": "20260401100000",
+      "name": "owner_only_batch_upsert_tasks"
+    },
+    {
+      "version": "20260403050835",
+      "name": "20260401100000_owner_only_batch_upsert_tasks"
+    },
+    {
+      "version": "20260403050931",
+      "name": "20260403110000_purge_connection_tombstone_hardening"
+    },
+    {
+      "version": "20260403051156",
+      "name": "20260403113000_cleanup_duplicate_owner_only_policies"
+    },
+    {
+      "version": "20260403110000",
+      "name": "purge_connection_tombstone_hardening"
+    },
+    {
+      "version": "20260403113000",
+      "name": "cleanup_duplicate_owner_only_policies"
+    },
+    {
+      "version": "20260404062520",
+      "name": "20260404103000_projects_soft_delete_alignment"
+    },
+    {
+      "version": "20260404103000",
+      "name": "projects_soft_delete_alignment"
+    },
+    {
+      "version": "20260406070222",
+      "name": "project_soft_delete_rpc"
+    },
+    {
+      "version": "20260406071509",
+      "name": "project_soft_delete_rpc_harden_owner_mismatch"
+    },
+    {
+      "version": "20260406143000",
+      "name": "project_soft_delete_rpc"
+    },
+    {
+      "version": "20260408050338",
+      "name": "project_soft_delete_children_consistency"
+    },
+    {
+      "version": "20260411084529",
+      "name": "connection_endpoint_tombstone_hardening"
+    },
+    {
+      "version": "20260411141000",
+      "name": "connection_endpoint_tombstone_hardening"
+    },
+    {
+      "version": "20260412143000",
+      "name": "widget_backend_foundation"
+    },
+    {
+      "version": "20260413020054",
+      "name": "widget_backend_foundation"
+    },
+    {
+      "version": "20260413020931",
+      "name": "widget_notify_webhook_hmac"
+    },
+    {
+      "version": "20260413102000",
+      "name": "widget_notify_webhook_hmac"
+    },
+    {
+      "version": "20260413113000",
+      "name": "widget_notify_hmac_replay_fix"
+    },
+    {
+      "version": "20260413120000",
+      "name": "widget_notify_secret_normalization"
+    },
+    {
+      "version": "20260413121000",
+      "name": "widget_notify_limits_backfill"
+    },
+    {
+      "version": "20260414000000",
+      "name": "fix_projects_rls_soft_delete"
+    },
+    {
+      "version": "20260416000000",
+      "name": "drop_redundant_tasks_connections_permissive_policies"
+    },
+    {
+      "version": "20260416000100",
+      "name": "add_covering_indexes_for_unindexed_foreign_keys"
+    },
+    {
+      "version": "20260416000200",
+      "name": "pin_security_definer_search_path"
+    },
+    {
+      "version": "20260416094500",
+      "name": "cleanup_logs_and_atomic_routine_completion"
+    },
+    {
+      "version": "20260416163000",
+      "name": "widget_capabilities_rules_backfill"
+    },
+    {
+      "version": "20260418032000",
+      "name": "widget_token_hash_and_notify_scope"
+    },
+    {
+      "version": "20260420154000",
+      "name": "widget_platform_android_only"
+    },
+    {
+      "version": "20260421054140",
+      "name": "widget_notify_webhook_timeout_and_trim_payload"
+    },
+    {
+      "version": "20260421054223",
+      "name": "widget_notify_webhook_projects_payload_fix"
+    },
+    {
+      "version": "20260421054415",
+      "name": "widget_notify_webhook_if_elsif_fix"
+    },
+    {
+      "version": "20260422073000",
+      "name": "widget_summary_rpc"
+    },
+    {
+      "version": "20260423013500",
+      "name": "batch_tombstone_rpc_deleted_at"
+    },
+    {
+      "version": "20260423041041",
+      "name": "widget_summary_wave1_black_box_watermark"
+    },
+    {
+      "version": "20260423045825",
+      "name": "widget_summary_wave1_unread_count"
+    },
+    {
+      "version": "20260423153000",
+      "name": "widget_summary_wave1_black_box_watermark"
+    },
+    {
+      "version": "20260423165810",
+      "name": "user_preferences_backup_proof"
+    },
+    {
+      "version": "20260423170000",
+      "name": "widget_summary_wave1_unread_count"
+    },
+    {
+      "version": "20260423193000",
+      "name": "trash_retention_tombstone_cleanup"
+    },
+    {
+      "version": "20260423233000",
+      "name": "user_preferences_backup_proof"
+    },
+    {
+      "version": "20260424143000",
+      "name": "widget_gate_read_cooldown"
+    },
+    {
+      "version": "20260426110000",
+      "name": "widget_gate_read_alignment"
+    },
+    {
+      "version": "20260427163000",
+      "name": "reconcile_remote_migration_drift"
+    },
+    {
+      "version": "20260427170000",
+      "name": "security_hardening_compat"
+    },
+    {
+      "version": "20260427171000",
+      "name": "tasks_parking_meta_hot_index"
+    },
+    {
+      "version": "20260428043000",
+      "name": "external_source_links"
+    },
+    {
+      "version": "20260428060000",
+      "name": "external_source_links_tighter_rls"
+    },
+    {
+      "version": "20260428083000",
+      "name": "add_task_completed_at"
+    },
+    {
+      "version": "20260429080000",
+      "name": "sync_write_protection_rpcs"
+    },
+    {
+      "version": "20260430100000",
+      "name": "sync_rpc_project_and_delete_coverage"
+    },
+    {
+      "version": "20260430114000",
+      "name": "blackbox_content_loss_guard"
+    },
+    {
+      "version": "20260501143000",
+      "name": "widget_gate_read_cooldown_restore"
+    },
+    {
+      "version": "20260510023348",
+      "name": "sync_rpc_lww_upsert_semantics"
+    },
+    {
+      "version": "20260512035145",
+      "name": "sync_rpc_server_timestamps_for_non_task_entities"
+    },
+    {
+      "version": "20260512035416",
+      "name": "fix_sync_rpc_non_task_apply_typos"
+    },
+    {
+      "version": "20260512035436",
+      "name": "prevent_project_blackbox_resurrection"
+    },
+    {
+      "version": "20260513141838",
+      "name": "sync_rpc_lww_restore"
+    },
+    {
+      "version": "20260513171252",
+      "name": "sync_protocol_probe_authenticated_select"
+    },
+    {
+      "version": "20260518153447",
+      "name": "batch_upsert_tasks_stale_write_protection"
+    },
+    {
+      "version": "20260518153620",
+      "name": "sync_rpc_stale_write_protection"
+    },
+    {
+      "version": "20260518153726",
+      "name": "fix_sync_upsert_project_stale_guard_variables"
+    },
+    {
+      "version": "20260518163812",
+      "name": "external_source_links_stale_write_protection"
+    },
+    {
+      "version": "20260519033038",
+      "name": "sync_rpc_security_reconciliation"
+    },
+    {
+      "version": "20260522141000",
+      "name": "widget_gate_read_cooldown_reassert"
+    },
+    {
+      "version": "20260525045715",
+      "name": "optimize_parked_tasks_delta"
+    },
+    {
+      "version": "20260527110000",
+      "name": "batch_upsert_tasks_content_presence_guard"
+    },
+    {
+      "version": "20260531064621",
+      "name": "sync_upsert_task_missing_timestamp_guard"
+    },
+    {
+      "version": "20260531065823",
+      "name": "task_change_audit_forensics"
+    },
+    {
+      "version": "20260531082249",
+      "name": "database_hardening_dr_controls"
+    },
+    {
+      "version": "20260531082523",
+      "name": "advisor_followup_rls_and_function_exposure"
+    },
+    {
+      "version": "20260531082821",
+      "name": "advisor_followup_index_cleanup"
+    },
+    {
+      "version": "20260531084259",
+      "name": "quarantine_digest_and_audit_origin_hardening"
+    },
+    {
+      "version": "20260531085402",
+      "name": "quarantine_missing_timestamp_capture"
+    },
+    {
+      "version": "20260603062922",
+      "name": "black_box_completed_at"
+    },
+    {
+      "version": "20260603120000",
+      "name": "black_box_completed_at"
+    },
+    {
+      "version": "20260605062000",
+      "name": "task_attention_meta"
+    },
+    {
+      "version": "20260606050000",
+      "name": "security_sync_followup"
+    },
+    {
+      "version": "20260606051000",
+      "name": "security_upsert_task_stale_result"
+    },
+    {
+      "version": "20260606052000",
+      "name": "security_transcription_quota_and_cleanup_hardening"
+    },
+    {
+      "version": "20260714033000",
+      "name": "attachment_scan_rescan_lifecycle_hardening"
+    },
+    {
+      "version": "20261110040000",
+      "name": "restore_attachment_scan_prerequisites"
+    },
+    {
+      "version": "20261114030125",
+      "name": "sync_command_capability_probe"
+    },
+    {
+      "version": "20261114030454",
+      "name": "sync_offline_command_ingest_pull"
+    },
+    {
+      "version": "20261114030701",
+      "name": "sync_offline_command_field_lww_projection"
+    },
+    {
+      "version": "20261114030826",
+      "name": "sync_offline_command_domain_apply"
+    },
+    {
+      "version": "20261114032449",
+      "name": "sync_offline_command_projection_ambiguity_fix"
+    },
+    {
+      "version": "20261114032615",
+      "name": "sync_offline_command_domain_apply_ambiguity_fix"
+    },
+    {
+      "version": "20261114033537",
+      "name": "sync_offline_command_domain_apply_nested_payload_fix"
+    },
+    {
+      "version": "20261114094736",
+      "name": "sync_offline_command_domain_apply_ack"
+    },
+    {
+      "version": "20261114123814",
+      "name": "sync_offline_command_exact_allowlist"
+    },
+    {
+      "version": "20261114153135",
+      "name": "sync_offline_command_projection_index_cleanup"
+    },
+    {
+      "version": "20261115165939",
+      "name": "sync_offline_command_final_domain_apply_fence"
+    },
+    {
+      "version": "20261121060000",
+      "name": "widget_focus_action_durable_receipt"
+    },
+    {
+      "version": "20261122053816",
+      "name": "widget_focus_action_durable_receipt"
+    },
+    {
+      "version": "20261122053936",
+      "name": "widget_focus_action_durable_receipt_exact_repair"
+    }
+  ],
+  "rowCount": 132,
+  "canonicalRowsSha256": "F6F6F1CDE6D4B13C2C0DB861515D92F9CB5B6161BD3EC02776826F3924D66765",
+  "expectedGitSha": "82980ddab7649a83ed34bcc8b65646d6375e1a9f",
+  "maxAgeSeconds": 86400,
+  "sourceEvidence": {
+    "tool": "mcp__supabase.execute_sql",
+    "queryId": "4b9bbc32-7aed-4d77-a3e6-b6f263fa88c0",
+    "query": "SELECT version, name FROM supabase_migrations.schema_migrations ORDER BY version, name;",
+    "resultRowCount": 132
+  }
+}

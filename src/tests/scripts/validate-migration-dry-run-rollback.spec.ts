@@ -1,8 +1,9 @@
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
 
 const projectRoot = process.cwd();
@@ -16,7 +17,10 @@ const { isPathContained, pathIdentityKey } = createRequire(import.meta.url)(scri
 function createMigrationRoot(withMigrationDirectory = true): string {
   const root = mkdtempSync(path.join(tmpdir(), 'nanoflow-migration-dry-run-'));
   tempRoots.push(root);
-  if (withMigrationDirectory) mkdirSync(path.join(root, 'supabase', 'migrations'), { recursive: true });
+  if (withMigrationDirectory) {
+    mkdirSync(path.join(root, 'supabase', 'migrations'), { recursive: true });
+    mkdirSync(path.join(root, 'scripts'), { recursive: true });
+  }
   return root;
 }
 
@@ -29,6 +33,59 @@ function writeManifest(root: string, entries: unknown[], manifestPath = path.joi
   writeFileSync(manifestPath, JSON.stringify({ schemaVersion: 1, entries }, null, 2));
 }
 
+const KNOWN_SOURCE_PATH = 'supabase/migrations/20261121060000_widget_focus_action_durable_receipt.sql';
+const KNOWN_SOURCE_VERSION = '20261121060000';
+const KNOWN_SOURCE_NAME = 'widget_focus_action_durable_receipt';
+const KNOWN_ALIASES = [
+  { version: '20261122053816', name: 'widget_focus_action_durable_receipt' },
+  { version: '20261122053936', name: 'widget_focus_action_durable_receipt_exact_repair' },
+];
+function writeKnownSource(root: string, sql = 'SELECT 1;') {
+  writeMigration(root, path.basename(KNOWN_SOURCE_PATH), sql);
+  writeLedgerSnapshot(root, [
+    { version: KNOWN_SOURCE_VERSION, name: KNOWN_SOURCE_NAME },
+    ...KNOWN_ALIASES,
+  ]);
+  // alias manifest target binding is written by caller-specific fixture when needed
+  writeAliasManifest(root, [{
+    sourcePath: KNOWN_SOURCE_PATH,
+    sourceVersion: KNOWN_SOURCE_VERSION,
+    sourceName: KNOWN_SOURCE_NAME,
+    sourceSha256: createHash('sha256').update(sql).digest('hex').toUpperCase(),
+    expectedGitSha: '82980ddab7649a83ed34bcc8b65646d6375e1a9f',
+    appliedAliases: KNOWN_ALIASES,
+  }]);
+}
+
+function writeAliasManifest(root: string, aliases: unknown[]): void {
+  mkdirSync(path.join(root, 'scripts'), { recursive: true });
+  writeFileSync(path.join(root, 'scripts', 'migration-version-alias-manifest.json'), JSON.stringify({
+    schemaVersion: 2,
+    format: 'MIGRATION_VERSION_ALIASES_V1',
+    ledgerSnapshotPath: 'scripts/migration-ledger-snapshot.json',
+    aliases,
+  }, null, 2));
+}
+
+function writeLedgerSnapshot(root: string, rows: Array<{version:string;name:string}>, overrides: Record<string, unknown> = {}): void {
+  const canonicalRowsSha256 = require(scriptPath).canonicalRowsSha256(rows);
+  writeFileSync(path.join(root, 'scripts', 'migration-ledger-snapshot.json'), JSON.stringify({
+    format: 'SUPABASE_SCHEMA_MIGRATIONS_V1',
+    source: 'mcp__supabase.execute_sql',
+    capturedAtUtc: '2026-11-22T08:20:00Z',
+    projectRef: 'fkhihclpghmmtbbywvoj',
+    targetOriginMain: '3db29530188c15afdb6913ddcd8799a74a32d644',
+    query: 'SELECT version, name FROM supabase_migrations.schema_migrations ORDER BY version, name;',
+    rows,
+    rowCount: rows.length,
+    canonicalRowsSha256,
+    expectedGitSha: '82980ddab7649a83ed34bcc8b65646d6375e1a9f',
+    maxAgeSeconds: 86400,
+    sourceEvidence: { tool: 'mcp__supabase.execute_sql', queryId: 'fixture', query: 'SELECT version, name FROM supabase_migrations.schema_migrations', resultRowCount: rows.length },
+    ...overrides,
+  }, null, 2));
+}
+
 function manifestEntry(entryPath: string, category = 'out-of-transaction') {
   return {
     path: entryPath,
@@ -39,9 +96,17 @@ function manifestEntry(entryPath: string, category = 'out-of-transaction') {
   };
 }
 
-function runGuard(root: string, manifestPath: string | null = path.join(root, 'scripts-migration-dry-run-manifest.json'), json = true) {
+function runGuard(root: string, manifestPath: string | null = path.join(root, 'scripts-migration-dry-run-manifest.json'), json = true, options: { aliasManifest?: string; ledgerSnapshot?: string; now?: string; currentTargetSha?: string } = {}) {
+  const defaultAlias = path.join(root, 'scripts', 'migration-version-alias-manifest.json');
+  const defaultLedger = path.join(root, 'scripts', 'migration-ledger-snapshot.json');
+  mkdirSync(path.join(root, 'scripts'), { recursive: true });
+  if (!existsSync(defaultAlias) || !existsSync(defaultLedger)) { mkdirSync(path.join(root, 'scripts'), { recursive: true }); if(!existsSync(defaultLedger)) writeLedgerSnapshot(root, []); if(!existsSync(defaultAlias)) writeAliasManifest(root, []); }
   const args = [scriptPath, '--root', root];
   if (manifestPath) args.push('--manifest', manifestPath);
+  if (options.aliasManifest) args.push('--alias-manifest', options.aliasManifest);
+  if (options.ledgerSnapshot) args.push('--ledger-snapshot', options.ledgerSnapshot);
+  if (options.now) args.push('--now', options.now);
+  if (options.currentTargetSha) args.push('--current-target-sha', options.currentTargetSha);
   if (json) args.push('--json');
   return spawnSync(process.execPath, args, {
     cwd: projectRoot,
@@ -401,4 +466,86 @@ CREATE TABLE IF NOT EXISTS public.example_safe_comments (
     expect(report.summary.transactionSafe).toBe(1);
     expect(report.manualReview).toEqual([]);
   });
+
+  it('accepts the exact known production-ledger source and two-alias chain', () => {
+    const root = createMigrationRoot();
+    writeKnownSource(root);
+    writeManifest(root, []);
+    const result = runGuard(root, path.join(root, 'scripts-migration-dry-run-manifest.json'), true, { now: '2026-11-22T08:30:00Z', currentTargetSha: '82980ddab7649a83ed34bcc8b65646d6375e1a9f' });
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout).ledgerSnapshot.rowCount).toBe(3);
+  });
+
+  it('fails closed when the production ledger snapshot is missing', () => {
+    const root = createMigrationRoot();
+    writeKnownSource(root);
+    writeManifest(root, []);
+    const missing = runGuard(root, path.join(root, 'scripts-migration-dry-run-manifest.json'), true, { ledgerSnapshot: path.join(root, 'scripts', 'missing-ledger.json') });
+    expect(missing.status).toBe(1);
+    expect(missing.stderr).toContain('migration-ledger-snapshot-path-unavailable');
+  });
+
+  it('fails when the known alias chain is empty or names and versions drift', () => {
+    const root = createMigrationRoot();
+    writeKnownSource(root);
+    writeAliasManifest(root, [{
+      sourcePath: KNOWN_SOURCE_PATH,
+      sourceVersion: KNOWN_SOURCE_VERSION,
+      sourceName: KNOWN_SOURCE_NAME,
+      sourceSha256: createHash('sha256').update('SELECT 1;').digest('hex').toUpperCase(),
+      appliedAliases: [],
+    }]);
+    writeManifest(root, []);
+    const result = runGuard(root);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('migration-version-alias-entry-invalid');
+    expect(result.stderr).toContain('migration-version-alias-known-chain-invalid');
+  });
+
+  it('fails on fabricated ledger rows outside the exact known chain', () => {
+    const root = createMigrationRoot();
+    writeKnownSource(root);
+    writeLedgerSnapshot(root, [
+      { version: KNOWN_SOURCE_VERSION, name: KNOWN_SOURCE_NAME },
+      ...KNOWN_ALIASES,
+      { version: '20261123000000', name: 'fabricated_remote_row' },
+    ]);
+    writeManifest(root, []);
+    const result = runGuard(root);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('unexpected-alias-chain-row:20261123000000:fabricated_remote_row');
+  });
+
+  it('rejects the same alias assigned to multiple source entries', () => {
+    const root = createMigrationRoot();
+    writeKnownSource(root);
+    writeMigration(root, '20260102000000_other.sql', 'SELECT 2;');
+    const sourceSha2 = createHash('sha256').update('SELECT 2;').digest('hex').toUpperCase();
+    writeLedgerSnapshot(root, [
+      { version: KNOWN_SOURCE_VERSION, name: KNOWN_SOURCE_NAME },
+      { version: '20260102000000', name: 'other' },
+      ...KNOWN_ALIASES,
+    ]);
+    writeAliasManifest(root, [
+      {
+        sourcePath: KNOWN_SOURCE_PATH,
+        sourceVersion: KNOWN_SOURCE_VERSION,
+        sourceName: KNOWN_SOURCE_NAME,
+        sourceSha256: createHash('sha256').update('SELECT 1;').digest('hex').toUpperCase(),
+        appliedAliases: KNOWN_ALIASES,
+      },
+      {
+        sourcePath: 'supabase/migrations/20260102000000_other.sql',
+        sourceVersion: '20260102000000',
+        sourceName: 'other',
+        sourceSha256: sourceSha2,
+        appliedAliases: [KNOWN_ALIASES[0]],
+      },
+    ]);
+    writeManifest(root, []);
+    const result = runGuard(root);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('belongs to multiple sources');
+  });
+
 });

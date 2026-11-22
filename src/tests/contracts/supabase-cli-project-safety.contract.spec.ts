@@ -1,4 +1,6 @@
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { describe, expect, it } from 'vitest';
@@ -12,12 +14,18 @@ type ProjectTargetResult = {
 };
 
 type ProjectSafetyModule = {
+  evaluateDbPushPreflight: (
+    args: string[],
+    options?: { ledgerSnapshots?: Array<Record<string, unknown>>; configuredProjectRef?: string; linkedProjectRef?: string; targetSha?: string; currentTargetSha?: string; nowUtc?: string },
+  ) => { ok: boolean; runGuard: boolean; reason?: string; local?: boolean };
+  isDbPushCommand: (args: string[]) => boolean;
   evaluateRemoteProjectTarget: (
     args: string[],
     configuredProjectRef: string,
     linkedProjectRef: string,
   ) => ProjectTargetResult;
   isRemoteProjectCommand: (args: string[]) => boolean;
+  executeCli: (args: string[], dependencies: Record<string, unknown>) => { exitCode: number; spawned: boolean; reason?: string };
 };
 
 function loadSafetyModule(): ProjectSafetyModule | null {
@@ -26,6 +34,35 @@ function loadSafetyModule(): ProjectSafetyModule | null {
   }
   delete require.cache[require.resolve(wrapperPath)];
   return require(wrapperPath) as ProjectSafetyModule;
+}
+
+function makeWrapperProbe() {
+  const tempBase = path.join(process.cwd(), '.tmp', 'supabase-push-probes');
+  fs.mkdirSync(tempBase, { recursive: true });
+  const root = fs.mkdtempSync(path.join(tempBase, 'probe-'));
+  fs.mkdirSync(path.join(root, 'scripts'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'supabase', '.temp'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'node_modules', '.bin'), { recursive: true });
+  fs.copyFileSync(wrapperPath, path.join(root, 'scripts', 'supabase-cli.cjs'));
+  fs.copyFileSync(path.join(process.cwd(), 'scripts', 'validate-migration-dry-run-rollback.cjs'), path.join(root, 'scripts', 'validate-migration-dry-run-rollback.cjs'));
+  fs.writeFileSync(path.join(root, 'supabase', '.temp', 'project-ref'), 'fkhihclpghmmtbbywvoj');
+  const marker = path.join(root, 'spawned.txt');
+  fs.writeFileSync(path.join(root, 'node_modules', '.bin', 'supabase.cmd'), `@echo off\r\necho STUB_SPAWNED>>"${marker}"\r\nexit /b 0\r\n`);
+  fs.writeFileSync(path.join(root, 'node_modules', '.bin', 'supabase'), '#!/bin/sh\necho STUB_SPAWNED >> "' + marker.split(path.sep).join('/') + '"\nexit 0\n');
+  fs.copyFileSync(path.join(process.cwd(), 'package-lock.json'), path.join(root, 'package-lock.json'));
+  return { root, marker };
+}
+
+function runWrapperProbe(root: string) {
+  return spawnSync(process.execPath, [path.join(root, 'scripts', 'supabase-cli.cjs'), 'db', 'push', '--linked'], {
+    cwd: root,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      SUPABASE_PROJECT_REF: 'fkhihclpghmmtbbywvoj',
+      NANOFLOW_PUSH_TARGET_SHA: '3db29530188c15afdb6913ddcd8799a74a32d644',
+    },
+  });
 }
 
 describe('Supabase CLI project safety', () => {
@@ -92,14 +129,149 @@ describe('Supabase CLI project safety', () => {
     });
   });
 
-  it('runs the project target guard before spawning the Supabase CLI', () => {
-    const wrapper = fs.readFileSync(wrapperPath, 'utf8');
+  it('requires an explicit linked target and a bound ledger snapshot for remote db push', () => {
+    const safety = loadSafetyModule();
+    if (!safety) return;
+    const projectRef = 'abcdefghijklmnopqrst';
+    const targetSha = 'a'.repeat(40);
+    const bound = { projectRef, targetOriginMain: targetSha, expectedGitSha: targetSha, capturedAtUtc: '2026-11-22T08:20:00Z', maxAgeSeconds: 86400, sourceEvidence: { tool: 'mcp__supabase.execute_sql', queryId: 'test', query: 'SELECT', resultRowCount: 0 }, rows: [] };
+    const exact = { ledgerSnapshots: [bound], configuredProjectRef: projectRef, linkedProjectRef: projectRef, targetSha, currentTargetSha: targetSha, nowUtc: '2026-11-22T09:00:00Z' };
 
-    expect(wrapper).toContain('function evaluateRemoteProjectTarget(');
-    expect(wrapper).toContain("path.resolve(__dirname, '../supabase/.temp/project-ref')");
-    expect(wrapper).toContain('evaluateRemoteProjectTarget(args, projectRef, linkedProjectRef)');
-    expect(wrapper.indexOf('evaluateRemoteProjectTarget(args, projectRef, linkedProjectRef)')).toBeLessThan(
-      wrapper.indexOf('spawnSync(command, commandArgs'),
-    );
+    expect(safety.evaluateDbPushPreflight(['db', 'push'], exact)).toEqual({
+      ok: false, runGuard: false, reason: 'explicit-target-required',
+    });
+    expect(safety.evaluateDbPushPreflight(['db', 'push', '--local'], exact)).toEqual({
+      ok: true, runGuard: false, local: true,
+    });
+    expect(safety.evaluateDbPushPreflight(['db', 'push', '--linked'], { ...exact, ledgerSnapshots: [] })).toEqual({
+      ok: false, runGuard: false, reason: 'ledger-snapshot-not-target-bound',
+    });
+    expect(safety.evaluateDbPushPreflight(['db', 'push', '--linked'], { ...exact, configuredProjectRef: 'zzzzzzzzzzzzzzzzzzzz' })).toEqual({
+      ok: false, runGuard: false, reason: 'project-ref-mismatch',
+    });
+    expect(safety.evaluateDbPushPreflight(['db', 'push', '--linked'], { ...exact, targetSha: 'b'.repeat(40) })).toEqual({
+      ok: false, runGuard: false, reason: 'current-target-sha-mismatch',
+    });
+    expect(safety.evaluateDbPushPreflight(['db', 'push', '--linked'], exact)).toEqual({
+      ok: true, runGuard: true,
+    });
   });
+
+  it('never spawns the CLI when the known alias chain is empty or missing', () => {
+    const probe = makeWrapperProbe();
+    try {
+      fs.mkdirSync(path.join(probe.root, 'supabase', 'migrations'), { recursive: true });
+      fs.writeFileSync(path.join(probe.root, 'supabase', 'migrations', '20260101000000_safe.sql'), 'SELECT 1;');
+      fs.writeFileSync(path.join(probe.root, 'scripts', 'migration-version-alias-manifest.json'), JSON.stringify({
+        schemaVersion: 2, format: 'MIGRATION_VERSION_ALIASES_V1', ledgerSnapshotPath: 'scripts/migration-ledger-snapshot.json', aliases: [],
+      }));
+      fs.writeFileSync(path.join(probe.root, 'scripts', 'migration-ledger-snapshot.json'), JSON.stringify({
+        format: 'SUPABASE_SCHEMA_MIGRATIONS_V1', source: 'mcp__supabase.execute_sql', capturedAtUtc: '2026-11-22T08:20:00Z', projectRef: 'fkhihclpghmmtbbywvoj', targetOriginMain: '3db29530188c15afdb6913ddcd8799a74a32d644', rows: [], rowCount: 0, canonicalRowsSha256: 'A'.repeat(64),
+      }));
+      const result = runWrapperProbe(probe.root);
+      expect(result.status).not.toBe(0);
+      expect(fs.existsSync(probe.marker)).toBe(false);
+    } finally {
+      fs.rmSync(probe.root, { recursive: true, force: true });
+    }
+  });
+
+
+  it('rejects stale, wrong-target, and unverifiable ledger evidence before CLI spawn', () => {
+    const safety = loadSafetyModule();
+    if (!safety) return;
+    const projectRef = 'abcdefghijklmnopqrst';
+    const targetSha = 'a'.repeat(40);
+    const base = { projectRef, targetOriginMain: targetSha, expectedGitSha: targetSha, capturedAtUtc: '2026-11-20T00:00:00Z', maxAgeSeconds: 60, rows: [], sourceEvidence: { tool: 'mcp__supabase.execute_sql', queryId: 'test', query: 'SELECT', resultRowCount: 0 } };
+    const opts = { ledgerSnapshots: [base], configuredProjectRef: projectRef, linkedProjectRef: projectRef, targetSha, currentTargetSha: targetSha, nowUtc: '2026-11-22T00:00:00Z' };
+    expect(safety.evaluateDbPushPreflight(['db', 'push', '--linked'], opts)).toMatchObject({ ok: false, runGuard: false, reason: 'ledger-snapshot-stale' });
+    expect(safety.evaluateDbPushPreflight(['db', 'push', '--linked'], { ...opts, currentTargetSha: 'b'.repeat(40) })).toMatchObject({ ok: false, reason: 'current-target-sha-mismatch', runGuard: false });
+    expect(safety.evaluateDbPushPreflight(['db', 'push', '--linked'], { ...opts, ledgerSnapshots: [{ ...base, capturedAtUtc: '2026-11-22T00:00:00Z', sourceEvidence: null }] })).toMatchObject({ ok: false, runGuard: false, reason: 'ledger-capture-evidence-unverified' });
+  });
+
+
+  it('does not call the injected CLI executor on stale evidence in the real main control flow', () => {
+    const safety = loadSafetyModule();
+    if (!safety) return;
+    const projectRef = 'abcdefghijklmnopqrst';
+    const targetSha = 'a'.repeat(40);
+    let calls = 0;
+    const result = safety.executeCli(['db', 'push', '--linked'], {
+      env: {
+        SUPABASE_PROJECT_REF: projectRef,
+        NANOFLOW_PUSH_TARGET_SHA: targetSha,
+        NANOFLOW_CURRENT_TARGET_SHA: targetSha,
+        NANOFLOW_PREFLIGHT_NOW_UTC: '2026-11-22T00:00:00Z',
+      },
+      root: process.cwd(),
+      readLinkedProjectRef: () => projectRef,
+      loadLedgerSnapshots: () => ({
+        ok: true,
+        ledgers: [{
+          projectRef,
+          targetOriginMain: targetSha,
+          expectedGitSha: targetSha,
+          capturedAtUtc: '2026-11-20T00:00:00Z',
+          maxAgeSeconds: 60,
+          rows: [],
+          sourceEvidence: { tool: 'mcp__supabase.execute_sql', queryId: 'test', query: 'SELECT', resultRowCount: 0 },
+        }],
+      }),
+      invokeCliCommand: () => { calls += 1; throw new Error('CLI must not run'); },
+      runMigrationPreflight: () => { throw new Error('preflight must not run'); },
+      logError: () => undefined,
+    });
+    expect(result).toMatchObject({ exitCode: 2, spawned: false, reason: 'ledger-snapshot-stale' });
+    expect(calls).toBe(0);
+  });
+
+
+  it.each([
+    ['malformed now', 'not-a-date', '2026-11-22T08:20:00Z', 'ledger-current-time-invalid'],
+    ['malformed capturedAt', '2026-11-22T08:21:00Z', 'not-a-date', 'ledger-snapshot-captured-at-invalid'],
+    ['future capturedAt', '2026-11-22T08:20:00Z', '2026-11-22T08:20:01Z', 'ledger-snapshot-captured-in-future'],
+    ['missing capturedAt', '2026-11-22T08:20:00Z', '', 'ledger-snapshot-captured-at-invalid'],
+    ['missing query identity', '2026-11-22T08:20:00Z', '2026-11-22T08:20:00Z', 'ledger-capture-evidence-unverified'],
+  ])('executeCli does not spawn on %s', (_case, nowUtc, capturedAtUtc, expectedReason) => {
+    const safety = loadSafetyModule();
+    if (!safety) return;
+    const projectRef = 'abcdefghijklmnopqrst';
+    const targetSha = 'a'.repeat(40);
+    let spawnCalls = 0;
+    const sourceEvidence = expectedReason === 'ledger-capture-evidence-unverified'
+      ? { tool: 'mcp__supabase.execute_sql', resultRowCount: 0 }
+      : { tool: 'mcp__supabase.execute_sql', queryId: 'q', query: 'SELECT', resultRowCount: 0 };
+    const result = safety.executeCli(['db', 'push', '--linked'], {
+      env: { SUPABASE_PROJECT_REF: projectRef, NANOFLOW_PUSH_TARGET_SHA: targetSha, NANOFLOW_CURRENT_TARGET_SHA: targetSha, NANOFLOW_PREFLIGHT_NOW_UTC: nowUtc },
+      root: process.cwd(),
+      readLinkedProjectRef: () => projectRef,
+      loadLedgerSnapshots: () => ({ ok: true, ledgers: [{ projectRef, targetOriginMain: targetSha, expectedGitSha: targetSha, capturedAtUtc, maxAgeSeconds: 60, rows: [], sourceEvidence }] }),
+      invokeCliCommand: () => { spawnCalls += 1; return { status: 0 }; },
+      runMigrationPreflight: () => ({ ok: true, status: 0 }),
+      logError: () => undefined,
+    });
+    expect((result as { reason?: string }).reason).toBe(expectedReason);
+    expect(result).toMatchObject({ exitCode: 2, spawned: false });
+    expect(spawnCalls).toBe(0);
+  });
+
+  it('accepts freshness exactly at the max-age boundary and proceeds to the executor', () => {
+    const safety = loadSafetyModule();
+    if (!safety) return;
+    const projectRef = 'abcdefghijklmnopqrst';
+    const targetSha = 'a'.repeat(40);
+    let spawnCalls = 0;
+    const result = safety.executeCli(['db', 'push', '--linked'], {
+      env: { SUPABASE_PROJECT_REF: projectRef, NANOFLOW_PUSH_TARGET_SHA: targetSha, NANOFLOW_CURRENT_TARGET_SHA: targetSha, NANOFLOW_PREFLIGHT_NOW_UTC: '2026-11-22T08:21:00Z' },
+      root: process.cwd(),
+      readLinkedProjectRef: () => projectRef,
+      loadLedgerSnapshots: () => ({ ok: true, ledgers: [{ projectRef, targetOriginMain: targetSha, expectedGitSha: targetSha, capturedAtUtc: '2026-11-22T08:20:00Z', maxAgeSeconds: 60, rows: [], sourceEvidence: { tool: 'mcp__supabase.execute_sql', queryId: 'q', query: 'SELECT', resultRowCount: 0 } }] }),
+      invokeCliCommand: () => { spawnCalls += 1; return { status: 0 }; },
+      runMigrationPreflight: () => ({ ok: true, status: 0 }),
+      logError: () => undefined,
+    });
+    expect(result).toEqual({ exitCode: 0, spawned: true });
+    expect(spawnCalls).toBe(1);
+  });
+
 });

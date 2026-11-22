@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 2,
+  "format": "MIGRATION_VERSION_ALIASES_V1",
+  "ledgerSnapshotPath": "scripts/migration-ledger-snapshot.json",
+  "aliases": [
+    {
+      "sourcePath": "supabase/migrations/20261121060000_widget_focus_action_durable_receipt.sql",
+      "sourceVersion": "20261121060000",
+      "sourceName": "widget_focus_action_durable_receipt",
+      "sourceSha256": "515CD80C5C8B9B72E6D240BA2E27BA54DD24A98D3912EF1A61BE3740F9E3AB08",
+      "appliedAliases": [
+        {
+          "version": "20261122053816",
+          "name": "widget_focus_action_durable_receipt"
+        },
+        {
+          "version": "20261122053936",
+          "name": "widget_focus_action_durable_receipt_exact_repair"
+        }
+      ]
+    }
+  ],
+  "expectedGitSha": "82980ddab7649a83ed34bcc8b65646d6375e1a9f"
+}
