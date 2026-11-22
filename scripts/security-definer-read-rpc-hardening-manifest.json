@@ -1,0 +1,175 @@
+{
+  "schemaVersion": 1,
+  "taskId": "SECURITY-DEFINER-HARDENING-CANDIDATE-A@20261123-r149",
+  "revision": 1,
+  "baseline": "2693297948f12a06ac20fdbbf65670c6fed374e0",
+  "projectRef": "fkhihclpghmmtbbywvoj",
+  "candidateMigration": "supabase/migrations/20261123010000_non_destructive_security_definer_read_rpc_invoker.sql",
+  "fixedInputs": {
+    "A128": "7289DA2D668B53987BC16806CC86B7831FA0CF9EF75298F9949B5666AE292014",
+    "A130": "A4A2E14F3610CCD240A0B974E5871B4CCE09AA0AEA52A4FD3FD0CF05B904147A0",
+    "B126": "1BFAF9B2FFFFACF573A0A0E4E57DAF14737C19BC2C49F21A2710143948F629C0",
+    "C135r3": "089E0D252B29EF54FDA8D0CC3A020AB24044ABEC8C806638C38D5FF3D6EDB696"
+  },
+  "roles": {
+    "authenticated": {
+      "bypassRls": false
+    },
+    "anon": {
+      "bypassRls": false
+    },
+    "service_role": {
+      "bypassRls": true
+    },
+    "postgres": {
+      "bypassRls": true
+    }
+  },
+  "selectedFunctions": [
+    {
+      "signature": "get_dashboard_stats()",
+      "body": "CREATE OR REPLACE FUNCTION public.get_dashboard_stats()\n RETURNS json\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO 'pg_catalog', 'public'\nAS $function$\nDECLARE\n  current_user_id uuid := (SELECT auth.uid());\nBEGIN\n  RETURN json_build_object(\n    'pending', (\n      SELECT COUNT(*)\n      FROM public.tasks t\n      JOIN public.projects p ON t.project_id = p.id\n      WHERE p.owner_id = current_user_id\n        AND p.deleted_at IS NULL\n        AND t.status = 'active'\n        AND t.deleted_at IS NULL\n    ),\n    'completed', (\n      SELECT COUNT(*)\n      FROM public.tasks t\n      JOIN public.projects p ON t.project_id = p.id\n      WHERE p.owner_id = current_user_id\n        AND p.deleted_at IS NULL\n        AND t.status = 'completed'\n        AND t.deleted_at IS NULL\n    ),\n    'projects', (\n      SELECT COUNT(*)\n      FROM public.projects\n      WHERE owner_id = current_user_id\n        AND deleted_at IS NULL\n    )\n  );\nEND;\n$function$\n",
+      "bodySha256": "05b4584d6626c3376b7f4d472dbd78974c8c91c9df7a23b3acf87cfb71b31cb6",
+      "bodyBytes": 947,
+      "owner": "postgres",
+      "securityDefinerPreimage": true,
+      "volatility": "v",
+      "searchPath": [
+        "search_path=pg_catalog, public"
+      ],
+      "acl": "{postgres=X/postgres,authenticated=X/postgres,service_role=X/postgres}",
+      "authenticatedExecute": true,
+      "anonExecute": false,
+      "serviceRoleExecute": true,
+      "ownerFence": {
+        "authUid": true,
+        "ownerId": true,
+        "readOnly": true
+      },
+      "inverseSql": "ALTER FUNCTION public.get_dashboard_stats() SECURITY DEFINER;"
+    },
+    {
+      "signature": "get_all_projects_data(timestamp with time zone)",
+      "body": "CREATE OR REPLACE FUNCTION public.get_all_projects_data(p_since_timestamp timestamp with time zone DEFAULT '1970-01-01 00:00:00+00'::timestamp with time zone)\n RETURNS json\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO ''\nAS $function$\nDECLARE\n  v_result JSON;\n  v_user_id UUID;\nBEGIN\n  v_user_id := auth.uid();\n\n  SELECT json_build_object(\n    'projects', COALESCE((\n      SELECT json_agg(row_to_json(p.*) ORDER BY p.updated_at DESC)\n      FROM (\n        SELECT id, owner_id, title, description, created_date, updated_at, deleted_at, version\n        FROM public.projects\n        WHERE owner_id = v_user_id\n          AND deleted_at IS NULL\n          AND updated_at > p_since_timestamp\n      ) p\n    ), '[]'::json),\n    'server_time', now()\n  ) INTO v_result;\n\n  RETURN v_result;\nEND;\n$function$\n",
+      "bodySha256": "30b942d6d317c102ea4dbb40ead2a6a53c23a6cc9fb73f626071a89fe8ea47e4",
+      "bodyBytes": 805,
+      "owner": "postgres",
+      "securityDefinerPreimage": true,
+      "volatility": "v",
+      "searchPath": [
+        "search_path=\"\""
+      ],
+      "acl": "{postgres=X/postgres,authenticated=X/postgres,service_role=X/postgres}",
+      "authenticatedExecute": true,
+      "anonExecute": false,
+      "serviceRoleExecute": true,
+      "ownerFence": {
+        "authUid": true,
+        "ownerId": true,
+        "readOnly": true
+      },
+      "inverseSql": "ALTER FUNCTION public.get_all_projects_data(timestamp with time zone) SECURITY DEFINER;"
+    },
+    {
+      "signature": "get_projects_list(integer,integer)",
+      "body": "CREATE OR REPLACE FUNCTION public.get_projects_list(p_limit integer DEFAULT 50, p_offset integer DEFAULT 0)\n RETURNS json\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO ''\nAS $function$\nDECLARE\n  v_result JSON;\n  v_user_id UUID;\nBEGIN\n  v_user_id := auth.uid();\n\n  SELECT json_build_object(\n    'projects', COALESCE((\n      SELECT json_agg(json_build_object(\n        'id', p.id,\n        'owner_id', p.owner_id,\n        'title', p.title,\n        'description', p.description,\n        'created_date', p.created_date,\n        'updated_at', p.updated_at,\n        'version', p.version,\n        'task_count', (SELECT COUNT(*) FROM public.tasks WHERE project_id = p.id AND deleted_at IS NULL),\n        'last_modified', (SELECT MAX(updated_at) FROM (\n          SELECT updated_at FROM public.tasks WHERE project_id = p.id\n          UNION ALL\n          SELECT updated_at FROM public.connections WHERE project_id = p.id\n        ) AS updates)\n      ) ORDER BY p.updated_at DESC)\n      FROM (\n        SELECT *\n        FROM public.projects\n        WHERE owner_id = v_user_id\n          AND deleted_at IS NULL\n        ORDER BY updated_at DESC\n        LIMIT p_limit OFFSET p_offset\n      ) p\n    ), '[]'::json),\n    'total', (\n      SELECT COUNT(*)\n      FROM public.projects\n      WHERE owner_id = v_user_id\n        AND deleted_at IS NULL\n    ),\n    'server_time', now()\n  ) INTO v_result;\n\n  RETURN v_result;\nEND;\n$function$\n",
+      "bodySha256": "ff49f9898342e8d425c2299491fc8e6e5d6670ce8057cdb3744777dda504a8c0",
+      "bodyBytes": 1419,
+      "owner": "postgres",
+      "securityDefinerPreimage": true,
+      "volatility": "v",
+      "searchPath": [
+        "search_path=\"\""
+      ],
+      "acl": "{postgres=X/postgres,authenticated=X/postgres,service_role=X/postgres}",
+      "authenticatedExecute": true,
+      "anonExecute": false,
+      "serviceRoleExecute": true,
+      "ownerFence": {
+        "authUid": true,
+        "ownerId": true,
+        "readOnly": true
+      },
+      "inverseSql": "ALTER FUNCTION public.get_projects_list(integer,integer) SECURITY DEFINER;"
+    },
+    {
+      "signature": "list_project_heads_since(timestamp with time zone)",
+      "body": "CREATE OR REPLACE FUNCTION public.list_project_heads_since(p_since timestamp with time zone DEFAULT NULL::timestamp with time zone)\n RETURNS TABLE(project_id uuid, updated_at timestamp with time zone, version integer)\n LANGUAGE plpgsql\n SECURITY DEFINER\n SET search_path TO ''\nAS $function$\nDECLARE\n  v_user_id UUID;\nBEGIN\n  v_user_id := auth.uid();\n\n  IF v_user_id IS NULL THEN\n    RAISE EXCEPTION 'Authentication required';\n  END IF;\n\n  RETURN QUERY\n  WITH project_changes AS (\n    SELECT\n      p.id AS project_id,\n      GREATEST(\n        COALESCE(p.updated_at, '-infinity'::timestamptz),\n        COALESCE((SELECT MAX(t.updated_at) FROM public.tasks t WHERE t.project_id = p.id), '-infinity'::timestamptz),\n        COALESCE((SELECT MAX(c.updated_at) FROM public.connections c WHERE c.project_id = p.id), '-infinity'::timestamptz),\n        COALESCE((SELECT MAX(tt.deleted_at) FROM public.task_tombstones tt WHERE tt.project_id = p.id), '-infinity'::timestamptz),\n        COALESCE((SELECT MAX(ct.deleted_at) FROM public.connection_tombstones ct WHERE ct.project_id = p.id), '-infinity'::timestamptz)\n      ) AS updated_at,\n      COALESCE(p.version, 1)::INTEGER AS version\n    FROM public.projects p\n    WHERE p.owner_id = v_user_id\n      AND p.deleted_at IS NULL\n  )\n  SELECT\n    pc.project_id,\n    pc.updated_at,\n    pc.version\n  FROM project_changes pc\n  WHERE pc.updated_at > COALESCE(p_since, '-infinity'::timestamptz)\n  ORDER BY pc.updated_at ASC;\nEND;\n$function$\n",
+      "bodySha256": "319d08aa32cd27c39d723cc8af518e5d5875d7ca30e6c76ad429aa4807de7d44",
+      "bodyBytes": 1469,
+      "owner": "postgres",
+      "securityDefinerPreimage": true,
+      "volatility": "v",
+      "searchPath": [
+        "search_path=\"\""
+      ],
+      "acl": "{postgres=X/postgres,authenticated=X/postgres,service_role=X/postgres}",
+      "authenticatedExecute": true,
+      "anonExecute": false,
+      "serviceRoleExecute": true,
+      "ownerFence": {
+        "authUid": true,
+        "ownerId": true,
+        "readOnly": true
+      },
+      "inverseSql": "ALTER FUNCTION public.list_project_heads_since(timestamp with time zone) SECURITY DEFINER;"
+    }
+  ],
+  "excludedSignatures": {
+    "unproven": [
+      "append_task_attachment(uuid,jsonb)",
+      "batch_get_tombstones(uuid[])",
+      "batch_upsert_tasks(jsonb[],uuid)",
+      "get_accessible_project_probe(uuid)",
+      "get_black_box_sync_watermark()",
+      "get_full_project_data(uuid)",
+      "get_project_sync_watermark(uuid)",
+      "get_resume_recovery_probe(uuid)",
+      "get_user_projects_watermark()",
+      "increment_routine_completion(uuid,uuid,date)",
+      "is_connection_tombstoned(uuid)",
+      "is_task_tombstoned(uuid)",
+      "sync_apply_offline_command(jsonb)",
+      "sync_upsert_blackbox_entry(jsonb)",
+      "sync_upsert_connection(jsonb)",
+      "sync_upsert_project(jsonb)",
+      "sync_upsert_task(jsonb)",
+      "user_has_project_access(uuid)",
+      "user_is_project_owner(uuid)"
+    ],
+    "unprovenCount": 19,
+    "destructive": [
+      "purge_tasks_v2(uuid,uuid[])",
+      "purge_tasks_v3(uuid,uuid[])",
+      "remove_task_attachment(uuid,text)",
+      "safe_delete_tasks(uuid[],uuid)",
+      "soft_delete_project(uuid)",
+      "sync_delete_project(jsonb)",
+      "sync_delete_tasks(jsonb)"
+    ],
+    "destructiveCount": 7
+  },
+  "preconditions": {
+    "authenticatedSelectOnReferencedRelations": true,
+    "forcedRlsOnReferencedRelations": true,
+    "noCurrentClientCaller": true,
+    "noCurrentEdgeCaller": true,
+    "noFunctionCaller": true,
+    "noPolicyReference": true
+  },
+  "validationBoundary": {
+    "focusedContract": "44/44 PASS",
+    "typecheck": "PASS",
+    "eslint": "PASS",
+    "gitDiffCheck": "PASS",
+    "candidateClassification": "transaction-safe",
+    "fullMigrationGuard": {
+      "status": "BLOCKED",
+      "command": "node scripts/validate-migration-dry-run-rollback.cjs --root . --json",
+      "reason": "migration-ledger-snapshot-target-sha-mismatch: ledger and alias manifest expect 82980ddab7649a83ed34bcc8b65646d6375e1a9f; candidate baseline is 2693297948f12a06ac20fdbbf65670c6fed374e0"
+    }
+  },
+  "productionWrites": 0,
+  "productionProof": false,
+  "executionAuthorized": false
+}
