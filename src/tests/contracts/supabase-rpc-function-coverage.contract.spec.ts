@@ -59,6 +59,13 @@ interface RpcFunctionCoverageModule {
 const projectRoot = process.cwd();
 const modulePath = path.join(projectRoot, 'scripts', 'lib', 'supabase-rpc-function-coverage.cjs');
 const require = createRequire(import.meta.url);
+const freshInitDeferralPath = 'scripts/fresh-init-target-rpc-deferrals.json';
+const freshInitDeferralManifest = JSON.parse(readFileSync(path.join(projectRoot, freshInitDeferralPath), 'utf8')) as {
+  schemaVersion: number;
+  format: string;
+  targetOriginMain: string;
+  deferredRpcDeclarations: Array<{ rpcName: string; declarationSourcePath: string; declarationSourceSha256: string }>;
+};
 const generatedTypeGaps = [
   'claim_attachment_cleanup_jobs', 'claim_attachment_scan_rescan',
   'claim_due_attachment_scan_rescans', 'claim_task_attachment_cleanup',
@@ -67,12 +74,14 @@ const generatedTypeGaps = [
   'list_widget_notify_devices', 'release_transcription_quota',
   'sync_apply_offline_command', 'sync_get_offline_command_status',
 ];
+const intentionallyDeferredFreshInitRpcNames = freshInitDeferralManifest.deferredRpcDeclarations.map(entry => entry.rpcName);
 const syncTransportNames = [
-  'sync_delete_project', 'sync_delete_tasks',
-  'sync_increment_routine_completion', 'sync_upsert_blackbox_entry',
-  'sync_upsert_connection', 'sync_upsert_focus_session',
-  'sync_upsert_project', 'sync_upsert_routine_task',
-  'sync_upsert_task', 'sync_upsert_user_preferences',
+  'sync_apply_offline_command', 'sync_delete_project', 'sync_delete_tasks',
+  'sync_get_offline_command_status', 'sync_increment_routine_completion',
+  'sync_upsert_blackbox_entry', 'sync_upsert_connection',
+  'sync_upsert_focus_session', 'sync_upsert_project',
+  'sync_upsert_routine_task', 'sync_upsert_task',
+  'sync_upsert_user_preferences',
 ];
 const directFixturePath = 'supabase/functions/cleanup-attachments/cleanup-outbox.ts';
 function authorizedDirectSource(body: string): string {
@@ -83,6 +92,8 @@ function authorizedDirectSource(body: string): string {
 }
 const repositoryRpcIdentityRows = [
   'direct-rpc|supabase/functions/widget-black-box-action/index.ts|apply_widget_black_box_action',
+  'direct-rpc|supabase/functions/widget-focus-action/index.ts|apply_widget_focus_action',
+  'direct-rpc|supabase/functions/widget-focus-action/index.ts|apply_widget_focus_action',
   'direct-rpc|src/app/core/services/sync/tombstone.service.ts|batch_get_tombstones',
   'direct-rpc|supabase/functions/cleanup-attachments/cleanup-outbox.ts|claim_attachment_cleanup_jobs',
   'direct-rpc|supabase/functions/virus-scan/index.ts|claim_attachment_scan_rescan',
@@ -102,12 +113,13 @@ const repositoryRpcIdentityRows = [
   'direct-rpc|src/app/core/services/sync/project-sync-probe.service.ts|list_project_heads_page',
   'direct-rpc|supabase/functions/widget-notify/index.ts|list_widget_notify_devices',
   'direct-rpc|supabase/functions/transcribe/index.ts|release_transcription_quota',
-  'direct-rpc|src/services/sync-rpc-client.service.ts|sync_check_protocol',
   'sync-rpc-transport|src/services/sync-rpc-client.service.ts|sync_apply_offline_command',
-  'sync-rpc-transport|src/services/sync-rpc-client.service.ts|sync_get_offline_command_status',
+  'direct-rpc|src/services/sync-rpc-client.service.ts|sync_check_protocol',
   'sync-rpc-transport|src/services/sync-rpc-client.service.ts|sync_delete_project',
   'sync-rpc-transport|src/services/sync-rpc-client.service.ts|sync_delete_tasks',
+  'sync-rpc-transport|src/services/sync-rpc-client.service.ts|sync_get_offline_command_status',
   'sync-rpc-transport|src/services/sync-rpc-client.service.ts|sync_increment_routine_completion',
+  'direct-rpc|src/services/sync-rpc-client.service.ts|sync_pull_offline_projections',
   'sync-rpc-transport|src/services/sync-rpc-client.service.ts|sync_upsert_blackbox_entry',
   'sync-rpc-transport|src/services/sync-rpc-client.service.ts|sync_upsert_connection',
   'sync-rpc-transport|src/services/sync-rpc-client.service.ts|sync_upsert_focus_session',
@@ -115,9 +127,6 @@ const repositoryRpcIdentityRows = [
   'sync-rpc-transport|src/services/sync-rpc-client.service.ts|sync_upsert_routine_task',
   'sync-rpc-transport|src/services/sync-rpc-client.service.ts|sync_upsert_task',
   'sync-rpc-transport|src/services/sync-rpc-client.service.ts|sync_upsert_user_preferences',
-  'direct-rpc|src/services/sync-rpc-client.service.ts|sync_pull_offline_projections',
-  'direct-rpc|supabase/functions/widget-focus-action/index.ts|apply_widget_focus_action',
-  'direct-rpc|supabase/functions/widget-focus-action/index.ts|apply_widget_focus_action',
   'direct-rpc|supabase/functions/widget-summary/index.ts|widget_summary_wave1',
 ];
 function loadCoverage(): RpcFunctionCoverageModule {
@@ -771,7 +780,20 @@ class ProjectDataService {
     expect(report.references
       .filter(reference => reference.kind === 'sync-rpc-transport')
       .map(reference => reference.name)).toEqual(syncTransportNames);
-    expect(report.missingFromFreshInit).toEqual([]);
+    expect(report.missingFromFreshInit).toEqual(intentionallyDeferredFreshInitRpcNames);
+    expect(freshInitDeferralManifest.schemaVersion).toBe(1);
+    expect(freshInitDeferralManifest.format).toBe('FRESH_INIT_TARGET_RPC_DEFERRALS_V1');
+    expect(freshInitDeferralManifest.targetOriginMain).toBe('3db29530188c15afdb6913ddcd8799a74a32d644');
+    for (const deferral of freshInitDeferralManifest.deferredRpcDeclarations) {
+      expect(deferral.declarationSourcePath).toMatch(/^supabase\/migrations\/[0-9]{14}_.+\.sql$/);
+      const digest = require('node:crypto').createHash('sha256')
+        .update(readFileSync(path.join(projectRoot, deferral.declarationSourcePath)))
+        .digest('hex').toUpperCase();
+      expect(digest).toBe(deferral.declarationSourceSha256);
+      expect(readFileSync(path.join(projectRoot, deferral.declarationSourcePath), 'utf8'))
+        .toContain(`CREATE OR REPLACE FUNCTION public.${deferral.rpcName}`);
+    }
+    expect(new Set(intentionallyDeferredFreshInitRpcNames).size).toBe(intentionallyDeferredFreshInitRpcNames.length);
     expect(report.freshInitRpcDeclarations.indeterminate).toEqual([]);
     expect(report.missingFromGeneratedTypes).toEqual(generatedTypeGaps);
     expect(report.sqlClaimScope).toEqual({
@@ -782,6 +804,14 @@ class ProjectDataService {
     });
     expect(report.unresolvedDynamicSites.every(site => site.reason === 'dynamic-rpc-name')).toBe(true);
   }, 30_000);
+
+  it('does not allow an undeclared RPC omission to hide behind reviewed deferrals', () => {
+    const source = 'CREATE OR REPLACE FUNCTION public.declared_rpc() RETURNS void LANGUAGE sql AS $$ SELECT $$;';
+    const report = coverage.analyzeFreshInitRpcDeclarationCoverage(source, ['declared_rpc', 'undeclared_missing_rpc']);
+    expect(report.present).toEqual(['declared_rpc']);
+    expect(report.missing).toEqual(['undeclared_missing_rpc']);
+    expect(intentionallyDeferredFreshInitRpcNames).not.toContain('undeclared_missing_rpc');
+  });
 
   it('keeps lexical and control-flow helpers policy-free', () => {
     const typescript = require('typescript') as typeof import('typescript');

@@ -25,7 +25,8 @@ describe('offline command domain apply migration', () => {
   });
 
   it('keeps domain apply disabled until an operator advertises the capability', () => {
-    const sql = read();
+    const finalSql = fs.readFileSync(path.join(process.cwd(), 'supabase/migrations/20261115165939_sync_offline_command_final_domain_apply_fence.sql'), 'utf8');
+    const sql = finalSql;
     expect(sql).toContain("IF NOT (COALESCE(v_capabilities, '[]'::jsonb) @> '[\"domain-apply-v1\"]'::jsonb)");
     expect(sql).toContain("'skipped-capability-disabled'");
   });

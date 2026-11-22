@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "format": "FRESH_INIT_TARGET_RPC_DEFERRALS_V1",
+  "targetOriginMain": "3db29530188c15afdb6913ddcd8799a74a32d644",
+  "reviewedAtUtc": "2026-11-22T08:30:00Z",
+  "policy": "Only exact RPC/source-SHA pairs are deferred. Any new missing RPC or source SHA drift fails closed in the repository RPC coverage contract.",
+  "deferredRpcDeclarations": [
+    {
+      "rpcName": "apply_widget_focus_action",
+      "declarationSourcePath": "supabase/migrations/20261121060000_widget_focus_action_durable_receipt.sql",
+      "declarationSourceSha256": "515CD80C5C8B9B72E6D240BA2E27BA54DD24A98D3912EF1A61BE3740F9E3AB08",
+      "reason": "Target-only durable Widget Focus receipt RPC; functional dependency on widget_focus_action_receipts remains an explicit fresh-init omission.",
+      "requiresCoordinatedFreshInitUpdate": true
+    },
+    {
+      "rpcName": "sync_apply_offline_command",
+      "declarationSourcePath": "supabase/migrations/20261114123814_sync_offline_command_exact_allowlist.sql",
+      "declarationSourceSha256": "83D459C669961A7D8EE1C1AE71EACAB6EEEF242CD68F4C644643D20B73EF5C71",
+      "reason": "Target-only offline command ingest RPC; functional dependency on sync_command_log/capabilities remains an explicit fresh-init omission.",
+      "requiresCoordinatedFreshInitUpdate": true
+    },
+    {
+      "rpcName": "sync_get_offline_command_status",
+      "declarationSourcePath": "supabase/migrations/20261114094736_sync_offline_command_domain_apply_ack.sql",
+      "declarationSourceSha256": "954223940B5040DC0C95A5A36C0D3A63A39BA4EEDD6E722F11B24B6EF1AC019D",
+      "reason": "Target-only command acknowledgement RPC; functional dependency on sync_command_log and sync_command_domain_apply_log remains an explicit fresh-init omission.",
+      "requiresCoordinatedFreshInitUpdate": true
+    },
+    {
+      "rpcName": "sync_pull_offline_projections",
+      "declarationSourcePath": "supabase/migrations/20261114030701_sync_offline_command_field_lww_projection.sql",
+      "declarationSourceSha256": "871D29BD6ABEF5A6668B8C3925E5DF15F535875481A78639052D0D9AA6CEFACD",
+      "reason": "Target-only projection pull RPC; functional dependency on sync_command_projection remains an explicit fresh-init omission.",
+      "requiresCoordinatedFreshInitUpdate": true
+    }
+  ]
+}
