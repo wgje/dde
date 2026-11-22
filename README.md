@@ -115,7 +115,7 @@ npm start
 
 1. 准备一个 Supabase 项目。
 2. 创建一个**私有** Storage bucket，名字必须是 `attachments`。
-3. 执行 [`scripts/init-supabase.sql`](scripts/init-supabase.sql)（包含所有表、RLS、RPC、触发器和索引）。
+3. 执行 [`scripts/init-supabase.sql`](scripts/init-supabase.sql)（包含基础表、RLS、RPC、触发器和索引）。Fresh init 有意省略四个 target-only RPC，清单见 [`scripts/fresh-init-target-rpc-deferrals.json`](scripts/fresh-init-target-rpc-deferrals.json)；完整 target 功能还需协调应用迁移 `20261114030701`、`20261114030826` 和 `20261115165939`（以该 manifest 记录为准）。
 4. 配置以下环境变量：
 
 ```bash
@@ -825,7 +825,7 @@ npm run db:types               # 从 Supabase 生成 TypeScript 类型
 
 1. 创建 Supabase 项目
 2. 创建私有 `attachments` 存储桶
-3. 执行 [`scripts/init-supabase.sql`](scripts/init-supabase.sql)（v3.9.0，包含所有表/RLS/RPC/触发器/索引）
+3. 执行 [`scripts/init-supabase.sql`](scripts/init-supabase.sql)（v3.9.0，包含基础表/RLS/RPC/触发器/索引）。Fresh init 有意省略四个 target-only RPC，完整清单及 source SHA 见 [`scripts/fresh-init-target-rpc-deferrals.json`](scripts/fresh-init-target-rpc-deferrals.json)；完整 target 功能还需协调应用迁移 `20261114030701`、`20261114030826` 和 `20261115165939`（以 manifest 记录为准）。
 4. 配置环境变量
 5. 如需语音转写，部署 `transcribe` Edge Function + 设置 `GROQ_API_KEY`
 6. 如需定时清理，执行 [`scripts/cleanup-cron-setup.sql`](scripts/cleanup-cron-setup.sql)（需要 pg_cron 扩展）
