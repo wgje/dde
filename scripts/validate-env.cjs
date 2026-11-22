@@ -101,6 +101,13 @@ function credentialKeyError() {
   return 'Supabase legacy anon JWT 格式异常';
 }
 
+function validateProductionIdentity(value) {
+  const normalized = typeof value === 'string' ? value.trim() : '';
+  if (!normalized) return '未设置，生产构建需要真实的部署身份';
+  if (normalized === 'local' || normalized === 'development') return '不能使用本地回退值 ' + normalized;
+  return null;
+}
+
 /**
  * 环境变量定义
  * required: 必需的变量（缺少则阻断构建）
@@ -129,6 +136,21 @@ const envDefinitions = {
         if (value === 'YOUR_SUPABASE_ANON_KEY') return '仍然是占位符值，请设置真实的 Key';
         return null;
       },
+    },
+    {
+      name: 'NG_APP_SENTRY_ENVIRONMENT',
+      description: 'Sentry 发布环境标识',
+      validate: validateProductionIdentity,
+    },
+    {
+      name: 'NG_APP_DEPLOYMENT_TARGET',
+      description: '部署目标标识',
+      validate: validateProductionIdentity,
+    },
+    {
+      name: 'NG_APP_SUPABASE_PROJECT_ALIAS',
+      description: 'Supabase 项目别名',
+      validate: validateProductionIdentity,
     },
   ],
 

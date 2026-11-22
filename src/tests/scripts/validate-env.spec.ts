@@ -54,6 +54,9 @@ function runValidateEnv(
       NODE_PATH: path.join(repoRoot, 'node_modules'),
       NG_APP_SUPABASE_URL: 'https://abcdefghijklmnopqrst.supabase.co',
       NG_APP_SUPABASE_ANON_KEY: '',
+      NG_APP_SENTRY_ENVIRONMENT: 'production',
+      NG_APP_DEPLOYMENT_TARGET: 'production',
+      NG_APP_SUPABASE_PROJECT_ALIAS: 'production',
       NG_APP_DEV_AUTO_LOGIN_EMAIL: '',
       NG_APP_DEV_AUTO_LOGIN_PASSWORD: '',
       ...overrides,
@@ -89,6 +92,32 @@ function runValidateEnvWithLocal(
 }
 
 describe('validate-env Supabase API key validation', () => {
+  it('requires non-local deployment identity for production builds', () => {
+    const result = runValidateEnv({
+      NG_APP_SUPABASE_ANON_KEY: fixtureKey,
+      NG_APP_SENTRY_ENVIRONMENT: '',
+      NG_APP_DEPLOYMENT_TARGET: '',
+      NG_APP_SUPABASE_PROJECT_ALIAS: '',
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain('NG_APP_SENTRY_ENVIRONMENT');
+    expect(result.stdout).toContain('NG_APP_DEPLOYMENT_TARGET');
+    expect(result.stdout).toContain('NG_APP_SUPABASE_PROJECT_ALIAS');
+  }, 10_000);
+
+  it('rejects local fallback identities for production builds', () => {
+    const result = runValidateEnv({
+      NG_APP_SUPABASE_ANON_KEY: fixtureKey,
+      NG_APP_SENTRY_ENVIRONMENT: 'development',
+      NG_APP_DEPLOYMENT_TARGET: 'local',
+      NG_APP_SUPABASE_PROJECT_ALIAS: 'local',
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain('不能使用本地回退值');
+  }, 10_000);
+
   it('accepts Supabase publishable keys for production browser builds', () => {
     const result = runValidateEnv({
       NG_APP_SUPABASE_ANON_KEY: fixtureKey,
