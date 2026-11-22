@@ -79,6 +79,24 @@ describe('codegraph worktree bootstrap', () => {
     expect(report.blockingReason).toBe('CURRENT_INVALID_WITH_RUNTIME_CLOSURE_READY');
   }, 15_000);
 
+  it('requires every production runtime closure path in the repository tree', () => {
+    const bootstrap = require(bootstrapPath) as {
+      REQUIRED_RUNTIME_CLOSURE: readonly string[];
+      OPTIONAL_PROTOTYPE_CLOSURE: readonly string[];
+      TEST_CLOSURE: readonly string[];
+    };
+    const nonProductionClosure = new Set([
+      ...bootstrap.OPTIONAL_PROTOTYPE_CLOSURE,
+      ...bootstrap.TEST_CLOSURE,
+    ]);
+    const misplaced = bootstrap.REQUIRED_RUNTIME_CLOSURE.filter(relativePath =>
+      nonProductionClosure.has(relativePath));
+    const missing = bootstrap.REQUIRED_RUNTIME_CLOSURE.filter(relativePath =>
+      !fs.existsSync(path.join(repoRoot, relativePath)));
+
+    expect(misplaced).toEqual([]);
+    expect(missing).toEqual([]);
+  });
   it('keeps test fixtures out of the required runtime category', () => {
     const bootstrap = require(bootstrapPath) as {
       REQUIRED_RUNTIME_CLOSURE: readonly string[];
