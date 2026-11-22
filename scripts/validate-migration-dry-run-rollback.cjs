@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 const crypto = require('node:crypto');
+const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 
@@ -58,6 +59,11 @@ const CLI_INCOMPATIBLE_PATTERNS = [
   },
 ];
 
+function readGitHead(root) {
+  const result = spawnSync('git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8' });
+  return result.status === 0 ? String(result.stdout || '').trim() : '';
+}
+
 function parseArgs(argv) {
   const options = {
     root: process.cwd(),
@@ -95,6 +101,8 @@ function parseArgs(argv) {
   if (!options.manifest) options.manifest = path.join(options.root, DEFAULT_MANIFEST);
   if (!options.aliasManifest) options.aliasManifest = path.join(options.root, DEFAULT_ALIAS_MANIFEST);
   if (!options.ledgerSnapshot) options.ledgerSnapshot = path.join(options.root, DEFAULT_LEDGER_SNAPSHOT);
+  if (!options.now) options.now = new Date().toISOString();
+  if (!options.currentTargetSha) options.currentTargetSha = readGitHead(options.root);
 
   return options;
 }
@@ -382,18 +390,21 @@ function loadLedgerSnapshot(snapshotPath, expectedProjectRef = null, currentTarg
     || !/^[a-f0-9]{40}$/i.test(String(parsed.targetOriginMain || ''))
     || !Array.isArray(parsed.rows)
     || parsed.rowCount !== parsed.rows.length
-    || (nowUtc && (!parsed.sourceEvidence || parsed.sourceEvidence.tool !== 'mcp__supabase.execute_sql'
+    || (!parsed.sourceEvidence || parsed.sourceEvidence.tool !== 'mcp__supabase.execute_sql'
       || !['queryId','query','resultRowCount'].every(key => parsed.sourceEvidence[key] !== undefined)
       || !Number.isInteger(parsed.maxAgeSeconds) || parsed.maxAgeSeconds <= 0
-      || !Number.isFinite(Date.parse(parsed.capturedAtUtc))))) {
+      || !Number.isFinite(Date.parse(parsed.capturedAtUtc)))) {
     throw new Error('migration-ledger-snapshot-schema-invalid');
   }
   if (expectedProjectRef && parsed.projectRef !== expectedProjectRef) throw new Error('migration-ledger-snapshot-project-mismatch');
   if (currentTargetSha && String(parsed.expectedGitSha || '').toLowerCase() !== currentTargetSha.toLowerCase()) throw new Error('migration-ledger-snapshot-target-sha-mismatch');
-  if (nowUtc) {
-    if (Date.parse(nowUtc) - Date.parse(parsed.capturedAtUtc) > parsed.maxAgeSeconds * 1000) throw new Error('migration-ledger-snapshot-stale');
-    if (parsed.sourceEvidence.resultRowCount !== parsed.rows.length) throw new Error('migration-ledger-snapshot-capture-evidence-mismatch');
-  }
+  const nowMs = Date.parse(String(nowUtc || ''));
+  const capturedMs = Date.parse(String(parsed.capturedAtUtc || ''));
+  if (!Number.isFinite(nowMs)) throw new Error('migration-ledger-snapshot-current-time-invalid');
+  if (!Number.isFinite(capturedMs)) throw new Error('migration-ledger-snapshot-captured-at-invalid');
+  if (capturedMs > nowMs) throw new Error('migration-ledger-snapshot-captured-in-future');
+  if (nowMs - capturedMs > parsed.maxAgeSeconds * 1000) throw new Error('migration-ledger-snapshot-stale');
+  if (parsed.sourceEvidence.resultRowCount !== parsed.rows.length) throw new Error('migration-ledger-snapshot-capture-evidence-mismatch');
   return parsed;
 }
 
@@ -545,7 +556,7 @@ function buildPsqlPlan(transactionSafeFiles) {
 function validate(options) {
   const { canonicalDir, files: migrationFiles } = collectMigrationFiles(options.root);
   const manifestState = prepareManifest(options.root, canonicalDir, loadManifest(options.manifest).entries);
-  const aliasState = validateAliasLedger(options.root, canonicalDir, options.aliasManifest, options.ledgerSnapshot, migrationFiles, { projectRef: options.currentTargetSha ? 'fkhihclpghmmtbbywvoj' : null, currentTargetSha: options.currentTargetSha, nowUtc: options.now });
+  const aliasState = validateAliasLedger(options.root, canonicalDir, options.aliasManifest, options.ledgerSnapshot, migrationFiles, { projectRef: 'fkhihclpghmmtbbywvoj', currentTargetSha: options.currentTargetSha, nowUtc: options.now });
   const errors = [...aliasState.errors];
   const transactionDryRunFiles = [];
   const manualReview = [];

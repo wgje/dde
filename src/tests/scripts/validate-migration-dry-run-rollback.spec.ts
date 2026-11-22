@@ -476,6 +476,34 @@ CREATE TABLE IF NOT EXISTS public.example_safe_comments (
     expect(JSON.parse(result.stdout).ledgerSnapshot.rowCount).toBe(3);
   });
 
+  it('default guard rejects future ledger evidence without explicit clock/target flags', () => {
+    const root = createMigrationRoot();
+    spawnSync('git', ['init'], { cwd: root, encoding: 'utf8' });
+    spawnSync('git', ['config', 'user.email', 'test@example.invalid'], { cwd: root, encoding: 'utf8' });
+    spawnSync('git', ['config', 'user.name', 'Test'], { cwd: root, encoding: 'utf8' });
+    spawnSync('git', ['-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-m', 'fixture'], { cwd: root, encoding: 'utf8' });
+    const targetSha = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).stdout.trim();
+    writeMigration(root, path.basename(KNOWN_SOURCE_PATH), 'SELECT 1;');
+    writeManifest(root, []);
+    writeLedgerSnapshot(root, [
+      { version: KNOWN_SOURCE_VERSION, name: KNOWN_SOURCE_NAME },
+      ...KNOWN_ALIASES,
+    ], {
+      expectedGitSha: targetSha,
+      capturedAtUtc: '2999-01-01T00:00:00Z',
+    });
+    writeAliasManifest(root, [{
+      sourcePath: KNOWN_SOURCE_PATH,
+      sourceVersion: KNOWN_SOURCE_VERSION,
+      sourceName: KNOWN_SOURCE_NAME,
+      sourceSha256: createHash('sha256').update('SELECT 1;').digest('hex').toUpperCase(),
+      appliedAliases: KNOWN_ALIASES,
+    }]);
+    const result = runGuard(root);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('migration-ledger-snapshot-captured-in-future');
+  });
+
   it('fails closed when the production ledger snapshot is missing', () => {
     const root = createMigrationRoot();
     writeKnownSource(root);

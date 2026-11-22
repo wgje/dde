@@ -227,6 +227,52 @@ describe('Supabase CLI project safety', () => {
 
 
   it.each([
+    ['missing manifest expectedGitSha', undefined],
+    ['wrong manifest expectedGitSha', 'b'.repeat(40)],
+  ])('real wrapper subprocess does not spawn on %s', (_case, manifestExpectedGitSha) => {
+    const probe = makeWrapperProbe();
+    const targetSha = 'a'.repeat(40);
+    try {
+      fs.mkdirSync(path.join(probe.root, 'supabase', 'migrations'), { recursive: true });
+      fs.writeFileSync(path.join(probe.root, 'supabase', 'migrations', '20260101000000_safe.sql'), 'SELECT 1;');
+      fs.writeFileSync(path.join(probe.root, 'scripts', 'migration-version-alias-manifest.json'), JSON.stringify({
+        schemaVersion: 2,
+        format: 'MIGRATION_VERSION_ALIASES_V1',
+        ledgerSnapshotPath: 'scripts/migration-ledger-snapshot.json',
+        expectedGitSha: manifestExpectedGitSha,
+        aliases: [{
+          sourcePath: 'supabase/migrations/20261121060000_widget_focus_action_durable_receipt.sql',
+          sourceVersion: '20261121060000',
+          sourceName: 'widget_focus_action_durable_receipt',
+          sourceSha256: 'A'.repeat(64),
+          appliedAliases: [
+            { version: '20261122053816', name: 'widget_focus_action_durable_receipt' },
+            { version: '20261122053936', name: 'widget_focus_action_durable_receipt_exact_repair' },
+          ],
+        }],
+      }));
+      fs.writeFileSync(path.join(probe.root, 'scripts', 'migration-ledger-snapshot.json'), JSON.stringify({
+        format: 'SUPABASE_SCHEMA_MIGRATIONS_V1', source: 'mcp__supabase.execute_sql', capturedAtUtc: '2026-11-22T08:20:00Z', projectRef: 'fkhihclpghmmtbbywvoj', targetOriginMain: targetSha, expectedGitSha: targetSha, rows: [], rowCount: 0, canonicalRowsSha256: 'A'.repeat(64), sourceEvidence: { tool: 'mcp__supabase.execute_sql', queryId: 'q', query: 'SELECT', resultRowCount: 0 },
+      }));
+      const result = spawnSync(process.execPath, [path.join(probe.root, 'scripts', 'supabase-cli.cjs'), 'db', 'push', '--linked'], {
+        cwd: probe.root,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          SUPABASE_PROJECT_REF: 'fkhihclpghmmtbbywvoj',
+          NANOFLOW_PUSH_TARGET_SHA: targetSha,
+          NANOFLOW_CURRENT_TARGET_SHA: targetSha,
+          NANOFLOW_PREFLIGHT_NOW_UTC: '2026-11-22T08:21:00Z',
+        },
+      });
+      expect(result.status).not.toBe(0);
+      expect(fs.existsSync(probe.marker)).toBe(false);
+    } finally {
+      fs.rmSync(probe.root, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
     ['malformed now', 'not-a-date', '2026-11-22T08:20:00Z', 'ledger-current-time-invalid'],
     ['malformed capturedAt', '2026-11-22T08:21:00Z', 'not-a-date', 'ledger-snapshot-captured-at-invalid'],
     ['future capturedAt', '2026-11-22T08:20:00Z', '2026-11-22T08:20:01Z', 'ledger-snapshot-captured-in-future'],

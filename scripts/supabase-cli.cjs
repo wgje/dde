@@ -230,6 +230,7 @@ function executeCli(args = process.argv.slice(2), dependencies = {}) {
   const currentTargetSha = env.NANOFLOW_CURRENT_TARGET_SHA || readHead(root);
   const pushPreflight = evaluateDbPushPreflight(args, {
     expectedProjectRef: ledgerState.expectedProjectRef,
+    expectedGitSha: ledgerState.expectedGitSha,
     configuredProjectRef: projectRef,
     linkedProjectRef,
     targetSha: env.NANOFLOW_PUSH_TARGET_SHA,
