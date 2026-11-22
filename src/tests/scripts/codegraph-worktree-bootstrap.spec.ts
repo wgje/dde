@@ -97,9 +97,8 @@ describe('codegraph worktree bootstrap', () => {
       'src/tests/scripts/codegraph-overlay-resident-worker-prototype.spec.ts',
     ]));
     expect(bootstrap.REQUIRED_RUNTIME_CLOSURE).toEqual(expect.arrayContaining([
-      'scripts/lib/codegraph-overlay-candidate-search-text.mjs',
-      'scripts/lib/codegraph-overlay-immutable-cache.mjs',
-      'scripts/lib/codegraph-overlay-generation-cache.cjs',
+      'scripts/query-codegraph-nanoflow-overlay.mjs',
+      'scripts/lib/codegraph-overlay-worker-pool.cjs',
     ]));
   });
 
@@ -111,8 +110,8 @@ describe('codegraph worktree bootstrap', () => {
     expect(result.status).toBe(0);
     const report = JSON.parse(result.stdout);
     expect(report.independentTasksMayProceed).toBe(true);
-    expect(report.runtimeClosure.copied.some((entry: { path: string }) => entry.path === 'scripts/lib/codegraph-overlay-generation-cache.cjs')).toBe(true);
-    expect(fs.existsSync(path.join(root, 'scripts/lib/codegraph-overlay-generation-cache.cjs'))).toBe(true);
+    expect(report.runtimeClosure.copied.some((entry: { path: string }) => entry.path === 'scripts/query-codegraph-nanoflow-overlay.mjs')).toBe(true);
+    expect(fs.existsSync(path.join(root, 'scripts/query-codegraph-nanoflow-overlay.mjs'))).toBe(true);
     expect(report.status).toBe('CLOSURE_READY_GENERATION_PENDING');
   }, 15_000);
 });
