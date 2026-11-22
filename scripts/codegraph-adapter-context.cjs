@@ -20,6 +20,8 @@ const {
 
 const DEFAULT_CODEGRAPH_TARGET = '@colbymchenry/codegraph@1.6.2';
 const REQUIRED_FRESH_FALLBACK_ENV = {
+  CODEGRAPH_NO_DAEMON: '1',
+  CODEGRAPH_NO_WATCH: '1',
   NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '30000',
   NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE: '0',
 };
@@ -421,9 +423,10 @@ function isLikelyDedupMaintenanceQuery(segments) {
 }
 
 function resolveWrapperInvocation(options) {
+  const wrapperScriptPath = resolveExactRootWrapperScript(options.root);
   if (options.codegraphTarget) {
     return {
-      wrapperScriptPath: path.join(options.root, 'scripts', 'codegraph-nanoflow-mcp-stdio.cjs'),
+      wrapperScriptPath,
       codegraphTarget: options.codegraphTarget,
       codegraphArgs: ['serve', '--mcp', '--path', options.root],
       configEnv: {},
@@ -450,15 +453,26 @@ function resolveWrapperInvocation(options) {
       throw new Error(`Unsupported Codex MCP config in ${codexConfig.path}`);
     }
     const configuredTarget = replaceWorkspaceFolder(args[1], options.root);
+    const configuredWrapperScriptPath = replaceWorkspaceFolder(args[0], options.root);
     const configuredEnv = resolveConfigEnv(codexConfig.server.env ?? {});
+    const configuredCodegraphArgs = args.slice(2)
+      .map(arg => replaceWorkspaceFolder(arg, options.root));
+    const resolvedCodegraphArgs = resolveCodegraphArgs(args.slice(2), options.root);
     const configContractMismatches = codexConfig.scope === 'override'
       ? []
-      : freshFallbackConfigContractMismatches(configuredTarget, configuredEnv);
+      : freshFallbackConfigContractMismatches(
+          configuredTarget,
+          configuredEnv,
+          configuredWrapperScriptPath,
+          configuredCodegraphArgs,
+          options.root,
+        );
     const configContractOverride = configContractMismatches.length > 0;
     return {
-      wrapperScriptPath: replaceWorkspaceFolder(args[0], options.root),
+      wrapperScriptPath,
+      configuredWrapperScriptPath,
       codegraphTarget: configContractOverride ? DEFAULT_CODEGRAPH_TARGET : configuredTarget,
-      codegraphArgs: args.slice(2).map(arg => replaceWorkspaceFolder(arg, options.root)),
+      codegraphArgs: resolvedCodegraphArgs,
       configEnv: configContractOverride
         ? { ...configuredEnv, ...REQUIRED_FRESH_FALLBACK_ENV }
         : configuredEnv,
@@ -470,7 +484,8 @@ function resolveWrapperInvocation(options) {
   }
 
   return {
-    wrapperScriptPath: path.join(options.root, 'scripts', 'codegraph-nanoflow-mcp-stdio.cjs'),
+    wrapperScriptPath,
+    configuredWrapperScriptPath: null,
     codegraphTarget: DEFAULT_CODEGRAPH_TARGET,
     codegraphArgs: ['serve', '--mcp', '--path', options.root],
     configEnv: { ...REQUIRED_FRESH_FALLBACK_ENV },
@@ -481,8 +496,30 @@ function resolveWrapperInvocation(options) {
   };
 }
 
-function freshFallbackConfigContractMismatches(codegraphTarget, configEnv) {
+function freshFallbackConfigContractMismatches(
+  codegraphTarget,
+  configEnv,
+  configuredWrapperScriptPath,
+  codegraphArgs,
+  root,
+) {
   const mismatches = [];
+  const expectedWrapperScriptPath = path.join(root, 'scripts', 'codegraph-nanoflow-mcp-stdio.cjs');
+  if (!samePath(configuredWrapperScriptPath, expectedWrapperScriptPath)) {
+    mismatches.push({
+      field: 'wrapperScriptPath',
+      expected: expectedWrapperScriptPath,
+      actual: configuredWrapperScriptPath,
+    });
+  }
+  const actualProjectPath = pathArgument(codegraphArgs);
+  if (!actualProjectPath || !samePath(actualProjectPath, root)) {
+    mismatches.push({
+      field: 'codegraphArgs.path',
+      expected: path.resolve(root),
+      actual: actualProjectPath,
+    });
+  }
   if (codegraphTarget !== DEFAULT_CODEGRAPH_TARGET) {
     mismatches.push({
       field: 'codegraphTarget',
@@ -501,6 +538,152 @@ function freshFallbackConfigContractMismatches(codegraphTarget, configEnv) {
 
 function replaceWorkspaceFolder(value, root) {
   return String(value).replaceAll('${workspaceFolder}', root);
+}
+
+function resolveExactRootWrapperScript(root) {
+  const resolvedRoot = path.resolve(root);
+  const wrapperScriptPath = path.join(resolvedRoot, 'scripts', 'codegraph-nanoflow-mcp-stdio.cjs');
+  let realRoot;
+  let realWrapperScriptPath;
+  try {
+    realRoot = fs.realpathSync.native(resolvedRoot);
+    realWrapperScriptPath = fs.realpathSync.native(wrapperScriptPath);
+  } catch {
+    throw new Error(`Exact-root CodeGraph wrapper is unavailable: ${wrapperScriptPath}`);
+  }
+  let wrapperStat;
+  try {
+    wrapperStat = fs.statSync(realWrapperScriptPath);
+  } catch {
+    throw new Error(`Exact-root CodeGraph wrapper is unavailable: ${wrapperScriptPath}`);
+  }
+  if (!wrapperStat.isFile() || !isPathInside(realRoot, realWrapperScriptPath)) {
+    throw new Error(`Exact-root CodeGraph wrapper escapes requested root: ${wrapperScriptPath}`);
+  }
+  return wrapperScriptPath;
+}
+
+function resolveCodegraphArgs(args, root) {
+  const resolvedRoot = path.resolve(root);
+  const resolvedArgs = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = replaceWorkspaceFolder(args[index], resolvedRoot);
+    if (arg === '--path' || arg === '-p') {
+      if (index + 1 < args.length) index += 1;
+      continue;
+    }
+    if (arg.startsWith('--path=') || arg.startsWith('-p=')) continue;
+    resolvedArgs.push(arg);
+  }
+  resolvedArgs.push('--path', resolvedRoot);
+  return resolvedArgs;
+}
+
+function isPathInside(root, candidate) {
+  const relativePath = path.relative(root, candidate);
+  return relativePath === '' || (
+    relativePath !== '..'
+    && !relativePath.startsWith(`..${path.sep}`)
+    && !path.isAbsolute(relativePath)
+  );
+}
+
+function samePath(left, right) {
+  if (typeof left !== 'string' || typeof right !== 'string') return false;
+  const resolvedLeft = path.resolve(left);
+  const resolvedRight = path.resolve(right);
+  return process.platform === 'win32'
+    ? resolvedLeft.toLowerCase() === resolvedRight.toLowerCase()
+    : resolvedLeft === resolvedRight;
+}
+
+function pathArgument(args) {
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if ((arg === '--path' || arg === '-p') && index + 1 < args.length) {
+      return args[index + 1];
+    }
+    if (arg.startsWith('--path=')) return arg.slice('--path='.length);
+    if (arg.startsWith('-p=')) return arg.slice('-p='.length);
+  }
+  return null;
+}
+
+function readWrapperLogEvents(logPath) {
+  let contents;
+  try {
+    contents = fs.readFileSync(logPath, 'utf8');
+  } catch {
+    throw new Error(`Exact-root wrapper evidence is unavailable: ${logPath}`);
+  }
+  return contents.split(/\r?\n/).filter(Boolean).flatMap(line => {
+    try {
+      const event = JSON.parse(line);
+      return event && typeof event === 'object' && !Array.isArray(event) ? [event] : [];
+    } catch {
+      return [];
+    }
+  });
+}
+
+function verifyExactRootWrapperEvidence(logPath, root, expectedWrapperScriptPath) {
+  const events = readWrapperLogEvents(logPath);
+  const wrapperStart = events.filter(event => event.event === 'wrapper.start').at(-1);
+  if (!wrapperStart) {
+    throw new Error(`Exact-root wrapper evidence is missing wrapper.start: ${logPath}`);
+  }
+  if (!samePath(wrapperStart.scriptPath, expectedWrapperScriptPath)) {
+    throw new Error([
+      'Exact-root wrapper mismatch.',
+      `expectedWrapper=${expectedWrapperScriptPath}`,
+      `actualWrapper=${wrapperStart.scriptPath ?? 'missing'}`,
+    ].join(' '));
+  }
+  if (!samePath(wrapperStart.projectRoot, root)) {
+    throw new Error([
+      'Exact-root project root mismatch.',
+      `expectedRoot=${path.resolve(root)}`,
+      `actualRoot=${wrapperStart.projectRoot ?? 'missing'}`,
+    ].join(' '));
+  }
+  const actualCodegraphRoot = pathArgument(wrapperStart.codegraphArgs ?? []);
+  if (!samePath(actualCodegraphRoot, root)) {
+    throw new Error([
+      'Exact-root CodeGraph path mismatch.',
+      `expectedRoot=${path.resolve(root)}`,
+      `actualCodegraphPath=${actualCodegraphRoot ?? 'missing'}`,
+    ].join(' '));
+  }
+  return {
+    requestedRoot: path.resolve(root),
+    wrapperScriptPath: wrapperStart.scriptPath,
+    projectRoot: wrapperStart.projectRoot,
+    codegraphRoot: actualCodegraphRoot,
+  };
+}
+
+function verifyExactRootOverlayEvidence(logPath, root, wrapperEvidence) {
+  const events = readWrapperLogEvents(logPath);
+  const overlayStart = events.filter(event => event.event === 'overlay.query.start').at(-1);
+  if (!overlayStart) {
+    throw new Error(`Exact-root overlay evidence is missing overlay.query.start: ${logPath}`);
+  }
+  const expectedSelectorPath = path.join(root, '.codegraph', 'nanoflow-generations', 'CURRENT.json');
+  const actualSelectorPath = overlayStart.overlayFile?.path;
+  if (!samePath(actualSelectorPath, expectedSelectorPath)) {
+    throw new Error([
+      'Exact-root overlay selector mismatch.',
+      `expectedSelector=${expectedSelectorPath}`,
+      `actualSelector=${actualSelectorPath ?? 'missing'}`,
+    ].join(' '));
+  }
+  return {
+    ...wrapperEvidence,
+    overlaySelectorPath: actualSelectorPath,
+    overlaySelectorExists: overlayStart.overlayFile?.exists === true,
+    rootIdentityVerified: true,
+    overlaySelectorPathVerified: true,
+  };
 }
 
 function resolveConfigEnv(env) {
@@ -1530,8 +1713,10 @@ async function main() {
       env: {
         ...process.env,
         ...invocation.configEnv,
-        CODEGRAPH_NO_DAEMON: '1',
-        CODEGRAPH_NO_WATCH: '1',
+        // Adapter fallback must stay isolated from a broken or stale host:
+        // never attach to or create a shared daemon/watcher during diagnosis.
+        CODEGRAPH_NO_DAEMON: REQUIRED_FRESH_FALLBACK_ENV.CODEGRAPH_NO_DAEMON,
+        CODEGRAPH_NO_WATCH: REQUIRED_FRESH_FALLBACK_ENV.CODEGRAPH_NO_WATCH,
         NANOFLOW_CODEGRAPH_ALLOW_DAEMON: '0',
         NANOFLOW_CODEGRAPH_MCP_LOG: logPath,
         NANOFLOW_CODEGRAPH_REFRESH_ON_STARTUP: '0',
@@ -1554,6 +1739,11 @@ async function main() {
       'tools/list',
     );
     assertToolsList(tools, 'tools/list');
+    const wrapperEvidence = verifyExactRootWrapperEvidence(
+      logPath,
+      options.root,
+      invocation.wrapperScriptPath,
+    );
 
     const contextResult = await requestContextPackWithRetries(client, nextId, options);
     const contextText = contextResult.text;
@@ -1568,6 +1758,7 @@ async function main() {
         arguments: { query: effectiveOverlayQuery, limit: options.overlayQueryLimit, json: true },
       },
     });
+    const exactRootEvidence = verifyExactRootOverlayEvidence(logPath, options.root, wrapperEvidence);
 
     await shutdownProcessTree(child, childCloseTracker);
     const logAnalysis = analyzeLog(options.root, logPath, {
@@ -1612,10 +1803,13 @@ async function main() {
       partial: contextResult.partial,
       contextUsable: contextResult.contextUsable,
       outcome: contextResult.outcome,
+      projectRoot: options.root,
+      wrapperScriptPath: invocation.wrapperScriptPath,
+      configuredWrapperScriptPath: invocation.configuredWrapperScriptPath ?? null,
+      exactRootEvidence,
       query: options.query,
       overlayQuery: effectiveOverlayQuery,
       logPath,
-      wrapperScriptPath: invocation.wrapperScriptPath,
       codegraphTarget: invocation.codegraphTarget,
       configScope: invocation.configScope,
       configPath: invocation.configPath,
@@ -1679,6 +1873,10 @@ if (require.main === module) {
 module.exports = {
   createChildCloseTracker,
   requestOverlayProvenance,
+  resolveExactRootWrapperScript,
+  resolveCodegraphArgs,
+  verifyExactRootWrapperEvidence,
+  verifyExactRootOverlayEvidence,
   resolveWrapperInvocation,
   shutdownProcessTree,
   shouldPreserveContextAcrossCriticalLogFailure,

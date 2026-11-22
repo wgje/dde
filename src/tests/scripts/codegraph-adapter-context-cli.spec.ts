@@ -12,6 +12,13 @@ const repoRoot = path.resolve(__dirname, '../../..');
 const adapterContextScriptPath = path.join(repoRoot, 'scripts', 'codegraph-adapter-context.cjs');
 const tempRoots: string[] = [];
 const requireCjs = createRequire(import.meta.url);
+const { verifyExactRootWrapperEvidence } = requireCjs(adapterContextScriptPath) as {
+  verifyExactRootWrapperEvidence(
+    logPath: string,
+    root: string,
+    expectedWrapperScriptPath: string,
+  ): { requestedRoot: string; wrapperScriptPath: string; projectRoot: string; codegraphRoot: string };
+};
 const { buildNanoFlowContextOutcomeV1, parseNanoFlowContextOutcomeV1 } = requireCjs(
   path.join(repoRoot, 'scripts', 'lib', 'codegraph-context-outcome.cjs'),
 ) as {
@@ -259,7 +266,12 @@ function makeStubbornProcessTreeAdapterProject(): string {
       "'use strict';",
       "const { spawn } = require('node:child_process');",
       "const fs = require('node:fs');",
+      "const path = require('node:path');",
       "const readline = require('node:readline');",
+      "const codegraphArgs = process.argv.slice(3);",
+      "const pathIndex = codegraphArgs.findIndex((arg, index) => (arg === '--path' || arg === '-p') && index + 1 < codegraphArgs.length);",
+      "const projectRoot = path.resolve(pathIndex >= 0 ? codegraphArgs[pathIndex + 1] : process.cwd());",
+      "fs.appendFileSync(process.env.NANOFLOW_CODEGRAPH_MCP_LOG, JSON.stringify({ event: 'wrapper.start', scriptPath: __filename, projectRoot, codegraphArgs }) + '\\n');",
       "const descendant = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore', windowsHide: true });",
       "descendant.unref();",
       "fs.writeFileSync(process.env.NANOFLOW_TEST_DESCENDANT_PID_FILE, String(descendant.pid));",
@@ -296,7 +308,13 @@ function makeStubbornProcessTreeAdapterProject(): string {
   return projectRoot;
 }
 
-function writeCodexConfig(projectRoot: string, fakeCodegraph: string, command = 'node'): string {
+function writeCodexConfig(
+  projectRoot: string,
+  fakeCodegraph: string,
+  command = 'node',
+  configuredRoot = projectRoot,
+  configuredWrapperRoot = projectRoot,
+): string {
   const codexRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-codex-config-'));
   tempRoots.push(codexRoot);
   const configPath = path.join(codexRoot, 'config.toml');
@@ -307,15 +325,17 @@ function writeCodexConfig(projectRoot: string, fakeCodegraph: string, command = 
       '[mcp_servers.codegraph]',
       `command = ${tomlString(command)}`,
       'args = [',
-      `  ${tomlString(path.join(projectRoot, 'scripts', 'codegraph-nanoflow-mcp-stdio.cjs'))},`,
+      `  ${tomlString(path.join(configuredWrapperRoot, 'scripts', 'codegraph-nanoflow-mcp-stdio.cjs'))},`,
       `  ${tomlString(fakeCodegraph)},`,
       '  "serve",',
       '  "--mcp",',
       `  ${tomlString('--path')},`,
-      `  ${tomlString(projectRoot)},`,
+      `  ${tomlString(configuredRoot)},`,
       ']',
       '',
       '[mcp_servers.codegraph.env]',
+      'CODEGRAPH_NO_DAEMON = "1"',
+      'CODEGRAPH_NO_WATCH = "1"',
       'NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS = "10000"',
       'NANOFLOW_CODEGRAPH_OVERLAY_QUERY_TIMEOUT_MS = "10000"',
       'NANOFLOW_CODEGRAPH_REFRESH_ON_STARTUP = "0"',
@@ -536,7 +556,8 @@ describe('codegraph-adapter-context CLI', () => {
   it('prefers Codex MCP config over a stale VS Code MCP config for fresh adapter fallback', () => {
     const projectRoot = makeConfigBackedAdapterProject();
     const fakeCodegraph = makeContextReturningFakeCodegraph();
-    const codexConfigPath = writeCodexConfig(projectRoot, fakeCodegraph, process.execPath);
+    const configuredHostRoot = path.join(projectRoot, 'configured-host-root');
+    const codexConfigPath = writeCodexConfig(projectRoot, fakeCodegraph, process.execPath, configuredHostRoot, configuredHostRoot);
     const logRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-codegraph-adapter-context-codex-config-log-'));
     tempRoots.push(logRoot);
     const logPath = path.join(logRoot, 'wrapper.log');
@@ -556,11 +577,179 @@ describe('codegraph-adapter-context CLI', () => {
     const summary = JSON.parse(result.stdout) as {
       ok?: boolean;
       contextText?: string;
+      projectRoot?: string;
+      wrapperScriptPath?: string;
+      configuredWrapperScriptPath?: string | null;
+      configContractOverride?: boolean;
+      configContractMismatches?: Array<{ field?: string }>;
+      exactRootEvidence?: {
+        rootIdentityVerified?: boolean;
+        overlaySelectorPathVerified?: boolean;
+        wrapperScriptPath?: string;
+        overlaySelectorPath?: string;
+        overlaySelectorExists?: boolean;
+      };
+      diagnostics?: { overlayUnavailable?: boolean };
     };
     expect(summary.ok).toBe(true);
+    expect(summary.projectRoot).toBe(projectRoot);
+    expect(summary.wrapperScriptPath).toBe(path.join(projectRoot, 'scripts', 'codegraph-nanoflow-mcp-stdio.cjs'));
+    expect(summary.configuredWrapperScriptPath).toBe(
+      path.join(configuredHostRoot, 'scripts', 'codegraph-nanoflow-mcp-stdio.cjs'),
+    );
+    expect(summary.exactRootEvidence?.rootIdentityVerified).toBe(true);
+    expect(summary.exactRootEvidence?.overlaySelectorPathVerified).toBe(true);
+    expect(summary.exactRootEvidence?.wrapperScriptPath).toBe(summary.wrapperScriptPath);
+    expect(summary.exactRootEvidence?.overlaySelectorPath).toBe(
+      path.join(projectRoot, '.codegraph', 'nanoflow-generations', 'CURRENT.json'),
+    );
     expect(summary.contextText).toContain('## Exploration: ProjectShellComponent');
-    expect(fs.readFileSync(logPath, 'utf8')).toContain('"CODEGRAPH_NO_WATCH":"1"');
+    expect(summary.diagnostics?.overlayUnavailable).toBe(false);
+    const logText = fs.readFileSync(logPath, 'utf8');
+    expect(logText).toContain('"CODEGRAPH_NO_DAEMON":"1"');
+    expect(logText).toContain('"CODEGRAPH_NO_WATCH":"1"');
+    expect(logText).toContain('"NANOFLOW_CODEGRAPH_ALLOW_DAEMON":"0"');
+    const wrapperStartLine = logText
+      .split(/\r?\n/)
+      .find(line => line.includes('"event":"wrapper.start"'));
+    expect(wrapperStartLine).toBeDefined();
+    const wrapperStart = JSON.parse(wrapperStartLine ?? '{}') as {
+      projectRoot?: string;
+      scriptPath?: string;
+      codegraphArgs?: string[];
+      overlayFile?: { path?: string };
+      runtimeTopology?: {
+        mode?: string;
+        watcherOwnership?: string;
+        fileLockContentionRisk?: string;
+      };
+    };
+    expect(wrapperStart.projectRoot).toBe(projectRoot);
+    expect(wrapperStart.scriptPath).toBe(path.join(projectRoot, 'scripts', 'codegraph-nanoflow-mcp-stdio.cjs'));
+    expect(wrapperStart.codegraphArgs).toEqual(expect.arrayContaining(['--path', projectRoot]));
+    const overlayStartLine = logText
+      .split(/\r?\n/)
+      .find(line => line.includes('"event":"overlay.query.start"'));
+    expect(overlayStartLine).toBeDefined();
+    const overlayStart = JSON.parse(overlayStartLine ?? '{}') as { overlayFile?: { path?: string } };
+    expect(overlayStart.overlayFile?.path).toBe(
+      path.join(projectRoot, '.codegraph', 'nanoflow-generations', 'CURRENT.json'),
+    );
+    expect(wrapperStart.runtimeTopology).toMatchObject({
+      mode: 'direct-session',
+      watcherOwnership: 'disabled-manual-sync',
+      fileLockContentionRisk: 'none-no-watcher',
+    });
   }, 60_000);
+
+  it('uses the requested root when user Codex config targets another checkout', () => {
+    const projectRoot = makeConfigBackedAdapterProject();
+    const fakeCodegraph = makeContextReturningFakeCodegraph();
+    const configuredHostRoot = path.join(projectRoot, 'configured-host-root');
+    const codexConfigPath = writeCodexConfig(projectRoot, fakeCodegraph, process.execPath, configuredHostRoot, configuredHostRoot);
+    const resolverScript = [
+      `const { resolveWrapperInvocation } = require(${JSON.stringify(adapterContextScriptPath)});`,
+      `const invocation = resolveWrapperInvocation({ root: ${JSON.stringify(projectRoot)}, codegraphTarget: null });`,
+      'process.stdout.write(JSON.stringify(invocation));',
+    ].join(' ');
+    const result = spawnSync(process.execPath, ['-e', resolverScript], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        CODEX_HOME: path.dirname(codexConfigPath),
+        NANOFLOW_CODEGRAPH_CODEX_CONFIG: '',
+      },
+    });
+
+    expect(result.status, result.stderr).toBe(0);
+    const invocation = JSON.parse(result.stdout) as {
+      codegraphArgs?: string[];
+      wrapperScriptPath?: string;
+      configuredWrapperScriptPath?: string;
+      configScope?: string;
+      configPath?: string;
+      configContractOverride?: boolean;
+      configContractMismatches?: Array<{ field?: string }>;
+    };
+    expect(invocation.configScope).toBe('user');
+    expect(invocation.configuredWrapperScriptPath).toBe(
+      path.join(configuredHostRoot, 'scripts', 'codegraph-nanoflow-mcp-stdio.cjs'),
+    );
+    expect(invocation.wrapperScriptPath).toBe(
+      path.join(projectRoot, 'scripts', 'codegraph-nanoflow-mcp-stdio.cjs'),
+    );
+    expect(invocation.configPath).toBe(codexConfigPath);
+    expect(invocation.configContractOverride).toBe(true);
+    expect(invocation.configContractMismatches).toEqual(expect.arrayContaining([
+      expect.objectContaining({ field: 'wrapperScriptPath' }),
+      expect.objectContaining({ field: 'codegraphArgs.path' }),
+    ]));
+    expect(invocation.codegraphArgs).toEqual([
+      'serve', '--mcp', '--path', projectRoot,
+    ]);
+  });
+
+  it('fails closed when the requested root has no local CodeGraph wrapper', () => {
+    const projectRoot = makeConfigBackedAdapterProject();
+    const wrapperPath = path.join(projectRoot, 'scripts', 'codegraph-nanoflow-mcp-stdio.cjs');
+    fs.rmSync(wrapperPath);
+    const configuredHostRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-codegraph-configured-host-'));
+    tempRoots.push(configuredHostRoot);
+    fs.mkdirSync(path.join(configuredHostRoot, 'scripts'), { recursive: true });
+    const configuredWrapperPath = path.join(configuredHostRoot, 'scripts', 'codegraph-nanoflow-mcp-stdio.cjs');
+    fs.copyFileSync(path.join(repoRoot, 'scripts', 'codegraph-nanoflow-mcp-stdio.cjs'), configuredWrapperPath);
+    const fakeCodegraph = makeContextReturningFakeCodegraph();
+    const codexConfigPath = writeCodexConfig(
+      projectRoot,
+      fakeCodegraph,
+      process.execPath,
+      configuredHostRoot,
+      configuredHostRoot,
+    );
+    const result = runAdapterContext({
+      projectRoot,
+      query: 'ProjectShellComponent',
+      env: { NANOFLOW_CODEGRAPH_CODEX_CONFIG: codexConfigPath },
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('Exact-root CodeGraph wrapper is unavailable');
+    expect(result.stderr).toContain(wrapperPath);
+    expect(result.stdout).toBe('');
+    expect(fs.existsSync(configuredWrapperPath)).toBe(true);
+  });
+
+  it('rejects runtime wrapper evidence from another checkout even when the CodeGraph path matches', () => {
+    const projectRoot = makeConfigBackedAdapterProject();
+    const logRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-codegraph-exact-root-evidence-'));
+    tempRoots.push(logRoot);
+    const logPath = path.join(logRoot, 'wrapper.log');
+    const localWrapperPath = path.join(projectRoot, 'scripts', 'codegraph-nanoflow-mcp-stdio.cjs');
+    const mainWrapperPath = path.join(repoRoot, 'scripts', 'codegraph-nanoflow-mcp-stdio.cjs');
+    const wrapperStart = {
+      event: 'wrapper.start',
+      scriptPath: mainWrapperPath,
+      projectRoot,
+      codegraphArgs: ['serve', '--mcp', '--path', projectRoot],
+    };
+    fs.writeFileSync(logPath, JSON.stringify(wrapperStart));
+
+    expect(() => verifyExactRootWrapperEvidence(logPath, projectRoot, localWrapperPath))
+      .toThrow(/Exact-root wrapper mismatch/);
+
+    fs.writeFileSync(logPath, JSON.stringify({ ...wrapperStart, scriptPath: localWrapperPath, codegraphArgs: ['serve', '--mcp', '--path', repoRoot] }));
+    expect(() => verifyExactRootWrapperEvidence(logPath, projectRoot, localWrapperPath))
+      .toThrow(/Exact-root CodeGraph path mismatch/);
+
+    fs.writeFileSync(logPath, JSON.stringify({ ...wrapperStart, scriptPath: localWrapperPath }));
+    expect(verifyExactRootWrapperEvidence(logPath, projectRoot, localWrapperPath)).toEqual({
+      requestedRoot: projectRoot,
+      wrapperScriptPath: localWrapperPath,
+      projectRoot,
+      codegraphRoot: projectRoot,
+    });
+  });
 
   it('passes the requested project root to the MCP log analyzer', () => {
     const projectRoot = makeConfigBackedAdapterProject();
