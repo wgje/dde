@@ -48,10 +48,11 @@ function evaluateDbPushPreflight(args, options = {}) {
     reason: 'explicit-target-required',
   };
   const configuredRef = String(options.configuredProjectRef || '').trim();
+  const expectedProjectRef = String(options.expectedProjectRef || '').trim();
   const linkedRef = String(options.linkedProjectRef || '').trim();
   const targetSha = String(options.targetSha || '').trim();
   const currentTargetSha = String(options.currentTargetSha || '').trim();
-  if (!configuredRef || !linkedRef || configuredRef !== linkedRef) {
+  if (!configuredRef || !linkedRef || configuredRef !== linkedRef || (expectedProjectRef && configuredRef !== expectedProjectRef)) {
     return { ok: false, runGuard: false, reason: 'project-ref-mismatch' };
   }
   if (!/^[a-f0-9]{40}$/i.test(targetSha)) {
@@ -69,9 +70,19 @@ function evaluateDbPushPreflight(args, options = {}) {
     || String(ledger.targetOriginMain).toLowerCase() !== targetSha.toLowerCase()) {
     return { ok: false, runGuard: false, reason: 'ledger-snapshot-target-mismatch' };
   }
+  const expectedGitSha = String(options.expectedGitSha || ledger.expectedGitSha || '').trim();
+  if (!/^[a-f0-9]{40}$/i.test(expectedGitSha)
+    || expectedGitSha.toLowerCase() !== targetSha.toLowerCase()) {
+    return { ok: false, runGuard: false, reason: 'ledger-expected-target-sha-mismatch' };
+  }
   const freshnessReason = validateLedgerFreshness(ledger, options.nowUtc || new Date().toISOString());
   if (freshnessReason) return { ok: false, runGuard: false, reason: freshnessReason };
   return { ok: true, runGuard: true };
+}
+
+function readGitHead(root, executeGit = spawnSync) {
+  const result = executeGit('git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8' });
+  return result.status === 0 ? String(result.stdout || '').trim() : '';
 }
 
 function loadLedgerSnapshots(root) {
@@ -89,15 +100,18 @@ function loadLedgerSnapshots(root) {
     if (!exactAliasSet) {
       return { ok: false, ledgers: [], reason: 'known-alias-chain-missing' };
     }
-    return { ok: true, ledgers: [ledger] };
+    return { ok: true, ledgers: [ledger], expectedProjectRef: aliases.expectedProjectRef || ledger.projectRef, expectedGitSha: aliases.expectedGitSha || ledger.expectedGitSha };
   } catch {
     return { ok: false, ledgers: [], reason: 'ledger-or-alias-snapshot-unavailable' };
   }
 }
 
-function runMigrationPreflight(root) {
+function runMigrationPreflight(root, options = {}) {
   const guard = path.resolve(__dirname, 'validate-migration-dry-run-rollback.cjs');
-  const result = spawnSync(process.execPath, [guard, '--root', root], {
+  const args = [guard, '--root', root];
+  if (options.nowUtc) args.push('--now', options.nowUtc);
+  if (options.currentTargetSha) args.push('--current-target-sha', options.currentTargetSha);
+  const result = spawnSync(process.execPath, args, {
     cwd: root,
     encoding: 'utf8',
     env: process.env,
@@ -195,6 +209,7 @@ function executeCli(args = process.argv.slice(2), dependencies = {}) {
   const readLinkedRef = dependencies.readLinkedProjectRef || readLinkedProjectRef;
   const loadLedgers = dependencies.loadLedgerSnapshots || loadLedgerSnapshots;
   const runPreflight = dependencies.runMigrationPreflight || runMigrationPreflight;
+  const readHead = dependencies.readGitHead || readGitHead;
   const logError = dependencies.logError || ((message) => console.error(message));
 
   require('dotenv').config({ path: path.resolve(__dirname, '../.env.local'), quiet: true });
@@ -211,12 +226,15 @@ function executeCli(args = process.argv.slice(2), dependencies = {}) {
   }
 
   const ledgerState = loadLedgers(root);
+  const nowUtc = env.NANOFLOW_PREFLIGHT_NOW_UTC || new Date().toISOString();
+  const currentTargetSha = env.NANOFLOW_CURRENT_TARGET_SHA || readHead(root);
   const pushPreflight = evaluateDbPushPreflight(args, {
+    expectedProjectRef: ledgerState.expectedProjectRef,
     configuredProjectRef: projectRef,
     linkedProjectRef,
     targetSha: env.NANOFLOW_PUSH_TARGET_SHA,
-    currentTargetSha: env.NANOFLOW_CURRENT_TARGET_SHA || env.NANOFLOW_PUSH_TARGET_SHA,
-    nowUtc: env.NANOFLOW_PREFLIGHT_NOW_UTC,
+    currentTargetSha,
+    nowUtc,
     ledgerSnapshots: ledgerState.ledgers,
   });
   if (!pushPreflight.ok) {
@@ -225,7 +243,7 @@ function executeCli(args = process.argv.slice(2), dependencies = {}) {
     return { exitCode: 2, spawned: false, reason: pushPreflight.reason || ledgerState.reason || 'db-push-preflight-failed' };
   }
   if (pushPreflight.runGuard) {
-    const guardResult = runPreflight(root);
+    const guardResult = runPreflight(root, { nowUtc, currentTargetSha });
     if (!guardResult.ok) {
       logError('Supabase db push blocked by migration preflight.');
       if (guardResult.stderr) logError(guardResult.stderr.trim());

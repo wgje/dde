@@ -255,23 +255,64 @@ describe('Supabase CLI project safety', () => {
     expect(spawnCalls).toBe(0);
   });
 
-  it('accepts freshness exactly at the max-age boundary and proceeds to the executor', () => {
+  it.each([
+    ['missing expectedGitSha', undefined],
+    ['wrong expectedGitSha', 'b'.repeat(40)],
+  ])('executeCli does not spawn on %s', (_case, expectedGitSha) => {
     const safety = loadSafetyModule();
     if (!safety) return;
     const projectRef = 'abcdefghijklmnopqrst';
     const targetSha = 'a'.repeat(40);
     let spawnCalls = 0;
     const result = safety.executeCli(['db', 'push', '--linked'], {
+      env: {
+        SUPABASE_PROJECT_REF: projectRef,
+        NANOFLOW_PUSH_TARGET_SHA: targetSha,
+        NANOFLOW_CURRENT_TARGET_SHA: targetSha,
+        NANOFLOW_PREFLIGHT_NOW_UTC: '2026-11-22T08:21:00Z',
+      },
+      root: process.cwd(),
+      readLinkedProjectRef: () => projectRef,
+      loadLedgerSnapshots: () => ({
+        ok: true,
+        ledgers: [{
+          projectRef,
+          targetOriginMain: targetSha,
+          capturedAtUtc: '2026-11-22T08:20:00Z',
+          maxAgeSeconds: 60,
+          rows: [],
+          sourceEvidence: { tool: 'mcp__supabase.execute_sql', queryId: 'q', query: 'SELECT', resultRowCount: 0 },
+        }],
+        expectedGitSha,
+        expectedProjectRef: projectRef,
+      }),
+      invokeCliCommand: () => { spawnCalls += 1; return { status: 0 }; },
+      runMigrationPreflight: () => ({ ok: true, status: 0 }),
+      logError: () => undefined,
+    });
+    expect(result).toMatchObject({ exitCode: 2, spawned: false, reason: 'ledger-expected-target-sha-mismatch' });
+    expect(spawnCalls).toBe(0);
+  });
+
+  it('accepts freshness exactly at the max-age boundary and proceeds to the executor', () => {
+    const safety = loadSafetyModule();
+    if (!safety) return;
+    const projectRef = 'abcdefghijklmnopqrst';
+    const targetSha = 'a'.repeat(40);
+    let spawnCalls = 0;
+    let preflightArgs: unknown;
+    const result = safety.executeCli(['db', 'push', '--linked'], {
       env: { SUPABASE_PROJECT_REF: projectRef, NANOFLOW_PUSH_TARGET_SHA: targetSha, NANOFLOW_CURRENT_TARGET_SHA: targetSha, NANOFLOW_PREFLIGHT_NOW_UTC: '2026-11-22T08:21:00Z' },
       root: process.cwd(),
       readLinkedProjectRef: () => projectRef,
       loadLedgerSnapshots: () => ({ ok: true, ledgers: [{ projectRef, targetOriginMain: targetSha, expectedGitSha: targetSha, capturedAtUtc: '2026-11-22T08:20:00Z', maxAgeSeconds: 60, rows: [], sourceEvidence: { tool: 'mcp__supabase.execute_sql', queryId: 'q', query: 'SELECT', resultRowCount: 0 } }] }),
       invokeCliCommand: () => { spawnCalls += 1; return { status: 0 }; },
-      runMigrationPreflight: () => ({ ok: true, status: 0 }),
+      runMigrationPreflight: (_root: string, options: unknown) => { preflightArgs = options; return { ok: true, status: 0 }; },
       logError: () => undefined,
     });
     expect(result).toEqual({ exitCode: 0, spawned: true });
     expect(spawnCalls).toBe(1);
+    expect(preflightArgs).toEqual({ nowUtc: '2026-11-22T08:21:00Z', currentTargetSha: targetSha });
   });
 
 });
