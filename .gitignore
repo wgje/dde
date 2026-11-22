@@ -104,3 +104,6 @@ supabase/.temp/
 
 .vercel
 .env*.local
+
+# Local quota monitor snapshots and AI analysis exports
+.quota-monitor/
