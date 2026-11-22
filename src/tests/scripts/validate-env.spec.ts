@@ -256,4 +256,42 @@ describe('validate-env Supabase API key validation', () => {
     expect(result.stdout).toContain('Supabase browser key 定义重复');
     expect(`${result.stdout}${result.stderr}`).not.toContain('hidden_duplicate');
   }, 10_000);
+
+  it('keeps the Cloudflare Pages production and preview identity contract executable', () => {
+    const contract = JSON.parse(fs.readFileSync(
+      path.join(repoRoot, 'scripts/cloudflare-pages-version-identity-contract.json'),
+      'utf8',
+    )) as {
+      buildCommand: string;
+      forbiddenFallbackValues: string[];
+      environments: Record<string, Record<string, string>>;
+    };
+    expect(contract.buildCommand).toBe('npm run build:strict');
+    expect(contract.forbiddenFallbackValues).toEqual(expect.arrayContaining(['local', 'development']));
+    expect(contract.environments.production).toEqual({
+      NG_APP_SENTRY_ENVIRONMENT: 'production',
+      NG_APP_DEPLOYMENT_TARGET: 'production',
+      NG_APP_SUPABASE_PROJECT_ALIAS: 'production',
+    });
+    expect(contract.environments.preview).toEqual({
+      NG_APP_SENTRY_ENVIRONMENT: 'preview',
+      NG_APP_DEPLOYMENT_TARGET: 'preview',
+      NG_APP_SUPABASE_PROJECT_ALIAS: 'preview',
+    });
+  }, 10_000);
+
+  it('accepts the contract identity end to end before version output generation', () => {
+    const contract = JSON.parse(fs.readFileSync(
+      path.join(repoRoot, 'scripts/cloudflare-pages-version-identity-contract.json'),
+      'utf8',
+    )) as { environments: Record<string, Record<string, string>> };
+    const result = runValidateEnv({
+      NG_APP_SUPABASE_ANON_KEY: fixtureKey,
+      ...contract.environments.production,
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('环境变量验证通过');
+  }, 10_000);
+
 });

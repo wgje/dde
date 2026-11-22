@@ -382,4 +382,55 @@ describe('generate-version-json git provenance', () => {
     expect(bytes.endsWith('\n')).toBe(true);
     expect(bytes.endsWith('\n\n')).toBe(false);
   });
+
+  it('maps the reviewed Pages production identity contract into version.json', () => {
+    const fixture = makeFixture();
+    const contract = JSON.parse(fs.readFileSync(
+      path.join(repoRoot, 'scripts/cloudflare-pages-version-identity-contract.json'),
+      'utf8',
+    )) as { environments: Record<string, Record<string, string>> };
+    const identity = contract.environments.production;
+    const result = runFixture(fixture, {
+      GITHUB_SHA: sha40,
+      NODE_ENV: 'production',
+      ...identity,
+    });
+
+    expect(result.status).toBe(0);
+    const version = JSON.parse(fs.readFileSync(fixture.output, 'utf8'));
+    expect(version).toMatchObject({
+      gitSha: sha40.toLowerCase(),
+      environment: identity.NG_APP_SENTRY_ENVIRONMENT,
+      deploymentTarget: identity.NG_APP_DEPLOYMENT_TARGET,
+      supabaseProjectAlias: identity.NG_APP_SUPABASE_PROJECT_ALIAS,
+    });
+  });
+
+  it('does not replace an existing output when production identity is invalid', () => {
+    const fixture = makeFixture();
+    const validateScript = path.join(fixture.root, 'scripts', 'validate-env.cjs');
+    const validateLib = path.join(fixture.root, 'scripts', 'lib', 'supabase-browser-key-safety.cjs');
+    fs.mkdirSync(path.dirname(validateLib), { recursive: true });
+    fs.copyFileSync(path.join(repoRoot, 'scripts', 'validate-env.cjs'), validateScript);
+    fs.copyFileSync(path.join(repoRoot, 'scripts', 'lib', 'supabase-browser-key-safety.cjs'), validateLib);
+    const result = spawnSync(process.execPath, [
+      validateScript,
+      '--production',
+    ], {
+      cwd: fixture.root,
+      env: childEnv(fixture, {
+        NG_APP_SUPABASE_URL: 'https://abcdefghijklmnopqrst.supabase.co',
+        NG_APP_SUPABASE_ANON_KEY: 'sb_publishable_testkeyforbrowserbuild_12345678',
+        NG_APP_SENTRY_ENVIRONMENT: 'development',
+        NG_APP_DEPLOYMENT_TARGET: 'local',
+        NG_APP_SUPABASE_PROJECT_ALIAS: 'local',
+      }),
+      encoding: 'utf8',
+      timeout: 10_000,
+    });
+
+    expect(result.status).toBe(1);
+    expect(fs.readFileSync(fixture.output)).toEqual(previousVersion);
+  });
+
 });
