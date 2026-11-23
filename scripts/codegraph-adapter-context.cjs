@@ -133,6 +133,38 @@ function readDaemonIdentity(root, environment = process.env) {
   }
 }
 
+function readProcessStartIdentity(pid) {
+  if (process.platform === 'win32') {
+    try {
+      const result = spawnSync(
+        'powershell.exe',
+        ['-NoProfile', '-NonInteractive', '-Command', `(Get-Process -Id ${Number(pid)} -ErrorAction Stop).StartTime.ToUniversalTime().Ticks`],
+        { encoding: 'utf8', windowsHide: true, timeout: 5_000 },
+      );
+      if (result.status !== 0) return { ok: false, reason: 'process-start-unavailable' };
+      const ticks = Number(String(result.stdout || '').trim());
+      if (!Number.isSafeInteger(ticks) || ticks <= 0) return { ok: false, reason: 'process-start-invalid' };
+      return { ok: true, startedAtMs: ticks / 10_000, source: 'Get-Process.StartTime' };
+    } catch {
+      return { ok: false, reason: 'process-start-unavailable' };
+    }
+  }
+  if (process.platform === 'linux') {
+    try {
+      const stat = fs.readFileSync(`/proc/${Number(pid)}/stat`, 'utf8');
+      const startTicks = Number(stat.slice(stat.lastIndexOf(')') + 2).split(/\s+/)[19]);
+      if (!Number.isFinite(startTicks)) return { ok: false, reason: 'process-start-invalid' };
+      const uptimeMs = Number(fs.readFileSync('/proc/uptime', 'utf8').split(/\s+/)[0]) * 1_000;
+      const nowMs = Date.now();
+      const bootMs = nowMs - uptimeMs;
+      return { ok: true, startedAtMs: bootMs + startTicks * 10, source: 'proc.stat' };
+    } catch {
+      return { ok: false, reason: 'process-start-unavailable' };
+    }
+  }
+  return { ok: false, reason: 'process-start-unsupported' };
+}
+
 function readActiveCodegraphWriterLock(root, dependencies = {}) {
   const rootPath = path.resolve(root);
   const environment = dependencies.environment || process.env;
@@ -140,6 +172,7 @@ function readActiveCodegraphWriterLock(root, dependencies = {}) {
   const isProcessAlive = dependencies.isProcessAlive || (pid => {
     try { process.kill(pid, 0); return true; } catch { return false; }
   });
+  const readProcessStart = dependencies.readProcessStartIdentity || readProcessStartIdentity;
   let value;
   try {
     value = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
@@ -166,6 +199,20 @@ function readActiveCodegraphWriterLock(root, dependencies = {}) {
   const daemonStartMatches = Number.isFinite(daemonStartDeltaMs) && daemonStartDeltaMs <= 10_000;
   if (daemon.pid !== pid || !daemonStartMatches) {
     return { active: false, path: lockPath, pid, mode, reason: 'daemon-identity-mismatch', daemon, daemonStartDeltaMs };
+  }
+  const processIdentity = readProcessStart(pid);
+  const processStartMatches = processIdentity.ok
+    && Math.abs(processIdentity.startedAtMs - daemon.startedAt) <= 10_000;
+  if (!processStartMatches) {
+    return {
+      active: false,
+      path: lockPath,
+      pid,
+      mode,
+      reason: processIdentity.ok ? 'daemon-process-start-mismatch' : processIdentity.reason,
+      daemon,
+      processIdentity,
+    };
   }
   const expectedSockets = codegraphSocketCandidates(rootPath, environment);
   if (!expectedSockets.includes(daemon.socketPath)) {

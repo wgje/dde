@@ -1049,17 +1049,55 @@ describe('codegraph-adapter-context CLI', () => {
       return root;
     }
 
-    it('reuses only a writer whose daemon identity and start time match the exact root', () => {
+    it('reuses only a writer whose daemon identity and OS process start time match the exact root', () => {
       const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-codegraph-writer-'));
       tempRoots.push(root);
       fs.mkdirSync(path.join(root, '.codegraph'), { recursive: true });
       const socketPath = daemonSocketFor(root);
       fs.writeFileSync(path.join(root, '.codegraph', 'writer.pid'), JSON.stringify({ pid: 9001, mode: 'daemon', startedAt: 1760000000000, ready: true }));
       fs.writeFileSync(path.join(root, '.codegraph', 'daemon.pid'), JSON.stringify({ pid: 9001, version: '1.6.2', socketPath, startedAt: 1760000000016 }));
-      expect(resolveAdapterFallbackRuntime(root, { isProcessAlive: () => true })).toMatchObject({
+      expect(resolveAdapterFallbackRuntime(root, {
+        isProcessAlive: () => true,
+        readProcessStartIdentity: () => ({ ok: true, startedAtMs: 1760000000020, source: 'test' }),
+      })).toMatchObject({
         mode: 'shared-daemon-proxy',
         env: { CODEGRAPH_NO_DAEMON: '0', CODEGRAPH_NO_WATCH: '0' },
       });
+    });
+
+    it('rejects a live reused PID whose real process start identity differs from both lock files', () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-codegraph-writer-'));
+      tempRoots.push(root);
+      fs.mkdirSync(path.join(root, '.codegraph'), { recursive: true });
+      const socketPath = daemonSocketFor(root);
+      fs.writeFileSync(path.join(root, '.codegraph', 'writer.pid'), JSON.stringify({ pid: 9008, mode: 'daemon', startedAt: 1760000000008, ready: true }));
+      fs.writeFileSync(path.join(root, '.codegraph', 'daemon.pid'), JSON.stringify({ pid: 9008, version: '1.6.2', socketPath, startedAt: 1760000000012 }));
+      const dependencies = {
+        isProcessAlive: () => true,
+        readProcessStartIdentity: () => ({ ok: true, startedAtMs: 1760000100000, source: 'test' }),
+      };
+      expect(readActiveCodegraphWriterLock(root, dependencies)).toMatchObject({
+        active: false,
+        reason: 'daemon-process-start-mismatch',
+        processIdentity: { ok: true, startedAtMs: 1760000100000 },
+      });
+      expect(resolveAdapterFallbackRuntime(root, dependencies)).toMatchObject({ mode: 'direct-session' });
+    });
+
+    it('fails closed when the OS process start identity cannot be resolved', () => {
+      const root = makeWriterRoot(
+        { pid: 9009, mode: 'daemon', startedAt: 1760000000009, ready: true },
+        { pid: 9009, version: '1.6.2', socketPath: 'pipe', startedAt: 1760000000009 },
+      );
+      const dependencies = {
+        isProcessAlive: () => true,
+        readProcessStartIdentity: () => ({ ok: false, reason: 'process-start-unavailable' }),
+      };
+      expect(readActiveCodegraphWriterLock(root, dependencies)).toMatchObject({
+        active: false,
+        reason: 'process-start-unavailable',
+      });
+      expect(resolveAdapterFallbackRuntime(root, dependencies)).toMatchObject({ mode: 'direct-session' });
     });
 
     it.each([
@@ -1103,7 +1141,7 @@ describe('codegraph-adapter-context CLI', () => {
         socketPath: daemonSocketFor(root, { CODEGRAPH_DIR: '.codegraph-ci' }),
         startedAt: 1760000000010,
       }));
-      expect(readActiveCodegraphWriterLock(root, { environment: { CODEGRAPH_DIR: '.codegraph-ci' }, isProcessAlive: () => true })).toMatchObject({ active: true });
+      expect(readActiveCodegraphWriterLock(root, { environment: { CODEGRAPH_DIR: '.codegraph-ci' }, isProcessAlive: () => true, readProcessStartIdentity: () => ({ ok: true, startedAtMs: 1760000000020, source: 'test' }) })).toMatchObject({ active: true });
     });
     it('rejects copied lock files whose daemon socket belongs to another root', () => {
       const source = makeWriterRoot(undefined, undefined);
@@ -1115,11 +1153,11 @@ describe('codegraph-adapter-context CLI', () => {
       fs.mkdirSync(path.join(unrelated, '.codegraph'), { recursive: true });
       fs.copyFileSync(path.join(source, '.codegraph', 'writer.pid'), path.join(unrelated, '.codegraph', 'writer.pid'));
       fs.copyFileSync(path.join(source, '.codegraph', 'daemon.pid'), path.join(unrelated, '.codegraph', 'daemon.pid'));
-      expect(readActiveCodegraphWriterLock(unrelated, { isProcessAlive: () => true })).toMatchObject({
+      expect(readActiveCodegraphWriterLock(unrelated, { isProcessAlive: () => true, readProcessStartIdentity: () => ({ ok: true, startedAtMs: 1760000000020, source: 'test' }) })).toMatchObject({
         active: false,
         reason: 'daemon-root-mismatch',
       });
-      expect(resolveAdapterFallbackRuntime(unrelated, { isProcessAlive: () => true })).toMatchObject({ mode: 'direct-session' });
+      expect(resolveAdapterFallbackRuntime(unrelated, { isProcessAlive: () => true, readProcessStartIdentity: () => ({ ok: true, startedAtMs: 1760000000020, source: 'test' }) })).toMatchObject({ mode: 'direct-session' });
     });
     it('keeps daemon and watch disabled for stale writer locks', () => {
       const root = makeWriterRoot(
