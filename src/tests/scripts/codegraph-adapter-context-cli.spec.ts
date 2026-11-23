@@ -1024,6 +1024,116 @@ describe('codegraph-adapter-context CLI', () => {
     expect(logText).not.toContain('"event":"nanoflow.context.timeout"');
   }, 60_000);
 
+  describe('runtime writer identity and context quality', () => {
+    const { readActiveCodegraphWriterLock, resolveAdapterFallbackRuntime } = requireCjs(adapterContextScriptPath) as {
+      readActiveCodegraphWriterLock(root: string, dependencies?: Record<string, unknown>): Record<string, unknown>;
+      resolveAdapterFallbackRuntime(root: string, dependencies?: Record<string, unknown>): { mode: string; writerLock: Record<string, unknown>; env: Record<string, string> };
+    };
+
+    function daemonSocketFor(root: string, environment = process.env): string {
+      const crypto = require('node:crypto') as typeof import('node:crypto');
+      const canonical = fs.realpathSync.native(root).toLowerCase();
+      const hash = crypto.createHash('sha256').update(canonical).digest('hex').slice(0, 16);
+      const rawDir = String(environment.CODEGRAPH_DIR || '').trim();
+      const dataDir = rawDir && !rawDir.includes('/') && !rawDir.includes('\\') && !rawDir.includes('..') && rawDir !== '.' ? rawDir : '.codegraph';
+      return process.platform === 'win32'
+        ? `\\\\.\\pipe\\codegraph-${hash}`
+        : path.join(canonical, dataDir, 'daemon.sock');
+    }
+    function makeWriterRoot(writer: unknown, daemon: unknown): string {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-codegraph-writer-'));
+      tempRoots.push(root);
+      fs.mkdirSync(path.join(root, '.codegraph'), { recursive: true });
+      if (writer !== undefined) fs.writeFileSync(path.join(root, '.codegraph', 'writer.pid'), JSON.stringify(writer));
+      if (daemon !== undefined) fs.writeFileSync(path.join(root, '.codegraph', 'daemon.pid'), JSON.stringify(daemon));
+      return root;
+    }
+
+    it('reuses only a writer whose daemon identity and start time match the exact root', () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-codegraph-writer-'));
+      tempRoots.push(root);
+      fs.mkdirSync(path.join(root, '.codegraph'), { recursive: true });
+      const socketPath = daemonSocketFor(root);
+      fs.writeFileSync(path.join(root, '.codegraph', 'writer.pid'), JSON.stringify({ pid: 9001, mode: 'daemon', startedAt: 1760000000000, ready: true }));
+      fs.writeFileSync(path.join(root, '.codegraph', 'daemon.pid'), JSON.stringify({ pid: 9001, version: '1.6.2', socketPath, startedAt: 1760000000016 }));
+      expect(resolveAdapterFallbackRuntime(root, { isProcessAlive: () => true })).toMatchObject({
+        mode: 'shared-daemon-proxy',
+        env: { CODEGRAPH_NO_DAEMON: '0', CODEGRAPH_NO_WATCH: '0' },
+      });
+    });
+
+    it.each([
+      ['live unrelated PID without daemon identity', { pid: 9002, mode: 'daemon', startedAt: 1760000000001, ready: true }, undefined],
+      ['direct writer mode', { pid: 9003, mode: 'direct', startedAt: 1760000000002, ready: true }, { pid: 9003, version: '1.6.2', socketPath: 'pipe', startedAt: 1760000000002 }],
+      ['pid/start mismatch', { pid: 9004, mode: 'daemon', startedAt: 1760000000003, ready: true }, { pid: 9005, version: '1.6.2', socketPath: 'pipe', startedAt: 1760000000003 }],
+    ])('uses direct-session for %s', (_label, writer, daemon) => {
+      const root = makeWriterRoot(writer, daemon);
+      expect(resolveAdapterFallbackRuntime(root, { isProcessAlive: () => true })).toMatchObject({ mode: 'direct-session' });
+      expect(readActiveCodegraphWriterLock(root, { isProcessAlive: () => true }).active).toBe(false);
+    });
+
+    it('requires WSL detection and accepts the exact Windows drive mount root', () => {
+      const { codegraphDataDirNameFor } = requireCjs(adapterContextScriptPath) as {
+        codegraphDataDirNameFor(
+          root: string,
+          environment?: Record<string, string>,
+          platform?: NodeJS.Platform,
+          readProcVersion?: () => string,
+        ): string;
+      };
+      expect(codegraphDataDirNameFor('/mnt/c/project', {}, 'linux', () => 'Linux generic')).toBe('.codegraph');
+      expect(codegraphDataDirNameFor('/mnt/c', { WSL_DISTRO_NAME: 'Ubuntu' }, 'linux')).toBe('.codegraph-wsl');
+      expect(codegraphDataDirNameFor('/mnt/c/project', { WSL_INTEROP: 'wsl' }, 'linux')).toBe('.codegraph-wsl');
+      expect(codegraphDataDirNameFor('/project', { WSL_DISTRO_NAME: 'Ubuntu' }, 'linux')).toBe('.codegraph');
+    });
+    it('uses CODEGRAPH_DIR for lock and POSIX socket resolution', () => {
+      const { codegraphDataDirNameFor } = requireCjs(adapterContextScriptPath) as {
+        codegraphDataDirNameFor(root: string, environment?: Record<string, string>): string;
+      };
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-codegraph-dir-override-'));
+      tempRoots.push(root);
+      expect(codegraphDataDirNameFor(root, { CODEGRAPH_DIR: '.codegraph-ci' })).toBe('.codegraph-ci');
+      expect(codegraphDataDirNameFor(root, { CODEGRAPH_DIR: 'bad/path' })).toBe('.codegraph');
+      const dir = path.join(root, '.codegraph-ci');
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, 'writer.pid'), JSON.stringify({ pid: 9010, mode: 'daemon', startedAt: 1760000000000, ready: true }));
+      fs.writeFileSync(path.join(dir, 'daemon.pid'), JSON.stringify({
+        pid: 9010,
+        version: '1.6.2',
+        socketPath: daemonSocketFor(root, { CODEGRAPH_DIR: '.codegraph-ci' }),
+        startedAt: 1760000000010,
+      }));
+      expect(readActiveCodegraphWriterLock(root, { environment: { CODEGRAPH_DIR: '.codegraph-ci' }, isProcessAlive: () => true })).toMatchObject({ active: true });
+    });
+    it('rejects copied lock files whose daemon socket belongs to another root', () => {
+      const source = makeWriterRoot(undefined, undefined);
+      const sourceSocket = daemonSocketFor(source);
+      fs.writeFileSync(path.join(source, '.codegraph', 'writer.pid'), JSON.stringify({ pid: 9007, mode: 'daemon', startedAt: 1760000000007, ready: true }));
+      fs.writeFileSync(path.join(source, '.codegraph', 'daemon.pid'), JSON.stringify({ pid: 9007, version: '1.6.2', socketPath: sourceSocket, startedAt: 1760000000010 }));
+      const unrelated = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-codegraph-other-'));
+      tempRoots.push(unrelated);
+      fs.mkdirSync(path.join(unrelated, '.codegraph'), { recursive: true });
+      fs.copyFileSync(path.join(source, '.codegraph', 'writer.pid'), path.join(unrelated, '.codegraph', 'writer.pid'));
+      fs.copyFileSync(path.join(source, '.codegraph', 'daemon.pid'), path.join(unrelated, '.codegraph', 'daemon.pid'));
+      expect(readActiveCodegraphWriterLock(unrelated, { isProcessAlive: () => true })).toMatchObject({
+        active: false,
+        reason: 'daemon-root-mismatch',
+      });
+      expect(resolveAdapterFallbackRuntime(unrelated, { isProcessAlive: () => true })).toMatchObject({ mode: 'direct-session' });
+    });
+    it('keeps daemon and watch disabled for stale writer locks', () => {
+      const root = makeWriterRoot(
+        { pid: 9006, mode: 'daemon', startedAt: 1760000000006, ready: true },
+        { pid: 9006, version: '1.6.2', socketPath: 'pipe', startedAt: 1760000000006 },
+      );
+      expect(readActiveCodegraphWriterLock(root, { isProcessAlive: () => false })).toMatchObject({ active: false, reason: 'stale-process' });
+      expect(resolveAdapterFallbackRuntime(root, { isProcessAlive: () => false })).toMatchObject({
+        mode: 'direct-session',
+        env: { CODEGRAPH_NO_DAEMON: '1', CODEGRAPH_NO_WATCH: '1' },
+      });
+    });
+  });
+
   registerCodegraphAdapterContextCliQueryFocusSpecs({
     repoRoot,
     adapterContextScriptPath,

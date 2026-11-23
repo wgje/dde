@@ -41,6 +41,7 @@ const KNOWN_OVERLAY_MCP_FAILURE_CLASSES = new Set([
   'overlay-nonzero-exit',
   'overlay-timeout',
   'overlay-wrapper-error',
+  'overlay-current-invalid',
   'overlay-error',
 ]);
 const KNOWN_CONTEXT_MCP_FAILURE_CLASSES = new Set([
@@ -54,6 +55,151 @@ const KNOWN_CONTEXT_MCP_FAILURE_CLASSES = new Set([
   'shared-daemon-fallback-recovery-max-wait',
   'child-stdout-stream-error',
 ]);
+function codegraphDataDirNameFor(
+  root,
+  environment = process.env,
+  platform = process.platform,
+  readProcVersion = () => fs.readFileSync('/proc/version', 'utf8'),
+) {
+  const raw = String(environment.CODEGRAPH_DIR || '').trim();
+  if (raw) {
+    const invalid = raw === '.' || raw.includes('..') || raw.includes('/') || raw.includes('\\') || path.isAbsolute(raw);
+    return invalid ? '.codegraph' : raw;
+  }
+
+  const normalizedRoot = (platform === 'win32' ? path.win32.resolve(root) : path.posix.resolve(root))
+    .replace(/\\/g, '/');
+  const isWindowsDriveMount = /^\/mnt\/[a-z](\/|$)/i.test(normalizedRoot);
+  let isWsl = false;
+  if (platform === 'linux') {
+    if (environment.WSL_DISTRO_NAME || environment.WSL_INTEROP) {
+      isWsl = true;
+    } else {
+      try {
+        const version = String(readProcVersion()).toLowerCase();
+        isWsl = version.includes('microsoft') || version.includes('wsl');
+      } catch {
+        isWsl = false;
+      }
+    }
+  }
+  if (!isWsl || !isWindowsDriveMount) return '.codegraph';
+
+  try {
+    if (fs.statSync(path.join(root, '.codegraph-wsl')).isDirectory()) return '.codegraph-wsl';
+  } catch {
+    // Continue through the pinned CodeGraph 1.6.2 fallback order.
+  }
+  return fs.existsSync(path.join(root, '.codegraph', 'codegraph.db')) ? '.codegraph' : '.codegraph-wsl';
+}
+function codegraphDataDir(root, environment = process.env) {
+  return path.join(path.resolve(root), codegraphDataDirNameFor(root, environment));
+}
+
+function canonicalCodegraphRoot(root) {
+  const resolved = path.resolve(root);
+  let canonical = resolved;
+  try {
+    canonical = fs.realpathSync.native(resolved);
+  } catch {
+    // The root normally exists; retain the resolved path when it cannot be canonicalized.
+  }
+  return process.platform === 'win32' ? canonical.toLowerCase() : canonical;
+}
+
+function codegraphSocketCandidates(root, environment = process.env) {
+  const canonical = canonicalCodegraphRoot(root);
+  const hash = require('node:crypto').createHash('sha256').update(canonical).digest('hex').slice(0, 16);
+  if (process.platform === 'win32') return [`\\\\.\\pipe\\codegraph-${hash}`];
+  const inProject = path.join(canonical, codegraphDataDirNameFor(canonical, environment), 'daemon.sock');
+  const temporary = path.join(os.tmpdir(), `codegraph-${hash}.sock`);
+  return inProject.length > 100 ? [temporary] : [inProject, temporary];
+}
+
+function readDaemonIdentity(root, environment = process.env) {
+  const daemonPath = path.join(codegraphDataDir(root, environment), 'daemon.pid');
+  try {
+    const value = JSON.parse(fs.readFileSync(daemonPath, 'utf8'));
+    const pid = Number(value?.pid);
+    const version = String(value?.version || '');
+    const socketPath = String(value?.socketPath || '');
+    const startedAt = Number(value?.startedAt);
+    if (!Number.isSafeInteger(pid) || pid <= 0 || !version || !socketPath || !Number.isFinite(startedAt)) {
+      return { ok: false, path: daemonPath, reason: 'invalid-daemon-identity' };
+    }
+    return { ok: true, path: daemonPath, pid, version, socketPath, startedAt };
+  } catch {
+    return { ok: false, path: daemonPath, reason: 'missing-or-invalid-daemon-identity' };
+  }
+}
+
+function readActiveCodegraphWriterLock(root, dependencies = {}) {
+  const rootPath = path.resolve(root);
+  const environment = dependencies.environment || process.env;
+  const lockPath = path.join(codegraphDataDir(rootPath, environment), 'writer.pid');
+  const isProcessAlive = dependencies.isProcessAlive || (pid => {
+    try { process.kill(pid, 0); return true; } catch { return false; }
+  });
+  let value;
+  try {
+    value = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
+  } catch {
+    return { active: false, path: lockPath, pid: null, mode: null, reason: 'missing-or-invalid' };
+  }
+  const pid = Number(value?.pid);
+  const mode = String(value?.mode || '');
+  const startedAt = Number(value?.startedAt);
+  if (!Number.isSafeInteger(pid) || pid <= 0) {
+    return { active: false, path: lockPath, pid: null, mode: mode || null, reason: 'invalid-pid' };
+  }
+  if (mode !== 'daemon' || !Number.isFinite(startedAt) || value?.ready !== true) {
+    return { active: false, path: lockPath, pid, mode: mode || null, reason: 'writer-not-daemon-ready' };
+  }
+  if (!isProcessAlive(pid)) {
+    return { active: false, path: lockPath, pid, mode, reason: 'stale-process' };
+  }
+  const daemon = readDaemonIdentity(rootPath, environment);
+  if (!daemon.ok) {
+    return { active: false, path: lockPath, pid, mode, reason: daemon.reason, daemon };
+  }
+  const daemonStartDeltaMs = Math.abs(daemon.startedAt - startedAt);
+  const daemonStartMatches = Number.isFinite(daemonStartDeltaMs) && daemonStartDeltaMs <= 10_000;
+  if (daemon.pid !== pid || !daemonStartMatches) {
+    return { active: false, path: lockPath, pid, mode, reason: 'daemon-identity-mismatch', daemon, daemonStartDeltaMs };
+  }
+  const expectedSockets = codegraphSocketCandidates(rootPath, environment);
+  if (!expectedSockets.includes(daemon.socketPath)) {
+    return { active: false, path: lockPath, pid, mode, reason: 'daemon-root-mismatch', daemon, expectedSockets };
+  }
+  return { active: true, path: lockPath, pid, mode, reason: 'live-exact-root-daemon', daemon };
+}
+
+function resolveAdapterFallbackRuntime(root, dependencies = {}) {
+  const writerLock = readActiveCodegraphWriterLock(root, dependencies);
+  if (!writerLock.active) {
+    return {
+      mode: 'direct-session',
+      writerLock,
+      env: {
+        ...REQUIRED_FRESH_FALLBACK_ENV,
+        NANOFLOW_CODEGRAPH_ALLOW_DAEMON: '0',
+      },
+    };
+  }
+  // Reuse only a writer lock whose daemon identity is bound to this exact root.
+  // A live unrelated or PID-reused process must never switch fallback topology.
+  return {
+    mode: 'shared-daemon-proxy',
+    writerLock,
+    env: {
+      ...REQUIRED_FRESH_FALLBACK_ENV,
+      CODEGRAPH_NO_DAEMON: '0',
+      CODEGRAPH_NO_WATCH: '0',
+      NANOFLOW_CODEGRAPH_ALLOW_DAEMON: '1',
+    },
+  };
+}
+
 const TOOLING_TRIAGE_SEGMENTS = new Set([
   'adapter',
   'context',
@@ -1700,6 +1846,7 @@ async function main() {
     fs.rmSync(explicitLogPath, { force: true });
   }
 
+  const adapterRuntime = resolveAdapterFallbackRuntime(options.root);
   const child = spawn(
     process.execPath,
     [
@@ -1713,11 +1860,7 @@ async function main() {
       env: {
         ...process.env,
         ...invocation.configEnv,
-        // Adapter fallback must stay isolated from a broken or stale host:
-        // never attach to or create a shared daemon/watcher during diagnosis.
-        CODEGRAPH_NO_DAEMON: REQUIRED_FRESH_FALLBACK_ENV.CODEGRAPH_NO_DAEMON,
-        CODEGRAPH_NO_WATCH: REQUIRED_FRESH_FALLBACK_ENV.CODEGRAPH_NO_WATCH,
-        NANOFLOW_CODEGRAPH_ALLOW_DAEMON: '0',
+        ...adapterRuntime.env,
         NANOFLOW_CODEGRAPH_MCP_LOG: logPath,
         NANOFLOW_CODEGRAPH_REFRESH_ON_STARTUP: '0',
         NANOFLOW_CODEGRAPH_CONFIG_ALIGNMENT_MODE: 'adapter-fallback',
@@ -1791,14 +1934,29 @@ async function main() {
         attempt => attempt.failureClass === OVERLAY_STALE_SKIP_REFRESH_FAILURE_CLASS,
       )
     );
+    const baseContextAvailable = contextResult.outcome?.base?.status === 'available';
+    const overlayStatus = contextResult.outcome?.overlay?.status;
+    const overlayOutcomeFailure = contextResult.partial
+      && overlayStatus !== 'available';
+    const usablePartialContext = contextResult.partial
+      && contextResult.contextUsable === true
+      && baseContextAvailable
+      && !overlayOutcomeFailure;
+    const overlayBlockingFailure = malformedOverlayResponse
+      || staleSkipRefreshFailure
+      || (!overlayResult.ok && overlayResult.failureClass !== 'overlay-empty-result')
+      || overlayOutcomeFailure;
     const strictPartialContextFailure = contextResult.partial
       && contextResult.outcome?.base?.status === 'available'
       && contextResult.outcome?.overlay?.status !== 'available';
+    const blockingFailure = !contextResult.complete
+      ? (!usablePartialContext || overlayBlockingFailure)
+      : (malformedOverlayResponse || staleSkipRefreshFailure || strictPartialContextFailure);
     const summary = {
-      ok: contextResult.complete
-        && !malformedOverlayResponse
-        && !staleSkipRefreshFailure
-        && !strictPartialContextFailure,
+      ok: !blockingFailure,
+      blocking: blockingFailure,
+      qualityComplete: contextResult.complete && !malformedOverlayResponse && !staleSkipRefreshFailure,
+      degraded: usablePartialContext,
       complete: contextResult.complete,
       partial: contextResult.partial,
       contextUsable: contextResult.contextUsable,
@@ -1845,6 +2003,8 @@ async function main() {
         currentDiskContextWrapper: logAnalysis.currentDiskContextWrapper,
         currentDiskContextSourceOrdering: logAnalysis.currentDiskContextSourceOrdering,
         activeWrappers: logAnalysis.activeWrappers,
+        adapterFallbackTopology: adapterRuntime.mode,
+        adapterWriterLock: adapterRuntime.writerLock,
       },
     };
 
@@ -1880,4 +2040,7 @@ module.exports = {
   resolveWrapperInvocation,
   shutdownProcessTree,
   shouldPreserveContextAcrossCriticalLogFailure,
+  readActiveCodegraphWriterLock,
+  resolveAdapterFallbackRuntime,
+  codegraphDataDirNameFor,
 };

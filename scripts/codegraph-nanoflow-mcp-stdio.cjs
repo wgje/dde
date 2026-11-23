@@ -4989,6 +4989,7 @@ function buildOverlayInvestigation(failureClass) {
     'overlay-nonzero-exit': 'overlay subprocess exited non-zero; inspect stderrTail and profilePhases',
     'overlay-signal-exit': 'overlay subprocess exited from a signal',
     'overlay-wrapper-error': 'wrapper-side overlay handler threw before or after the subprocess result',
+    'overlay-current-invalid': 'authenticated CURRENT generation is missing or incompatible with the active overlay contract',
   };
   return {
     failureBoundary: 'overlay-subprocess',
@@ -11702,8 +11703,12 @@ function classifyOverlayQueryFailure({
   if (outputLimitExceeded) return 'overlay-max-buffer';
   if (error) return 'overlay-process-error';
   if (signal) return 'overlay-signal-exit';
-  if (status !== 0 && String(stderr).split(/\r?\n/).includes(OVERLAY_STALE_SKIP_REFRESH)) {
+  const stderrLines = String(stderr).split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+  if (status !== 0 && stderrLines.includes(OVERLAY_STALE_SKIP_REFRESH)) {
     return OVERLAY_STALE_SKIP_REFRESH;
+  }
+  if (status !== 0 && stderrLines.includes('overlay-current-invalid')) {
+    return 'overlay-current-invalid';
   }
   if (status === 0 && jsonOutput && emptyJsonResponse) return 'overlay-empty-response';
   if (status === 0 && jsonOutput && jsonParseError) return 'overlay-json-parse';

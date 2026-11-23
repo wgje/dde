@@ -529,7 +529,7 @@ export function registerCodegraphAdapterContextCliRecoverySpecs(
 
     expect(result.status, [result.stdout, result.stderr, result.error?.message ?? ''].join('\n')).toBe(0);
     const summary = JSON.parse(result.stdout) as AdapterSummary;
-    expect(summary.ok).toBe(expected.status === 'complete');
+    expect(summary.ok).toBe(expected.status === 'complete' || (expected.status === 'partial' && expected.usableContext && expected.baseStatus === 'available' && expected.overlayStatus === 'available'));
     expect(summary.complete).toBe(expected.status === 'complete');
     expect(summary.partial).toBe(expected.partial);
     expect(summary.contextUsable).toBe(expected.usableContext);
@@ -613,6 +613,21 @@ export function registerCodegraphAdapterContextCliRecoverySpecs(
       failureClass,
     }));
     expect(summary.diagnostics?.overlayFailureClass).toBe(failureClass);
+  }, 45_000);
+
+  it('keeps arbitrary overlay-current-prefixed stderr from bypassing canonical malformed-output handling', () => {
+    const projectRoot = makeConfigBackedAdapterProject();
+    writeRawAdapterOverlayScript(projectRoot, repoRoot, '{"unexpectedShape":"not-a-matches-array"}');
+    const result = runAdapterContext({
+      projectRoot,
+      codegraphTarget: makeContextReturningFakeCodegraph(),
+      query: 'overlay-current-prefix-must-not-bypass',
+      args: ['--overlay-limit', '1', '--overlay-query-limit', '1', '--max-files', '1', '--timeout-ms', '15000'],
+    });
+    expect(result.status, [result.stdout, result.stderr, result.error?.message ?? ''].join('\n')).toBe(0);
+    const summary = JSON.parse(result.stdout) as AdapterSummary;
+    expect(summary.ok).toBe(false);
+    expect(['overlay-invalid-json-shape', 'overlay-json-parse-error']).toContain(summary.diagnostics?.overlayFailureClass);
   }, 45_000);
 
   it.runIf(process.platform === 'win32')('terminates the wrapper process tree after a context request timeout', () => {

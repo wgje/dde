@@ -79,6 +79,57 @@ describe('codegraph worktree bootstrap', () => {
     expect(report.blockingReason).toBe('CURRENT_INVALID_WITH_RUNTIME_CLOSURE_READY');
   }, 15_000);
 
+  it.each([
+    ['CURRENT_INVALID', '{invalid'],
+    ['current contract mismatch', JSON.stringify({
+      compatibilityDigest: 'a'.repeat(64),
+      contractDigest: 'b'.repeat(64),
+      generationId: `g-${'c'.repeat(64)}`,
+      manifestDigest: 'd'.repeat(64),
+      overlaySchemaDigest: 'e'.repeat(64),
+      protocol: 'codegraph-overlay-generation-v1',
+      publishedAt: '2026-11-23T00:00:00.000Z',
+      receiptDigest: 'f'.repeat(64),
+      schemaVersion: 1,
+      sequence: '1',
+      sourcePolicyDigest: '1'.repeat(64),
+    })],
+  ])('never reports ready for canonical receipt %s', (_label, currentBytes) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-bootstrap-canonical-invalid-'));
+    const sourceRoot = createClosureSource();
+    const currentPath = path.join(root, '.codegraph', 'nanoflow-generations', 'CURRENT.json');
+    fs.mkdirSync(path.dirname(currentPath), { recursive: true });
+    tempRoots.push(root);
+    fs.writeFileSync(currentPath, currentBytes, 'utf8');
+    const result = runBootstrap(root, ['--source-root', sourceRoot, '--no-generate', '--require-ready']);
+    expect(result.status, result.stderr || result.stdout).toBe(78);
+    const report = JSON.parse(result.stdout);
+    expect(report.generationState).toBe('INVALID');
+    expect(report.currentBefore.status).toBe('invalid');
+    expect(report.currentBefore.status).not.toBe('ready');
+    expect(['CURRENT_INVALID','MANIFEST_INVALID']).toContain((report.currentBefore as { errorCode?: string }).errorCode);
+  }, 15_000);
+  it.each([
+    ['MANIFEST_INVALID'],
+    ['SELECTOR_DRIFT'],
+  ])('maps canonical %s to invalid and never ready at bootstrap level', errorCode => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-bootstrap-receipt-invalid-'));
+    const currentPath = path.join(root, '.codegraph', 'nanoflow-generations', 'CURRENT.json');
+    fs.mkdirSync(path.dirname(currentPath), { recursive: true });
+    tempRoots.push(root);
+    fs.writeFileSync(currentPath, '{}', 'utf8');
+    const bootstrap = require(bootstrapPath) as {
+      currentState(root: string, readReceipt: (root: string) => { ok: false; errorCode: string }): {
+        status: string;
+        errorCode?: string;
+      };
+    };
+    expect(bootstrap.currentState(root, () => ({ ok: false, errorCode }))).toEqual({
+      status: 'invalid',
+      path: currentPath,
+      errorCode,
+    });
+  });
   it('requires every production runtime closure path in the repository tree', () => {
     const bootstrap = require(bootstrapPath) as {
       REQUIRED_RUNTIME_CLOSURE: readonly string[];

@@ -3,6 +3,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+const { readOverlayCurrentReceipt } = require('./lib/codegraph-overlay-current-receipt.cjs');
 
 const REQUIRED_RUNTIME_CLOSURE = Object.freeze([
   'scripts/codegraph-nanoflow-mcp-stdio.cjs',
@@ -88,18 +89,25 @@ function hashFile(filePath) {
 
 function currentPath(root) { return path.join(root, CURRENT_RELATIVE_PATH); }
 
-function currentState(root) {
+function currentState(root, readReceipt = readOverlayCurrentReceipt) {
   const filePath = currentPath(root);
   if (!fs.existsSync(filePath)) return { status: 'missing', path: filePath };
-  try {
-    const value = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-    if (!value || typeof value.generationId !== 'string' || typeof value.sequence !== 'string') {
-      return { status: 'invalid', path: filePath };
-    }
-    return { status: 'ready', path: filePath, generationId: value.generationId, sequence: value.sequence };
-  } catch (error) {
-    return { status: 'invalid', path: filePath, error: error instanceof Error ? error.message : String(error) };
+
+  const receipt = readReceipt(root);
+  if (receipt.ok) {
+    return {
+      status: 'ready',
+      path: filePath,
+      generationId: receipt.current.generationId,
+      sequence: receipt.current.sequence,
+    };
   }
+
+  return {
+    status: receipt.errorCode === 'CURRENT_MISSING' ? 'missing' : 'invalid',
+    path: filePath,
+    errorCode: receipt.errorCode,
+  };
 }
 
 function targetIsClean(root, relativePath) {
@@ -278,4 +286,5 @@ module.exports = Object.freeze({
   OPTIONAL_PROTOTYPE_CLOSURE,
   TEST_CLOSURE,
   CLOSURE_CATEGORIES,
+  currentState,
 });
