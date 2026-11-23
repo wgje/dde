@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 中文使用手册
+    url: https://github.com/wgje/dde/tree/main/docs/handbook
+    about: 先查找使用、部署、备份和常见问题说明。
+  - name: 贡献与仓库地图
+    url: https://github.com/wgje/dde/blob/main/CONTRIBUTING.md
+    about: 报告前确认贡献边界、代码路径和验证要求。
