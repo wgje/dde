@@ -373,6 +373,48 @@ describe('Supabase CLI project safety', () => {
     expect(spawnCalls).toBe(0);
   });
 
+  it('delegates the guard once and executes the CLI only after successful preflight', () => {
+    const safety = loadSafetyModule();
+    if (!safety) return;
+    const projectRef = 'abcdefghijklmnopqrst';
+    const sourceSha = 'c'.repeat(40);
+    const targetSha = 'd'.repeat(40);
+    let spawnCalls = 0;
+    let guardCalls = 0;
+    const result = safety.executeCli(['db', 'push', '--linked'], {
+      env: { SUPABASE_PROJECT_REF: projectRef, NANOFLOW_PUSH_TARGET_SHA: targetSha, NANOFLOW_CURRENT_TARGET_SHA: targetSha, NANOFLOW_PREFLIGHT_NOW_UTC: '2026-11-22T08:21:00Z' },
+      root: process.cwd(),
+      readLinkedProjectRef: () => projectRef,
+      loadLedgerSnapshots: () => ({ ok: true, ledgers: [{ projectRef, sourceGitSha: sourceSha, capturedAtUtc: '2026-11-22T08:20:00Z', maxAgeSeconds: 60, rows: [], sourceEvidence: { tool: 'mcp__supabase.execute_sql', queryId: 'q', query: 'SELECT', resultRowCount: 0 } }], expectedGitSha: sourceSha, expectedProjectRef: projectRef }),
+      gitIsAncestor: () => true,
+      invokeCliCommand: () => { spawnCalls += 1; return { status: 0 }; },
+      runMigrationPreflight: () => { guardCalls += 1; return { ok: true, status: 0 }; },
+      logError: () => undefined,
+    });
+    expect(result).toEqual({ exitCode: 0, spawned: true });
+    expect(guardCalls).toBe(1);
+    expect(spawnCalls).toBe(1);
+  });
+
+  it('does not spawn on project-ref mismatch in executeCli', () => {
+    const safety = loadSafetyModule();
+    if (!safety) return;
+    let spawnCalls = 0;
+    let guardCalls = 0;
+    const result = safety.executeCli(['db', 'push', '--linked'], {
+      env: { SUPABASE_PROJECT_REF: 'aaaaaaaaaaaaaaaaaaaa', NANOFLOW_PUSH_TARGET_SHA: 'a'.repeat(40) },
+      root: process.cwd(),
+      readLinkedProjectRef: () => 'bbbbbbbbbbbbbbbbbbbb',
+      loadLedgerSnapshots: () => { throw new Error('ledger must not load'); },
+      invokeCliCommand: () => { spawnCalls += 1; return { status: 0 }; },
+      runMigrationPreflight: () => { guardCalls += 1; return { ok: true, status: 0 }; },
+      logError: () => undefined,
+    });
+    expect(result).toMatchObject({ exitCode: 2, spawned: false });
+    expect(spawnCalls).toBe(0);
+    expect(guardCalls).toBe(0);
+  });
+
   it('accepts a source snapshot that is an ancestor of the actual pushed HEAD', () => {
     const safety = loadSafetyModule();
     if (!safety) return;
