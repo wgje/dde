@@ -7,7 +7,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        提交前请移除真实用户数据、访问令牌和未脱敏日志。安全漏洞请勿公开填写；当前私密漏洞报告渠道尚待维护者启用。
+        提交前请移除真实用户数据、访问令牌和未脱敏日志。安全漏洞请勿公开填写，请通过仓库 Security → Advisories → Report a vulnerability 私下报告。
   - type: dropdown
     id: area
     attributes:
