@@ -215,6 +215,10 @@ export function registerCodegraphAdapterDoctorLiveProcessSpecs(
             CODEGRAPH_DAEMON_IDLE_TIMEOUT_MS: '300000',
             CODEGRAPH_DAEMON_MAX_IDLE_MS: '1800000',
             NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '30000',
+            NANOFLOW_CODEGRAPH_OVERLAY_QUERY_TIMEOUT_MS: '60000',
+            NANOFLOW_CODEGRAPH_OVERLAY_WORKER_ENABLED: '1',
+            NANOFLOW_CODEGRAPH_OVERLAY_WORKER_POOL_SIZE: '1',
+            NANOFLOW_CODEGRAPH_OVERLAY_PREWARM: '1',
             NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE: '0',
           },
           effectiveChildEnv: {
@@ -347,6 +351,10 @@ export function registerCodegraphAdapterDoctorLiveProcessSpecs(
       CODEGRAPH_DAEMON_IDLE_TIMEOUT_MS: '300000',
       CODEGRAPH_DAEMON_MAX_IDLE_MS: '1800000',
       NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '30000',
+      NANOFLOW_CODEGRAPH_OVERLAY_QUERY_TIMEOUT_MS: '60000',
+      NANOFLOW_CODEGRAPH_OVERLAY_WORKER_ENABLED: '1',
+      NANOFLOW_CODEGRAPH_OVERLAY_WORKER_POOL_SIZE: '1',
+      NANOFLOW_CODEGRAPH_OVERLAY_PREWARM: '1',
       NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE: '0',
     };
     writeFileSync(wrapperPath, wrapperSource);
@@ -738,7 +746,7 @@ export function registerCodegraphAdapterDoctorLiveProcessSpecs(
     expect(explainResult.stdout).toContain('codegraphTarget expected=@colbymchenry/codegraph@1.6.2 current=@colbymchenry/codegraph@1.1.1');
     expect(explainResult.stdout).toContain('configuredWrapper current=<missing> context=<missing>');
     expect(explainResult.stdout).toContain(
-      'envMismatches=2 current-wrapper.NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS expected=30000 actual=60000; current-context-wrapper.NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS expected=30000 actual=60000',
+      'envMismatches=10 current-wrapper.NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS expected=30000 actual=60000; current-wrapper.NANOFLOW_CODEGRAPH_OVERLAY_QUERY_TIMEOUT_MS expected=60000 actual=<missing>; current-wrapper.NANOFLOW_CODEGRAPH_OVERLAY_WORKER_ENABLED expected=1 actual=<missing>; current-wrapper.NANOFLOW_CODEGRAPH_OVERLAY_WORKER_POOL_SIZE expected=1 actual=<missing>; current-wrapper.NANOFLOW_CODEGRAPH_OVERLAY_PREWARM expected=1 actual=<missing>; current-context-wrapper.NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS expected=30000 actual=60000; current-context-wrapper.NANOFLOW_CODEGRAPH_OVERLAY_QUERY_TIMEOUT_MS expected=60000 actual=<missing>; current-context-wrapper.NANOFLOW_CODEGRAPH_OVERLAY_WORKER_ENABLED expected=1 actual=<missing>; current-context-wrapper.NANOFLOW_CODEGRAPH_OVERLAY_WORKER_POOL_SIZE expected=1 actual=<missing>; current-context-wrapper.NANOFLOW_CODEGRAPH_OVERLAY_PREWARM expected=1 actual=<missing>',
     );
     expect(explainResult.stdout).toContain('liveProcessMismatches=1 pid=12092 target=@colbymchenry/codegraph@1.1.1');
     expect(explainResult.stdout).toContain('fallback=npm run codegraph:adapter:context -- --query "<query>" --json');
@@ -767,8 +775,8 @@ export function registerCodegraphAdapterDoctorLiveProcessSpecs(
       currentConfiguredWrapper: null,
       currentConfiguredContextWrapper: null,
       liveProcessMismatchCount: 1,
-      envMismatchCount: 2,
-      envMismatches: [
+      envMismatchCount: 10,
+      envMismatches: expect.arrayContaining([
         expect.objectContaining({
           scope: 'current-wrapper',
           key: 'NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS',
@@ -776,12 +784,60 @@ export function registerCodegraphAdapterDoctorLiveProcessSpecs(
           actual: '60000',
         }),
         expect.objectContaining({
+          scope: 'current-wrapper',
+          key: 'NANOFLOW_CODEGRAPH_OVERLAY_QUERY_TIMEOUT_MS',
+          expected: '60000',
+          actual: null,
+        }),
+        expect.objectContaining({
+          scope: 'current-wrapper',
+          key: 'NANOFLOW_CODEGRAPH_OVERLAY_WORKER_ENABLED',
+          expected: '1',
+          actual: null,
+        }),
+        expect.objectContaining({
+          scope: 'current-wrapper',
+          key: 'NANOFLOW_CODEGRAPH_OVERLAY_WORKER_POOL_SIZE',
+          expected: '1',
+          actual: null,
+        }),
+        expect.objectContaining({
+          scope: 'current-wrapper',
+          key: 'NANOFLOW_CODEGRAPH_OVERLAY_PREWARM',
+          expected: '1',
+          actual: null,
+        }),
+        expect.objectContaining({
           scope: 'current-context-wrapper',
           key: 'NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS',
           expected: '30000',
           actual: '60000',
         }),
-      ],
+        expect.objectContaining({
+          scope: 'current-context-wrapper',
+          key: 'NANOFLOW_CODEGRAPH_OVERLAY_QUERY_TIMEOUT_MS',
+          expected: '60000',
+          actual: null,
+        }),
+        expect.objectContaining({
+          scope: 'current-context-wrapper',
+          key: 'NANOFLOW_CODEGRAPH_OVERLAY_WORKER_ENABLED',
+          expected: '1',
+          actual: null,
+        }),
+        expect.objectContaining({
+          scope: 'current-context-wrapper',
+          key: 'NANOFLOW_CODEGRAPH_OVERLAY_WORKER_POOL_SIZE',
+          expected: '1',
+          actual: null,
+        }),
+        expect.objectContaining({
+          scope: 'current-context-wrapper',
+          key: 'NANOFLOW_CODEGRAPH_OVERLAY_PREWARM',
+          expected: '1',
+          actual: null,
+        }),
+      ]),
       autoSyncDisabled: expect.objectContaining({
         failureClass: 'codegraph-autosync-disabled',
         textTail: expect.stringContaining('index is frozen'),

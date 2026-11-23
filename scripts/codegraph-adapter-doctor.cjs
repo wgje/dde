@@ -35,6 +35,10 @@ const REQUIRED_CODEX_MCP_ENV = new Map([
   ['CODEGRAPH_DAEMON_IDLE_TIMEOUT_MS', '300000'],
   ['CODEGRAPH_DAEMON_MAX_IDLE_MS', '1800000'],
   ['NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS', '30000'],
+  ['NANOFLOW_CODEGRAPH_OVERLAY_QUERY_TIMEOUT_MS', '60000'],
+  ['NANOFLOW_CODEGRAPH_OVERLAY_WORKER_ENABLED', '1'],
+  ['NANOFLOW_CODEGRAPH_OVERLAY_WORKER_POOL_SIZE', '1'],
+  ['NANOFLOW_CODEGRAPH_OVERLAY_PREWARM', '1'],
   ['NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE', '0'],
 ]);
 const REQUIRED_CODEGRAPH_TARGET = '@colbymchenry/codegraph@1.6.2';
@@ -44,6 +48,10 @@ const HOST_MCP_ENV_KEYS_TO_COMPARE = [
   'CODEGRAPH_DAEMON_IDLE_TIMEOUT_MS',
   'CODEGRAPH_DAEMON_MAX_IDLE_MS',
   'NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS',
+  'NANOFLOW_CODEGRAPH_OVERLAY_QUERY_TIMEOUT_MS',
+  'NANOFLOW_CODEGRAPH_OVERLAY_WORKER_ENABLED',
+  'NANOFLOW_CODEGRAPH_OVERLAY_WORKER_POOL_SIZE',
+  'NANOFLOW_CODEGRAPH_OVERLAY_PREWARM',
   'NANOFLOW_CODEGRAPH_SHARED_DAEMON_FALLBACK_RECOVERY',
   'NANOFLOW_CODEGRAPH_SHARED_DAEMON_FALLBACK_RECOVERY_DELAY_MS',
   'NANOFLOW_CODEGRAPH_SHARED_DAEMON_FALLBACK_RECOVERY_DEFER_MS',
@@ -2293,8 +2301,8 @@ function buildReport(root, options = {}) {
 
   return {
     ok: checks.every(check => check.ok),
-    runtimeOk: null,
-    pendingHostRestart: false,
+    runtimeOk: hostMcp.hostConfigMismatch || hostMcp.scriptStaleAgainstDisk ? false : null,
+    pendingHostRestart: hostMcp.hostConfigMismatch === true || hostMcp.scriptStaleAgainstDisk === true,
     root,
     strict: options.strict === true,
     phase,
@@ -2313,8 +2321,10 @@ function applyConfigRepairRuntimeState(report, configRepair) {
     report.hostMcp.currentConfiguredWrapper
     || report.hostMcp.currentConfiguredContextWrapper,
   );
-  const pendingHostRestart = configRepair.changed && !matchingRuntimeObserved;
-  report.runtimeOk = configRepair.changed ? matchingRuntimeObserved : null;
+  const liveRuntimeMismatch = report.hostMcp.hostConfigMismatch === true
+    || report.hostMcp.scriptStaleAgainstDisk === true;
+  const pendingHostRestart = liveRuntimeMismatch || (configRepair.changed && !matchingRuntimeObserved);
+  report.runtimeOk = liveRuntimeMismatch ? false : (configRepair.changed ? matchingRuntimeObserved : null);
   report.pendingHostRestart = pendingHostRestart;
   report.mcpConfig.repair = {
     ...configRepair,

@@ -114,6 +114,10 @@ export function registerCodegraphAdapterDoctorHostSpecs(
           codegraphTarget: '@colbymchenry/codegraph@1.6.2',
           env: {
             NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '30000',
+            NANOFLOW_CODEGRAPH_OVERLAY_QUERY_TIMEOUT_MS: '60000',
+            NANOFLOW_CODEGRAPH_OVERLAY_WORKER_ENABLED: '1',
+            NANOFLOW_CODEGRAPH_OVERLAY_WORKER_POOL_SIZE: '1',
+            NANOFLOW_CODEGRAPH_OVERLAY_PREWARM: '1',
             NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE: '0',
           },
         }),
@@ -229,6 +233,10 @@ export function registerCodegraphAdapterDoctorHostSpecs(
           codegraphTarget: '@colbymchenry/codegraph@1.6.2',
           env: {
             NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '30000',
+            NANOFLOW_CODEGRAPH_OVERLAY_QUERY_TIMEOUT_MS: '60000',
+            NANOFLOW_CODEGRAPH_OVERLAY_WORKER_ENABLED: '1',
+            NANOFLOW_CODEGRAPH_OVERLAY_WORKER_POOL_SIZE: '1',
+            NANOFLOW_CODEGRAPH_OVERLAY_PREWARM: '1',
             NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE: '0',
           },
         }),
@@ -414,6 +422,10 @@ export function registerCodegraphAdapterDoctorHostSpecs(
           codegraphTarget: '@colbymchenry/codegraph@1.6.2',
           env: {
             NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '30000',
+            NANOFLOW_CODEGRAPH_OVERLAY_QUERY_TIMEOUT_MS: '60000',
+            NANOFLOW_CODEGRAPH_OVERLAY_WORKER_ENABLED: '1',
+            NANOFLOW_CODEGRAPH_OVERLAY_WORKER_POOL_SIZE: '1',
+            NANOFLOW_CODEGRAPH_OVERLAY_PREWARM: '1',
             NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE: '0',
           },
         }),
@@ -432,6 +444,10 @@ export function registerCodegraphAdapterDoctorHostSpecs(
             codegraphTarget: '@colbymchenry/codegraph@1.6.2',
             env: {
               NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '30000',
+            NANOFLOW_CODEGRAPH_OVERLAY_QUERY_TIMEOUT_MS: '60000',
+            NANOFLOW_CODEGRAPH_OVERLAY_WORKER_ENABLED: '1',
+            NANOFLOW_CODEGRAPH_OVERLAY_WORKER_POOL_SIZE: '1',
+            NANOFLOW_CODEGRAPH_OVERLAY_PREWARM: '1',
               NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE: '0',
             },
           },
@@ -575,6 +591,10 @@ export function registerCodegraphAdapterDoctorHostSpecs(
       CODEGRAPH_DAEMON_IDLE_TIMEOUT_MS: '0',
       CODEGRAPH_DAEMON_MAX_IDLE_MS: '0',
       NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '30000',
+            NANOFLOW_CODEGRAPH_OVERLAY_QUERY_TIMEOUT_MS: '60000',
+            NANOFLOW_CODEGRAPH_OVERLAY_WORKER_ENABLED: '1',
+            NANOFLOW_CODEGRAPH_OVERLAY_WORKER_POOL_SIZE: '1',
+            NANOFLOW_CODEGRAPH_OVERLAY_PREWARM: '1',
       NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE: '0',
     };
     const configuredEnv = {

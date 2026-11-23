@@ -126,8 +126,17 @@ const OVERLAY_QUERY_MAX_BUFFER_BYTES = parsePositiveIntegerEnv(
 const OVERLAY_QUERY_KILL_GRACE_MS = 1000;
 const OVERLAY_QUERY_WORKER_POOL_SIZE = Math.min(8, parsePositiveIntegerEnv('NANOFLOW_CODEGRAPH_OVERLAY_WORKER_POOL_SIZE', 2));
 const OVERLAY_QUERY_WORKER_MAX_QUEUE_SIZE = Math.min(1024, parsePositiveIntegerEnv('NANOFLOW_CODEGRAPH_OVERLAY_WORKER_MAX_QUEUE_SIZE', 32));
-const OVERLAY_QUERY_WORKER_ENABLED = process.env.NANOFLOW_CODEGRAPH_OVERLAY_WORKER_ENABLED === '1'
-  && OverlayQueryWorkerPool !== null;
+const OVERLAY_QUERY_WORKER_ENV = process.env.NANOFLOW_CODEGRAPH_OVERLAY_WORKER_ENABLED;
+// Preserve the legacy direct-session path, but make warm reuse the default for
+// the shared-daemon MCP topology. Explicit "0" remains an escape hatch.
+const SHARED_DAEMON_OVERLAY_WORKER_DEFAULT = OVERLAY_QUERY_WORKER_ENV === undefined
+  && !isTruthyEnvValue(createCodegraphChildEnv().CODEGRAPH_NO_DAEMON);
+const OVERLAY_QUERY_WORKER_ENABLED = OverlayQueryWorkerPool !== null
+  && (OVERLAY_QUERY_WORKER_ENV === '1'
+    || (OVERLAY_QUERY_WORKER_ENV !== '0' && SHARED_DAEMON_OVERLAY_WORKER_DEFAULT));
+const OVERLAY_QUERY_WORKER_PREWARM_ENABLED =
+  OVERLAY_QUERY_WORKER_ENABLED
+  && process.env.NANOFLOW_CODEGRAPH_OVERLAY_PREWARM !== '0';
 const CONTEXT_PACK_TIMEOUT_MS = parsePositiveIntegerEnv(
   'NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS',
   30_000,
@@ -548,6 +557,11 @@ diagnostics.log('wrapper.start', {
   overlayQueryTimeoutMs: OVERLAY_QUERY_TIMEOUT_MS,
   overlayQueryMaxBufferBytes: OVERLAY_QUERY_MAX_BUFFER_BYTES,
   contextPackTimeoutMs: CONTEXT_PACK_TIMEOUT_MS,
+  overlayQueryWorkerEnabled: OVERLAY_QUERY_WORKER_ENABLED,
+  overlayQueryWorkerPrewarmEnabled: OVERLAY_QUERY_WORKER_PREWARM_ENABLED,
+  overlayQueryWorkerSelection: OVERLAY_QUERY_WORKER_ENV === undefined
+    ? (SHARED_DAEMON_OVERLAY_WORKER_DEFAULT ? 'shared-daemon-default' : 'legacy-default')
+    : (OVERLAY_QUERY_WORKER_ENV === '1' ? 'explicit-enabled' : 'explicit-disabled'),
   refreshOnStartup: REFRESH_ON_STARTUP,
   childRestartBackoff: {
     after: CHILD_RESTART_BACKOFF_AFTER,
@@ -659,7 +673,7 @@ let fatalShutdownLogged = false;
 installProcessFatalDiagnostics();
 installProcessStdioDiagnostics();
 spawnManagedCodegraph('startup');
-if (OVERLAY_QUERY_WORKER_ENABLED && process.env.NANOFLOW_CODEGRAPH_OVERLAY_PREWARM === '1') prewarmOverlayQueryWorkerPool('startup');
+if (OVERLAY_QUERY_WORKER_ENABLED && OVERLAY_QUERY_WORKER_PREWARM_ENABLED) prewarmOverlayQueryWorkerPool('startup');
 
 process.stdin.on('data', chunk => {
   const modeBefore = clientMode;
