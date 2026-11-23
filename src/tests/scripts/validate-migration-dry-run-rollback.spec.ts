@@ -55,7 +55,7 @@ function writeKnownSource(root: string, sql = 'SELECT 1;', sourceGitSha = '82980
     sourceVersion: KNOWN_SOURCE_VERSION,
     sourceName: KNOWN_SOURCE_NAME,
     sourceSha256: createHash('sha256').update(sql).digest('hex').toUpperCase(),
-    expectedGitSha: '82980ddab7649a83ed34bcc8b65646d6375e1a9f',
+    expectedGitSha: 'd5b1850f4632a202f74ba7c17dbd998cae1071f3',
     appliedAliases: KNOWN_ALIASES,
   }]);
 }
@@ -76,14 +76,14 @@ function writeLedgerSnapshot(root: string, rows: Array<{version:string;name:stri
   writeFileSync(path.join(root, 'scripts', 'migration-ledger-snapshot.json'), JSON.stringify({
     format: 'SUPABASE_SCHEMA_MIGRATIONS_V1',
     source: 'mcp__supabase.execute_sql',
-    capturedAtUtc: '2026-11-22T08:20:00Z',
+    capturedAtUtc: '2026-11-23T12:30:00Z',
     projectRef: 'fkhihclpghmmtbbywvoj',
     query: 'SELECT version, name FROM supabase_migrations.schema_migrations ORDER BY version, name;',
     rows,
     rowCount: rows.length,
     canonicalRowsSha256,
-    sourceGitSha: '82980ddab7649a83ed34bcc8b65646d6375e1a9f',
-    expectedGitSha: '82980ddab7649a83ed34bcc8b65646d6375e1a9f',
+    sourceGitSha: 'd5b1850f4632a202f74ba7c17dbd998cae1071f3',
+    expectedGitSha: 'd5b1850f4632a202f74ba7c17dbd998cae1071f3',
     maxAgeSeconds: 86400,
     sourceEvidence: { tool: 'mcp__supabase.execute_sql', queryId: 'fixture', query: 'SELECT version, name FROM supabase_migrations.schema_migrations', resultRowCount: rows.length },
     ...overrides,
@@ -483,7 +483,7 @@ CREATE TABLE IF NOT EXISTS public.example_safe_comments (
     spawnSync('git', ['-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-m', 'later target'], { cwd: root, encoding: 'utf8' });
     const targetSha = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).stdout.trim();
     writeKnownSource(root, 'SELECT 1;', sourceSha);
-    const result = runGuard(root, path.join(root, 'scripts-migration-dry-run-manifest.json'), true, { now: '2026-11-22T08:30:00Z', currentTargetSha: targetSha });
+    const result = runGuard(root, path.join(root, 'scripts-migration-dry-run-manifest.json'), true, { now: '2026-11-23T12:30:00Z', currentTargetSha: targetSha });
     expect(result.status).toBe(0);
     expect(JSON.parse(result.stdout).ledgerSnapshot.rowCount).toBe(3);
   });
@@ -543,18 +543,34 @@ CREATE TABLE IF NOT EXISTS public.example_safe_comments (
     expect(result.stderr).toContain('migration-version-alias-known-chain-invalid');
   });
 
-  it('fails on fabricated ledger rows outside the exact known chain', () => {
+  it('accepts an ordinary migration newer than the known alias chain', () => {
     const root = createMigrationRoot();
     writeKnownSource(root);
     writeLedgerSnapshot(root, [
       { version: KNOWN_SOURCE_VERSION, name: KNOWN_SOURCE_NAME },
       ...KNOWN_ALIASES,
-      { version: '20261123000000', name: 'fabricated_remote_row' },
+      { version: '20261123115247', name: 'restore_sync_increment_routine_completion' },
     ]);
-    writeManifest(root, []);
-    const result = runGuard(root);
+    const manifestPath = path.join(root, 'scripts-migration-dry-run-manifest.json');
+    writeManifest(root, [], manifestPath);
+    const result = runGuard(root, manifestPath, true, { now: '2026-11-23T12:30:00Z' });
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout).ledgerSnapshot.rowCount).toBe(4);
+  });
+
+  it('fails closed when a declared alias is missing while a newer ordinary row is present', () => {
+    const root = createMigrationRoot();
+    writeKnownSource(root);
+    writeLedgerSnapshot(root, [
+      { version: KNOWN_SOURCE_VERSION, name: KNOWN_SOURCE_NAME },
+      KNOWN_ALIASES[0],
+      { version: '20261123115247', name: 'restore_sync_increment_routine_completion' },
+    ]);
+    const manifestPath = path.join(root, 'scripts-migration-dry-run-manifest.json');
+    writeManifest(root, [], manifestPath);
+    const result = runGuard(root, manifestPath, true, { now: '2026-11-23T12:30:00Z' });
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain('unexpected-alias-chain-row:20261123000000:fabricated_remote_row');
+    expect(result.stderr).toContain(`migration-ledger-snapshot-missing-alias-chain-row:${KNOWN_ALIASES[1].version}`);
   });
 
   it('rejects the same alias assigned to multiple source entries', () => {
@@ -583,8 +599,9 @@ CREATE TABLE IF NOT EXISTS public.example_safe_comments (
         appliedAliases: [KNOWN_ALIASES[0]],
       },
     ]);
-    writeManifest(root, []);
-    const result = runGuard(root);
+    const manifestPath = path.join(root, 'scripts-migration-dry-run-manifest.json');
+    writeManifest(root, [], manifestPath);
+    const result = runGuard(root, manifestPath, true, { now: '2026-11-23T12:30:00Z' });
     expect(result.status).toBe(1);
     expect(result.stderr).toContain('belongs to multiple sources');
   });

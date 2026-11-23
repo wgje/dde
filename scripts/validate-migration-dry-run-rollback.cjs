@@ -530,15 +530,22 @@ function validateAliasLedger(root, canonicalDir, aliasManifestPath, ledgerSnapsh
     if (!ledgerPairs.has(pair)) errors.push(`migration-ledger-snapshot-missing-declared-row:${pair}`);
   }
   if (sourceVersions.length > 0) {
-    const aliasChainFloor = sourceVersions.reduce((min, version) => min < version ? min : version);
-    const ledgerAliasChain = new Set(ledger.rows
-      .filter(row => row.version >= aliasChainFloor)
-      .map(row => `${row.version}:${row.name}`));
-    for (const pair of ledgerAliasChain) {
-      if (!declaredPairs.has(pair)) errors.push(`migration-ledger-snapshot-unexpected-alias-chain-row:${pair}`);
-    }
-    for (const pair of declaredPairs.keys()) {
-      if (!ledgerAliasChain.has(pair)) errors.push(`migration-ledger-snapshot-missing-alias-chain-row:${pair}`);
+    // Aliases are exact identity declarations, not a date range. Ordinary
+    // migrations may be newer than an alias source; the only rows interpreted
+    // as aliases are the exact applied pairs explicitly declared below.
+    const declaredAliasPairs = new Set(
+      [...aliasManifest.aliases].flatMap(entry =>
+        (entry?.appliedAliases || []).map(alias => `${alias.version}:${alias.name}`)),
+    );
+    const observedAliasPairs = new Set(
+      ledger.rows
+        .map(row => `${row.version}:${row.name}`)
+        .filter(pair => declaredAliasPairs.has(pair)),
+    );
+    for (const pair of declaredAliasPairs) {
+      if (!observedAliasPairs.has(pair)) {
+        errors.push(`migration-ledger-snapshot-missing-alias-chain-row:${pair}`);
+      }
     }
   }
   return { errors, bySource, ledger };
