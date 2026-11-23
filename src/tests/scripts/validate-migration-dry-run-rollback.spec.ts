@@ -55,6 +55,7 @@ function writeKnownSource(root: string, sql = 'SELECT 1;', sourceGitSha = '82980
     sourceVersion: KNOWN_SOURCE_VERSION,
     sourceName: KNOWN_SOURCE_NAME,
     sourceSha256: createHash('sha256').update(sql).digest('hex').toUpperCase(),
+    sourceApplied: true,
     expectedGitSha: 'd5b1850f4632a202f74ba7c17dbd998cae1071f3',
     appliedAliases: KNOWN_ALIASES,
   }]);
@@ -510,6 +511,7 @@ CREATE TABLE IF NOT EXISTS public.example_safe_comments (
       sourceVersion: KNOWN_SOURCE_VERSION,
       sourceName: KNOWN_SOURCE_NAME,
       sourceSha256: createHash('sha256').update('SELECT 1;').digest('hex').toUpperCase(),
+      sourceApplied: true,
       appliedAliases: KNOWN_ALIASES,
     }]);
     const result = runGuard(root);
@@ -534,6 +536,7 @@ CREATE TABLE IF NOT EXISTS public.example_safe_comments (
       sourceVersion: KNOWN_SOURCE_VERSION,
       sourceName: KNOWN_SOURCE_NAME,
       sourceSha256: createHash('sha256').update('SELECT 1;').digest('hex').toUpperCase(),
+      sourceApplied: true,
       appliedAliases: [],
     }]);
     writeManifest(root, []);
@@ -573,6 +576,74 @@ CREATE TABLE IF NOT EXISTS public.example_safe_comments (
     expect(result.stderr).toContain(`migration-ledger-snapshot-missing-alias-chain-row:${KNOWN_ALIASES[1].version}`);
   });
 
+  it('accepts a declared source whose code was applied only under its alias', () => {
+    const root = createMigrationRoot();
+    writeMigration(root, path.basename(KNOWN_SOURCE_PATH), 'SELECT 1;');
+    writeMigration(root, path.basename(SECURITY_SOURCE_PATH), 'SELECT 2;');
+    writeLedgerSnapshot(root, [
+      { version: KNOWN_SOURCE_VERSION, name: KNOWN_SOURCE_NAME },
+      ...KNOWN_ALIASES,
+      { version: SECURITY_ALIAS_VERSION, name: 'non_destructive_security_definer_read_rpc_invoker' },
+    ]);
+    writeAliasManifest(root, [
+      {
+        sourcePath: KNOWN_SOURCE_PATH,
+        sourceVersion: KNOWN_SOURCE_VERSION,
+        sourceName: KNOWN_SOURCE_NAME,
+        sourceSha256: createHash('sha256').update('SELECT 1;').digest('hex').toUpperCase(),
+        sourceApplied: true,
+        appliedAliases: KNOWN_ALIASES,
+      },
+      {
+        sourcePath: SECURITY_SOURCE_PATH,
+        sourceVersion: SECURITY_SOURCE_VERSION,
+        sourceName: 'non_destructive_security_definer_read_rpc_invoker',
+        sourceSha256: createHash('sha256').update('SELECT 2;').digest('hex').toUpperCase(),
+        sourceApplied: false,
+        appliedAliases: [{ version: SECURITY_ALIAS_VERSION, name: 'non_destructive_security_definer_read_rpc_invoker' }],
+      },
+    ]);
+    const manifestPath = path.join(root, 'scripts-migration-dry-run-manifest.json');
+    writeManifest(root, [], manifestPath);
+    const result = runGuard(root, manifestPath, true, { now: '2026-11-23T12:30:00Z' });
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout).ledgerSnapshot.rowCount).toBe(4);
+  });
+
+  it('rejects a source declared unapplied when the ledger records it as applied', () => {
+    const root = createMigrationRoot();
+    writeMigration(root, path.basename(KNOWN_SOURCE_PATH), 'SELECT 1;');
+    writeMigration(root, path.basename(SECURITY_SOURCE_PATH), 'SELECT 2;');
+    writeLedgerSnapshot(root, [
+      { version: KNOWN_SOURCE_VERSION, name: KNOWN_SOURCE_NAME },
+      ...KNOWN_ALIASES,
+      { version: SECURITY_SOURCE_VERSION, name: 'non_destructive_security_definer_read_rpc_invoker' },
+      { version: SECURITY_ALIAS_VERSION, name: 'non_destructive_security_definer_read_rpc_invoker' },
+    ]);
+    writeAliasManifest(root, [
+      {
+        sourcePath: KNOWN_SOURCE_PATH,
+        sourceVersion: KNOWN_SOURCE_VERSION,
+        sourceName: KNOWN_SOURCE_NAME,
+        sourceSha256: createHash('sha256').update('SELECT 1;').digest('hex').toUpperCase(),
+        sourceApplied: true,
+        appliedAliases: KNOWN_ALIASES,
+      },
+      {
+        sourcePath: SECURITY_SOURCE_PATH,
+        sourceVersion: SECURITY_SOURCE_VERSION,
+        sourceName: 'non_destructive_security_definer_read_rpc_invoker',
+        sourceSha256: createHash('sha256').update('SELECT 2;').digest('hex').toUpperCase(),
+        sourceApplied: false,
+        appliedAliases: [{ version: SECURITY_ALIAS_VERSION, name: 'non_destructive_security_definer_read_rpc_invoker' }],
+      },
+    ]);
+    const manifestPath = path.join(root, 'scripts-migration-dry-run-manifest.json');
+    writeManifest(root, [], manifestPath);
+    const result = runGuard(root, manifestPath, true, { now: '2026-11-23T12:30:00Z' });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('source row must remain unapplied when declared sourceApplied=false');
+  });
   it('rejects the same alias assigned to multiple source entries', () => {
     const root = createMigrationRoot();
     writeKnownSource(root);
@@ -589,6 +660,7 @@ CREATE TABLE IF NOT EXISTS public.example_safe_comments (
         sourceVersion: KNOWN_SOURCE_VERSION,
         sourceName: KNOWN_SOURCE_NAME,
         sourceSha256: createHash('sha256').update('SELECT 1;').digest('hex').toUpperCase(),
+        sourceApplied: true,
         appliedAliases: KNOWN_ALIASES,
       },
       {
@@ -596,6 +668,7 @@ CREATE TABLE IF NOT EXISTS public.example_safe_comments (
         sourceVersion: '20260102000000',
         sourceName: 'other',
         sourceSha256: sourceSha2,
+        sourceApplied: true,
         appliedAliases: [KNOWN_ALIASES[0]],
       },
     ]);

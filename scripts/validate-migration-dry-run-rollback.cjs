@@ -478,8 +478,10 @@ function validateAliasLedger(root, canonicalDir, aliasManifestPath, ledgerSnapsh
     const sourceName = typeof alias?.sourceName === 'string' ? alias.sourceName : '';
     const sourceSha256 = typeof alias?.sourceSha256 === 'string' ? alias.sourceSha256.toUpperCase() : '';
     const appliedAliases = alias?.appliedAliases;
+    const sourceApplied = alias?.sourceApplied;
     if (!sourcePath || !/^[0-9]{14}$/.test(sourceVersion) || !sourceName
       || !/^[A-F0-9]{64}$/.test(sourceSha256)
+      || typeof sourceApplied !== 'boolean'
       || !Array.isArray(appliedAliases) || appliedAliases.length === 0) {
       errors.push('migration-version-alias-entry-invalid');
       continue;
@@ -509,8 +511,12 @@ function validateAliasLedger(root, canonicalDir, aliasManifestPath, ledgerSnapsh
       errors.push(`${sourcePath}: migration-version-alias source SHA mismatch`);
     }
     const sourcePair = `${sourceVersion}:${sourceName}`;
-    if (!ledgerPairs.has(sourcePair)) errors.push(`${sourcePath}: ledger source row missing or name mismatch`);
-    declaredPairs.set(sourcePair, 'source');
+    if (sourceApplied) {
+      if (!ledgerPairs.has(sourcePair)) errors.push(`${sourcePath}: ledger source row missing or name mismatch`);
+      declaredPairs.set(sourcePair, 'source');
+    } else if (ledgerPairs.has(sourcePair)) {
+      errors.push(`${sourcePath}: source row must remain unapplied when declared sourceApplied=false`);
+    }
     for (const applied of appliedAliases) {
       const version = typeof applied?.version === 'string' ? applied.version : '';
       const name = typeof applied?.name === 'string' ? applied.name : '';
