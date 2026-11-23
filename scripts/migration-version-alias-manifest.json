@@ -2,6 +2,7 @@
   "schemaVersion": 2,
   "format": "MIGRATION_VERSION_ALIASES_V1",
   "ledgerSnapshotPath": "scripts/migration-ledger-snapshot.json",
+  "expectedProjectRef": "fkhihclpghmmtbbywvoj",
   "aliases": [
     {
       "sourcePath": "supabase/migrations/20261121060000_widget_focus_action_durable_receipt.sql",

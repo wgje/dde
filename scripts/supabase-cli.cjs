@@ -52,7 +52,8 @@ function evaluateDbPushPreflight(args, options = {}) {
   const linkedRef = String(options.linkedProjectRef || '').trim();
   const targetSha = String(options.targetSha || '').trim();
   const currentTargetSha = String(options.currentTargetSha || '').trim();
-  if (!configuredRef || !linkedRef || configuredRef !== linkedRef || (expectedProjectRef && configuredRef !== expectedProjectRef)) {
+  if (!expectedProjectRef || !configuredRef || !linkedRef
+    || configuredRef !== linkedRef || configuredRef !== expectedProjectRef) {
     return { ok: false, runGuard: false, reason: 'project-ref-mismatch' };
   }
   if (!/^[a-f0-9]{40}$/i.test(targetSha)) {
@@ -66,14 +67,16 @@ function evaluateDbPushPreflight(args, options = {}) {
     return { ok: false, runGuard: false, reason: 'ledger-snapshot-not-target-bound' };
   }
   const ledger = ledgers[0];
-  if (!ledger || ledger.projectRef !== configuredRef
-    || String(ledger.targetOriginMain).toLowerCase() !== targetSha.toLowerCase()) {
+  if (!ledger || ledger.projectRef !== configuredRef) {
     return { ok: false, runGuard: false, reason: 'ledger-snapshot-target-mismatch' };
   }
-  const expectedGitSha = String(options.expectedGitSha || ledger.expectedGitSha || '').trim();
-  if (!/^[a-f0-9]{40}$/i.test(expectedGitSha)
-    || expectedGitSha.toLowerCase() !== targetSha.toLowerCase()) {
-    return { ok: false, runGuard: false, reason: 'ledger-expected-target-sha-mismatch' };
+  const sourceGitSha = String(ledger.sourceGitSha || '').trim();
+  const expectedSourceGitSha = String(options.expectedGitSha || '').trim();
+  if (!/^[a-f0-9]{40}$/i.test(sourceGitSha) || !/^[a-f0-9]{40}$/i.test(expectedSourceGitSha) || expectedSourceGitSha.toLowerCase() !== sourceGitSha.toLowerCase()) {
+    return { ok: false, runGuard: false, reason: 'ledger-source-sha-mismatch' };
+  }
+  if (options.sourceIsAncestor && !options.sourceIsAncestor(sourceGitSha, targetSha)) {
+    return { ok: false, runGuard: false, reason: 'ledger-source-sha-not-ancestor' };
   }
   const freshnessReason = validateLedgerFreshness(ledger, options.nowUtc || new Date().toISOString());
   if (freshnessReason) return { ok: false, runGuard: false, reason: freshnessReason };
@@ -85,12 +88,37 @@ function readGitHead(root, executeGit = spawnSync) {
   return result.status === 0 ? String(result.stdout || '').trim() : '';
 }
 
+function gitIsAncestor(root, ancestorSha, descendantSha, executeGit = spawnSync) {
+  const result = executeGit('git', ['-C', root, 'merge-base', '--is-ancestor', ancestorSha, descendantSha]);
+  return result.status === 0;
+}
+
+function validateSourceSnapshot(root, ledger, executeGit = spawnSync) {
+  const sourceGitSha = String(ledger?.sourceGitSha || '').trim();
+  const expectedGitSha = String(ledger?.expectedGitSha || '').trim();
+  if (!/^[a-f0-9]{40}$/i.test(sourceGitSha)
+    || !/^[a-f0-9]{40}$/i.test(expectedGitSha)
+    || sourceGitSha.toLowerCase() !== expectedGitSha.toLowerCase()) {
+    return { ok: false, reason: 'ledger-source-sha-mismatch' };
+  }
+  const head = executeGit('git', ['-C', root, 'cat-file', '-e', `${sourceGitSha}^{commit}`], { encoding: 'utf8' });
+  if (head.status !== 0) return { ok: false, reason: 'ledger-source-sha-unavailable' };
+  return { ok: true, sourceGitSha };
+}
+
 function loadLedgerSnapshots(root) {
   const ledgerSource = path.join(root, 'scripts', 'migration-ledger-snapshot.json');
   const aliasSource = path.join(root, 'scripts', 'migration-version-alias-manifest.json');
   try {
     const ledger = JSON.parse(fs.readFileSync(ledgerSource, 'utf8'));
     const aliases = JSON.parse(fs.readFileSync(aliasSource, 'utf8'));
+    const expectedProjectRef = String(aliases.expectedProjectRef || '').trim();
+    if (!expectedProjectRef) {
+      return { ok: false, ledgers: [], reason: 'alias-manifest-project-ref-missing' };
+    }
+    if (ledger.projectRef !== expectedProjectRef) {
+      return { ok: false, ledgers: [], reason: 'alias-manifest-project-ref-mismatch' };
+    }
     const target = aliases && Array.isArray(aliases.aliases)
       ? aliases.aliases.find(entry => entry && entry.sourceVersion === '20261121060000') : null;
     const exactAliasSet = target && Array.isArray(target.appliedAliases)
@@ -100,7 +128,9 @@ function loadLedgerSnapshots(root) {
     if (!exactAliasSet) {
       return { ok: false, ledgers: [], reason: 'known-alias-chain-missing' };
     }
-    return { ok: true, ledgers: [ledger], expectedProjectRef: aliases.expectedProjectRef || ledger.projectRef, expectedGitSha: aliases.expectedGitSha || ledger.expectedGitSha };
+    const sourceValidation = validateSourceSnapshot(root, ledger);
+    if (!sourceValidation.ok) return { ok: false, ledgers: [], reason: sourceValidation.reason };
+    return { ok: true, ledgers: [ledger], expectedProjectRef, expectedGitSha: ledger.expectedGitSha };
   } catch {
     return { ok: false, ledgers: [], reason: 'ledger-or-alias-snapshot-unavailable' };
   }
@@ -210,6 +240,7 @@ function executeCli(args = process.argv.slice(2), dependencies = {}) {
   const loadLedgers = dependencies.loadLedgerSnapshots || loadLedgerSnapshots;
   const runPreflight = dependencies.runMigrationPreflight || runMigrationPreflight;
   const readHead = dependencies.readGitHead || readGitHead;
+  const isAncestor = dependencies.gitIsAncestor || gitIsAncestor;
   const logError = dependencies.logError || ((message) => console.error(message));
 
   require('dotenv').config({ path: path.resolve(__dirname, '../.env.local'), quiet: true });
@@ -235,6 +266,7 @@ function executeCli(args = process.argv.slice(2), dependencies = {}) {
     linkedProjectRef,
     targetSha: env.NANOFLOW_PUSH_TARGET_SHA,
     currentTargetSha,
+    sourceIsAncestor: (sourceGitSha, targetSha) => isAncestor(root, sourceGitSha, targetSha),
     nowUtc,
     ledgerSnapshots: ledgerState.ledgers,
   });
@@ -282,6 +314,7 @@ module.exports = {
   invokeCliCommand,
   isDbPushCommand,
   isRemoteProjectCommand,
+  loadLedgerSnapshots,
   validateLedgerFreshness,
 };
 

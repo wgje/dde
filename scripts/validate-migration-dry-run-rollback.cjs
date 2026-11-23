@@ -64,6 +64,11 @@ function readGitHead(root) {
   return result.status === 0 ? String(result.stdout || '').trim() : '';
 }
 
+function gitIsAncestor(root, ancestorSha, descendantSha) {
+  const result = spawnSync('git', ['-C', root, 'merge-base', '--is-ancestor', ancestorSha, descendantSha]);
+  return result.status === 0;
+}
+
 function parseArgs(argv) {
   const options = {
     root: process.cwd(),
@@ -377,7 +382,7 @@ function loadJsonFile(filePath, unavailableCode, invalidCode) {
   }
 }
 
-function loadLedgerSnapshot(snapshotPath, expectedProjectRef = null, currentTargetSha = null, nowUtc = null) {
+function loadLedgerSnapshot(snapshotPath, root, expectedProjectRef = null, currentTargetSha = null, nowUtc = null) {
   const parsed = loadJsonFile(
     snapshotPath,
     'migration-ledger-snapshot-path-unavailable',
@@ -387,7 +392,9 @@ function loadLedgerSnapshot(snapshotPath, expectedProjectRef = null, currentTarg
     || parsed.source !== 'mcp__supabase.execute_sql'
     || !/^[A-Z0-9]{64}$/i.test(String(parsed.canonicalRowsSha256 || ''))
     || !/^[a-z0-9]{20}$/.test(String(parsed.projectRef || ''))
-    || !/^[a-f0-9]{40}$/i.test(String(parsed.targetOriginMain || ''))
+    || !/^[a-f0-9]{40}$/i.test(String(parsed.sourceGitSha || ''))
+    || !/^[a-f0-9]{40}$/i.test(String(parsed.expectedGitSha || ''))
+    || parsed.expectedGitSha.toLowerCase() !== parsed.sourceGitSha.toLowerCase()
     || !Array.isArray(parsed.rows)
     || parsed.rowCount !== parsed.rows.length
     || (!parsed.sourceEvidence || parsed.sourceEvidence.tool !== 'mcp__supabase.execute_sql'
@@ -397,7 +404,7 @@ function loadLedgerSnapshot(snapshotPath, expectedProjectRef = null, currentTarg
     throw new Error('migration-ledger-snapshot-schema-invalid');
   }
   if (expectedProjectRef && parsed.projectRef !== expectedProjectRef) throw new Error('migration-ledger-snapshot-project-mismatch');
-  if (currentTargetSha && String(parsed.expectedGitSha || '').toLowerCase() !== currentTargetSha.toLowerCase()) throw new Error('migration-ledger-snapshot-target-sha-mismatch');
+  if (currentTargetSha && !gitIsAncestor(root, parsed.sourceGitSha.toLowerCase(), currentTargetSha.toLowerCase())) throw new Error('migration-ledger-snapshot-source-not-ancestor');
   const nowMs = Date.parse(String(nowUtc || ''));
   const capturedMs = Date.parse(String(parsed.capturedAtUtc || ''));
   if (!Number.isFinite(nowMs)) throw new Error('migration-ledger-snapshot-current-time-invalid');
@@ -422,7 +429,7 @@ function validateAliasLedger(root, canonicalDir, aliasManifestPath, ledgerSnapsh
     'migration-version-alias-manifest-path-unavailable',
     'migration-version-alias-manifest-invalid-json',
   );
-  const ledger = loadLedgerSnapshot(ledgerSnapshotPath, freshness.projectRef, freshness.currentTargetSha, freshness.nowUtc);
+  const ledger = loadLedgerSnapshot(ledgerSnapshotPath, root, freshness.projectRef, freshness.currentTargetSha, freshness.nowUtc);
   if (canonicalRowsSha256(ledger.rows) !== String(ledger.canonicalRowsSha256).toUpperCase()) {
     errors.push('migration-ledger-snapshot-rows-sha-mismatch');
   }
@@ -556,7 +563,10 @@ function buildPsqlPlan(transactionSafeFiles) {
 function validate(options) {
   const { canonicalDir, files: migrationFiles } = collectMigrationFiles(options.root);
   const manifestState = prepareManifest(options.root, canonicalDir, loadManifest(options.manifest).entries);
-  const aliasState = validateAliasLedger(options.root, canonicalDir, options.aliasManifest, options.ledgerSnapshot, migrationFiles, { projectRef: 'fkhihclpghmmtbbywvoj', currentTargetSha: options.currentTargetSha, nowUtc: options.now });
+  const aliasManifest = loadJsonFile(options.aliasManifest, 'migration-version-alias-manifest-path-unavailable', 'migration-version-alias-manifest-invalid-json');
+  const expectedProjectRef = String(aliasManifest.expectedProjectRef || '').trim();
+  if (!/^[a-z0-9]{20}$/.test(expectedProjectRef)) throw new Error('migration-version-alias-manifest-project-ref-invalid');
+  const aliasState = validateAliasLedger(options.root, canonicalDir, options.aliasManifest, options.ledgerSnapshot, migrationFiles, { projectRef: expectedProjectRef, currentTargetSha: options.currentTargetSha, nowUtc: options.now });
   const errors = [...aliasState.errors];
   const transactionDryRunFiles = [];
   const manualReview = [];
@@ -621,7 +631,7 @@ function validate(options) {
     },
     manualReview,
     aliases: [...aliasState.bySource.values()],
-    ledgerSnapshot: { rowCount: aliasState.ledger.rowCount, projectRef: aliasState.ledger.projectRef, targetOriginMain: aliasState.ledger.targetOriginMain, canonicalRowsSha256: aliasState.ledger.canonicalRowsSha256 },
+    ledgerSnapshot: { rowCount: aliasState.ledger.rowCount, projectRef: aliasState.ledger.projectRef, sourceGitSha: aliasState.ledger.sourceGitSha, canonicalRowsSha256: aliasState.ledger.canonicalRowsSha256 },
   };
 
   return { errors, report };

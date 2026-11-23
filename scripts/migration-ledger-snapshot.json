@@ -3,7 +3,8 @@
   "source": "mcp__supabase.execute_sql",
   "capturedAtUtc": "2026-11-22T08:20:00Z",
   "projectRef": "fkhihclpghmmtbbywvoj",
-  "targetOriginMain": "82980ddab7649a83ed34bcc8b65646d6375e1a9f",
+  "sourceGitSha": "82980ddab7649a83ed34bcc8b65646d6375e1a9f",
+  "expectedGitSha": "82980ddab7649a83ed34bcc8b65646d6375e1a9f",
   "query": "SELECT version, name FROM supabase_migrations.schema_migrations ORDER BY version, name;",
   "rows": [
     {

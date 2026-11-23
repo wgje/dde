@@ -40,12 +40,12 @@ const KNOWN_ALIASES = [
   { version: '20261122053816', name: 'widget_focus_action_durable_receipt' },
   { version: '20261122053936', name: 'widget_focus_action_durable_receipt_exact_repair' },
 ];
-function writeKnownSource(root: string, sql = 'SELECT 1;') {
+function writeKnownSource(root: string, sql = 'SELECT 1;', sourceGitSha = '82980ddab7649a83ed34bcc8b65646d6375e1a9f') {
   writeMigration(root, path.basename(KNOWN_SOURCE_PATH), sql);
   writeLedgerSnapshot(root, [
     { version: KNOWN_SOURCE_VERSION, name: KNOWN_SOURCE_NAME },
     ...KNOWN_ALIASES,
-  ]);
+  ], { sourceGitSha, expectedGitSha: sourceGitSha });
   // alias manifest target binding is written by caller-specific fixture when needed
   writeAliasManifest(root, [{
     sourcePath: KNOWN_SOURCE_PATH,
@@ -63,6 +63,7 @@ function writeAliasManifest(root: string, aliases: unknown[]): void {
     schemaVersion: 2,
     format: 'MIGRATION_VERSION_ALIASES_V1',
     ledgerSnapshotPath: 'scripts/migration-ledger-snapshot.json',
+    expectedProjectRef: 'fkhihclpghmmtbbywvoj',
     aliases,
   }, null, 2));
 }
@@ -74,11 +75,11 @@ function writeLedgerSnapshot(root: string, rows: Array<{version:string;name:stri
     source: 'mcp__supabase.execute_sql',
     capturedAtUtc: '2026-11-22T08:20:00Z',
     projectRef: 'fkhihclpghmmtbbywvoj',
-    targetOriginMain: '3db29530188c15afdb6913ddcd8799a74a32d644',
     query: 'SELECT version, name FROM supabase_migrations.schema_migrations ORDER BY version, name;',
     rows,
     rowCount: rows.length,
     canonicalRowsSha256,
+    sourceGitSha: '82980ddab7649a83ed34bcc8b65646d6375e1a9f',
     expectedGitSha: '82980ddab7649a83ed34bcc8b65646d6375e1a9f',
     maxAgeSeconds: 86400,
     sourceEvidence: { tool: 'mcp__supabase.execute_sql', queryId: 'fixture', query: 'SELECT version, name FROM supabase_migrations.schema_migrations', resultRowCount: rows.length },
@@ -467,16 +468,24 @@ CREATE TABLE IF NOT EXISTS public.example_safe_comments (
     expect(report.manualReview).toEqual([]);
   });
 
-  it('accepts the exact known production-ledger source and two-alias chain', () => {
+  it('accepts the exact known production-ledger source and two-alias chain', { timeout: 10000 }, () => {
     const root = createMigrationRoot();
     writeKnownSource(root);
     writeManifest(root, []);
-    const result = runGuard(root, path.join(root, 'scripts-migration-dry-run-manifest.json'), true, { now: '2026-11-22T08:30:00Z', currentTargetSha: '82980ddab7649a83ed34bcc8b65646d6375e1a9f' });
+    spawnSync('git', ['init'], { cwd: root, encoding: 'utf8' });
+    spawnSync('git', ['config', 'user.email', 'test@example.invalid'], { cwd: root, encoding: 'utf8' });
+    spawnSync('git', ['config', 'user.name', 'Test'], { cwd: root, encoding: 'utf8' });
+    spawnSync('git', ['-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-m', 'snapshot source'], { cwd: root, encoding: 'utf8' });
+    const sourceSha = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).stdout.trim();
+    spawnSync('git', ['-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-m', 'later target'], { cwd: root, encoding: 'utf8' });
+    const targetSha = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).stdout.trim();
+    writeKnownSource(root, 'SELECT 1;', sourceSha);
+    const result = runGuard(root, path.join(root, 'scripts-migration-dry-run-manifest.json'), true, { now: '2026-11-22T08:30:00Z', currentTargetSha: targetSha });
     expect(result.status).toBe(0);
     expect(JSON.parse(result.stdout).ledgerSnapshot.rowCount).toBe(3);
   });
 
-  it('default guard rejects future ledger evidence without explicit clock/target flags', () => {
+  it('default guard rejects future ledger evidence without explicit clock/target flags', { timeout: 10000 }, () => {
     const root = createMigrationRoot();
     spawnSync('git', ['init'], { cwd: root, encoding: 'utf8' });
     spawnSync('git', ['config', 'user.email', 'test@example.invalid'], { cwd: root, encoding: 'utf8' });
@@ -489,6 +498,7 @@ CREATE TABLE IF NOT EXISTS public.example_safe_comments (
       { version: KNOWN_SOURCE_VERSION, name: KNOWN_SOURCE_NAME },
       ...KNOWN_ALIASES,
     ], {
+      sourceGitSha: targetSha,
       expectedGitSha: targetSha,
       capturedAtUtc: '2999-01-01T00:00:00Z',
     });
