@@ -656,6 +656,61 @@ function barrierAcquire(state, owner, barrierToken, canonicalBarrierToken) {
   };
 }
 
+function barrierRecoverStaleOverlayGenerator(state, owner) {
+  const barrier = effectiveBarrier(state);
+  const ownerMatch = /^codegraph-overlay-generator:(\d+)$/.exec(String(owner ?? ''));
+  const barrierOwnerMatch = /^codegraph-overlay-generator:(\d+)$/.exec(String(barrier.owner ?? ''));
+  if (barrier.state !== 'HELD' || !ownerMatch || !barrierOwnerMatch
+    || owner !== barrier.owner || ownerMatch[1] !== barrierOwnerMatch[1]) {
+    return rejectedBarrierBody('barrier-recover-stale', state, barrier, 'stale-overlay-generator-barrier-required');
+  }
+
+  const pid = Number(ownerMatch[1]);
+  try {
+    process.kill(pid, 0);
+    return rejectedBarrierBody('barrier-recover-stale', state, barrier, 'barrier-owner-still-running', { ownerPid: pid });
+  } catch (error) {
+    // Only ESRCH proves the process is gone. EPERM and all unknown errors fail closed.
+    if (error?.code !== 'ESRCH') {
+      return rejectedBarrierBody('barrier-recover-stale', state, barrier, 'barrier-owner-liveness-unknown', { ownerPid: pid });
+    }
+  }
+
+  const activeBuildLeases = Object.values(effectiveResourceLeases(state))
+    .filter(lease => lease?.kind === 'build' && lease.state === 'ACTIVE');
+  const boundLeases = activeBuildLeases.filter(lease => (
+    lease.owner === owner
+    && lease.resourceId === 'codegraph-overlay-generation'
+    && lease.barrierOwner === barrier.owner
+    && lease.barrierTokenFingerprint === barrier.tokenFingerprint
+    && lease.fence === barrier.fence
+    && lease.heldEpoch === barrier.heldEpoch
+  ));
+  if (boundLeases.length !== activeBuildLeases.length) {
+    return rejectedBarrierBody('barrier-recover-stale', state, barrier, 'unrelated-active-build-resource-leases', {
+      blockers: activeBuildLeases.map(lease => ({
+        owner: lease.owner, resourceId: lease.resourceId, tokenFingerprint: lease.tokenFingerprint,
+      })),
+    });
+  }
+
+  const releasedAt = nextTimestampAtOrAfter(barrier.heartbeatAt, barrier.transitions.at(-1)?.at);
+  for (const lease of boundLeases) {
+    lease.state = 'RELEASED';
+    lease.releasedAt = releasedAt;
+  }
+  appendBarrierTransition(barrier, 'RELEASED', releasedAt);
+  barrier.releasedAt = releasedAt;
+  return {
+    status: 0,
+    body: barrierBody('barrier-recover-stale', state, barrier, {
+      recovered: true, ownerPid: pid, releasedResourceLeaseCount: boundLeases.length,
+    }),
+    stateChanged: true,
+    state,
+  };
+}
+
 function barrierHeartbeat(state, owner, barrierToken) {
   const barrier = effectiveBarrier(state);
   if (!BARRIER_ACTIVE_STATES.has(barrier.state)
@@ -1375,6 +1430,9 @@ async function main() {
       if (args.command === 'barrier-heartbeat') {
         return barrierHeartbeat(state, args.owner, args.barrierToken);
       }
+      if (args.command === 'barrier-recover-stale') {
+        return barrierRecoverStaleOverlayGenerator(state, args.owner);
+      }
       if (args.command === 'barrier-release') {
         return barrierRelease(state, args.owner, args.barrierToken);
       }
@@ -1407,7 +1465,7 @@ async function main() {
           args.canonicalResourceToken,
         );
       }
-      throw new Error('usage: agent-file-lease [--root <dir>] [--owner <id>] [--barrier-token <token>|--barrier-token-stdin] [--resource-kind <read|build> --resource-id <id> --resource-token-stdin] <claim|release|status|prune|reconcile-expired-exact|barrier-acquire|barrier-heartbeat|barrier-release|resource-lease-acquire|resource-lease-heartbeat|resource-lease-release> [files...]');
+      throw new Error('usage: agent-file-lease [--root <dir>] [--owner <id>] [--barrier-token <token>|--barrier-token-stdin] [--resource-kind <read|build> --resource-id <id> --resource-token-stdin] <claim|release|status|prune|reconcile-expired-exact|barrier-acquire|barrier-heartbeat|barrier-release|barrier-recover-stale|resource-lease-acquire|resource-lease-heartbeat|resource-lease-release> [files...]');
     }, ownerRef);
     await waitForCliTransactionTestCheckpoint(args.root, 'after-commit-before-release');
     return transactionResult;
