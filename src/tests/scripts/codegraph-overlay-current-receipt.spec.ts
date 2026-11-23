@@ -266,6 +266,30 @@ describe('CodeGraph Overlay CURRENT receipt reader', () => {
     });
   });
 
+  it('retries a transient CURRENT publication read before failing closed', () => {
+    const root = makeRoot();
+    const published = publish(root);
+    const currentPath = path.join(root, '.codegraph', 'nanoflow-generations', 'CURRENT.json');
+    const originalRead = fs.readFileSync.bind(fs);
+    let currentReads = 0;
+    vi.spyOn(fs, 'readFileSync').mockImplementation(((file: fs.PathOrFileDescriptor, ...args: unknown[]) => {
+      if (typeof file === 'string' && path.resolve(file) === path.resolve(currentPath)) {
+        currentReads += 1;
+        if (currentReads === 1) return Buffer.from('{');
+      }
+      return originalRead(file, ...(args as []));
+    }) as typeof fs.readFileSync);
+
+    const result = reader.readOverlayCurrentReceipt(root) as {
+      ok: boolean;
+      current?: Record<string, unknown>;
+    };
+
+    expect(result.ok).toBe(true);
+    expect(result.current).toEqual(published.current);
+    expect(currentReads).toBeGreaterThanOrEqual(3);
+  });
+
   it('detects an observed CURRENT A/B selector drift', () => {
     const root = makeRoot();
     publish(root);

@@ -7,6 +7,7 @@ import nativeGraphSidecar from './lib/codegraph-native-graph-sidecar.cjs';
 import overlayGenerationPublisher from './lib/codegraph-overlay-generation-publisher.cjs';
 import overlayStability from './lib/codegraph-overlay-stability.cjs';
 import sourcePolicy from './lib/codegraph-source-policy.cjs';
+import graphSchema from './lib/codegraph-nanoflow-overlay-v1-schema-graph.cjs';
 
 const {
   readNativeAndroidKotlinFunctionEndpoints,
@@ -214,6 +215,39 @@ const TYPESCRIPT_GLOBAL_VALUE_REFERENCES = new Set([
   ...TYPESCRIPT_STANDARD_LIBRARY_REFERENCES.values,
 ]);
 
+const NODE_METADATA_ORDERS_BY_RELATION_AND_SHAPE = new Map();
+const NODE_METADATA_ORDERS_BY_SHAPE = new Map();
+for (const [relation, orders] of graphSchema.nodeMetadataOrders) {
+  for (const order of orders) {
+    const sortedShape = JSON.stringify([...order].sort());
+    const relationKey = `${relation}\0${sortedShape}`;
+    if (!NODE_METADATA_ORDERS_BY_RELATION_AND_SHAPE.has(relationKey)) {
+      NODE_METADATA_ORDERS_BY_RELATION_AND_SHAPE.set(relationKey, order);
+    }
+    const shapeOrders = NODE_METADATA_ORDERS_BY_SHAPE.get(sortedShape) ?? [];
+    if (!shapeOrders.some(candidate => JSON.stringify(candidate) === JSON.stringify(order))) {
+      shapeOrders.push(order);
+    }
+    NODE_METADATA_ORDERS_BY_SHAPE.set(sortedShape, shapeOrders);
+  }
+}
+
+function canonicalizeMetadataValue(value) {
+  if (Array.isArray(value)) return value.map(canonicalizeMetadataValue);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonicalizeMetadataValue(value[key])]));
+}
+
+function canonicalNodeMetadata(metadata, kind) {
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return metadata;
+  const sortedShape = JSON.stringify(Object.keys(metadata).sort());
+  const relation = metadata.relation ?? `@none:${kind}`;
+  const exactOrder = NODE_METADATA_ORDERS_BY_RELATION_AND_SHAPE.get(`${relation}\0${sortedShape}`);
+  const shapeOrders = NODE_METADATA_ORDERS_BY_SHAPE.get(sortedShape) ?? [];
+  const order = exactOrder ?? (shapeOrders.length === 1 ? shapeOrders[0] : null);
+  if (!order) throw new Error(`codegraph-overlay-node-metadata-order-ambiguous:${relation}:${sortedShape}`);
+  return Object.fromEntries(order.map(key => [key, canonicalizeMetadataValue(metadata[key])]));
+}
 const CALL_RECEIVER_SKIP_NAMES = new Set(['self', 'this', 'cls', 'super']);
 
 const args = parseArgs(process.argv.slice(2));
@@ -8637,7 +8671,9 @@ function buildNativeGraph(overlay) {
 
   return {
     schemaVersion: 1,
-    nodes: [...nodesById.values()].sort(compareGraphNodes),
+    nodes: [...nodesById.values()].map(node => node.metadata
+      ? { ...node, metadata: canonicalNodeMetadata(node.metadata, node.kind) }
+      : node).sort(compareGraphNodes),
     edges: edges.sort(compareGraphEdges),
   };
 }
@@ -9658,7 +9694,6 @@ function addClassSemanticEdges(addReferenceNode, addEdge, sourceId, sourceFile, 
     addEdge('references', sourceId, addReferenceNode(input.name, sourceFile, { relation: 'input' }), {
       relation: 'input',
       api: input.api,
-      alias: input.alias,
       line: input.line,
     });
   }
@@ -9667,7 +9702,6 @@ function addClassSemanticEdges(addReferenceNode, addEdge, sourceId, sourceFile, 
     addEdge('calls', sourceId, addReferenceNode(output.name, sourceFile, { relation: 'output' }), {
       relation: 'output',
       api: output.api,
-      alias: output.alias,
       line: output.line,
     });
   }
@@ -10772,7 +10806,6 @@ function readDecoratedIo(source, member, name, semantics) {
     semantics.inputs.push({
       name,
       api: '@Input',
-      alias: readReferenceName(input.arguments?.[0]),
       line: readLine(source, member),
     });
   }
@@ -10782,12 +10815,10 @@ function readDecoratedIo(source, member, name, semantics) {
     semantics.outputs.push({
       name,
       api: '@Output',
-      alias: readReferenceName(output.arguments?.[0]),
       line: readLine(source, member),
     });
   }
 }
-
 function readHostBinding(source, member, name, semantics) {
   if (!name) return;
   const decorator = findDecoratorCall(member, 'HostBinding');

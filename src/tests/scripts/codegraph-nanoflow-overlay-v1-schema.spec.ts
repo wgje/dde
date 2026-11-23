@@ -12,14 +12,14 @@ const schemaPath = path.join(libRoot, 'codegraph-nanoflow-overlay-v1-schema.cjs'
 const contractPath = path.join(repoRoot, 'scripts', 'contracts', 'codegraph-nanoflow-overlay-v1.json');
 const currentOverlayPath = path.join(repoRoot, '.codegraph', 'nanoflow-overlay.json');
 const SOURCE_POLICY_DIGEST = 'ca78ea5e17d32399faac676bcab26fc1d7f48186a89792774d37a6b8549d0ca3';
-const SCHEMA_DIGEST = '5132af08c96287a8808840b6667fe2df8e0a4d6a57e471c9aada686d0f2e3250';
-const DESCRIPTOR_MANIFEST_DIGEST = '245dade46ea7b39cd068f2c6ce7c160a05c04238341d9d78e5e54fee9c64b2a5';
+const SCHEMA_DIGEST = 'b249654318ff8d1c9c2fb997c0976a04ea90e81d8782faa36c1c2d826503a618';
+const DESCRIPTOR_MANIFEST_DIGEST = 'fc2b6c5144b181a7e22d24a68407f4d783b9459e89c76a9c800c228a1f16eead';
 const GENERATED_AT = '2026-08-03T00:00:00.000Z';
 const EXPECTED_DESCRIPTOR_DIGESTS = Object.freeze({
   typescript: 'cd2538e77f1abbe5aabe750e0a4ecda1807e006cecc2fc6acc03296dd7f2eabf',
   'angular-support': 'a68c9feed371bb4d107b7e458559431df0197a013e0434350f63285b38027bbc',
   'supabase-android': '7deba66271dd9253c05ff74b2000a3a6124a793da35c2c490d0e7bb03ae16e9d',
-  graph: '63f663485bdbcf3465ae17ba939589d0a8632ab1e29e2b9d3ec67ca85502498b',
+  graph: 'd9c4de516950bcf6951d4d778d76dc46fdc5a2c895d44382136045f432e426ea',
 });
 const EXPECTED_PRODUCER_NODE_ORDERS = Object.freeze([
   Object.freeze({
@@ -838,7 +838,7 @@ describe('CodeGraph NanoFlow Overlay v1 schema authority predecessor', () => {
     const sourcePolicySource = fs.readFileSync(path.join(libRoot, 'codegraph-source-policy.cjs'), 'utf8');
     expect(sourcePolicySource).toMatch(/node:fs/);
     expect([sha256(fs.readFileSync(path.join(repoRoot, 'scripts', 'generate-codegraph-nanoflow-overlay.mjs'))),
-      sha256(sourcePolicySource)]).toEqual(['f61fc7da733f529cd75ee892b2a879709cfd88056bdbb0cc58b5a79fb20a5cf2',
+      sha256(sourcePolicySource)]).toEqual(['27f44b92e1b5a9d63ceca28481e2396c5b198f07a591a82b8a4cdbef2995d2e0',
       '892d9aa9178db3196627d66f6d44d26665df2d8fb8dcc8bb0b5ce3d9bd2c3cfc']);
     const trace = spawnSync(process.execPath, ['-e', `
       const Module = require('node:module'); const seen = new Set(); const load = Module._load;

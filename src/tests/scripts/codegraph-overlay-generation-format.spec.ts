@@ -46,9 +46,9 @@ function setAtPath(root: Record<string, unknown>, pathParts: string[], value: un
 describe('CodeGraph Overlay generation format', () => {
   it('pins the complete generation contract with an independent literal digest', () => {
     expect(require(path.join(repoRoot, 'scripts', 'contracts', 'codegraph-overlay-generation-v1.json')).overlaySchemaDigest)
-      .toBe('5132af08c96287a8808840b6667fe2df8e0a4d6a57e471c9aada686d0f2e3250');
+      .toBe('b249654318ff8d1c9c2fb997c0976a04ea90e81d8782faa36c1c2d826503a618');
     expect(format.CONTRACT_DIGEST).toBe(
-      '84b36416a722fc14848df06caedc09d71e821b1f1d270ed7db8b68b1a34ace03',
+      'bf6234522c78740469fa0ad78b97944e4c5df521704f761fcc4be171c0108ea3',
     );
   });
 

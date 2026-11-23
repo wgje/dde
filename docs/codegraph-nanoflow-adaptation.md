@@ -58,6 +58,8 @@ If the triage fields require a fresh adapter fallback or doctor snapshot, do
 not change adapter source or timeout values until those commands reproduce the
 failure or confirm the config boundary.
 
+On Windows, adapter writer identity converts `Get-Process.StartTime` to Unix milliseconds before comparing it with `daemon.pid.startedAt`; raw .NET ticks must not be parsed as a JavaScript `Number`, because they exceed the safe-integer range and falsely disable exact-root shared-daemon reuse.
+
 ## Current Adaptation Layer
 
 NanoFlow uses a sidecar overlay to add project-specific semantics that the generic
@@ -578,6 +580,8 @@ Documentation sync is numeric-token-only and
 uses a recoverable two-document transaction with fsynced same-directory temps,
 journaled pre/post images, and preimage CAS. `codegraph:overlay:docs:assert-clean`
 is read-only; `codegraph:overlay:docs:recover` accepts only recognized hashes.
+If a generator process crashes while holding the shared overlay publication barrier, do not edit `tmp/agent-file-leases.json` manually. After verifying the recorded `codegraph-overlay-generator:<pid>` process is gone, recover only that dead-owner barrier with `node scripts/agent-file-lease.cjs --owner "codegraph-overlay-generator:<pid>" barrier-recover-stale`; the command refuses live/unknown processes, non-generator owners, unrelated build leases, or a barrier that is not HELD. Then rerun the stable overlay transaction.
+
 There is no cross-three-file simultaneous atomicity claim. The lower-level docs
 validator remains snapshot-only. After intentional count drift, run
 `npm run codegraph:overlay:sync`, then finish with `codegraph:overlay:validate`.
@@ -1828,8 +1832,12 @@ not use `.vscode/mcp.json` as a Codex repair source. The current config sets
 `CODEGRAPH_NO_DAEMON=0`, `CODEGRAPH_NO_WATCH=0`,
 `CODEGRAPH_DAEMON_IDLE_TIMEOUT_MS=300000`,
 `CODEGRAPH_DAEMON_MAX_IDLE_MS=1800000`,
-`NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS=30000`, and
-`NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE=0`. The live Codex path respects
+`NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS=30000`,
+`NANOFLOW_CODEGRAPH_OVERLAY_QUERY_TIMEOUT_MS=60000`,
+`NANOFLOW_CODEGRAPH_OVERLAY_WORKER_ENABLED=1`,
+`NANOFLOW_CODEGRAPH_OVERLAY_WORKER_POOL_SIZE=1`,
+`NANOFLOW_CODEGRAPH_OVERLAY_PREWARM=1`, and
+`NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE=0`. The shared-daemon MCP path defaults to the prewarmed process-local overlay worker even when an older launcher omits the worker env flags; explicit `NANOFLOW_CODEGRAPH_OVERLAY_WORKER_ENABLED=0` preserves the one-shot compatibility path. The worker rechecks exact CURRENT selector bytes on each request and reloads the authenticated immutable generation when it changes. The live Codex path respects
 that upstream shared-daemon contract: all MCP wrappers proxy to one CodeGraph
 daemon, one `MCPEngine`, one SQLite writer, and one watcher. The short-lived
 `codegraph:adapter:context` fallback intentionally overrides this with

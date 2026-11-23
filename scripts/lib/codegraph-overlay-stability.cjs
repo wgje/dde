@@ -76,7 +76,16 @@ function assertSourceManifestEqual(left, right) {
   const leftDigest = manifestDigest(left);
   const rightDigest = manifestDigest(right);
   if (stableJson(left) !== stableJson(right)) {
-    throw new Error(`codegraph-overlay-source-manifest-drift: ${leftDigest} != ${rightDigest}`);
+    const leftByPath = new Map((Array.isArray(left) ? left : []).map(entry => [entry.path, entry]));
+    const rightByPath = new Map((Array.isArray(right) ? right : []).map(entry => [entry.path, entry]));
+    const changedPaths = [...new Set([...leftByPath.keys(), ...rightByPath.keys()])]
+      .filter(sourcePath => stableJson(leftByPath.get(sourcePath) ?? null)
+        !== stableJson(rightByPath.get(sourcePath) ?? null))
+      .sort()
+      .slice(0, 20);
+    throw new Error(
+      `codegraph-overlay-source-manifest-drift: ${leftDigest} != ${rightDigest}; changedPaths=${JSON.stringify(changedPaths)}`,
+    );
   }
   return rightDigest;
 }

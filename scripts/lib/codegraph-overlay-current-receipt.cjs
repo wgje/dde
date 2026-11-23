@@ -29,6 +29,20 @@ const ERROR_CODES = new Set([
   'SELECTOR_DRIFT',
   'IO_FAILURE',
 ]);
+// Publication writes a complete immutable generation before atomically replacing
+// CURRENT.json. On Windows, antivirus/indexer activity can still expose a very
+// short read window while the rename/readback settles. Retry only the bounded
+// control-file/payload failures that can be caused by that publication window;
+// malformed data remains fail-closed after the retry budget is exhausted.
+const TRANSIENT_PUBLICATION_ERROR_CODES = new Set([
+  'CURRENT_MISSING',
+  'CURRENT_INVALID',
+  'GENERATION_INVALID',
+  'MANIFEST_INVALID',
+  'RECEIPT_INVALID',
+  'PAYLOAD_INVALID',
+]);
+const TRANSIENT_PUBLICATION_RETRY_ATTEMPTS = 3;
 
 function sha256(bytes) {
   return crypto.createHash('sha256').update(bytes).digest('hex');
@@ -280,7 +294,7 @@ function readPayload(generationDirectory, manifest, projectRoot) {
   return skeleton;
 }
 
-function readOverlayCurrentReceipt(projectRoot) {
+function readOverlayCurrentReceiptOnce(projectRoot) {
   try {
     if (typeof projectRoot !== 'string' || projectRoot.length < 1) fail('INVALID_PROJECT_ROOT');
     const root = path.resolve(projectRoot);
@@ -334,6 +348,21 @@ function readOverlayCurrentReceipt(projectRoot) {
       : 'IO_FAILURE';
     return deepFreeze({ ok: false, errorCode });
   }
+}
+
+function readOverlayCurrentReceipt(projectRoot) {
+  let result = null;
+  for (let attempt = 0; attempt < TRANSIENT_PUBLICATION_RETRY_ATTEMPTS; attempt += 1) {
+    result = readOverlayCurrentReceiptOnce(projectRoot);
+    if (
+      result.ok
+      || !TRANSIENT_PUBLICATION_ERROR_CODES.has(result.errorCode)
+      || attempt === TRANSIENT_PUBLICATION_RETRY_ATTEMPTS - 1
+    ) {
+      return result;
+    }
+  }
+  return result;
 }
 
 module.exports = Object.freeze({ readOverlayCurrentReceipt });

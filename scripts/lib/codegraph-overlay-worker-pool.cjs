@@ -32,6 +32,8 @@ class OverlayQueryWorkerPool {
     this.queue = [];
     this.closed = false;
     this.nextRequestId = 1;
+    this.ready = false;
+    this.prewarmPromise = null;
   }
 
   makeWorker(index) {
@@ -39,7 +41,32 @@ class OverlayQueryWorkerPool {
   }
 
   prewarm(timeoutMs, metadata = {}) {
-    return this.request(['--prewarm'], timeoutMs, { ...metadata, prewarm: true });
+    if (this.closed) {
+      return Promise.reject(new OverlayWorkerError('overlay-worker-pool-closed', { failureClass: 'overlay-process-error' }));
+    }
+    if (this.ready) {
+      return Promise.resolve({ ok: true, outputText: '', cacheHit: true, generationId: null, profileEvents: [] });
+    }
+    if (this.prewarmPromise) return this.prewarmPromise;
+    const request = this.request(['--prewarm'], timeoutMs, { ...metadata, prewarm: true });
+    this.prewarmPromise = request.then(result => {
+      if (!result?.ok) {
+        throw new OverlayWorkerError(
+          String(result?.error ?? 'overlay-prewarm-failed'),
+          { failureClass: result?.failureClass ?? 'overlay-prewarm-failed', result },
+        );
+      }
+      this.ready = true;
+      return result;
+    }).finally(() => {
+      this.prewarmPromise = null;
+    });
+    return this.prewarmPromise;
+  }
+
+  requestWhenReady(args, timeoutMs, metadata = {}, readinessTimeoutMs = timeoutMs) {
+    return this.prewarm(readinessTimeoutMs, { reason: 'query-readiness', ...metadata })
+      .then(() => this.request(args, timeoutMs, metadata));
   }
 
   request(args, timeoutMs, metadata = {}) {
@@ -195,6 +222,7 @@ class OverlayQueryWorkerPool {
     const job = worker.currentJob;
     if (job?.timer) clearTimeout(job.timer);
     this.resetWorker(worker);
+    if (job?.metadata?.prewarm) this.ready = false;
     if (child && terminate && child.exitCode === null && child.signalCode === null) {
       child.kill();
       if (process.platform === 'win32' && child.pid) {
@@ -230,6 +258,8 @@ class OverlayQueryWorkerPool {
   close() {
     if (this.closed) return;
     this.closed = true;
+    this.ready = false;
+    this.prewarmPromise = null;
     for (const job of this.queue.splice(0)) {
       job.reject(new OverlayWorkerError('overlay-worker-pool-closed', { failureClass: 'overlay-process-error' }));
     }

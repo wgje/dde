@@ -22,6 +22,12 @@ interface WorkerResult {
 }
 interface WorkerPool {
   request(args: string[], timeoutMs: number, metadata?: Record<string, unknown>): Promise<WorkerResult>;
+  requestWhenReady(
+    args: string[],
+    timeoutMs: number,
+    metadata?: Record<string, unknown>,
+    readinessTimeoutMs?: number,
+  ): Promise<WorkerResult>;
   close(): void;
 }
 interface WorkerPoolApi {
@@ -42,6 +48,8 @@ function createFakeWorker(delayMs: number) {
   const scriptPath = path.join(root, 'worker.cjs');
   const startLog = path.join(root, 'starts.log');
   const crashMarker = path.join(root, 'crash-once.marker');
+  const requestLog = path.join(root, 'requests.log');
+  const prewarmFailureMarker = path.join(root, 'prewarm-failure.marker');
   writeFileSync(scriptPath, `
 'use strict';
 const fs = require('node:fs');
@@ -52,6 +60,12 @@ void (async () => {
   for await (const line of rl) {
     const request = JSON.parse(line);
     const args = request.args || [];
+    fs.appendFileSync(process.env.OVERLAY_WORKER_REQUEST_LOG, args.join(' ') + '\\n');
+    if (args.includes('--prewarm') && process.env.OVERLAY_WORKER_FAIL_PREWARM_ONCE === '1' && !fs.existsSync(process.env.OVERLAY_WORKER_PREWARM_FAILURE_MARKER)) {
+      fs.writeFileSync(process.env.OVERLAY_WORKER_PREWARM_FAILURE_MARKER, 'failed');
+      process.stdout.write(JSON.stringify({ id: request.id, ok: false, error: 'transient-prewarm-failure', profileEvents: [] }) + '\\n');
+      continue;
+    }
     if (args.includes('--crash-once') && !fs.existsSync(process.env.OVERLAY_WORKER_CRASH_MARKER)) {
       fs.writeFileSync(process.env.OVERLAY_WORKER_CRASH_MARKER, 'crashed');
       process.stderr.write('fixture worker crash\\n');
@@ -73,7 +87,8 @@ void (async () => {
     root,
     scriptPath,
     startLog,
-    env: { ...process.env, OVERLAY_WORKER_START_LOG: startLog, OVERLAY_WORKER_CRASH_MARKER: crashMarker },
+    requestLog,
+    env: { ...process.env, OVERLAY_WORKER_START_LOG: startLog, OVERLAY_WORKER_CRASH_MARKER: crashMarker, OVERLAY_WORKER_REQUEST_LOG: requestLog, OVERLAY_WORKER_PREWARM_FAILURE_MARKER: prewarmFailureMarker, OVERLAY_WORKER_FAIL_PREWARM_ONCE: '0' },
   };
 }
 
@@ -92,6 +107,35 @@ async function waitForFileLines(filePath: string, expectedLines: number): Promis
 }
 
 describe('persistent overlay worker pool', () => {
+  it('waits for a successful prewarm before dispatching the first real query', async () => {
+    const fixture = createFakeWorker(5);
+    const pool = new OverlayQueryWorkerPool({ ...fixture, size: 1, maxBufferBytes: 1024 * 1024 });
+    try {
+      const result = await pool.requestWhenReady(['--query', 'gated'], 1000, { queryId: 'gated' }, 1000);
+      expect(result.ok).toBe(true);
+      const requests = readFileSync(fixture.requestLog, 'utf8').trim().split(/\r?\n/);
+      expect(requests).toEqual(['--prewarm', '--query gated']);
+    } finally {
+      pool.close();
+    }
+  });
+
+  it('does not dispatch a query when readiness fails and retries readiness later', async () => {
+    const fixture = createFakeWorker(5);
+    fixture.env.OVERLAY_WORKER_FAIL_PREWARM_ONCE = '1';
+    const pool = new OverlayQueryWorkerPool({ ...fixture, size: 1, maxBufferBytes: 1024 * 1024 });
+    try {
+      await expect(pool.requestWhenReady(['--query', 'blocked'], 1000, { queryId: 'blocked' }, 1000))
+        .rejects.toMatchObject({ failureClass: 'overlay-worker-query-failed' });
+      const recovered = await pool.requestWhenReady(['--query', 'recovered'], 1000, { queryId: 'recovered' }, 1000);
+      expect(recovered.ok).toBe(true);
+      const requests = readFileSync(fixture.requestLog, 'utf8').trim().split(/\r?\n/);
+      expect(requests).toEqual(['--prewarm', '--prewarm', '--query recovered']);
+    } finally {
+      pool.close();
+    }
+  });
+
   it('reuses a warm worker for subsequent requests and correlates result IDs', async () => {
     const fixture = createFakeWorker(5);
     const pool = new OverlayQueryWorkerPool({ ...fixture, size: 1, maxBufferBytes: 1024 * 1024 });
