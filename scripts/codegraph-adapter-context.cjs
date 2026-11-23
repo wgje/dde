@@ -133,23 +133,30 @@ function readDaemonIdentity(root, environment = process.env) {
   }
 }
 
-function readProcessStartIdentity(pid) {
-  if (process.platform === 'win32') {
+function readProcessStartIdentity(pid, dependencies = {}) {
+  const platform = dependencies.platform || process.platform;
+  const spawnProcess = dependencies.spawnSync || spawnSync;
+  if (platform === 'win32') {
     try {
-      const result = spawnSync(
+      const result = spawnProcess(
         'powershell.exe',
         ['-NoProfile', '-NonInteractive', '-Command', `(Get-Process -Id ${Number(pid)} -ErrorAction Stop).StartTime.ToUniversalTime().Ticks`],
         { encoding: 'utf8', windowsHide: true, timeout: 5_000 },
       );
       if (result.status !== 0) return { ok: false, reason: 'process-start-unavailable' };
-      const ticks = Number(String(result.stdout || '').trim());
-      if (!Number.isSafeInteger(ticks) || ticks <= 0) return { ok: false, reason: 'process-start-invalid' };
-      return { ok: true, startedAtMs: ticks / 10_000, source: 'Get-Process.StartTime' };
+      const ticks = BigInt(String(result.stdout || '').trim());
+      if (ticks <= 0n) return { ok: false, reason: 'process-start-invalid' };
+      const epochOffsetTicks = 621355968000000000n;
+      const millisecondsFromEpoch = (ticks - epochOffsetTicks) / 10_000n;
+      if (millisecondsFromEpoch <= 0n || millisecondsFromEpoch > BigInt(Number.MAX_SAFE_INTEGER)) {
+        return { ok: false, reason: 'process-start-invalid' };
+      }
+      return { ok: true, startedAtMs: Number(millisecondsFromEpoch), source: 'Get-Process.StartTime' };
     } catch {
       return { ok: false, reason: 'process-start-unavailable' };
     }
   }
-  if (process.platform === 'linux') {
+  if (platform === 'linux') {
     try {
       const stat = fs.readFileSync(`/proc/${Number(pid)}/stat`, 'utf8');
       const startTicks = Number(stat.slice(stat.lastIndexOf(')') + 2).split(/\s+/)[19]);
@@ -2088,6 +2095,7 @@ module.exports = {
   shutdownProcessTree,
   shouldPreserveContextAcrossCriticalLogFailure,
   readActiveCodegraphWriterLock,
+  readProcessStartIdentity,
   resolveAdapterFallbackRuntime,
   codegraphDataDirNameFor,
 };

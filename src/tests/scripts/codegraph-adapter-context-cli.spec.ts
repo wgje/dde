@@ -1084,6 +1084,27 @@ describe('codegraph-adapter-context CLI', () => {
       expect(resolveAdapterFallbackRuntime(root, dependencies)).toMatchObject({ mode: 'direct-session' });
     });
 
+    it('converts Windows .NET ticks without losing precision', () => {
+      const root = makeWriterRoot(
+        { pid: 9011, mode: 'daemon', startedAt: 1760000000011, ready: true },
+        { pid: 9011, version: '1.6.2', socketPath: 'pipe', startedAt: 1760000000011 },
+      );
+      const adapter = requireCjs(adapterContextScriptPath) as {
+        readProcessStartIdentity(
+          pid: number,
+          dependencies: {
+            platform: NodeJS.Platform;
+            spawnSync: () => { status: number; stdout: string };
+          },
+        ): { ok: boolean; startedAtMs?: number; reason?: string };
+      };
+      const ticks = 621355968000000000n + 1_760_000_000_011n * 10_000n;
+      expect(adapter.readProcessStartIdentity(
+        9011,
+        { platform: 'win32', spawnSync: () => ({ status: 0, stdout: `\uFEFF${ticks}\r\n` }) },
+      )).toEqual({ ok: true, startedAtMs: 1760000000011, source: 'Get-Process.StartTime' });
+    });
+
     it('fails closed when the OS process start identity cannot be resolved', () => {
       const root = makeWriterRoot(
         { pid: 9009, mode: 'daemon', startedAt: 1760000000009, ready: true },
