@@ -19,6 +19,18 @@
           "name": "widget_focus_action_durable_receipt_exact_repair"
         }
       ]
+    },
+    {
+      "sourcePath": "supabase/migrations/20261123010000_non_destructive_security_definer_read_rpc_invoker.sql",
+      "sourceVersion": "20261123010000",
+      "sourceName": "non_destructive_security_definer_read_rpc_invoker",
+      "sourceSha256": "FD6C469633A0D27AC67B57E9E68876B9D231E7A7BBB6909BD2BCFBE90A1E1D27",
+      "appliedAliases": [
+        {
+          "version": "20261123024603",
+          "name": "non_destructive_security_definer_read_rpc_invoker"
+        }
+      ]
     }
   ],
   "expectedGitSha": "82980ddab7649a83ed34bcc8b65646d6375e1a9f"

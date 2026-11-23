@@ -4,7 +4,6 @@
   "capturedAtUtc": "2026-11-22T08:20:00Z",
   "projectRef": "fkhihclpghmmtbbywvoj",
   "sourceGitSha": "82980ddab7649a83ed34bcc8b65646d6375e1a9f",
-  "expectedGitSha": "82980ddab7649a83ed34bcc8b65646d6375e1a9f",
   "query": "SELECT version, name FROM supabase_migrations.schema_migrations ORDER BY version, name;",
   "rows": [
     {
@@ -534,16 +533,24 @@
     {
       "version": "20261122053936",
       "name": "widget_focus_action_durable_receipt_exact_repair"
+    },
+    {
+      "version": "20261123010000",
+      "name": "non_destructive_security_definer_read_rpc_invoker"
+    },
+    {
+      "version": "20261123024603",
+      "name": "non_destructive_security_definer_read_rpc_invoker"
     }
   ],
-  "rowCount": 132,
-  "canonicalRowsSha256": "F6F6F1CDE6D4B13C2C0DB861515D92F9CB5B6161BD3EC02776826F3924D66765",
+  "rowCount": 134,
+  "canonicalRowsSha256": "C031CC53073B06C073B9D7079A7F565359BF3CCC85BF68E343B75B55A8FE1342",
   "expectedGitSha": "82980ddab7649a83ed34bcc8b65646d6375e1a9f",
   "maxAgeSeconds": 86400,
   "sourceEvidence": {
     "tool": "mcp__supabase.execute_sql",
-    "queryId": "4b9bbc32-7aed-4d77-a3e6-b6f263fa88c0",
+    "queryId": "02a50366-bfed-4a7f-a0d7-d65280d72417",
     "query": "SELECT version, name FROM supabase_migrations.schema_migrations ORDER BY version, name;",
-    "resultRowCount": 132
+    "resultRowCount": 134
   }
 }

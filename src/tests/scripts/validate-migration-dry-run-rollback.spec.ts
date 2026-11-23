@@ -35,6 +35,9 @@ function writeManifest(root: string, entries: unknown[], manifestPath = path.joi
 
 const KNOWN_SOURCE_PATH = 'supabase/migrations/20261121060000_widget_focus_action_durable_receipt.sql';
 const KNOWN_SOURCE_VERSION = '20261121060000';
+const SECURITY_SOURCE_PATH = 'supabase/migrations/20261123010000_non_destructive_security_definer_read_rpc_invoker.sql';
+const SECURITY_SOURCE_VERSION = '20261123010000';
+const SECURITY_ALIAS_VERSION = '20261123024603';
 const KNOWN_SOURCE_NAME = 'widget_focus_action_durable_receipt';
 const KNOWN_ALIASES = [
   { version: '20261122053816', name: 'widget_focus_action_durable_receipt' },
@@ -468,7 +471,7 @@ CREATE TABLE IF NOT EXISTS public.example_safe_comments (
     expect(report.manualReview).toEqual([]);
   });
 
-  it('accepts the exact known production-ledger source and two-alias chain', { timeout: 10000 }, () => {
+  it('accepts the exact known production-ledger source, alias chains, and security-invoker source', { timeout: 10000 }, () => {
     const root = createMigrationRoot();
     writeKnownSource(root);
     writeManifest(root, []);
