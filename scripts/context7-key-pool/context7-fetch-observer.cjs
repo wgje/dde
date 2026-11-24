@@ -1,7 +1,7 @@
 'use strict';
 
 const proxyDispatcher = (() => {
-  const proxyUrl = process.env.HTTPS_PROXY || process.env.ALL_PROXY || process.env.HTTP_PROXY;
+  const proxyUrl = process.env.NANOFLOW_CONTEXT7_PROXY_URL;
   if (typeof proxyUrl !== 'string' || !/^https?:\/\//i.test(proxyUrl)) return null;
   try {
     const { ProxyAgent } = require('undici');

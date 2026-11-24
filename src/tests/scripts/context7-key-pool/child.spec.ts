@@ -151,6 +151,7 @@ async function fakeChild(options: {
     connectTimeoutMs: options.connectTimeoutMs ?? 2_000,
     callTimeoutMs: options.callTimeoutMs ?? 2_000,
     redact: (value: unknown) => value,
+    useProxy: false,
   });
 }
 
