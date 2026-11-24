@@ -32,6 +32,7 @@ const SAFE_ENV_NAMES = Object.freeze([
   'LOCALAPPDATA',
   'HTTP_PROXY',
   'HTTPS_PROXY',
+  'ALL_PROXY',
   'NO_PROXY',
   'NODE_EXTRA_CA_CERTS',
 ]);

@@ -280,6 +280,7 @@ describe('Context7 official child adapter', () => {
       PATH: process.env.PATH ?? '',
       TEMP: os.tmpdir(),
       HTTPS_PROXY: 'http://proxy.fixture',
+      ALL_PROXY: 'http://all-proxy.fixture',
       NODE_EXTRA_CA_CERTS: path.join(tempRoot(), 'fixture-ca.pem'),
       CONTEXT7_API_KEY: 'inherited-canonical-sentinel',
       CONTEXT7_API_KEY_1: 'slot-one-sentinel',
@@ -303,7 +304,7 @@ describe('Context7 official child adapter', () => {
       const { getDefaultEnvironment } = require('@modelcontextprotocol/sdk/client/stdio.js') as {
         getDefaultEnvironment(): Record<string, string>;
       };
-      const expectedSafe = ['PATH', 'TEMP', 'HTTPS_PROXY', 'NODE_EXTRA_CA_CERTS'];
+      const expectedSafe = ['PATH', 'TEMP', 'HTTPS_PROXY', 'ALL_PROXY', 'NODE_EXTRA_CA_CERTS'];
       if (process.platform !== 'win32') expectedSafe.push('http_proxy');
       const expectedNames = [...new Set([
         ...Object.keys(getDefaultEnvironment()),

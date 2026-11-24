@@ -1,5 +1,16 @@
 'use strict';
 
+const proxyDispatcher = (() => {
+  const proxyUrl = process.env.HTTPS_PROXY || process.env.ALL_PROXY || process.env.HTTP_PROXY;
+  if (typeof proxyUrl !== 'string' || !/^https?:\/\//i.test(proxyUrl)) return null;
+  try {
+    const { ProxyAgent } = require('undici');
+    return new ProxyAgent(proxyUrl);
+  } catch {
+    return null;
+  }
+})();
+
 const FAILURE_PREFIX = 'nanoflow-context7-failure-v1';
 const MARKER_RE = /^[a-f0-9]{64}$/;
 const TERMINAL_EXIT_CODE = 86;
@@ -54,9 +65,13 @@ async function observedFetch(input, init) {
   }
   if (!ENDPOINTS.has(endpoint)) return nativeFetch(input, init);
 
+  const requestInit = proxyDispatcher
+    ? { ...(init ?? {}), dispatcher: proxyDispatcher }
+    : init;
+
   let upstream;
   try {
-    upstream = await nativeFetch(input, init);
+    upstream = await nativeFetch(input, requestInit);
   } catch {
     try {
       return responseFor(envelope('transport', 'none', 'none'), 599);
