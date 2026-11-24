@@ -33,7 +33,59 @@
         }
       ],
       "sourceApplied": false
+    },
+    {
+      "sourcePath": "supabase/migrations/20260715018200_project_delta_keyset_covering_indexes.sql",
+      "sourceVersion": "20260715018200",
+      "sourceName": "project_delta_keyset_covering_indexes",
+      "sourceSha256": "4E52B6A2F8440A4F943124920133A75325C12EB5DFEA7A435047A9C99278B59D",
+      "appliedAliases": [
+        {
+          "version": "20261124023512",
+          "name": "project_delta_keyset_covering_indexes"
+        }
+      ],
+      "sourceApplied": false
+    },
+    {
+      "sourcePath": "supabase/migrations/20260715018400_widget_active_lookup_indexes.sql",
+      "sourceVersion": "20260715018400",
+      "sourceName": "widget_active_lookup_indexes",
+      "sourceSha256": "0A793F4A9E095B2BA5BC54F60AEC3F594956070CC32B86B620D8D2A4355997E6",
+      "appliedAliases": [
+        {
+          "version": "20261124023525",
+          "name": "widget_active_lookup_indexes"
+        }
+      ],
+      "sourceApplied": false
+    },
+    {
+      "sourcePath": "supabase/migrations/20260716000200_personal_retention_cleanup_indexes.sql",
+      "sourceVersion": "20260716000200",
+      "sourceName": "personal_retention_cleanup_indexes",
+      "sourceSha256": "CED4D7081A76776CD01E63AE8E1FD35DD55B462438A9587E61FC5E9ABF813C25",
+      "appliedAliases": [
+        {
+          "version": "20261124023536",
+          "name": "personal_retention_cleanup_indexes"
+        }
+      ],
+      "sourceApplied": false
+    },
+    {
+      "sourcePath": "supabase/migrations/20260716001500_dr_maintenance_cleanup_indexes.sql",
+      "sourceVersion": "20260716001500",
+      "sourceName": "dr_maintenance_cleanup_indexes",
+      "sourceSha256": "7CC0C64F5688928E5B9650732BC86A752A76FFA58593EDF54A24751988BC005A",
+      "appliedAliases": [
+        {
+          "version": "20261124023547",
+          "name": "dr_maintenance_cleanup_indexes"
+        }
+      ],
+      "sourceApplied": false
     }
   ],
-  "expectedGitSha": "63527401d581c0e7e5c05dec926ccaa6e2f0bb3a"
+  "expectedGitSha": "9ba8ec6297d9646ca1cf60437bf74d0518505f56"
 }

@@ -1,9 +1,9 @@
 {
   "format": "SUPABASE_SCHEMA_MIGRATIONS_V1",
   "source": "mcp__supabase.execute_sql",
-  "capturedAtUtc": "2026-11-23T13:30:09.528Z",
+  "capturedAtUtc": "2026-11-24T02:37:58.950Z",
   "projectRef": "fkhihclpghmmtbbywvoj",
-  "sourceGitSha": "63527401d581c0e7e5c05dec926ccaa6e2f0bb3a",
+  "sourceGitSha": "9ba8ec6297d9646ca1cf60437bf74d0518505f56",
   "query": "SELECT version, name FROM supabase_migrations.schema_migrations ORDER BY version, name;",
   "rows": [
     {
@@ -541,16 +541,32 @@
     {
       "version": "20261123115247",
       "name": "restore_sync_increment_routine_completion"
+    },
+    {
+      "version": "20261124023512",
+      "name": "project_delta_keyset_covering_indexes"
+    },
+    {
+      "version": "20261124023525",
+      "name": "widget_active_lookup_indexes"
+    },
+    {
+      "version": "20261124023536",
+      "name": "personal_retention_cleanup_indexes"
+    },
+    {
+      "version": "20261124023547",
+      "name": "dr_maintenance_cleanup_indexes"
     }
   ],
-  "rowCount": 134,
-  "canonicalRowsSha256": "2684DF7786C90BAEEB1961C1B4689551569831DD89044793B1A2D985571A8A4C",
-  "expectedGitSha": "63527401d581c0e7e5c05dec926ccaa6e2f0bb3a",
+  "rowCount": 138,
+  "canonicalRowsSha256": "E72DC0E5D1E40768793FD3F7A0A951828256B5888D37B8B8F2F7A1D13B3D1EE2",
+  "expectedGitSha": "9ba8ec6297d9646ca1cf60437bf74d0518505f56",
   "maxAgeSeconds": 86400,
   "sourceEvidence": {
     "tool": "mcp__supabase.execute_sql",
-    "queryId": "mcp__supabase.execute_sql:20261123-live-schema-migrations",
+    "queryId": "mcp__supabase.execute_sql:20261124-live-schema-migrations",
     "query": "SELECT version, name FROM supabase_migrations.schema_migrations ORDER BY version, name;",
-    "resultRowCount": 134
+    "resultRowCount": 138
   }
 }
