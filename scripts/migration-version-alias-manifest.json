@@ -306,6 +306,32 @@
         }
       ],
       "sourceApplied": false
+    },
+    {
+      "sourcePath": "supabase/migrations/20260715017000_sync_upsert_task_explainability.sql",
+      "sourceVersion": "20260715017000",
+      "sourceName": "sync_upsert_task_explainability",
+      "sourceSha256": "C50EE45E5E2EB36E2E8B1C12E8714131F2B5E4E3F6E1800B680545BB0E16FDF0",
+      "appliedAliases": [
+        {
+          "version": "20261124040405",
+          "name": "sync_upsert_task_explainability_helper"
+        }
+      ],
+      "sourceApplied": false
+    },
+    {
+      "sourcePath": "supabase/migrations/20260727000000_sync_upsert_task_write_intent_guard.sql",
+      "sourceVersion": "20260727000000",
+      "sourceName": "sync_upsert_task_write_intent_guard",
+      "sourceSha256": "CFBA7F44E31736780061B2619CB33966EAF7BBE858AC2371CDDB443A458E324F",
+      "appliedAliases": [
+        {
+          "version": "20261124040517",
+          "name": "sync_upsert_task_write_intent_guard_apply"
+        }
+      ],
+      "sourceApplied": false
     }
   ],
   "expectedGitSha": "9ba8ec6297d9646ca1cf60437bf74d0518505f56"
