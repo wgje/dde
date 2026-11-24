@@ -293,6 +293,19 @@
         }
       ],
       "sourceApplied": false
+    },
+    {
+      "sourcePath": "supabase/migrations/20260716000900_function_execute_privilege_convergence.sql",
+      "sourceVersion": "20260716000900",
+      "sourceName": "function_execute_privilege_convergence",
+      "sourceSha256": "D0EBCC41362EF8322E474B28BAA650DF8D16F272D8ED177A3827A098DBF1AE82",
+      "appliedAliases": [
+        {
+          "version": "20261124040010",
+          "name": "rls_helper_execute_privilege_convergence"
+        }
+      ],
+      "sourceApplied": false
     }
   ],
   "expectedGitSha": "9ba8ec6297d9646ca1cf60437bf74d0518505f56"
