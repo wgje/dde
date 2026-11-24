@@ -85,6 +85,19 @@
         }
       ],
       "sourceApplied": false
+    },
+    {
+      "sourcePath": "supabase/migrations/20260715018600_black_box_keyset_covering_index.sql",
+      "sourceVersion": "20260715018600",
+      "sourceName": "black_box_keyset_covering_index",
+      "sourceSha256": "525A198C3EBC712DBD02C4A62E45186708B120A17002669E3BC841B0CF4F8C14",
+      "appliedAliases": [
+        {
+          "version": "20261124033209",
+          "name": "black_box_keyset_covering_index_transactional"
+        }
+      ],
+      "sourceApplied": false
     }
   ],
   "expectedGitSha": "9ba8ec6297d9646ca1cf60437bf74d0518505f56"
