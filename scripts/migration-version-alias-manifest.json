@@ -163,6 +163,32 @@
         }
       ],
       "sourceApplied": false
+    },
+    {
+      "sourcePath": "supabase/migrations/20260609020000_drop_entity_uuid_defaults.sql",
+      "sourceVersion": "20260609020000",
+      "sourceName": "drop_entity_uuid_defaults",
+      "sourceSha256": "752669279232AFD7A59A8B914CA71BAD80B49A8CCB2D3849F949A5660EAB27AD",
+      "appliedAliases": [
+        {
+          "version": "20261124034742",
+          "name": "entity_uuid_defaults_and_user_preferences_identity_convergence"
+        }
+      ],
+      "sourceApplied": false
+    },
+    {
+      "sourcePath": "supabase/migrations/20260728000100_widget_legacy_retired_primary_keys.sql",
+      "sourceVersion": "20260728000100",
+      "sourceName": "widget_legacy_retired_primary_keys",
+      "sourceSha256": "3B37FB2EEB03057CA3AD0700F8819B7D45FBC7F88F38E5A57E48365D21102B39",
+      "appliedAliases": [
+        {
+          "version": "20261124034615",
+          "name": "widget_legacy_retired_primary_keys_convergence"
+        }
+      ],
+      "sourceApplied": false
     }
   ],
   "expectedGitSha": "9ba8ec6297d9646ca1cf60437bf74d0518505f56"
