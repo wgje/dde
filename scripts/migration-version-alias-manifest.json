@@ -332,6 +332,19 @@
         }
       ],
       "sourceApplied": false
+    },
+    {
+      "sourcePath": "supabase/migrations/20260715016000_safe_delete_tasks_retirement.sql",
+      "sourceVersion": "20260715016000",
+      "sourceName": "safe_delete_tasks_retirement",
+      "sourceSha256": "DC8A4EBC4E48347B70E3BD095BEAB537EF78573785D05501A3C7FCEC4F1C13F0",
+      "appliedAliases": [
+        {
+          "version": "20261124040138",
+          "name": "destructive_helper_service_role_contract_convergence"
+        }
+      ],
+      "sourceApplied": false
     }
   ],
   "expectedGitSha": "9ba8ec6297d9646ca1cf60437bf74d0518505f56"

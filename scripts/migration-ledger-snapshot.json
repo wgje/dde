@@ -1,7 +1,7 @@
 {
   "format": "SUPABASE_SCHEMA_MIGRATIONS_V1",
   "source": "mcp__supabase.execute_sql",
-  "capturedAtUtc": "2026-11-24T04:07:01.928Z",
+  "capturedAtUtc": "2026-11-24T04:13:33.361Z",
   "projectRef": "fkhihclpghmmtbbywvoj",
   "sourceGitSha": "9ba8ec6297d9646ca1cf60437bf74d0518505f56",
   "query": "SELECT version, name FROM supabase_migrations.schema_migrations ORDER BY version, name;",
@@ -671,6 +671,10 @@
       "name": "rls_helper_execute_privilege_convergence"
     },
     {
+      "version": "20261124040138",
+      "name": "destructive_helper_service_role_contract_convergence"
+    },
+    {
       "version": "20261124040405",
       "name": "sync_upsert_task_explainability_helper"
     },
@@ -683,14 +687,14 @@
       "name": "sync_upsert_task_acl_repair"
     }
   ],
-  "rowCount": 169,
-  "canonicalRowsSha256": "9BF3D784F0848C51CA5F22A0B801CD4F0D23D50879BAA4B7FD7111C07128F51D",
+  "rowCount": 170,
+  "canonicalRowsSha256": "C5E3F6D16EA994061560B0F6D04969815B448AA618940787C877330E96B4E83F",
   "expectedGitSha": "9ba8ec6297d9646ca1cf60437bf74d0518505f56",
   "maxAgeSeconds": 86400,
   "sourceEvidence": {
     "tool": "mcp__supabase.execute_sql",
     "queryId": "mcp__supabase.execute_sql:20261124-live-schema-migrations",
     "query": "SELECT version, name FROM supabase_migrations.schema_migrations ORDER BY version, name;",
-    "resultRowCount": 169
+    "resultRowCount": 170
   }
 }
