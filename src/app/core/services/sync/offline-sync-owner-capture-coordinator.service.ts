@@ -4,13 +4,12 @@ import { SyncRpcClientService } from '../../../../services/sync-rpc-client.servi
 import { FEATURE_FLAGS } from '../../../../config/feature-flags.config';
 import { OFFLINE_SYNC_REMOTE_CAPABILITIES } from '../../../../services/sync/offline-sync-capability-gate';
 import { AUTH_CONFIG } from '../../../../config/auth.config';
-import type { QueuedAction } from '../../../../services/action-queue.types';
 import type { OfflineCommandStore, OfflineCommandRecord } from '../../../../services/sync/offline-command-store';
 import type { OfflineSyncCommandEnvelope } from '../../../../services/sync/offline-sync-command-envelope';
 import { getAuthOwnerTransition } from '../../../../services/auth-owner-transition.controller';
 import { createOfflineSyncProjectionRpcTransport, pullAndApplyOfflineSyncProjections } from '../../../../services/sync/offline-sync-projection-rpc-adapter';
 import { LoggerService } from '../../../../services/logger.service';
-import { RetryQueueService, type RetryQueueItem } from './retry-queue.service';
+import { RetryQueueService } from './retry-queue.service';
 import { ActionQueueService } from '../../../../services/action-queue.service';
 import { getOfflineSyncCaptureHooks } from './offline-sync-capture-registry';
 import { getOfflineSyncActionCaptureHooks } from '../../../../services/sync/offline-sync-action-capture-registry';

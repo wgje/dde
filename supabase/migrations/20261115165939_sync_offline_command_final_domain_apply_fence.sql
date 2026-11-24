@@ -27,7 +27,7 @@ BEGIN
       'task.move', 'task.reorder', 'task.detach', 'task.assign', 'task.tags.update',
       'task.parking_meta.update', 'task.attention_items.update', 'task.todo.update'
     )
-    WHEN 'connection' THEN NEW.command IN ('connection.create', 'connection.update', 'connection.delete', 'connection.restore', 'connection.reorder')
+    WHEN 'connection' THEN NEW.command IN ('connection.create', 'connection.update', 'connection.restore', 'connection.reorder')
     WHEN 'black_box_entry' THEN NEW.command IN ('black_box_entry.create', 'black_box_entry.update')
     WHEN 'preference' THEN NEW.command IN ('preference.create', 'preference.update')
     WHEN 'focus_session' THEN NEW.command IN ('focus_session.create', 'focus_session.update')

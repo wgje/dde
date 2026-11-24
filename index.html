@@ -731,6 +731,8 @@
     (function() {
       var startTime = Date.now();
       var dismissed = false;
+      var recoveryParam = 'nanoflow-startup-recovery';
+      var recoveryValue = 'bypass-worker-v1';
 
       function dismissLoader() {
         if (dismissed) return;
@@ -774,12 +776,30 @@
         if (elapsed < 25000) {
           setTimeout(checkReady, 100);
         } else {
+          var currentUrl = new URL(window.location.href);
+          var recoveryAttempted = currentUrl.searchParams.get(recoveryParam) === recoveryValue;
+          window.__NANOFLOW_PUSH_STARTUP_TRACE__ && window.__NANOFLOW_PUSH_STARTUP_TRACE__('loader.handoff_timeout', {
+            elapsedMs: elapsed,
+            recoveryAttempted: recoveryAttempted,
+            lastTraceEvent: (window.__NANOFLOW_STARTUP_TRACE__ || []).slice(-1)[0]?.event || null
+          });
+          if (!recoveryAttempted) {
+            currentUrl.searchParams.set('ngsw-bypass', '');
+            currentUrl.searchParams.set(recoveryParam, recoveryValue);
+            window.__NANOFLOW_PUSH_STARTUP_TRACE__ && window.__NANOFLOW_PUSH_STARTUP_TRACE__('loader.worker_bypass', {
+              elapsedMs: elapsed
+            });
+            window.location.replace(currentUrl.href);
+            return;
+          }
+
           // 超时 - 显示错误
           var loader = document.getElementById('initial-loader');
           if (loader) {
             loader.innerHTML = '<div style="text-align:center;padding:2rem;">' +
               '<h2 style="color:#dc2626;">加载超时</h2>' +
               '<p style="color:#666;margin:1rem 0;">应用加载时间过长，可能是缓存问题导致。</p>' +
+              '<p style="color:#666;margin:1rem 0;">已尝试绕过 Service Worker；本地数据与缓存未被清理。</p>' +
               '<div style="display:flex;gap:0.5rem;justify-content:center;margin-top:1rem;flex-wrap:wrap;">' +
               '<button onclick="location.reload()" style="padding:0.5rem 1rem;background:#4f46e5;color:#fff;border:none;border-radius:4px;cursor:pointer;">刷新</button>' +
               '<button onclick="if(window.__NANOFLOW_FORCE_CLEAR_CACHE__)window.__NANOFLOW_FORCE_CLEAR_CACHE__();else{caches.keys().then(function(k){return Promise.all(k.map(function(n){return caches.delete(n)}))}).then(function(){location.reload()})}" style="padding:0.5rem 1rem;background:#dc2626;color:#fff;border:none;border-radius:4px;cursor:pointer;">清除缓存</button>' +

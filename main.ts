@@ -6,6 +6,7 @@ import { createPostHandoffSwRegistrationStrategy } from './src/services/sw-regis
 import { pushStartupTrace } from './src/utils/startup-trace';
 import { ensureBrowserNetworkSuspensionTracking } from './src/utils/browser-network-suspension';
 import { applyStartupVersionAction, decideStartupVersionAction } from './src/utils/startup-version-policy';
+import { buildStartupWorkerBypassUrl, resolveStartupRecoveryDecision } from './src/utils/startup-recovery';
 import { forceClearCacheImpl, type ForceClearCacheDeps } from './src/utils/force-clear-cache-impl';
 import { isGojsOverviewOriginRectNoise, extractErrorStack as extractAnyErrorStack } from './src/utils/gojs-overview-noise';
 
@@ -501,14 +502,36 @@ async function startApplication() {
   // 添加启动超时保护（15秒）
   const startupTimeout = setTimeout(() => {
     logError('Angular 启动超时！');
+    const recoveryDecision = resolveStartupRecoveryDecision(window.location.href);
+    const recoveryUrl = buildStartupWorkerBypassUrl(window.location.href);
+    pushStartupTrace('app.startup_timeout', {
+      buildId: BUILD_ID,
+      elapsedMs: Date.now() - START_TIME,
+      startupPhase,
+      recoveryDecision,
+      recoveryAttempted: recoveryUrl !== null,
+    });
     captureStartupSentryError(new Error('Startup timeout'), {
       component: 'main',
       mechanism: 'startup-timeout',
       isFatal: true,
+      recoveryDecision,
+      startupPhase,
     });
+    if (recoveryUrl !== null) {
+      pushStartupTrace('app.startup_worker_bypass', {
+        buildId: BUILD_ID,
+        elapsedMs: Date.now() - START_TIME,
+      });
+      window.location.replace(recoveryUrl);
+      return;
+    }
     showStartupError('启动超时', '应用启动时间过长，可能是缓存问题导致。', new Error('Startup timeout'));
   }, 15000);
   
+  let startupPhase: 'module-imports' | 'angular-bootstrap' = 'module-imports';
+  pushStartupTrace('app.start_phase', { phase: startupPhase, atMs: Date.now() - START_TIME });
+
   try {
     const [
       appComponentModule,
@@ -521,11 +544,14 @@ async function startApplication() {
       import('./src/services/global-error-handler.service'),
       import('./src/services/sentry-lazy-loader.service'),
     ]);
+    pushStartupTrace('app.start_phase_complete', { phase: startupPhase, atMs: Date.now() - START_TIME });
     const AppComponent = appComponentModule.AppComponent;
     const routes = appRoutesModule.routes;
     const GlobalErrorHandler = globalErrorHandlerModule.GlobalErrorHandler;
     const SentryLazyLoaderService = sentryLoaderModule.SentryLazyLoaderService;
 
+    startupPhase = 'angular-bootstrap';
+    pushStartupTrace('app.start_phase', { phase: startupPhase, atMs: Date.now() - START_TIME });
     const appRef = await bootstrapApplication(AppComponent, {
       providers: [
         // ============= 错误处理器（使用 GlobalErrorHandler）=============
@@ -576,6 +602,7 @@ async function startApplication() {
     });
     
     clearTimeout(startupTimeout);
+    pushStartupTrace('app.start_phase_complete', { phase: startupPhase, atMs: Date.now() - START_TIME });
     flushStartupSentryQueue(appRef.injector.get(SentryLazyLoaderService));
     
     const elapsed = Date.now() - START_TIME;

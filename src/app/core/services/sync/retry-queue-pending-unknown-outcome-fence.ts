@@ -234,14 +234,15 @@ function isSameFenceIdentity(
 }
 
 function getStorage(storageKind: RetryQueueFenceStorageKind): Storage | null {
+  let storage: Storage | undefined;
   try {
-    const storage = storageKind === 'local'
+    storage = storageKind === 'local'
       ? globalThis.localStorage
       : globalThis.sessionStorage;
-    return typeof storage === 'undefined' ? null : storage;
   } catch {
-    return null;
+    storage = undefined;
   }
+  return storage ?? null;
 }
 
 function removeFenceFromStorage(storageKind: RetryQueueFenceStorageKind, key: string): void {

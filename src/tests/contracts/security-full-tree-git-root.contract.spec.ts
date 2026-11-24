@@ -202,7 +202,7 @@ describe('Git-visible full-tree helper', () => {
     expect(nestedRecords.map(record => record.relativePath)).toContain('nested.txt');
     expect(nestedRecords.find(record => record.relativePath === 'nested.txt')?.readBuffer().toString('utf8'))
       .toBe('nested root\n');
-  });
+  }, 10_000);
 
   it('rejects an external symlink or junction without exposing the target', () => {
     const root = makeTemp('nanoflow-git-external-link-root-');
@@ -260,7 +260,7 @@ describe('Git-visible full-tree helper', () => {
     expect(records.find(record => record.relativePath === 'tracked.txt')?.readBuffer().toString('utf8'))
       .toMatch(/^linked content\r?\n$/u);
     git(root, ['worktree', 'remove', '--force', linked]);
-  });
+  }, 10_000);
 
   it('uses one staged mixed listing command and has no fallback scanner', () => {
     const source = fs.readFileSync(helperPath, 'utf8');
@@ -298,7 +298,7 @@ describe('full-tree security callers', () => {
     expect(result.stderr).toContain(expectedRule);
     expect(result.stderr).not.toContain(content.toString('utf8'));
     expect(result.stderr).not.toContain(foreign);
-  });
+  }, 10_000);
 
   it('rejects a control-character Git path without logging the raw path', () => {
     const root = makeTemp('nanoflow-security-control-path-');

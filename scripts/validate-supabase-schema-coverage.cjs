@@ -259,7 +259,7 @@ function main() {
     errors,
     'fresh-init RPC functions missing',
     rpcReport.missingFromFreshInit,
-    ['apply_widget_focus_action', 'sync_apply_offline_command', 'sync_get_offline_command_status', 'sync_pull_offline_projections'],
+    ['apply_widget_focus_action'],
   );
   expectList(
     errors,

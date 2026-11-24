@@ -10,7 +10,13 @@
  */
 
 import { Injectable, inject } from '@angular/core';
-import { ProjectSyncCursorService, ProjectDataService, RetryQueueService, TombstoneService } from '../core-bridge';
+import {
+  ProjectSyncCursorService,
+  ProjectDataService,
+  RetryQueueService,
+  TombstoneService,
+  type RetryQueueItem,
+} from '../core-bridge';
 import { AUTH_CONFIG } from '../config/auth.config';
 import { ConflictDetectionService } from './conflict-detection.service';
 import { ProjectStateService } from './project-state.service';
@@ -23,7 +29,6 @@ import type {
 } from './action-queue.types';
 import { ActionQueueService } from './action-queue.service';
 import { AuthService } from './auth.service';
-import type { RetryQueueItem } from '../app/core/services/sync/retry-queue.types';
 import { LoggerService } from './logger.service';
 import { Project, Task, Connection } from '../models';
 import { SYNC_CONFIG } from '../config';
