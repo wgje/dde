@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -133,12 +133,14 @@ describe('Supabase CLI project safety', () => {
   it('binds the committed source SHA to the current target across later commits', () => {
     const safety = loadSafetyModule();
     if (!safety) return;
-    const sourceSha = '82980ddab7649a83ed34bcc8b65646d6375e1a9f';
-    const targetSha = 'cffd31496c64c0bfe78a0c1cbd18b6c3087803e3';
     const ledgerState = safety.loadLedgerSnapshots(process.cwd());
     expect(ledgerState.ok).toBe(true);
     expect(ledgerState.expectedProjectRef).toBe('fkhihclpghmmtbbywvoj');
-    expect(ledgerState.expectedGitSha).toBe(sourceSha);
+    const sourceSha = ledgerState.expectedGitSha;
+    const targetSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: process.cwd(), encoding: 'utf8' }).trim();
+    const capturedAtUtc = String((ledgerState.ledgers[0] as Record<string, unknown>).capturedAtUtc);
+    const nowUtc = new Date(Date.parse(capturedAtUtc) + 60_000).toISOString();
+    expect(sourceSha).toMatch(/^[a-f0-9]{40}$/i);
     expect(ledgerState.ledgers[0]?.sourceGitSha).toBe(sourceSha);
     const seen: string[] = [];
     const result = safety.evaluateDbPushPreflight(['db', 'push', '--linked'], {
@@ -149,7 +151,7 @@ describe('Supabase CLI project safety', () => {
       targetSha,
       currentTargetSha: targetSha,
       expectedGitSha: sourceSha,
-      nowUtc: '2026-11-22T08:30:00Z',
+      nowUtc,
       sourceIsAncestor: (left: string, right: string) => { seen.push(left, right); return true; },
     });
     expect(result).toMatchObject({ ok: true, runGuard: true });

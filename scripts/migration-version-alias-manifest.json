@@ -33,7 +33,319 @@
         }
       ],
       "sourceApplied": false
+    },
+    {
+      "sourcePath": "supabase/migrations/20260715018200_project_delta_keyset_covering_indexes.sql",
+      "sourceVersion": "20260715018200",
+      "sourceName": "project_delta_keyset_covering_indexes",
+      "sourceSha256": "4E52B6A2F8440A4F943124920133A75325C12EB5DFEA7A435047A9C99278B59D",
+      "appliedAliases": [
+        {
+          "version": "20261124023512",
+          "name": "project_delta_keyset_covering_indexes"
+        }
+      ],
+      "sourceApplied": false
+    },
+    {
+      "sourcePath": "supabase/migrations/20260715018400_widget_active_lookup_indexes.sql",
+      "sourceVersion": "20260715018400",
+      "sourceName": "widget_active_lookup_indexes",
+      "sourceSha256": "0A793F4A9E095B2BA5BC54F60AEC3F594956070CC32B86B620D8D2A4355997E6",
+      "appliedAliases": [
+        {
+          "version": "20261124023525",
+          "name": "widget_active_lookup_indexes"
+        }
+      ],
+      "sourceApplied": false
+    },
+    {
+      "sourcePath": "supabase/migrations/20260716000200_personal_retention_cleanup_indexes.sql",
+      "sourceVersion": "20260716000200",
+      "sourceName": "personal_retention_cleanup_indexes",
+      "sourceSha256": "CED4D7081A76776CD01E63AE8E1FD35DD55B462438A9587E61FC5E9ABF813C25",
+      "appliedAliases": [
+        {
+          "version": "20261124023536",
+          "name": "personal_retention_cleanup_indexes"
+        }
+      ],
+      "sourceApplied": false
+    },
+    {
+      "sourcePath": "supabase/migrations/20260716001500_dr_maintenance_cleanup_indexes.sql",
+      "sourceVersion": "20260716001500",
+      "sourceName": "dr_maintenance_cleanup_indexes",
+      "sourceSha256": "7CC0C64F5688928E5B9650732BC86A752A76FFA58593EDF54A24751988BC005A",
+      "appliedAliases": [
+        {
+          "version": "20261124023547",
+          "name": "dr_maintenance_cleanup_indexes"
+        }
+      ],
+      "sourceApplied": false
+    },
+    {
+      "sourcePath": "supabase/migrations/20260715018600_black_box_keyset_covering_index.sql",
+      "sourceVersion": "20260715018600",
+      "sourceName": "black_box_keyset_covering_index",
+      "sourceSha256": "525A198C3EBC712DBD02C4A62E45186708B120A17002669E3BC841B0CF4F8C14",
+      "appliedAliases": [
+        {
+          "version": "20261124033209",
+          "name": "black_box_keyset_covering_index_transactional"
+        }
+      ],
+      "sourceApplied": false
+    },
+    {
+      "sourcePath": "supabase/migrations/20260629031500_external_source_links_operation_id.sql",
+      "sourceVersion": "20260629031500",
+      "sourceName": "external_source_links_operation_id",
+      "sourceSha256": "EB14E15B71F8E7129796DEC75D536DD252E385E02FDF24653AA0768FCB1305B9",
+      "appliedAliases": [
+        {
+          "version": "20261124034443",
+          "name": "external_source_links_operation_column_convergence"
+        }
+      ],
+      "sourceApplied": false
+    },
+    {
+      "sourcePath": "supabase/migrations/20260715005823_attachment_cleanup_cloud_outbox.sql",
+      "sourceVersion": "20260715005823",
+      "sourceName": "attachment_cleanup_cloud_outbox",
+      "sourceSha256": "3910A91DB8FD9C367F1C1A8FD3338BF4772EB15CC6F4C4210566BD68BDAA4484",
+      "appliedAliases": [
+        {
+          "version": "20261124034216",
+          "name": "attachment_cleanup_outbox_convergence"
+        }
+      ],
+      "sourceApplied": false
+    },
+    {
+      "sourcePath": "supabase/migrations/20260729000000_widget_black_box_action_idempotency.sql",
+      "sourceVersion": "20260729000000",
+      "sourceName": "widget_black_box_action_idempotency",
+      "sourceSha256": "001B62ABE5CF9F898F06BE4FFF311F8B1F09A8494AA71C2DBF90E23E0056E5B4",
+      "appliedAliases": [
+        {
+          "version": "20261124034228",
+          "name": "widget_black_box_action_receipt_convergence"
+        }
+      ],
+      "sourceApplied": false
+    },
+    {
+      "sourcePath": "supabase/migrations/20260731000000_external_source_link_operation_identity.sql",
+      "sourceVersion": "20260731000000",
+      "sourceName": "external_source_link_operation_identity",
+      "sourceSha256": "95E23396F147E9BED67C1DFCBF11DDCC53908579E1A4D6C62EC3F4453025D5AF",
+      "appliedAliases": [
+        {
+          "version": "20261124034105",
+          "name": "external_source_link_operation_identity_convergence"
+        }
+      ],
+      "sourceApplied": false
+    },
+    {
+      "sourcePath": "supabase/migrations/20260803000000_external_source_links_update_owner_guard.sql",
+      "sourceVersion": "20260803000000",
+      "sourceName": "external_source_links_update_owner_guard",
+      "sourceSha256": "BCD52D2FA0AC9E867A23033F7E9EB86576223CDFE167716A015AE5612C738271",
+      "appliedAliases": [
+        {
+          "version": "20261124034417",
+          "name": "external_source_links_update_owner_guard_convergence"
+        }
+      ],
+      "sourceApplied": false
+    },
+    {
+      "sourcePath": "supabase/migrations/20260609020000_drop_entity_uuid_defaults.sql",
+      "sourceVersion": "20260609020000",
+      "sourceName": "drop_entity_uuid_defaults",
+      "sourceSha256": "752669279232AFD7A59A8B914CA71BAD80B49A8CCB2D3849F949A5660EAB27AD",
+      "appliedAliases": [
+        {
+          "version": "20261124034742",
+          "name": "entity_uuid_defaults_and_user_preferences_identity_convergence"
+        }
+      ],
+      "sourceApplied": false
+    },
+    {
+      "sourcePath": "supabase/migrations/20260728000100_widget_legacy_retired_primary_keys.sql",
+      "sourceVersion": "20260728000100",
+      "sourceName": "widget_legacy_retired_primary_keys",
+      "sourceSha256": "3B37FB2EEB03057CA3AD0700F8819B7D45FBC7F88F38E5A57E48365D21102B39",
+      "appliedAliases": [
+        {
+          "version": "20261124034615",
+          "name": "widget_legacy_retired_primary_keys_convergence"
+        }
+      ],
+      "sourceApplied": false
+    },
+    {
+      "sourcePath": "supabase/migrations/20260730000000_transcription_usage_quota_immutability.sql",
+      "sourceVersion": "20260730000000",
+      "sourceName": "transcription_usage_quota_immutability",
+      "sourceSha256": "E6385360F93555357A96E30D33AD2B374FE85A8CBC3C50D254592A78068366DE",
+      "appliedAliases": [
+        {
+          "version": "20261124035042",
+          "name": "internal_auxiliary_table_acl_convergence"
+        }
+      ],
+      "sourceApplied": false
+    },
+    {
+      "sourcePath": "supabase/migrations/20260715019000_attachment_internal_table_privilege_convergence.sql",
+      "sourceVersion": "20260715019000",
+      "sourceName": "attachment_internal_table_privilege_convergence",
+      "sourceSha256": "9F6ADC2F892AB47817DCD01873413D196A01C4DE85FA23C5122914A773227285",
+      "appliedAliases": [
+        {
+          "version": "20261124035145",
+          "name": "attachment_internal_table_privilege_separation"
+        }
+      ],
+      "sourceApplied": false
+    },
+    {
+      "sourcePath": "supabase/migrations/20260718003100_task_tombstone_keyset_pagination.sql",
+      "sourceVersion": "20260718003100",
+      "sourceName": "task_tombstone_keyset_pagination",
+      "sourceSha256": "821657508C154DFFEA3CE3093EACB08416FBF0330CBF576115DD71FEBFDC1847",
+      "appliedAliases": [
+        {
+          "version": "20261124035323",
+          "name": "keyset_index_and_required_identity_convergence"
+        }
+      ],
+      "sourceApplied": false
+    },
+    {
+      "sourcePath": "supabase/migrations/20260716052000_routine_tasks_keyset_index_convergence.sql",
+      "sourceVersion": "20260716052000",
+      "sourceName": "routine_tasks_keyset_index_convergence",
+      "sourceSha256": "D9653C8DDC10EA1952BBFFBD7F73604114745E88CAADAFC94EFCEC886FBD6BC5",
+      "appliedAliases": [
+        {
+          "version": "20261124035710",
+          "name": "routine_tasks_keyset_index_source_record"
+        }
+      ],
+      "sourceApplied": false
+    },
+    {
+      "sourcePath": "supabase/migrations/20260718003200_tasks_created_at_keyset_convergence.sql",
+      "sourceVersion": "20260718003200",
+      "sourceName": "tasks_created_at_keyset_convergence",
+      "sourceSha256": "02F186349D7BFABB2359AB15A90F57C3B1BDAE58D5FEC018041C9DDA2E9A0DEB",
+      "appliedAliases": [
+        {
+          "version": "20261124035723",
+          "name": "tasks_created_at_keyset_source_record"
+        }
+      ],
+      "sourceApplied": false
+    },
+    {
+      "sourcePath": "supabase/migrations/20260718003000_projects_owner_updated_id_keyset_convergence.sql",
+      "sourceVersion": "20260718003000",
+      "sourceName": "projects_owner_updated_id_keyset_convergence",
+      "sourceSha256": "4C684B54ECCFED20EFD8560DFE883DAD21F34A5715414BB5DDE9B9FEFD201307",
+      "appliedAliases": [
+        {
+          "version": "20261124035733",
+          "name": "projects_owner_updated_id_keyset_source_record"
+        }
+      ],
+      "sourceApplied": false
+    },
+    {
+      "sourcePath": "supabase/migrations/20260716043500_widget_operational_retention.sql",
+      "sourceVersion": "20260716043500",
+      "sourceName": "widget_operational_retention",
+      "sourceSha256": "2F289D080192E111246F5D068985F961CE7115C7EDDA675720B3BA88F949ECBF",
+      "appliedAliases": [
+        {
+          "version": "20261124035626",
+          "name": "widget_operational_retention_function_and_cron"
+        }
+      ],
+      "sourceApplied": false
+    },
+    {
+      "sourcePath": "supabase/migrations/20260628193000_sync_rpc_payload_digest_replay_guard.sql",
+      "sourceVersion": "20260628193000",
+      "sourceName": "sync_rpc_payload_digest_replay_guard",
+      "sourceSha256": "427157D0972ABE1BB1031FA6152D670A70D9F0CDE2792F42C8BBCB415E0A2BF0",
+      "appliedAliases": [
+        {
+          "version": "20261124035458",
+          "name": "sync_delete_tasks_purge_rowtype_repair"
+        }
+      ],
+      "sourceApplied": false
+    },
+    {
+      "sourcePath": "supabase/migrations/20260716000900_function_execute_privilege_convergence.sql",
+      "sourceVersion": "20260716000900",
+      "sourceName": "function_execute_privilege_convergence",
+      "sourceSha256": "D0EBCC41362EF8322E474B28BAA650DF8D16F272D8ED177A3827A098DBF1AE82",
+      "appliedAliases": [
+        {
+          "version": "20261124040010",
+          "name": "rls_helper_execute_privilege_convergence"
+        }
+      ],
+      "sourceApplied": false
+    },
+    {
+      "sourcePath": "supabase/migrations/20260715017000_sync_upsert_task_explainability.sql",
+      "sourceVersion": "20260715017000",
+      "sourceName": "sync_upsert_task_explainability",
+      "sourceSha256": "C50EE45E5E2EB36E2E8B1C12E8714131F2B5E4E3F6E1800B680545BB0E16FDF0",
+      "appliedAliases": [
+        {
+          "version": "20261124040405",
+          "name": "sync_upsert_task_explainability_helper"
+        }
+      ],
+      "sourceApplied": false
+    },
+    {
+      "sourcePath": "supabase/migrations/20260727000000_sync_upsert_task_write_intent_guard.sql",
+      "sourceVersion": "20260727000000",
+      "sourceName": "sync_upsert_task_write_intent_guard",
+      "sourceSha256": "CFBA7F44E31736780061B2619CB33966EAF7BBE858AC2371CDDB443A458E324F",
+      "appliedAliases": [
+        {
+          "version": "20261124040517",
+          "name": "sync_upsert_task_write_intent_guard_apply"
+        }
+      ],
+      "sourceApplied": false
+    },
+    {
+      "sourcePath": "supabase/migrations/20260715016000_safe_delete_tasks_retirement.sql",
+      "sourceVersion": "20260715016000",
+      "sourceName": "safe_delete_tasks_retirement",
+      "sourceSha256": "DC8A4EBC4E48347B70E3BD095BEAB537EF78573785D05501A3C7FCEC4F1C13F0",
+      "appliedAliases": [
+        {
+          "version": "20261124040138",
+          "name": "destructive_helper_service_role_contract_convergence"
+        }
+      ],
+      "sourceApplied": false
     }
   ],
-  "expectedGitSha": "63527401d581c0e7e5c05dec926ccaa6e2f0bb3a"
+  "expectedGitSha": "9ba8ec6297d9646ca1cf60437bf74d0518505f56"
 }

@@ -137,10 +137,22 @@ const OVERLAY_QUERY_WORKER_ENABLED = OverlayQueryWorkerPool !== null
 const OVERLAY_QUERY_WORKER_PREWARM_ENABLED =
   OVERLAY_QUERY_WORKER_ENABLED
   && process.env.NANOFLOW_CODEGRAPH_OVERLAY_PREWARM !== '0';
+// A cold authenticated overlay generation routinely takes ~50-75s on
+// Windows. When the worker path is enabled, keep the legacy 30s contract as
+// the configured minimum but never let the first warm query time out before
+// readiness/query completion. Explicit worker=0 retains the old direct-session
+// timing behavior.
 const CONTEXT_PACK_TIMEOUT_MS = parsePositiveIntegerEnv(
   'NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS',
   30_000,
 );
+const WARM_OVERLAY_INTERNAL_TIMEOUT_MS = 180_000;
+const OVERLAY_QUERY_TIMEOUT_MS_EFFECTIVE = OVERLAY_QUERY_WORKER_ENABLED
+  ? Math.max(OVERLAY_QUERY_TIMEOUT_MS, WARM_OVERLAY_INTERNAL_TIMEOUT_MS)
+  : OVERLAY_QUERY_TIMEOUT_MS;
+const CONTEXT_PACK_TIMEOUT_MS_EFFECTIVE = OVERLAY_QUERY_WORKER_ENABLED
+  ? Math.max(CONTEXT_PACK_TIMEOUT_MS, WARM_OVERLAY_INTERNAL_TIMEOUT_MS)
+  : CONTEXT_PACK_TIMEOUT_MS;
 const CONTEXT_PACK_TIMEOUT_OVERLAY_GRACE_MS = parsePositiveIntegerEnv(
   'NANOFLOW_CODEGRAPH_CONTEXT_PACK_OVERLAY_GRACE_MS',
   750,
@@ -555,8 +567,10 @@ diagnostics.log('wrapper.start', {
   effectiveChildEnv: pickEnv(createCodegraphChildEnv(), CODEGRAPH_CHILD_ENV_KEYS),
   runtimeTopology: summarizeCodegraphRuntimeTopology(createCodegraphChildEnv()),
   overlayQueryTimeoutMs: OVERLAY_QUERY_TIMEOUT_MS,
+  effectiveOverlayQueryTimeoutMs: OVERLAY_QUERY_TIMEOUT_MS_EFFECTIVE,
   overlayQueryMaxBufferBytes: OVERLAY_QUERY_MAX_BUFFER_BYTES,
   contextPackTimeoutMs: CONTEXT_PACK_TIMEOUT_MS,
+  effectiveContextPackTimeoutMs: CONTEXT_PACK_TIMEOUT_MS_EFFECTIVE,
   overlayQueryWorkerEnabled: OVERLAY_QUERY_WORKER_ENABLED,
   overlayQueryWorkerPrewarmEnabled: OVERLAY_QUERY_WORKER_PREWARM_ENABLED,
   overlayQueryWorkerSelection: OVERLAY_QUERY_WORKER_ENV === undefined
@@ -3429,14 +3443,14 @@ function forwardNanoFlowContextPackRequestUnchecked(message, requestTrace) {
   const internalId = nextInternalRequestId;
   nextInternalRequestId -= 1;
   const startedAtMs = Date.now();
-  const deadlineMs = startedAtMs + CONTEXT_PACK_TIMEOUT_MS;
+  const deadlineMs = startedAtMs + CONTEXT_PACK_TIMEOUT_MS_EFFECTIVE;
   const contextId = `${diagnostics.runId}:context-${Math.abs(internalId)}`;
   const baseQuery = contextPackExploreQueryFor(query);
   const baseQueryFocused = baseQuery !== query;
   const baseMaxFiles = baseQueryFocused && maxFilesWasDefaulted ? 1 : maxFiles;
   const timeoutTimer = setTimeout(() => {
     handleNanoFlowContextPackTimeout(internalId);
-  }, CONTEXT_PACK_TIMEOUT_MS);
+  }, CONTEXT_PACK_TIMEOUT_MS_EFFECTIVE);
   timeoutTimer.unref?.();
   pendingContextPacks.set(String(internalId), {
     originalId: message.id,
@@ -3467,7 +3481,7 @@ function forwardNanoFlowContextPackRequestUnchecked(message, requestTrace) {
     overlayLimit,
     startedAtMs,
     deadlineMs,
-    timeoutMs: CONTEXT_PACK_TIMEOUT_MS,
+    timeoutMs: CONTEXT_PACK_TIMEOUT_MS_EFFECTIVE,
   });
   const forwarded = writeToCodegraphStdin(`${JSON.stringify({
     jsonrpc: '2.0',
@@ -3504,8 +3518,8 @@ function handleNanoFlowContextPackEntryError(message, requestTrace, error) {
     ? buildContextPackQueryPlan(pending)
     : {
         rawQuery: query,
-        contextTimeoutMs: CONTEXT_PACK_TIMEOUT_MS,
-        overlayTimeoutMs: OVERLAY_QUERY_TIMEOUT_MS,
+        contextTimeoutMs: CONTEXT_PACK_TIMEOUT_MS_EFFECTIVE,
+        overlayTimeoutMs: OVERLAY_QUERY_TIMEOUT_MS_EFFECTIVE,
       };
 
   diagnostics.log('nanoflow.context.error', {
@@ -3584,7 +3598,7 @@ function startPendingContextPackOverlay(internalId) {
   const overlayStartedAtMs = Date.now();
   const baseElapsedMs = overlayStartedAtMs - pending.startedAtMs;
   const deadlineRemainingMs = Math.max(1, pending.deadlineMs - overlayStartedAtMs);
-  const overlayTimeoutMs = Math.max(deadlineRemainingMs, OVERLAY_QUERY_TIMEOUT_MS);
+  const overlayTimeoutMs = Math.max(deadlineRemainingMs, OVERLAY_QUERY_TIMEOUT_MS_EFFECTIVE);
   const overlayQuery = contextPackOverlayQueryFor(pending.query);
   diagnostics.log('nanoflow.context.overlay.start', {
     originalId: pending.originalId,
@@ -3598,8 +3612,8 @@ function startPendingContextPackOverlay(internalId) {
       baseElapsedMs,
       deadlineRemainingMs,
       timeoutMs: overlayTimeoutMs,
-      contextTimeoutMs: CONTEXT_PACK_TIMEOUT_MS,
-      overlayTimeoutMs: OVERLAY_QUERY_TIMEOUT_MS,
+      contextTimeoutMs: CONTEXT_PACK_TIMEOUT_MS_EFFECTIVE,
+      overlayTimeoutMs: OVERLAY_QUERY_TIMEOUT_MS_EFFECTIVE,
       overlayRecoveryGraceMs: CONTEXT_PACK_TIMEOUT_OVERLAY_GRACE_MS,
       queryPlan: buildContextPackQueryPlan(pending, {
         deadlineRemainingMs,
@@ -3633,8 +3647,8 @@ function buildContextPackQueryPlan(pending, extra = {}) {
     maxFilesWasDefaulted: pending.maxFilesWasDefaulted,
     baseMaxFiles: pending.baseMaxFiles,
     overlayLimit: pending.overlayLimit,
-    contextTimeoutMs: CONTEXT_PACK_TIMEOUT_MS,
-    overlayTimeoutMs: pending.overlayTimeoutMs ?? OVERLAY_QUERY_TIMEOUT_MS,
+    contextTimeoutMs: CONTEXT_PACK_TIMEOUT_MS_EFFECTIVE,
+    overlayTimeoutMs: pending.overlayTimeoutMs ?? OVERLAY_QUERY_TIMEOUT_MS_EFFECTIVE,
     overlayDeadlineRemainingMs: Number.isFinite(pending.overlayDeadlineMs)
       ? Math.max(0, pending.overlayDeadlineMs - Date.now())
       : null,
@@ -4012,7 +4026,7 @@ async function handleNanoFlowContextPackTimeoutResponse(internalId, pending) {
     baseCodegraph: {
       isError: true,
       text: '',
-      rawError: `NanoFlow context pack timed out waiting for base CodeGraph after ${CONTEXT_PACK_TIMEOUT_MS}ms.`,
+      rawError: `NanoFlow context pack timed out waiting for base CodeGraph after ${CONTEXT_PACK_TIMEOUT_MS_EFFECTIVE}ms.`,
     },
     nanoFlowOverlay: {
       isError: !overlaySucceeded,
@@ -4068,7 +4082,7 @@ async function handleNanoFlowContextPackTimeoutResponse(internalId, pending) {
       overlayRecoveryTimeoutMs,
     }),
     elapsedMs,
-    timeoutMs: CONTEXT_PACK_TIMEOUT_MS,
+    timeoutMs: CONTEXT_PACK_TIMEOUT_MS_EFFECTIVE,
     overlayRecoveryTimedOut,
     overlayRecoveryTimeoutMs,
     failureClass,
@@ -4261,7 +4275,7 @@ function writeInvalidParamsResponse(id, message, source = 'nanoflow-overlay') {
 
 function prewarmOverlayQueryWorkerPool(reason = 'startup') {
   try {
-    getOverlayQueryWorkerPool().prewarm(Math.max(OVERLAY_QUERY_TIMEOUT_MS, CONTEXT_PACK_TIMEOUT_MS), { reason })
+    getOverlayQueryWorkerPool().prewarm(Math.max(OVERLAY_QUERY_TIMEOUT_MS_EFFECTIVE, CONTEXT_PACK_TIMEOUT_MS_EFFECTIVE), { reason })
       .catch(error => diagnostics.log('overlay.worker.prewarm.failed', {
         reason, failureClass: error?.failureClass ?? 'overlay-prewarm-failed',
         error: serializeDiagnosticError(error), runtime: summarizeRuntimeStateSafely(),
@@ -4311,7 +4325,16 @@ function getOverlayQueryWorkerPool() {
 }
 
 function requestOverlayQueryWorker(args, timeoutMs, metadata) {
-  return getOverlayQueryWorkerPool().request(args, timeoutMs, metadata);
+  const pool = getOverlayQueryWorkerPool();
+  if (!OVERLAY_QUERY_WORKER_PREWARM_ENABLED || metadata?.prewarm === true) {
+    return pool.request(args, timeoutMs, metadata);
+  }
+  const readinessTimeoutMs = Math.max(
+    timeoutMs,
+    OVERLAY_QUERY_TIMEOUT_MS_EFFECTIVE,
+    CONTEXT_PACK_TIMEOUT_MS_EFFECTIVE,
+  );
+  return pool.requestWhenReady(args, timeoutMs, metadata, readinessTimeoutMs);
 }
 
 function closeOverlayQueryWorkerPool(reason) {
@@ -4333,7 +4356,7 @@ function runNanoFlowOverlayQuery(query, limit, options = {}) {
   const overlayFile = getOverlayFileDiagnostics(projectRoot);
   const timeoutMs = Number.isInteger(options.timeoutMs) && options.timeoutMs > 0
     ? options.timeoutMs
-    : OVERLAY_QUERY_TIMEOUT_MS;
+    : OVERLAY_QUERY_TIMEOUT_MS_EFFECTIVE;
   const outputMode = options.nativeJson
     ? WRAPPER_OUTPUT_MODES.nativeJson
     : (options.nativeMarkdown

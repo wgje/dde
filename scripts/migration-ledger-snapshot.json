@@ -1,9 +1,9 @@
 {
   "format": "SUPABASE_SCHEMA_MIGRATIONS_V1",
   "source": "mcp__supabase.execute_sql",
-  "capturedAtUtc": "2026-11-23T13:30:09.528Z",
+  "capturedAtUtc": "2026-11-24T04:13:33.361Z",
   "projectRef": "fkhihclpghmmtbbywvoj",
-  "sourceGitSha": "63527401d581c0e7e5c05dec926ccaa6e2f0bb3a",
+  "sourceGitSha": "9ba8ec6297d9646ca1cf60437bf74d0518505f56",
   "query": "SELECT version, name FROM supabase_migrations.schema_migrations ORDER BY version, name;",
   "rows": [
     {
@@ -541,16 +541,160 @@
     {
       "version": "20261123115247",
       "name": "restore_sync_increment_routine_completion"
+    },
+    {
+      "version": "20261124023512",
+      "name": "project_delta_keyset_covering_indexes"
+    },
+    {
+      "version": "20261124023525",
+      "name": "widget_active_lookup_indexes"
+    },
+    {
+      "version": "20261124023536",
+      "name": "personal_retention_cleanup_indexes"
+    },
+    {
+      "version": "20261124023547",
+      "name": "dr_maintenance_cleanup_indexes"
+    },
+    {
+      "version": "20261124030023",
+      "name": "non_destructive_read_rpc_invoker_batch_1"
+    },
+    {
+      "version": "20261124030245",
+      "name": "legacy_mutation_rpc_authenticated_retirement_apply"
+    },
+    {
+      "version": "20261124030332",
+      "name": "legacy_admin_tombstone_rpc_authenticated_retirement_apply"
+    },
+    {
+      "version": "20261124030344",
+      "name": "legacy_service_role_mutation_helper_retirement_apply"
+    },
+    {
+      "version": "20261124030357",
+      "name": "legacy_full_project_aggregate_authenticated_retirement_apply"
+    },
+    {
+      "version": "20261124030518",
+      "name": "internal_project_delete_helper_retirement_apply"
+    },
+    {
+      "version": "20261124030751",
+      "name": "concurrent_index_additions_transactional_backfill"
+    },
+    {
+      "version": "20261124030832",
+      "name": "legacy_index_redundancy_retirement_apply"
+    },
+    {
+      "version": "20261124032457",
+      "name": "restore_focus_sync_wrappers_and_active_view_acl"
+    },
+    {
+      "version": "20261124032617",
+      "name": "restore_focus_sync_business_guards"
+    },
+    {
+      "version": "20261124032726",
+      "name": "restore_user_preferences_sync_business_guard"
+    },
+    {
+      "version": "20261124033209",
+      "name": "black_box_keyset_covering_index_transactional"
+    },
+    {
+      "version": "20261124034105",
+      "name": "external_source_link_operation_identity_convergence"
+    },
+    {
+      "version": "20261124034216",
+      "name": "attachment_cleanup_outbox_convergence"
+    },
+    {
+      "version": "20261124034228",
+      "name": "widget_black_box_action_receipt_convergence"
+    },
+    {
+      "version": "20261124034417",
+      "name": "external_source_links_update_owner_guard_convergence"
+    },
+    {
+      "version": "20261124034443",
+      "name": "external_source_links_operation_column_convergence"
+    },
+    {
+      "version": "20261124034615",
+      "name": "widget_legacy_retired_primary_keys_convergence"
+    },
+    {
+      "version": "20261124034742",
+      "name": "entity_uuid_defaults_and_user_preferences_identity_convergence"
+    },
+    {
+      "version": "20261124035042",
+      "name": "internal_auxiliary_table_acl_convergence"
+    },
+    {
+      "version": "20261124035145",
+      "name": "attachment_internal_table_privilege_separation"
+    },
+    {
+      "version": "20261124035323",
+      "name": "keyset_index_and_required_identity_convergence"
+    },
+    {
+      "version": "20261124035458",
+      "name": "sync_delete_tasks_purge_rowtype_repair"
+    },
+    {
+      "version": "20261124035626",
+      "name": "widget_operational_retention_function_and_cron"
+    },
+    {
+      "version": "20261124035710",
+      "name": "routine_tasks_keyset_index_source_record"
+    },
+    {
+      "version": "20261124035723",
+      "name": "tasks_created_at_keyset_source_record"
+    },
+    {
+      "version": "20261124035733",
+      "name": "projects_owner_updated_id_keyset_source_record"
+    },
+    {
+      "version": "20261124040010",
+      "name": "rls_helper_execute_privilege_convergence"
+    },
+    {
+      "version": "20261124040138",
+      "name": "destructive_helper_service_role_contract_convergence"
+    },
+    {
+      "version": "20261124040405",
+      "name": "sync_upsert_task_explainability_helper"
+    },
+    {
+      "version": "20261124040517",
+      "name": "sync_upsert_task_write_intent_guard_apply"
+    },
+    {
+      "version": "20261124040544",
+      "name": "sync_upsert_task_acl_repair"
     }
   ],
-  "rowCount": 134,
-  "canonicalRowsSha256": "2684DF7786C90BAEEB1961C1B4689551569831DD89044793B1A2D985571A8A4C",
-  "expectedGitSha": "63527401d581c0e7e5c05dec926ccaa6e2f0bb3a",
+  "rowCount": 170,
+  "canonicalRowsSha256": "C5E3F6D16EA994061560B0F6D04969815B448AA618940787C877330E96B4E83F",
+  "expectedGitSha": "9ba8ec6297d9646ca1cf60437bf74d0518505f56",
   "maxAgeSeconds": 86400,
   "sourceEvidence": {
     "tool": "mcp__supabase.execute_sql",
-    "queryId": "mcp__supabase.execute_sql:20261123-live-schema-migrations",
+    "queryId": "mcp__supabase.execute_sql:20261124-live-schema-migrations",
     "query": "SELECT version, name FROM supabase_migrations.schema_migrations ORDER BY version, name;",
-    "resultRowCount": 134
+    "resultRowCount": 170
   }
 }

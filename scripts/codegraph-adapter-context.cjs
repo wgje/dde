@@ -31,6 +31,8 @@ const MCP_PROTOCOL_VERSION = '2025-06-18';
 const WRAPPER_TIMEOUT_HEADROOM_MIN_MS = 2_500;
 const WRAPPER_TIMEOUT_HEADROOM_MAX_MS = 5_000;
 const TOOLING_TRIAGE_WRAPPER_TIMEOUT_RATIO = 0.75;
+const WARM_OVERLAY_ADAPTER_TIMEOUT_MS = 180_000;
+const WARM_OVERLAY_WRAPPER_TIMEOUT_MS = 175_000;
 const TOOLING_QUALITY_FOCUSED_QUERY = 'codegraph adapter context wrapper log guard sourceOrdering sourceSelection';
 const TOOLING_ISSUE_REGISTRY_FOCUSED_QUERY = 'docs/codegraph-nanoflow-adaptation-issues.md codegraph nanoflow adaptation issues';
 const TOOLING_TRIAGE_ANCHOR_SEGMENTS = new Set(['codegraph', 'nanoflow', 'mcp']);
@@ -477,11 +479,18 @@ function printHelp() {
 }
 
 function deriveWrapperRequestTimeoutMs(timeoutMs, options = {}) {
+  const warmWorkerEnabled = options.workerEnabled === true;
+  const callerTimeoutMs = warmWorkerEnabled
+    ? Math.max(timeoutMs, WARM_OVERLAY_ADAPTER_TIMEOUT_MS)
+    : timeoutMs;
   const headroomMs = Math.min(
     WRAPPER_TIMEOUT_HEADROOM_MAX_MS,
-    Math.max(WRAPPER_TIMEOUT_HEADROOM_MIN_MS, Math.floor(timeoutMs * 0.1)),
+    Math.max(WRAPPER_TIMEOUT_HEADROOM_MIN_MS, Math.floor(callerTimeoutMs * 0.1)),
   );
-  const derived = Math.max(1, timeoutMs - headroomMs);
+  const derived = Math.max(1, callerTimeoutMs - headroomMs);
+  if (warmWorkerEnabled) {
+    return Math.max(derived, WARM_OVERLAY_WRAPPER_TIMEOUT_MS);
+  }
   return shouldUseFastToolingTriageTimeout(options)
     ? Math.min(derived, Math.max(1, Math.floor(timeoutMs * TOOLING_TRIAGE_WRAPPER_TIMEOUT_RATIO)))
     : derived;
@@ -1887,7 +1896,15 @@ async function shutdownProcessTree(child, closeTracker, options = {}) {
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   const invocation = resolveWrapperInvocation(options);
-  const wrapperRequestTimeoutMs = deriveWrapperRequestTimeoutMs(options.timeoutMs, options);
+  const adapterRuntime = resolveAdapterFallbackRuntime(options.root);
+  const workerEnv = invocation.configEnv?.NANOFLOW_CODEGRAPH_OVERLAY_WORKER_ENABLED;
+  const workerEnabled = workerEnv === '0'
+    ? false
+    : workerEnv === '1' || adapterRuntime.mode === 'shared-daemon-proxy';
+  const clientTimeoutMs = workerEnabled
+    ? Math.max(options.timeoutMs, WARM_OVERLAY_ADAPTER_TIMEOUT_MS)
+    : options.timeoutMs;
+  const wrapperRequestTimeoutMs = deriveWrapperRequestTimeoutMs(clientTimeoutMs, { ...options, workerEnabled });
   const explicitLogPath = process.env.NANOFLOW_CODEGRAPH_MCP_LOG
     ? path.resolve(process.env.NANOFLOW_CODEGRAPH_MCP_LOG)
     : null;
@@ -1900,7 +1917,6 @@ async function main() {
     fs.rmSync(explicitLogPath, { force: true });
   }
 
-  const adapterRuntime = resolveAdapterFallbackRuntime(options.root);
   const child = spawn(
     process.execPath,
     [
@@ -1925,7 +1941,7 @@ async function main() {
     },
   );
   const childCloseTracker = createChildCloseTracker(child);
-  const client = createMcpClient(child, options.timeoutMs, { logPath });
+  const client = createMcpClient(child, clientTimeoutMs, { logPath });
   let nextRequestId = 1;
   const nextId = () => nextRequestId++;
 
