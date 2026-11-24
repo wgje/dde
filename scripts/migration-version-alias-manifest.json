@@ -189,6 +189,32 @@
         }
       ],
       "sourceApplied": false
+    },
+    {
+      "sourcePath": "supabase/migrations/20260730000000_transcription_usage_quota_immutability.sql",
+      "sourceVersion": "20260730000000",
+      "sourceName": "transcription_usage_quota_immutability",
+      "sourceSha256": "E6385360F93555357A96E30D33AD2B374FE85A8CBC3C50D254592A78068366DE",
+      "appliedAliases": [
+        {
+          "version": "20261124035042",
+          "name": "internal_auxiliary_table_acl_convergence"
+        }
+      ],
+      "sourceApplied": false
+    },
+    {
+      "sourcePath": "supabase/migrations/20260715019000_attachment_internal_table_privilege_convergence.sql",
+      "sourceVersion": "20260715019000",
+      "sourceName": "attachment_internal_table_privilege_convergence",
+      "sourceSha256": "9F6ADC2F892AB47817DCD01873413D196A01C4DE85FA23C5122914A773227285",
+      "appliedAliases": [
+        {
+          "version": "20261124035145",
+          "name": "attachment_internal_table_privilege_separation"
+        }
+      ],
+      "sourceApplied": false
     }
   ],
   "expectedGitSha": "9ba8ec6297d9646ca1cf60437bf74d0518505f56"
