@@ -1,7 +1,7 @@
 {
   "format": "SUPABASE_SCHEMA_MIGRATIONS_V1",
   "source": "mcp__supabase.execute_sql",
-  "capturedAtUtc": "2026-11-24T03:57:47.306Z",
+  "capturedAtUtc": "2026-11-24T03:58:32.783Z",
   "projectRef": "fkhihclpghmmtbbywvoj",
   "sourceGitSha": "9ba8ec6297d9646ca1cf60437bf74d0518505f56",
   "query": "SELECT version, name FROM supabase_migrations.schema_migrations ORDER BY version, name;",

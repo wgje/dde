@@ -280,6 +280,19 @@
         }
       ],
       "sourceApplied": false
+    },
+    {
+      "sourcePath": "supabase/migrations/20260628193000_sync_rpc_payload_digest_replay_guard.sql",
+      "sourceVersion": "20260628193000",
+      "sourceName": "sync_rpc_payload_digest_replay_guard",
+      "sourceSha256": "427157D0972ABE1BB1031FA6152D670A70D9F0CDE2792F42C8BBCB415E0A2BF0",
+      "appliedAliases": [
+        {
+          "version": "20261124035458",
+          "name": "sync_delete_tasks_purge_rowtype_repair"
+        }
+      ],
+      "sourceApplied": false
     }
   ],
   "expectedGitSha": "9ba8ec6297d9646ca1cf60437bf74d0518505f56"
