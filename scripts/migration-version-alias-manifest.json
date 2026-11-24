@@ -215,6 +215,71 @@
         }
       ],
       "sourceApplied": false
+    },
+    {
+      "sourcePath": "supabase/migrations/20260718003100_task_tombstone_keyset_pagination.sql",
+      "sourceVersion": "20260718003100",
+      "sourceName": "task_tombstone_keyset_pagination",
+      "sourceSha256": "821657508C154DFFEA3CE3093EACB08416FBF0330CBF576115DD71FEBFDC1847",
+      "appliedAliases": [
+        {
+          "version": "20261124035323",
+          "name": "keyset_index_and_required_identity_convergence"
+        }
+      ],
+      "sourceApplied": false
+    },
+    {
+      "sourcePath": "supabase/migrations/20260716052000_routine_tasks_keyset_index_convergence.sql",
+      "sourceVersion": "20260716052000",
+      "sourceName": "routine_tasks_keyset_index_convergence",
+      "sourceSha256": "D9653C8DDC10EA1952BBFFBD7F73604114745E88CAADAFC94EFCEC886FBD6BC5",
+      "appliedAliases": [
+        {
+          "version": "20261124035710",
+          "name": "routine_tasks_keyset_index_source_record"
+        }
+      ],
+      "sourceApplied": false
+    },
+    {
+      "sourcePath": "supabase/migrations/20260718003200_tasks_created_at_keyset_convergence.sql",
+      "sourceVersion": "20260718003200",
+      "sourceName": "tasks_created_at_keyset_convergence",
+      "sourceSha256": "02F186349D7BFABB2359AB15A90F57C3B1BDAE58D5FEC018041C9DDA2E9A0DEB",
+      "appliedAliases": [
+        {
+          "version": "20261124035723",
+          "name": "tasks_created_at_keyset_source_record"
+        }
+      ],
+      "sourceApplied": false
+    },
+    {
+      "sourcePath": "supabase/migrations/20260718003000_projects_owner_updated_id_keyset_convergence.sql",
+      "sourceVersion": "20260718003000",
+      "sourceName": "projects_owner_updated_id_keyset_convergence",
+      "sourceSha256": "4C684B54ECCFED20EFD8560DFE883DAD21F34A5715414BB5DDE9B9FEFD201307",
+      "appliedAliases": [
+        {
+          "version": "20261124035733",
+          "name": "projects_owner_updated_id_keyset_source_record"
+        }
+      ],
+      "sourceApplied": false
+    },
+    {
+      "sourcePath": "supabase/migrations/20260716043500_widget_operational_retention.sql",
+      "sourceVersion": "20260716043500",
+      "sourceName": "widget_operational_retention",
+      "sourceSha256": "2F289D080192E111246F5D068985F961CE7115C7EDDA675720B3BA88F949ECBF",
+      "appliedAliases": [
+        {
+          "version": "20261124035626",
+          "name": "widget_operational_retention_function_and_cron"
+        }
+      ],
+      "sourceApplied": false
     }
   ],
   "expectedGitSha": "9ba8ec6297d9646ca1cf60437bf74d0518505f56"
