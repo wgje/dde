@@ -2122,10 +2122,26 @@ function compareWrapperStartEnv(wrapperStart, configuredEnv) {
       typeof wrapperStart.env[key] === 'string' ? String(wrapperStart.env[key]) : null,
     ]),
   );
+  const sharedDaemonDefaultWorker = wrapperStart?.overlayQueryWorkerEnabled === true
+    && (wrapperStart.overlayQueryWorkerSelection === 'shared-daemon-default'
+      || wrapperStart.runtimeTopology?.mode === 'shared-daemon-proxy');
+  const workerEnvKeys = new Set([
+    'NANOFLOW_CODEGRAPH_OVERLAY_WORKER_ENABLED',
+    'NANOFLOW_CODEGRAPH_OVERLAY_WORKER_POOL_SIZE',
+    'NANOFLOW_CODEGRAPH_OVERLAY_PREWARM',
+  ]);
   const mismatchedKeys = Object.entries(expected)
-    .filter(([key, value]) => actual[key] !== value)
+    .filter(([key, value]) => {
+      if (actual[key] === value) return false;
+      // New wrappers intentionally default the shared-daemon worker path on.
+      // Missing worker env keys are therefore compatible only when the wrapper
+      // proves that default selection was active; old wrapper code is still
+      // rejected by the script SHA check.
+      if (actual[key] === null && workerEnvKeys.has(key) && sharedDaemonDefaultWorker) return false;
+      return true;
+    })
     .map(([key]) => key);
-  return { matches: mismatchedKeys.length === 0, expected, actual, mismatchedKeys };
+  return { matches: mismatchedKeys.length === 0, expected, actual, mismatchedKeys, sharedDaemonDefaultWorker };
 }
 
 function compareWrapperStartTarget(wrapperStart, expectedCodegraphTarget) {

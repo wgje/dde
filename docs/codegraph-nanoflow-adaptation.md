@@ -1837,7 +1837,8 @@ not use `.vscode/mcp.json` as a Codex repair source. The current config sets
 `NANOFLOW_CODEGRAPH_OVERLAY_WORKER_ENABLED=1`,
 `NANOFLOW_CODEGRAPH_OVERLAY_WORKER_POOL_SIZE=1`,
 `NANOFLOW_CODEGRAPH_OVERLAY_PREWARM=1`, and
-`NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE=0`. The shared-daemon MCP path defaults to the prewarmed process-local overlay worker even when an older launcher omits the worker env flags; explicit `NANOFLOW_CODEGRAPH_OVERLAY_WORKER_ENABLED=0` preserves the one-shot compatibility path. The worker rechecks exact CURRENT selector bytes on each request and reloads the authenticated immutable generation when it changes. The live Codex path respects
+`NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE=0`. The shared-daemon MCP path defaults to the prewarmed process-local overlay worker even when an older launcher omits the worker env flags; explicit `NANOFLOW_CODEGRAPH_OVERLAY_WORKER_ENABLED=0` preserves the one-shot compatibility path.
+The configured 30s/60s values remain the compatibility contract, but worker-enabled runtime uses an internal 180s readiness/query budget. This prevents the first authenticated generation read (typically 50-75s on Windows) from becoming a false `overlay-timeout`; the explicit worker=0 path retains legacy timing. The wrapper records both configured and effective timeout fields in `wrapper.start`. The worker rechecks exact CURRENT selector bytes on each request and reloads the authenticated immutable generation when it changes. The live Codex path respects
 that upstream shared-daemon contract: all MCP wrappers proxy to one CodeGraph
 daemon, one `MCPEngine`, one SQLite writer, and one watcher. The short-lived
 `codegraph:adapter:context` fallback intentionally overrides this with
@@ -1980,6 +1981,7 @@ return `isError=true`, exact marker content, and
 that exact declared class, preserves it in direct and context diagnostics, and
 forces `summary.ok=false` if either path observes it. This does not change
 malformed, oversized, timeout, transport, or partial-native recovery precedence.
+When the adapter resolves a worker-enabled shared-daemon path, it extends its client/wrapper request budget to 180s (175s wrapper headroom) so a cold authenticated generation cannot be mislabeled `overlay-timeout` at the 60s CLI default. Explicit worker=0/direct-session fixtures retain their caller timeout and legacy behavior.
 For screenshot-level truncation or very wide queries, first
 retry `npm run codegraph:adapter:context -- --query "<same search>" --max-files 1 --json`;
 only then fall through to `codegraph:overlay:query --skip-refresh` or native
