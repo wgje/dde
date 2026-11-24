@@ -98,6 +98,71 @@
         }
       ],
       "sourceApplied": false
+    },
+    {
+      "sourcePath": "supabase/migrations/20260629031500_external_source_links_operation_id.sql",
+      "sourceVersion": "20260629031500",
+      "sourceName": "external_source_links_operation_id",
+      "sourceSha256": "EB14E15B71F8E7129796DEC75D536DD252E385E02FDF24653AA0768FCB1305B9",
+      "appliedAliases": [
+        {
+          "version": "20261124034443",
+          "name": "external_source_links_operation_column_convergence"
+        }
+      ],
+      "sourceApplied": false
+    },
+    {
+      "sourcePath": "supabase/migrations/20260715005823_attachment_cleanup_cloud_outbox.sql",
+      "sourceVersion": "20260715005823",
+      "sourceName": "attachment_cleanup_cloud_outbox",
+      "sourceSha256": "3910A91DB8FD9C367F1C1A8FD3338BF4772EB15CC6F4C4210566BD68BDAA4484",
+      "appliedAliases": [
+        {
+          "version": "20261124034216",
+          "name": "attachment_cleanup_outbox_convergence"
+        }
+      ],
+      "sourceApplied": false
+    },
+    {
+      "sourcePath": "supabase/migrations/20260729000000_widget_black_box_action_idempotency.sql",
+      "sourceVersion": "20260729000000",
+      "sourceName": "widget_black_box_action_idempotency",
+      "sourceSha256": "001B62ABE5CF9F898F06BE4FFF311F8B1F09A8494AA71C2DBF90E23E0056E5B4",
+      "appliedAliases": [
+        {
+          "version": "20261124034228",
+          "name": "widget_black_box_action_receipt_convergence"
+        }
+      ],
+      "sourceApplied": false
+    },
+    {
+      "sourcePath": "supabase/migrations/20260731000000_external_source_link_operation_identity.sql",
+      "sourceVersion": "20260731000000",
+      "sourceName": "external_source_link_operation_identity",
+      "sourceSha256": "95E23396F147E9BED67C1DFCBF11DDCC53908579E1A4D6C62EC3F4453025D5AF",
+      "appliedAliases": [
+        {
+          "version": "20261124034105",
+          "name": "external_source_link_operation_identity_convergence"
+        }
+      ],
+      "sourceApplied": false
+    },
+    {
+      "sourcePath": "supabase/migrations/20260803000000_external_source_links_update_owner_guard.sql",
+      "sourceVersion": "20260803000000",
+      "sourceName": "external_source_links_update_owner_guard",
+      "sourceSha256": "BCD52D2FA0AC9E867A23033F7E9EB86576223CDFE167716A015AE5612C738271",
+      "appliedAliases": [
+        {
+          "version": "20261124034417",
+          "name": "external_source_links_update_owner_guard_convergence"
+        }
+      ],
+      "sourceApplied": false
     }
   ],
   "expectedGitSha": "9ba8ec6297d9646ca1cf60437bf74d0518505f56"
