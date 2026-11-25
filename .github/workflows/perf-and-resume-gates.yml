@@ -10,6 +10,9 @@ on:
       - main
       - master
 
+env:
+  LANG: 'zh-CN'
+
 jobs:
   perf-and-resume-gates:
     # Playwright 1.60 supports Ubuntu 24.04, not the newer ubuntu-latest image.

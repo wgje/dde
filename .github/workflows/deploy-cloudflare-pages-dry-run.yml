@@ -17,6 +17,7 @@ env:
   NODE_VERSION: '22'
   WRANGLER_VERSION: '3.112.0'
   ENABLE_SENTRY_SOURCEMAPS: 'false'
+  LANG: 'zh-CN'
 
 jobs:
   dry-run:

@@ -15,6 +15,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  LANG: 'zh-CN'
+
 jobs:
   codegraph-adapter-gate:
     runs-on: ubuntu-latest
