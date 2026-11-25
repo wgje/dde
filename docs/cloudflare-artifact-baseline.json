@@ -1,13 +1,20 @@
 {
   "schemaVersion": 1,
-  "description": "Initial Cloudflare artifact trend baseline captured from the 2026-04-29 production candidate on codex/cloudflare-cursor-consistency. Update only after a verified main deployment intentionally changes deploy artifact shape.",
-  "gitSha": "b05889949680553f3838a481f5410dfea91b8139",
+  "description": "Verified from the live nanoflow.pages.dev production version.json and artifact-manifest.json on 2026-11-25. Both manifests identified this SHA as production; do not change without the same identity verification.",
+  "gitSha": "61e79ea4fe8e32841fe08328b5f0babe582f134a",
+  "source": {
+    "versionManifest": "https://nanoflow.pages.dev/version.json",
+    "artifactManifest": "https://nanoflow.pages.dev/artifact-manifest.json",
+    "verifiedAt": "2026-11-25T14:37:17.815Z",
+    "versionManifestSha256": "E234FBDF385C25A9F2D8CEA7CFD4D1FCF01861E3FC15C4CF91E0AA82922F9721",
+    "artifactManifestSha256": "20E10479A05BC26B51BED01FCB4E81F10821B4EDCEC2D2AA79052256F417CC1A"
+  },
   "metrics": {
-    "fileCount": 149,
-    "totalBytes": 5991000,
-    "rootJsCount": 114,
+    "fileCount": 259,
+    "totalBytes": 8399899,
+    "rootJsCount": 225,
     "headerRuleCount": 21,
-    "ngswAssetCount": 139,
-    "gojsFlowChunkBytes": 1952661
+    "ngswAssetCount": 249,
+    "gojsFlowChunkBytes": 1716617
   }
 }
