@@ -269,9 +269,10 @@ describe('Context7 official child adapter', () => {
     const { getDefaultEnvironment } = require('@modelcontextprotocol/sdk/client/stdio.js') as {
       getDefaultEnvironment(): Record<string, string>;
     };
-    const expected = process.platform === 'win32'
+    const inheritedKeys = process.platform === 'win32'
       ? ['APPDATA', 'HOMEDRIVE', 'HOMEPATH', 'LOCALAPPDATA', 'PATH', 'PROCESSOR_ARCHITECTURE', 'PROGRAMFILES', 'SYSTEMDRIVE', 'SYSTEMROOT', 'TEMP', 'USERNAME', 'USERPROFILE']
       : ['HOME', 'LOGNAME', 'PATH', 'SHELL', 'TERM', 'USER'];
+    const expected = inheritedKeys.filter(key => process.env[key] !== undefined).sort();
     expect(Object.keys(getDefaultEnvironment()).sort()).toEqual(expected);
   });
 
