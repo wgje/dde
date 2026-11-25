@@ -20,6 +20,7 @@ export { SyncStateService } from './app/core/services/sync/sync-state.service';
 // RetryQueueService + RetryableEntityType — 被 sync-coordinator, action-queue 使用
 export { RetryQueueService } from './app/core/services/sync/retry-queue.service';
 export type { RetryableEntityType } from './app/core/services/sync/retry-queue.service';
+export type { RetryQueueItem } from './app/core/services/sync/retry-queue.types';
 
 // SessionManagerService — 被 app-lifecycle-orchestrator, event-driven-sync-pulse 使用
 export { SessionManagerService } from './app/core/services/sync/session-manager.service';

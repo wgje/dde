@@ -1,4 +1,4 @@
-import type { RetryQueueItemTerminalReason } from './retry-queue-processing';
+import type { RetryQueueItemTerminalReason } from '../../../../services/retry-queue-item-terminal-reason';
 import type { RetryQueueItem } from './retry-queue.types';
 
 export interface RetryQueuePreflightLogger {

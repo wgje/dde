@@ -1,7 +1,6 @@
 import type { LeaseHandle } from '../../../../services/sync-writer-lease.service';
 import { localBackupUiRestoreWriterQuiescence } from '../../../../services/local-backup-ui-restore-writer-quiescence.service';
 import { AUTH_CONFIG } from '../../../../config/auth.config';
-import type { BlackBoxEntry } from '../../../../models';
 import { isPermanentFailureError } from '../../../../utils/permanent-failure-error';
 import {
   isBrowserNetworkSuspendedError,
@@ -15,8 +14,8 @@ import {
   isRetryQueueServerPressureError,
   normalizeRetryQueueSliceBudget,
   shouldProcessRetryQueue,
-  type RetryQueueItemTerminalReason,
 } from './retry-queue-processing';
+import type { RetryQueueItemTerminalReason } from '../../../../services/retry-queue-item-terminal-reason';
 import type {
   NormalizedQueueSliceOperationIds,
   RetryOperationHandler,

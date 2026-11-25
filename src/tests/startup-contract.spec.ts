@@ -212,6 +212,54 @@ describe('startup launch contract', () => {
     expect(manifest.widgets).toBeUndefined();
   });
 
+  it('startup watchdog performs one route-preserving NGSW bypass without clearing local data', () => {
+    const mainSource = fs.readFileSync(path.join(process.cwd(), 'main.ts'), 'utf8');
+    const recoverySource = fs.readFileSync(path.join(process.cwd(), 'src/utils/startup-recovery.ts'), 'utf8');
+    const timeoutStart = mainSource.indexOf("const startupTimeout = setTimeout(() => {");
+    const timeoutEnd = mainSource.indexOf('}, 15000);', timeoutStart);
+    const timeoutBlock = mainSource.slice(timeoutStart, timeoutEnd);
+
+    expect(timeoutStart).toBeGreaterThan(-1);
+    expect(timeoutBlock).toContain('buildStartupWorkerBypassUrl(window.location.href)');
+    expect(timeoutBlock).toContain('window.location.replace(recoveryUrl)');
+    expect(timeoutBlock).toContain("pushStartupTrace('app.startup_timeout'");
+    expect(timeoutBlock).toContain('startupPhase');
+    expect(mainSource).toContain("pushStartupTrace('app.start_phase'");
+    expect(mainSource).toContain("pushStartupTrace('app.start_phase_complete'");
+    expect(timeoutBlock).not.toContain('clearApplicationCaches');
+    expect(timeoutBlock).not.toContain('unregisterApplicationServiceWorkers');
+    expect(timeoutBlock).not.toContain('clearRecoveryStorage');
+    expect(recoverySource).toContain("'ngsw-bypass'");
+    expect(recoverySource).toContain("'nanoflow-startup-recovery'");
+    expect(recoverySource).toContain("? 'report-only'");
+  });
+
+  it('launch loader bypasses the worker once after handoff timeout and never clears browser data', () => {
+    const indexSource = fs.readFileSync(path.join(process.cwd(), 'index.html'), 'utf8');
+    const launchStart = indexSource.indexOf('<!-- LAUNCH_SHARED_LOADER_DISMISS_START -->');
+    const launchEnd = indexSource.indexOf('<!-- LAUNCH_SHARED_LOADER_DISMISS_END -->', launchStart);
+    const loaderBlock = indexSource.slice(launchStart, launchEnd);
+
+    expect(launchStart).toBeGreaterThan(-1);
+    expect(launchEnd).toBeGreaterThan(launchStart);
+    expect(loaderBlock).toContain('elapsed < 25000');
+    expect(loaderBlock).toContain("currentUrl.searchParams.set('ngsw-bypass', '')");
+    expect(loaderBlock).toContain("currentUrl.searchParams.set(recoveryParam, recoveryValue)");
+    expect(loaderBlock).toContain('window.location.replace(currentUrl.href)');
+    expect(loaderBlock).toContain('loader.handoff_timeout');
+    expect(loaderBlock).toContain('loader.worker_bypass');
+    expect(loaderBlock).toContain("currentUrl.searchParams.get(recoveryParam) === recoveryValue");
+    const recoveryStart = loaderBlock.indexOf('var recoveryParam');
+    const timeoutStart = loaderBlock.indexOf('var recoveryAttempted');
+    expect(recoveryStart).toBeGreaterThan(-1);
+    expect(timeoutStart).toBeGreaterThan(recoveryStart);
+    const terminalErrorStart = loaderBlock.indexOf('// 超时 - 显示错误', timeoutStart);
+    const recoveryPolicy = `${loaderBlock.slice(recoveryStart, loaderBlock.indexOf('function dismissLoader'))}${loaderBlock.slice(timeoutStart, terminalErrorStart)}`;
+    expect(recoveryPolicy).not.toContain('caches.delete');
+    expect(recoveryPolicy).not.toContain('getRegistrations');
+    expect(recoveryPolicy).not.toContain('indexedDB.deleteDatabase');
+  });
+
   it('main bootstrap should keep the legacy-compatible composed service worker entry', () => {
     const mainPath = path.join(process.cwd(), 'main.ts');
     const mainSource = fs.readFileSync(mainPath, 'utf8');
