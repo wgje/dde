@@ -3996,13 +3996,23 @@ function analyzeLog() {
   return summary;
 }
 
+function writeStdoutSynchronously(text) {
+  const bytes = Buffer.from(text);
+  let offset = 0;
+  while (offset < bytes.length) {
+    const written = fs.writeSync(process.stdout.fd, bytes, offset, bytes.length - offset);
+    if (written <= 0) throw new Error('stdout write made no progress');
+    offset += written;
+  }
+}
+
 try {
   const summary = analyzeLog();
   const wantsText = flags.has('--text') || flags.has('--no-json');
   if (flags.has('--json') && !wantsText) {
-    process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
+    writeStdoutSynchronously(`${JSON.stringify(summary, null, 2)}\n`);
   } else {
-    process.stdout.write([
+    writeStdoutSynchronously([
       `MCP log: ${summary.logPath}`,
       `events=${summary.totalEvents} malformed=${summary.malformedLines}`,
       `observedAt=${summary.observedAt ?? '(none)'}`,
