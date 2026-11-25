@@ -142,3 +142,7 @@ Incremental sync uses `updated_at > last_sync_time` with a safety lookback where
 7. Update Context7 docs under `docs/context7`.
 8. Run `npm run docs:context7:validate`.
 9. Run affected service and contract tests.
+
+## Fresh-init execution order
+
+Create `public.projects` before SQL-language owner/access helpers that reference it. The initial `active_tasks` view must use an explicit stable column prefix compatible with its final replacement; a changing `SELECT t.*` prefix can make PostgreSQL reject the later view. Validate a fresh database with function-body checks enabled. Local replay and rollback receipts do not establish production parity.

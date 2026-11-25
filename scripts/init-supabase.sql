@@ -362,47 +362,6 @@ AS $$
   SELECT auth.uid()
 $$;
 
--- 检查用户是否为项目所有者
-CREATE OR REPLACE FUNCTION public.user_is_project_owner(p_project_id UUID)
-RETURNS BOOLEAN
-LANGUAGE SQL
-STABLE
-PARALLEL SAFE
-SET search_path TO 'pg_catalog', 'public'
-AS $$
-  SELECT EXISTS (
-    SELECT 1 FROM public.projects p
-    WHERE p.id = p_project_id
-    AND p.owner_id = public.current_user_id()
-  )
-$$;
-
--- 检查用户是否为项目所有者（个人版 owner-only）
-CREATE OR REPLACE FUNCTION public.user_has_project_access(p_project_id UUID)
-RETURNS BOOLEAN
-LANGUAGE SQL
-STABLE
-PARALLEL SAFE
-SET search_path TO 'pg_catalog', 'public'
-AS $$
-  SELECT EXISTS (
-    SELECT 1 FROM public.projects p
-    WHERE p.id = p_project_id
-    AND p.owner_id = public.current_user_id()
-  )
-$$;
-
--- 获取用户可访问的所有项目 ID（个人版 owner-only）
-CREATE OR REPLACE FUNCTION public.user_accessible_project_ids()
-RETURNS SETOF UUID
-LANGUAGE SQL
-STABLE
-PARALLEL SAFE
-SET search_path TO 'pg_catalog', 'public'
-AS $$
-  SELECT id FROM public.projects WHERE owner_id = public.current_user_id()
-$$;
-
 -- ============================================
 -- 1. 项目表 (projects)
 -- ============================================
@@ -452,6 +411,47 @@ CREATE INDEX IF NOT EXISTS idx_projects_owner_id_active
 -- 注：以下索引已删除（未使用或被复合索引替代）：
 -- - idx_projects_owner_id: 被 idx_projects_owner_updated_id 完全覆盖
 -- - idx_projects_updated_at: 被复合索引替代
+
+-- 检查用户是否为项目所有者
+CREATE OR REPLACE FUNCTION public.user_is_project_owner(p_project_id UUID)
+RETURNS BOOLEAN
+LANGUAGE SQL
+STABLE
+PARALLEL SAFE
+SET search_path TO 'pg_catalog', 'public'
+AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM public.projects p
+    WHERE p.id = p_project_id
+    AND p.owner_id = public.current_user_id()
+  )
+$$;
+
+-- 检查用户是否为项目所有者（个人版 owner-only）
+CREATE OR REPLACE FUNCTION public.user_has_project_access(p_project_id UUID)
+RETURNS BOOLEAN
+LANGUAGE SQL
+STABLE
+PARALLEL SAFE
+SET search_path TO 'pg_catalog', 'public'
+AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM public.projects p
+    WHERE p.id = p_project_id
+    AND p.owner_id = public.current_user_id()
+  )
+$$;
+
+-- 获取用户可访问的所有项目 ID（个人版 owner-only）
+CREATE OR REPLACE FUNCTION public.user_accessible_project_ids()
+RETURNS SETOF UUID
+LANGUAGE SQL
+STABLE
+PARALLEL SAFE
+SET search_path TO 'pg_catalog', 'public'
+AS $$
+  SELECT id FROM public.projects WHERE owner_id = public.current_user_id()
+$$;
 
 -- ============================================
 -- 2. 项目成员表 (project_members)
@@ -2886,7 +2886,10 @@ GRANT EXECUTE ON FUNCTION public.purge_tasks_v2(uuid, uuid[]) TO service_role;
 
 -- 1) 创建视图：自动过滤已 tombstone 和软删除的任务
 CREATE OR REPLACE VIEW public.active_tasks AS
-SELECT t.*
+-- Keep this prefix aligned with the final view below; later fields append safely.
+SELECT t.id, t.project_id, t.parent_id, t.title, t.content, t.stage, t."order",
+       t.rank, t.status, t.x, t.y, t.short_id, t.priority, t.due_date, t.tags,
+       t.attachments, t.deleted_at, t.created_at, t.updated_at
 FROM public.tasks t
 WHERE NOT EXISTS (
   SELECT 1

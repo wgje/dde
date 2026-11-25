@@ -227,6 +227,14 @@ export function registerSqlSecurityHardeningPolicyContractSpecs(
 
   it('init script 中的 owner helper 与 purge RPC 必须保持 owner/project-scope 约束', () => {
     const sql = readSql('scripts/init-supabase.sql');
+    const projectsOffset = sql.indexOf('CREATE TABLE IF NOT EXISTS public.projects (');
+    const ownerOffset = sql.indexOf('CREATE OR REPLACE FUNCTION public.user_is_project_owner(');
+    const accessOffset = sql.indexOf('CREATE OR REPLACE FUNCTION public.user_has_project_access(');
+    const accessibleProjectsOffset = sql.indexOf('CREATE OR REPLACE FUNCTION public.user_accessible_project_ids(');
+    expect(projectsOffset).toBeGreaterThanOrEqual(0);
+    expect(ownerOffset).toBeGreaterThan(projectsOffset);
+    expect(accessOffset).toBeGreaterThan(ownerOffset);
+    expect(accessibleProjectsOffset).toBeGreaterThan(accessOffset);
     const ownerHelperSection = getSection(
       sql,
       'CREATE OR REPLACE FUNCTION public.user_is_project_owner(',
@@ -235,7 +243,7 @@ export function registerSqlSecurityHardeningPolicyContractSpecs(
     const accessHelperSection = getSection(
       sql,
       'CREATE OR REPLACE FUNCTION public.user_has_project_access(',
-      'CREATE TABLE IF NOT EXISTS public.projects (',
+      'CREATE OR REPLACE FUNCTION public.user_accessible_project_ids(',
     );
     const purgeV2Section = getSection(
       sql,

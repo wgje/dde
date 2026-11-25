@@ -107,6 +107,42 @@ describe('projectExistsGuard', () => {
     expect(routerMock.navigate).not.toHaveBeenCalled();
   });
 
+  it('allows a cold deep link when snapshot prehydration confirms its initial owner', async () => {
+    currentUserId = null;
+    sessionGeneration = 0;
+    projectStateMock.projects.mockReturnValue([{ id: 'project-a' }]);
+    projectStateMock.getProject.mockReturnValue({ id: 'project-a' });
+    userSessionMock.prehydrateFromSnapshot.mockImplementation(() => {
+      currentUserId = 'owner-a';
+      return true;
+    });
+    const route = { params: { projectId: 'project-a' } } as unknown as ActivatedRouteSnapshot;
+    const state = { url: '/projects/project-a/text' } as RouterStateSnapshot;
+
+    await expect(TestBed.runInInjectionContext(() => projectExistsGuard(route, state))).resolves.toBe(true);
+    expect(userSessionMock.prehydrateFromSnapshot).toHaveBeenCalledTimes(1);
+    expect(userSessionMock.loadProjects).not.toHaveBeenCalled();
+    expect(routerMock.navigate).not.toHaveBeenCalled();
+  });
+
+  it.each(['owner-change', 'generation-change'] as const)(
+    'rejects a real %s during synchronous snapshot prehydration', async change => {
+      userSessionMock.prehydrateFromSnapshot.mockImplementation(() => {
+        if (change === 'owner-change') currentUserId = 'owner-b';
+        else sessionGeneration += 1;
+        return true;
+      });
+      const route = { params: { projectId: 'project-a' } } as unknown as ActivatedRouteSnapshot;
+      const state = { url: '/projects/project-a/text' } as RouterStateSnapshot;
+
+      await expect(TestBed.runInInjectionContext(() => projectExistsGuard(route, state))).resolves.toBe(false);
+      expect(projectStateMock.getProject).not.toHaveBeenCalled();
+      expect(userSessionMock.loadProjects).not.toHaveBeenCalled();
+      expect(routerMock.navigate).not.toHaveBeenCalled();
+      expect(toastMock.error).not.toHaveBeenCalled();
+    },
+  );
+
   it('partial 启动目录下不应提前把合法 deep-link 重定向到 /projects', async () => {
     projectStateMock.projects.mockReturnValue([{ id: 'project-1' }]);
     projectStateMock.getProject.mockReturnValue(null);
