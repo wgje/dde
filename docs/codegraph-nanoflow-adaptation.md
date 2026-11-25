@@ -235,8 +235,8 @@ CodeGraph AST index does not fully model:
   `metadata.relation = "android-kotlin-annotation"`, and strict native
   JSON/Markdown keep the relation evidence through closed edges and focused
   source blocks while stripping NanoFlow metadata.
-- Android Kotlin member graph summary: 175 androidKotlinClasses, 71 androidKotlinDataClasses, 7 androidKotlinSealedClasses, 7 androidKotlinInterfaces, 0 androidKotlinInterfaceEdges, 9 androidKotlinExtendsEdges, 20 androidKotlinImplementsEdges, 20 androidKotlinObjects, 20 androidKotlinObjectEdges, 8 androidKotlinCompanionObjects, 8 androidKotlinCompanionObjectEdges, 19 androidKotlinEnums, 79 androidKotlinEnumMembers, 79 androidKotlinEnumMemberEdges, 495 androidKotlinImports, 495 androidKotlinImportEdges, 86 androidKotlinConstructors, 86 androidKotlinConstructorEdges, 1758 androidKotlinProperties, 1758 androidKotlinPropertyEdges, 622 androidKotlinMethods, 622 androidKotlinMethodEdges, 32 androidKotlinFunctions, 32 androidKotlinFunctionEdges, 74 androidKotlinOverrideEdges, 720 androidKotlinTypeReferenceEdges, 1171 androidKotlinCalls, 1171 androidKotlinCallEdges, 36 androidKotlinAnnotations, and 36 androidKotlinAnnotationEdges.
-- Android packaging/resource graph summary: 7 androidManifestComponents, 3 androidManifestPermissions, 3 androidManifestUsesPermissionEdges, 3 androidManifestQueries, 3 androidManifestQueryEdges, 1 androidManifestComponentPermissions, 1 androidManifestComponentPermissionEdges, 6 androidManifestIntentFilters, 6 androidManifestIntentFilterActions, 6 androidManifestIntentFilterActionEdges, 3 androidManifestIntentFilterCategories, 3 androidManifestIntentFilterCategoryEdges, 1 androidManifestIntentFilterData, 1 androidManifestIntentFilterDataEdges, 1 androidWidgetProviders, 46 androidResourceReferences, 276 androidKotlinResourceReferences, and 276 androidKotlinResourceReferenceEdges.
+- Android Kotlin member graph summary: 182 androidKotlinClasses, 73 androidKotlinDataClasses, 7 androidKotlinSealedClasses, 7 androidKotlinInterfaces, 0 androidKotlinInterfaceEdges, 9 androidKotlinExtendsEdges, 20 androidKotlinImplementsEdges, 22 androidKotlinObjects, 22 androidKotlinObjectEdges, 9 androidKotlinCompanionObjects, 9 androidKotlinCompanionObjectEdges, 19 androidKotlinEnums, 79 androidKotlinEnumMembers, 79 androidKotlinEnumMemberEdges, 539 androidKotlinImports, 539 androidKotlinImportEdges, 89 androidKotlinConstructors, 89 androidKotlinConstructorEdges, 1913 androidKotlinProperties, 1913 androidKotlinPropertyEdges, 648 androidKotlinMethods, 648 androidKotlinMethodEdges, 32 androidKotlinFunctions, 32 androidKotlinFunctionEdges, 74 androidKotlinOverrideEdges, 779 androidKotlinTypeReferenceEdges, 1171 androidKotlinCalls, 1171 androidKotlinCallEdges, 39 androidKotlinAnnotations, and 39 androidKotlinAnnotationEdges.
+- Android packaging/resource graph summary: 7 androidManifestComponents, 3 androidManifestPermissions, 3 androidManifestUsesPermissionEdges, 3 androidManifestQueries, 3 androidManifestQueryEdges, 1 androidManifestComponentPermissions, 1 androidManifestComponentPermissionEdges, 6 androidManifestIntentFilters, 6 androidManifestIntentFilterActions, 6 androidManifestIntentFilterActionEdges, 3 androidManifestIntentFilterCategories, 3 androidManifestIntentFilterCategoryEdges, 1 androidManifestIntentFilterData, 1 androidManifestIntentFilterDataEdges, 1 androidWidgetProviders, 46 androidResourceReferences, 277 androidKotlinResourceReferences, and 277 androidKotlinResourceReferenceEdges.
 - Android App Widget provider metadata is emitted as native `references` edges
   from the resolved receiver class to the `res/xml/*.xml` provider file with
   `metadata.relation = "android-widget-provider"`. Querying this relation is
@@ -1479,20 +1479,20 @@ relationship counts below.
   only native CodeGraph edge kinds; the specific reason is stored in
   `metadata.relation`.
 - Angular declaration and dependency-injection graph summary: `angularComponents=88`,
-  `angularDirectives=3`, `angularPipes=1`, `angularInjectables=273`,
-  `angularInjectorFiles=605`, `angularInjectorDependencyReferences=1943`, and
+  `angularDirectives=3`, `angularPipes=1`, `angularInjectables=277`,
+  `angularInjectorFiles=615`, `angularInjectorDependencyReferences=1975`, and
   `angularApplicationProviders=1`.
-- Angular imports and reactive API graph summary: `standaloneImportEdges=172`,
-  `angularInputEdges=193`, `angularOutputEdges=220`, `angularModelEdges=0`,
-  `angularQueryEdges=22`, and `angularSignalEdges=490`. The real tree currently
+- Angular imports and reactive API graph summary: `standaloneImportEdges=171`,
+  `angularInputEdges=198`, `angularOutputEdges=220`, `angularModelEdges=0`,
+  `angularQueryEdges=22`, and `angularSignalEdges=513`. The real tree currently
   has no projected Angular model relation; fixture/spec coverage preserves that
   supported zero-count contract.
-- Context7 retrieval and source-map graph summary: `context7Documents=72`,
-  `context7Categories=17`, `context7CategoryDocEdges=72`,
-  `context7RetrievalRoutes=14`, `context7RetrievalPrimaryEdges=14`,
-  `context7RetrievalSecondaryEdges=40`, `context7SourceMapRoutes=16`,
+- Context7 retrieval and source-map graph summary: `context7Documents=73`,
+  `context7Categories=17`, `context7CategoryDocEdges=73`,
+  `context7RetrievalRoutes=15`, `context7RetrievalPrimaryEdges=15`,
+  `context7RetrievalSecondaryEdges=43`, `context7SourceMapRoutes=16`,
   `context7SourceMapDocEdges=21`, and `context7SourceMapSourceEdges=37`.
-- 120 dynamic import entries, 117 dynamic import graph edges, and 28 Angular route
+- 122 dynamic import entries, 119 dynamic import graph edges, and 28 Angular route
   anchors. The current real tree has 3 `angular-route-guard` edges
   (`canActivate` and `canDeactivate`) and 0 `angular-route-resolver` edges;
   resolver parsing is covered by fixtures and excludes ordinary object
@@ -1502,7 +1502,7 @@ relationship counts below.
   queries; the current real tree has 0 `angular-route-provider` edges.
 - Route, template binding, template declaration usage, signal, input/output/model, provider/import,
   host-directive, host attribute, host binding/listener, Edge Function env, migration table, and migration policy edges are included
-  when present. Current Angular template extraction records 3,312 template bindings: 1,368 property, 1,071 event, 319 interpolation, 23 model, 525 control-flow, and 6 structural directive bindings, with 0 template-local
+  when present. Current Angular template extraction records 3,381 template bindings: 1,391 property, 1,078 event, 348 interpolation, 19 model, 539 control-flow, and 6 structural directive bindings, with 0 template-local
   alias/contextual-variable bindings, 0 pipe-name-as-binding entries, and 0
   `@defer on` trigger-word bindings. The template declaration usage layer adds 75 `template-component` edges, 3 `template-directive` edges in the current
   real tree (the workspace shell slot `@Directive` declarations `app-workspace-overlays`, `app-workspace-sidebar`, and `app-workspace-shell-core` used as elements in `src/workspace-shell.component.html`), and 6 `template-pipe` edges; fixtures cover directive selector lists, `:not(...)` exclusions,
@@ -1513,16 +1513,16 @@ relationship counts below.
   `inputs` / `outputs` alias metadata; the current real tree has 0 host-directive edges because it does not use this Angular metadata yet.
   `host` metadata object entries are parsed into `host-attribute`,
   `host-binding`, and `host-listener` relationships with the static value or
-  expression preserved in edge metadata. The current real tree has 6 host-attribute edges, 5 host-binding edges, and 24 host-listener edges.
-- 9 Supabase Edge Functions with 37 env-var references after following relative
-  helper imports under `supabase/functions`, 25 followed source/helper files
+  expression preserved in edge metadata. The current real tree has 6 host-attribute edges, 5 host-binding edges, and 25 host-listener edges.
+- 8 Supabase Edge Functions with 37 env-var references after following relative
+  helper imports under `supabase/functions`, 24 followed source/helper files
   counted per Edge Function (`14` unique files), 17 recorded source import
-  relations, 17 native `edge-function-source` import edges, 9 generated
+  relations, 17 native `edge-function-source` import edges, 8 generated
   `/functions/v1/<name>` route nodes/edges, 31 explicit `req.method` method
   and CORS allowed-method references currently found in the real tree
   (`method-equality=7`, `method-inequality-guard=8`,
   `cors-allowed-methods=16`; covering `OPTIONS` and `POST`), 10
-  implementation-side `edge-function-invoke` edges, and 42
+  implementation-side `edge-function-invoke` edges, and 44
   native test-reference edges from Edge Function entry nodes to 18 spec/contract
   file references.
   `env-var` nodes/edges are stable project-semantic counters and preserve
@@ -1564,23 +1564,23 @@ relationship counts below.
   migration-constraint-validation edges, `280` privilege-grant edges, `378` privilege-revoke edges, `472`
   privilege-object edges, `650` privilege-role edges, `65` migration test
   edges, `0` migration variable-sourced edges). The
-  structured `policyDetails` array currently contains 109 parsed policy detail
-  records, `functionDetails` contains 151 parsed SQL function definitions,
-  `triggerDetails` contains 40 parsed SQL trigger definitions, and
-  `indexDetails` contains 90 parsed SQL index definitions, and
-  `constraintDetails` contains 63 parsed SQL constraints.
+  structured `policyDetails` array currently contains 112 parsed policy detail
+  records, `functionDetails` contains 170 parsed SQL function definitions,
+  `triggerDetails` contains 44 parsed SQL trigger definitions, and
+  `indexDetails` contains 94 parsed SQL index definitions, and
+  `constraintDetails` contains 66 parsed SQL constraints.
   `constraintValidationDetails` contains 8 parsed SQL constraint validation
   statements and reuses the corresponding constraint nodes instead of creating
   validation-only graph nodes. The structured
-  `privilegeDetails` array contains 662 parsed PostgreSQL `GRANT` / `REVOKE`
+  `privilegeDetails` array contains 712 parsed PostgreSQL `GRANT` / `REVOKE`
   statements, backed by 480 privilege nodes, 472 privilege-object nodes, and
   650 privilege-role nodes.
-  Supabase structured detail summary: 42 edgeFunctionTests, 151 migrationFunctionDetails, 40 migrationTriggers, 109 migrationRlsDetails, 173 migrationTests, and 109 policyDetails.
-  The Supabase migration node summary is 151 SQL function nodes, 151 SQL function edges, 40 trigger edges, 40 trigger-function edges, 90 migration-index nodes, 90 migration-index edges, 63 migration-constraint nodes, 63 migration-constraint edges, 0 migration-constraint-validation nodes, 8 migration-constraint-validation edges, and 109 migration-rls edges.
-  The Supabase policy/privilege node summary is 179 policy nodes, 108 policy-command edges, 108 policy-type edges, 108 policy-role edges, 86 policy-using edges, 47 policy-with-check edges, 706 privilege nodes, 684 privilege-object nodes, 425 privilege-grant edges, 720 privilege-revoke edges, 684 privilege-object edges, 1055 privilege-role nodes, and 1055 privilege-role edges.
-  The Supabase migration test summary is 173 migration tests and 173 migration test edges.
-  The migration graph summary is 151 SQL function edges, 40 trigger-function edges, 90 migration-index edges, 63 migration-constraint edges, 8 migration-constraint-validation edges, and 109 migration-rls edges. The policy and privilege graph summary
-  is 108 policy-command edges, 108 policy-type edges, 108 policy-role edges, 86 policy-using edges, 47 policy-with-check edges, 425 privilege-grant edges, 720 privilege-revoke edges, 684 privilege-object edges, and 1055 privilege-role edges.
+  Supabase structured detail summary: 44 edgeFunctionTests, 170 migrationFunctionDetails, 44 migrationTriggers, 117 migrationRlsDetails, 178 migrationTests, and 112 policyDetails.
+  The Supabase migration node summary is 170 SQL function nodes, 170 SQL function edges, 44 trigger edges, 44 trigger-function edges, 94 migration-index nodes, 94 migration-index edges, 66 migration-constraint nodes, 66 migration-constraint edges, 0 migration-constraint-validation nodes, 8 migration-constraint-validation edges, and 117 migration-rls edges.
+  The Supabase policy/privilege node summary is 182 policy nodes, 111 policy-command edges, 111 policy-type edges, 111 policy-role edges, 89 policy-using edges, 47 policy-with-check edges, 756 privilege nodes, 734 privilege-object nodes, 449 privilege-grant edges, 795 privilege-revoke edges, 734 privilege-object edges, 1154 privilege-role nodes, and 1154 privilege-role edges.
+  The Supabase migration test summary is 178 migration tests and 178 migration test edges.
+  The migration graph summary is 170 SQL function edges, 44 trigger-function edges, 94 migration-index edges, 66 migration-constraint edges, 8 migration-constraint-validation edges, and 117 migration-rls edges. The policy and privilege graph summary
+  is 111 policy-command edges, 111 policy-type edges, 111 policy-role edges, 89 policy-using edges, 47 policy-with-check edges, 449 privilege-grant edges, 795 privilege-revoke edges, 734 privilege-object edges, and 1154 privilege-role edges.
   Statement-level `ALTER PUBLICATION <name> ADD|DROP|SET TABLE` entries are
   split on top-level commas into per-table `migration-realtime-publication`
   facts that link the Realtime publication to the same tables the TypeScript
@@ -1595,11 +1595,11 @@ relationship counts below.
   `crypto.randomUUID()`, `@defer`, `visibility:hidden`, `StoreService`, and
   `content`. All 19 hard-rule keyword edges carry
   `keywordMapping: hard-rule-keyword` and `matchedNeedle`. The implementation
-  evidence layer adds 76 `hard-rule-implementation` native `references` edges
-  from the `crypto.randomUUID()` AGENTS keyword to 63 callable symbols that
+  evidence layer adds 78 `hard-rule-implementation` native `references` edges
+  from the `crypto.randomUUID()` AGENTS keyword to 65 callable symbols that
   contain AST-proven calls.
-  The AGENTS hard-rule node/provenance summary is 19 hard-rule keyword nodes, 19 hard-rule keyword edges, 19 hard-rule keyword mapping edges, 76 hard-rule implementation edges, and 63 hard-rule implementation targets.
-  The AGENTS hard-rule graph summary is 19 hard-rule keyword edges and 76 hard-rule implementation edges. The AGENTS sync-rule graph summary is 19 sync-rule anchors, 20 sync-body keyword edges, 5 sync-config keyword edges, and 14 config-source edges.
+  The AGENTS hard-rule node/provenance summary is 19 hard-rule keyword nodes, 19 hard-rule keyword edges, 19 hard-rule keyword mapping edges, 78 hard-rule implementation edges, and 65 hard-rule implementation targets.
+  The AGENTS hard-rule graph summary is 19 hard-rule keyword edges and 78 hard-rule implementation edges. The AGENTS sync-rule graph summary is 19 sync-rule anchors, 20 sync-body keyword edges, 5 sync-config keyword edges, and 14 config-source edges.
 - 19 AGENTS-derived sync-rule anchors, including 14 `*_CONFIG.*` baseline rows
   from the §9 key configuration table, with 25 explicit AGENTS keyword nodes and
   25 keyword reference edges for synchronization/config terms such as
@@ -1617,23 +1617,23 @@ relationship counts below.
   `SYNC_CONFIG` constant while exact `sync-config-source` queries bring back the
   corresponding property provenance for strict native codeBlocks.
   The AGENTS sync-rule node/provenance summary is 19 sync-rule anchors, 14 config-rule anchors, 19 sync-rule nodes, 25 sync-rule keyword nodes, 25 sync-rule keyword edges, 20 sync-body keyword edges, 5 sync-config keyword edges, 88 config-property nodes, 88 config-property edges, 37 config-property parent edges, 14 config-source edges, 14 config-source property edges, and 5 sync-config-source edges.
-- The Supabase select-field layer adds 212 native `supabase-select-field` property nodes, 393 `supabase-select-field` edges, 285 method/function `references` edges from `.select(...)` call sites to selected fields, 104 inline select field nodes, 105 inline select provenance edges, and 6 `sync-required-field` edges from the AGENTS `content` hard-rule keyword to tasks field nodes. The incremental-predicate layer adds 1 `supabase-incremental-predicate` nodes, 1 method/function predicate `references` edges, and 2 `sync-required-predicate` edges from AGENTS keywords to query predicates. The Storage bucket layer adds 10 `supabase-storage-bucket` nodes and 10 native `references` edges
+- The Supabase select-field layer adds 217 native `supabase-select-field` property nodes, 398 `supabase-select-field` edges, 290 method/function `references` edges from `.select(...)` call sites to selected fields, 109 inline select field nodes, 110 inline select provenance edges, and 6 `sync-required-field` edges from the AGENTS `content` hard-rule keyword to tasks field nodes. The incremental-predicate layer adds 1 `supabase-incremental-predicate` nodes, 1 method/function predicate `references` edges, and 2 `sync-required-predicate` edges from AGENTS keywords to query predicates. The Storage bucket layer adds 10 `supabase-storage-bucket` nodes and 10 native `references` edges
   for the real `attachments` bucket across client calls and `storage.objects`
   policies.
-  Select and storage node summary: 212 supabase-select-field nodes, 104 inline select field nodes, 1 supabase-incremental-predicate nodes, and 10 supabase-storage-bucket nodes.
-  Select and storage graph summary: 393 supabase-select-field edges, 285 supabase-select-field reference edges, 105 inline select provenance edges, 6 sync-required-field edges, 1 supabase-incremental-predicate edges, 2 sync-required-predicate edges, and 10 supabase-storage-bucket edges.
-- The Supabase RPC/table-write layer adds 22 `supabase-rpc` nodes and 34 native
-  `references` edges for static `rpc(...)` calls, plus 19
-  `supabase-table-write` nodes and 35 native `references` edges for static
+  Select and storage node summary: 217 supabase-select-field nodes, 109 inline select field nodes, 1 supabase-incremental-predicate nodes, and 10 supabase-storage-bucket nodes.
+  Select and storage graph summary: 398 supabase-select-field edges, 290 supabase-select-field reference edges, 110 inline select provenance edges, 6 sync-required-field edges, 1 supabase-incremental-predicate edges, 2 sync-required-predicate edges, and 10 supabase-storage-bucket edges.
+- The Supabase RPC/table-write layer adds 24 `supabase-rpc` nodes and 39 native
+  `references` edges for static `rpc(...)` calls, plus 21
+  `supabase-table-write` nodes and 37 native `references` edges for static
   `.from(...).insert/update/upsert/delete` write chains. The real tree currently
   contains table-write operations for `insert`, `update`, and `upsert`; fixture
   coverage locks `delete` parsing and query output.
-  The operation node summary is 22 Supabase RPC nodes and 34 Supabase RPC edges; 19 Supabase table-write nodes and 35 Supabase table-write edges.
-  The operation graph summary is 34 Supabase RPC edges and 35 Supabase table-write edges.
+  The operation node summary is 24 Supabase RPC nodes and 39 Supabase RPC edges; 21 Supabase table-write nodes and 37 Supabase table-write edges.
+  The operation graph summary is 39 Supabase RPC edges and 37 Supabase table-write edges.
 - The Supabase Edge Function header layer adds 46 `edge-function-header`
   native-shaped `variable` nodes and 46 native `references` edges across
   request auth, CORS, content-length, webhook-signature, and proxy-IP headers.
-- A synced diagnostic run reported 146,739 graph nodes and 278,583 graph edges in the native-shaped projection. `codegraph:overlay:sync` refreshes this
+- A synced diagnostic run reported 150,660 graph nodes and 286,313 graph edges in the native-shaped projection. `codegraph:overlay:sync` refreshes this
   top-level diagnostic summary, while the validator only requires the summary to
   be present because this document and `AGENTS.md` both participate in the graph
   and exact totals would otherwise oscillate as self-referential helper rows.
@@ -1648,12 +1648,12 @@ relationship counts below.
 - 148 CommonJS require edges, 74 CommonJS export edges, 81 `implements` edges,
   1,056 `decorates` edges, 125 `decorator-argument` edges, and 8 `overrides`
   edges; all emitted edge kinds are from CodeGraph's native edge-kind set.
-- 797 total test-reference edges; all 797 carry provenance in
+- 842 total test-reference edges; all 842 carry provenance in
   `metadata.testMapping`. Angular contributes 71 `same-basename` edges and
-  511 `class-reference` edges. Supabase contributes 40 `path-reference` edges,
-  2 `route-reference` edge, 0 `invoke-reference` edges, and 173
+  549 `class-reference` edges. Supabase contributes 42 `path-reference` edges,
+  2 `route-reference` edge, 0 `invoke-reference` edges, and 178
   `filename-reference` edges. Default JSON `relationshipGroups` and Markdown
-  render `testMapping`; 5,588 template/path/route/filename-derived edges also render
+  render `testMapping`; 5,690 template/path/route/filename-derived edges also render
   `matchedNeedle`, while strict native JSON strips it with the rest of NanoFlow
   metadata.
 - Angular external resource graph summary: 19 template-url edges and 10 style-url edges.
