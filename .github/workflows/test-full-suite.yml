@@ -36,6 +36,9 @@ jobs:
       - name: Install Dependencies
         run: npm ci
 
+      - name: Prepare exact-root CodeGraph worktree
+        run: npm run codex:worktree:setup
+
       - name: Configure CodeGraph Adapter for CI
         shell: bash
         run: |

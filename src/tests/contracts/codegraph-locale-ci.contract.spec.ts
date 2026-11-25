@@ -18,4 +18,13 @@ describe('CodeGraph locale CI contract', () => {
     const workflow = readFileSync(path.join(root, workflowPath), 'utf8');
     expect(workflow).toMatch(/^\s*LANG:\s*['\"]?zh-CN['\"]?\s*$/m);
   });
+
+  it('prepares a fresh exact-root CodeGraph index before the adapter gate', () => {
+    const workflow = readFileSync(path.join(root, '.github/workflows/test-full-suite.yml'), 'utf8');
+    const setup = workflow.indexOf('run: npm run codex:worktree:setup');
+    const gate = workflow.indexOf('npm run codegraph:adapter:gate');
+    expect(setup).toBeGreaterThanOrEqual(0);
+    expect(gate).toBeGreaterThan(setup);
+  });
 });
+
