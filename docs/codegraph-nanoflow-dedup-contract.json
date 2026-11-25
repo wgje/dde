@@ -1,7 +1,12 @@
 {
   "schemaVersion": 2,
-  "hotspotParts": ["codegraph-nanoflow-dedup-contract-android-kotlin.json"],
-  "dependencyLeafSources": ["scripts/lib/codegraph-overlay-baseline.cjs", "scripts/lib/codegraph-source-policy.cjs"],
+  "hotspotParts": [
+    "codegraph-nanoflow-dedup-contract-android-kotlin.json"
+  ],
+  "dependencyLeafSources": [
+    "scripts/lib/codegraph-overlay-baseline.cjs",
+    "scripts/lib/codegraph-source-policy.cjs"
+  ],
   "upstreamCodeGraphVersion": "@colbymchenry/codegraph@1.6.2",
   "fixedVersionUpgradeProbe": "--codegraph-target @colbymchenry/codegraph@<new-version>",
   "nativeDelegationContract": {
@@ -22,7 +27,10 @@
       "repository hard-rule anchors"
     ]
   },
-  "verificationGates": ["npm run codegraph:overlay:docs:validate", "npm run codegraph:adapter:gate"],
+  "verificationGates": [
+    "npm run codegraph:overlay:docs:validate",
+    "npm run codegraph:adapter:gate"
+  ],
   "hotspots": [
     {
       "name": "collectTypeScript()",
@@ -32,12 +40,17 @@
       "allowedPurpose": "attach NanoFlow metadata.relation to native-shaped endpoints for Angular, Supabase, test, Android, Context7, and AGENTS hard-rule semantics",
       "forbiddenScope": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
       "removalTrigger": "upstream extension point or native projection hook can carry NanoFlow relation metadata and source-evidence policy without rebuilding generic TypeScript graph shape",
-      "verificationGate": ["npm run codegraph:overlay:docs:validate", "npm run codegraph:adapter:gate"],
+      "verificationGate": [
+        "npm run codegraph:overlay:docs:validate",
+        "npm run codegraph:adapter:gate"
+      ],
       "capabilityCategory": "overlay graph duplicate hotspot",
       "language": "typescript",
       "nativeOwnedCapability": "native CodeGraph owns generic TypeScript/Kotlin symbol, import, export, reference, call, type, decorator, callers/callees, impact, auto-sync, indexing, and generic search ranking behavior",
       "nanoFlowOwnedCapability": "NanoFlow owns project-specific semantics, metadata.relation attachment, source evidence policy, and repository hard-rule anchors",
-      "allowedRelations": ["metadata.relation"],
+      "allowedRelations": [
+        "metadata.relation"
+      ],
       "forbiddenGenericBehavior": "must not reimplement native auto-sync, indexing, generic search ranking, or callers/callees/impact",
       "upstreamHookNeeded": "upstream CodeGraph hook for attaching NanoFlow metadata.relation and source evidence policy to native graph endpoints",
       "removalCandidateWhen": "upstream CodeGraph exposes an extension point or native projection hook for NanoFlow relation metadata without rebuilding generic graph shape",
@@ -329,7 +342,9 @@
       "sourceSymbols": [
         "selectGraphResults",
         "selectEntryPoints",
-        "orderRelatedFilesForQuery"
+        "orderRelatedFilesForQuery",
+        "compareSyncBodyKeywordEndpointPriority",
+        "compareSyncConfigKeywordEndpointPriority"
       ],
       "coveredChildSymbols": [
         "seedExplicitPathScopedGraphNodeIds",
@@ -352,8 +367,6 @@
         "compareNodeSpecificity",
         "compareNode",
         "compareEdge",
-        "compareSyncBodyKeywordEndpointPriority",
-        "compareSyncConfigKeywordEndpointPriority",
         "exactMetadataQueryFromEdges",
         "exactMetadataQueriesFromEdges",
         "suppressedExactRelationEntryPointIds",
@@ -400,21 +413,25 @@
         "buildBlastRadiusEntries",
         "buildNotShownEntries",
         "formatSummary",
-        "buildSourceBlocks"
+        "buildSourceBlocks",
+        "scoreNativeProjectionItemForQuery",
+        "compareNativeProjectionRelevance",
+        "compareGeneratedFileOrder",
+        "compareExactRelationEdgeCodeBlockOrder",
+        "compareNativeCodeBlockNodeOrder",
+        "shouldSuppressBroadNativeCodeBlock",
+        "compareProvenanceEdgeLineCodeBlockOrder"
       ],
       "coveredChildSymbols": [
         "buildStrictNativeMarkdownRelationshipGroups",
         "compareStrictNativeMarkdownEdges",
         "orderNativeProjectionItems",
-        "scoreNativeProjectionItemForQuery",
-        "compareNativeProjectionRelevance",
         "scoreNodeRelevanceForQuery",
         "queryScoringContext",
         "lowInformationNodePenalty",
         "lowInformationFilePenalty",
         "queryAllowsTestFiles",
         "isLowInformationTestFilePath",
-        "compareGeneratedFileOrder",
         "formatStrictNativeRelatedSymbol",
         "compareStrictNativeRelatedNodeOrder",
         "formatStrictNativeLocation",
@@ -422,8 +439,6 @@
         "formatStrictNativeEdgeLocation",
         "pushNativeCodeBlockWithinNativeBudget",
         "buildExactRelationEdgeCodeBlocks",
-        "compareExactRelationEdgeCodeBlockOrder",
-        "compareNativeCodeBlockNodeOrder",
         "readNodeCodeBlock",
         "readEdgeLineCodeBlock",
         "pushNativeCodeBlock",
@@ -437,13 +452,11 @@
         "exactRelationEndpointCodeBlockNodes",
         "prioritizeExactRelationCodeBlockEdges",
         "resolveNativeCodeBlockNode",
-        "shouldSuppressBroadNativeCodeBlock",
         "suppressedNativeCodeBlockNodeIds",
         "suppressedExactRelationCodeBlockEndpointIds",
         "shouldSuppressLocalEvidenceEndpointForOwnerPreferredRelation",
         "buildProvenanceEdgeLineCodeBlocksForQuery",
         "buildProvenanceEdgeLineCodeBlocks",
-        "compareProvenanceEdgeLineCodeBlockOrder",
         "readSourceBlock",
         "formatSourceBlockSymbols",
         "scoreSourceFileGroupForQuery",
@@ -481,15 +494,14 @@
       "removalCandidateWhen": "upstream CodeGraph exposes relation-filtered native JSON formatter hooks so NanoFlow no longer carries a parallel strict projection",
       "lastVerifiedGate": "npm run codegraph:overlay:docs:validate",
       "sourceSymbols": [
-        "toNativeJsonFormatterResponse"
-      ],
-      "coveredChildSymbols": [
+        "toNativeJsonFormatterResponse",
         "serializeNativeJsonNode",
         "serializeNativeJsonEdge",
         "nativeJsonEdgeLine",
         "nativeJsonEdgeColumn",
         "serializeNativeJsonCodeBlock"
       ],
+      "coveredChildSymbols": [],
       "duplicateBoundaryRole": "native-json-formatter",
       "outputSurface": [
         "nativeJson"
@@ -520,14 +532,14 @@
       "removalCandidateWhen": "upstream CodeGraph exposes relation-filtered query and formatter hooks so NanoFlow no longer carries a parallel augmented formatter entry point",
       "lastVerifiedGate": "npm run codegraph:overlay:docs:validate",
       "sourceSymbols": [
-        "formatNativeMarkdown"
+        "formatNativeMarkdown",
+        "markdownRelatedSymbolKey"
       ],
       "coveredChildSymbols": [
         "formatNanoFlowAugmentedMarkdown",
         "filterRelationshipGroupsForMarkdown",
         "formatInlineFileList",
         "formatEdgeMetadata",
-        "markdownRelatedSymbolKey",
         "truncateMarkdownOutput",
         "groupMarkdownRelatedNodesByFile"
       ],
