@@ -33,6 +33,17 @@ describe('CodeGraph locale CI contract', () => {
     expect(step).toContain('NANOFLOW_CODEGRAPH_OVERLAY_PREWARM = "1"');
   });
 
+  it('prepares generated environment files before running CodeGraph infra tests', () => {
+    const workflow = readFileSync(path.join(root, '.github/workflows/test-full-suite.yml'), 'utf8');
+    const envSetup = workflow.indexOf('run: npm run test:prepare-env');
+    const codegraphSetup = workflow.indexOf('run: npm run codex:worktree:setup');
+    const gate = workflow.indexOf('npm run codegraph:adapter:gate');
+
+    expect(envSetup).toBeGreaterThanOrEqual(0);
+    expect(codegraphSetup).toBeGreaterThan(envSetup);
+    expect(gate).toBeGreaterThan(codegraphSetup);
+  });
+
   it('prepares a fresh exact-root CodeGraph index before the adapter gate', () => {
     const workflow = readFileSync(path.join(root, '.github/workflows/test-full-suite.yml'), 'utf8');
     const setup = workflow.indexOf('run: npm run codex:worktree:setup');

@@ -332,7 +332,16 @@ export function registerAnalyzeCodegraphMcpLogActiveWrapperSpecs(): void {
     const script = makeScriptFile('module.exports = { version: "gate-smoke-project-root" };\n');
     const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-mcp-project-root-'));
     const configuredEnv = {
+      CODEGRAPH_DAEMON_IDLE_TIMEOUT_MS: '300000',
+      CODEGRAPH_DAEMON_MAX_IDLE_MS: '1800000',
+      CODEGRAPH_NO_DAEMON: '0',
+      CODEGRAPH_NO_WATCH: '0',
       NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: '30000',
+      NANOFLOW_CODEGRAPH_OVERLAY_QUERY_TIMEOUT_MS: '60000',
+      NANOFLOW_CODEGRAPH_OVERLAY_WORKER_ENABLED: '1',
+      NANOFLOW_CODEGRAPH_OVERLAY_WORKER_POOL_SIZE: '1',
+      NANOFLOW_CODEGRAPH_OVERLAY_PREWARM: '1',
+      NANOFLOW_CODEGRAPH_REFRESH_ON_STARTUP: '0',
       NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE: '0',
     };
     const smokeEnv = {
@@ -355,7 +364,16 @@ export function registerAnalyzeCodegraphMcpLogActiveWrapperSpecs(): void {
         ']',
         '',
         '[mcp_servers.codegraph.env]',
+        'CODEGRAPH_DAEMON_IDLE_TIMEOUT_MS = "300000"',
+        'CODEGRAPH_DAEMON_MAX_IDLE_MS = "1800000"',
+        'CODEGRAPH_NO_DAEMON = "0"',
+        'CODEGRAPH_NO_WATCH = "0"',
         'NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS = "30000"',
+        'NANOFLOW_CODEGRAPH_OVERLAY_QUERY_TIMEOUT_MS = "60000"',
+        'NANOFLOW_CODEGRAPH_OVERLAY_WORKER_ENABLED = "1"',
+        'NANOFLOW_CODEGRAPH_OVERLAY_WORKER_POOL_SIZE = "1"',
+        'NANOFLOW_CODEGRAPH_OVERLAY_PREWARM = "1"',
+        'NANOFLOW_CODEGRAPH_REFRESH_ON_STARTUP = "0"',
         'NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE = "0"',
         '',
       ].join('\n'));
