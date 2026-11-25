@@ -503,3 +503,7 @@ Supabase 相关问题不要一上来就写 SQL、删缓存或改 policy。先按
 - 部署和环境变量边界：读 [私有部署](01-private-deployment.md)。
 - 处理函数故障和线上症状：读 [生产排障](04-production-troubleshooting.md#edge-function-功能失败)。
 - 面向用户的数据恢复入口和限制：读 [备份与恢复](../03-data-sync-safety/03-backup-and-restore.md)。
+
+## 空库初始化验证
+
+初始化脚本需先创建 `projects` 再创建引用它的 SQL owner/access helper；`active_tasks` 的初始列顺序需与后续替换兼容。应在任务专用的本地空库执行脚本并保持函数体校验开启，再演练候选迁移及回滚。只读 Storage schema 前置依赖、fresh-init、升级迁移和线上读回属于不同证据，不可互相替代。
