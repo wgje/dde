@@ -19,6 +19,20 @@ describe('CodeGraph locale CI contract', () => {
     expect(workflow).toMatch(/^\s*LANG:\s*['\"]?zh-CN['\"]?\s*$/m);
   });
 
+  it('configures all required overlay worker settings in the CI doctor config', () => {
+    const workflow = readFileSync(path.join(root, '.github/workflows/test-full-suite.yml'), 'utf8');
+    const start = workflow.indexOf('      - name: Configure CodeGraph Adapter for CI');
+    const end = workflow.indexOf('      - name: Run CodeGraph Adapter Gate', start);
+    const step = workflow.slice(start, end);
+
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    expect(step).toContain('NANOFLOW_CODEGRAPH_OVERLAY_QUERY_TIMEOUT_MS = "60000"');
+    expect(step).toContain('NANOFLOW_CODEGRAPH_OVERLAY_WORKER_ENABLED = "1"');
+    expect(step).toContain('NANOFLOW_CODEGRAPH_OVERLAY_WORKER_POOL_SIZE = "1"');
+    expect(step).toContain('NANOFLOW_CODEGRAPH_OVERLAY_PREWARM = "1"');
+  });
+
   it('prepares a fresh exact-root CodeGraph index before the adapter gate', () => {
     const workflow = readFileSync(path.join(root, '.github/workflows/test-full-suite.yml'), 'utf8');
     const setup = workflow.indexOf('run: npm run codex:worktree:setup');
