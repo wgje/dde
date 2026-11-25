@@ -4,9 +4,22 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { readOverlayCurrentReceipt } = require('./lib/codegraph-overlay-current-receipt.cjs');
+const { resolveCodegraphPackageLaunch, resolveNpmExecLaunch } = require('./lib/codegraph-package-launcher.cjs');
+const { withSetupLock } = require('./lib/codegraph-worktree-setup-lock.cjs');
 
 const REQUIRED_RUNTIME_CLOSURE = Object.freeze([
+  'scripts/codegraph-worktree-bootstrap.cjs',
+  'scripts/setup-codegraph-worktree.cjs',
   'scripts/codegraph-nanoflow-mcp-stdio.cjs',
+  'scripts/codegraph-adapter-context.cjs',
+  'scripts/codegraph-codex-config.cjs',
+  'scripts/codegraph-nanoflow-dedup-query.cjs',
+  'scripts/codegraph-nanoflow-specialized-query.cjs',
+  'scripts/analyze-codegraph-mcp-log.cjs',
+  'scripts/agent-file-lease.cjs',
+  'scripts/lib/codegraph-context-outcome.cjs',
+  'scripts/lib/codegraph-package-launcher.cjs',
+  'scripts/lib/codegraph-worktree-setup-lock.cjs',
   'scripts/query-codegraph-nanoflow-overlay.mjs',
   'scripts/run-codegraph-overlay-stability.cjs',
   'scripts/generate-codegraph-nanoflow-overlay.mjs',
@@ -16,7 +29,9 @@ const REQUIRED_RUNTIME_CLOSURE = Object.freeze([
   'scripts/lib/codegraph-overlay-generation-format.cjs',
   'scripts/lib/codegraph-overlay-generation-publisher.cjs',
   'scripts/lib/codegraph-overlay-baseline.cjs',
+  'scripts/lib/codegraph-overlay-stability.cjs',
   'scripts/lib/codegraph-source-policy.cjs',
+  'scripts/lib/codegraph-native-graph-sidecar.cjs',
   'scripts/lib/codegraph-nanoflow-overlay-v1-schema.cjs',
   'scripts/lib/codegraph-nanoflow-overlay-v1-schema-angular-support.cjs',
   'scripts/lib/codegraph-nanoflow-overlay-v1-schema-graph.cjs',
@@ -142,26 +157,33 @@ function copyMissingClosure(root, sourceRoot, overwrite, syncClean = false) {
       overwritten.push({ path: relativePath, sha256: hashFile(targetPath) });
     }
   }
-  const staleAfter = REQUIRED_RUNTIME_CLOSURE.filter(relativePath => existsFile(sourceRoot, relativePath)
+  const staleAfter = !(overwrite || syncClean) ? [] : REQUIRED_RUNTIME_CLOSURE.filter(relativePath => existsFile(sourceRoot, relativePath)
     && existsFile(root, relativePath)
     && hashFile(path.join(sourceRoot, relativePath)) !== hashFile(path.join(root, relativePath)));
   return { missingBefore, copied, overwritten, staleBefore, staleAfter, dirtyConflicts, skippedSourceMissing };
 }
-function ensureNativeIndex(root, sourceRoot = null) {
+function ensureNativeIndex(root, sourceRoot = null, dependencies = {}) {
   const databasePath = path.join(root, '.codegraph', 'codegraph.db');
-  if (fs.existsSync(databasePath)) return { status: 'ready', path: databasePath, bootstrapped: false };
+  const current = currentState(root);
+  if (fs.existsSync(databasePath)) return { status: 'ready', path: databasePath, bootstrapped: false, current };
   const npmCache = process.env.npm_config_cache || process.env.NANOFLOW_CODEGRAPH_NPM_CACHE || 'D:/Code/tools/codegraph-npm-cache';
-  const npxCommand = process.platform === 'win32' ? 'npx.cmd' : 'npx';
-  const result = spawnSync(npxCommand, ['-y', '@colbymchenry/codegraph@1.6.2', 'init', '--yes', root], {
+  const initArgs = ['init', '--yes', root];
+  const env = { ...process.env, npm_config_cache: npmCache };
+  const launch = resolveCodegraphPackageLaunch('@colbymchenry/codegraph@1.6.2', initArgs, { root, env })
+    || resolveNpmExecLaunch('@colbymchenry/codegraph@1.6.2', initArgs);
+  if (!launch) return { status: 'failed', path: databasePath, bootstrapped: false, exitCode: 78, stderrTail: 'Node npm CLI unavailable; install npm before worktree setup' };
+  const { command, args: commandArgs } = launch;
+  const result = (dependencies.spawnSync || spawnSync)(command, commandArgs, {
     cwd: root, encoding: 'utf8', timeout: 20 * 60 * 1000, maxBuffer: 16 * 1024 * 1024,
     env: { ...process.env, npm_config_cache: npmCache }, windowsHide: true,
   });
-  const ready = fs.existsSync(databasePath);
+  const ready = result.status === 0 && fs.existsSync(databasePath);
   return { status: ready ? 'ready' : 'failed', path: databasePath, bootstrapped: ready,
     exitCode: result.status ?? 1, stderrTail: String(result.stderr ?? '').slice(-4000), stdoutTail: String(result.stdout ?? '').slice(-4000) };
 }
+
 function runGeneration(root, sourceRoot = null) {
-  const executionRoot = sourceRoot && existsFile(sourceRoot, 'scripts/run-codegraph-overlay-stability.cjs') ? sourceRoot : root;
+  const executionRoot = root;
   const result = spawnSync(process.execPath, [path.join(executionRoot, 'scripts', 'run-codegraph-overlay-stability.cjs'), '--root', root], {
     cwd: executionRoot,
     encoding: 'utf8',
@@ -204,6 +226,8 @@ function main() {
     generation: null,
     blockingReason: null,
     generationState: null,
+    exactRoot: { root: args.root, databasePath: path.join(args.root, '.codegraph', 'codegraph.db'), currentPath: currentPath(args.root) },
+    nativeIndexSync: null,
   };
   if (!fs.existsSync(args.root)) {
     report.status = 'ENVIRONMENT_BLOCKED';
@@ -217,13 +241,15 @@ function main() {
     report.runtimeClosure.missingOptional = OPTIONAL_PROTOTYPE_CLOSURE.filter(relativePath => !existsFile(args.root, relativePath));
     report.runtimeClosure.missingTests = TEST_CLOSURE.filter(relativePath => !existsFile(args.root, relativePath));
     const dirtyConflicts = report.runtimeClosure.dirtyConflicts ?? [];
-    const unresolvedStale = staleAfter.filter(relativePath => !dirtyConflicts.includes(relativePath));
-    if (missingAfter.length > 0 || unresolvedStale.length > 0) {
+    // A worktree may intentionally pin a different wrapper release than its
+    // source-root. Never overwrite that root's selected implementation. Only
+    // an incomplete runtime closure is a setup blocker; drift is recorded.
+    if (missingAfter.length > 0) {
       report.status = 'ENVIRONMENT_BLOCKED';
       report.taskImpact = 'adapter-dependent tasks blocked; unrelated tasks may proceed';
-      const unresolved = [...missingAfter, ...unresolvedStale, ...dirtyConflicts];
+      const unresolved = [...missingAfter, ...dirtyConflicts];
       report.blockingReason = args.sourceRoot
-        ? `runtime dependency closure is incomplete or stale: ${unresolved.join(', ')}`
+        ? `runtime dependency closure is incomplete: ${unresolved.join(', ')}`
         : 'runtime dependency closure is incomplete and no bootstrap source root was supplied';
     } else if (dirtyConflicts.length > 0) {
       report.status = 'READY_WITH_LOCAL_RUNTIME_CHANGES';
@@ -245,7 +271,11 @@ function main() {
         }
       }
       if (report.status === 'READY') report.generation = runGeneration(args.root, args.sourceRoot);
+      report.exactRoot.databaseExists = fs.existsSync(report.exactRoot.databasePath);
+      report.exactRoot.generation = report.currentBefore.status === 'ready' ? report.currentBefore.generationId : report.currentAfter?.generationId ?? null;
       report.currentAfter = currentState(args.root);
+      report.exactRoot.databaseExists = fs.existsSync(report.exactRoot.databasePath);
+      report.exactRoot.generation = report.currentAfter?.generationId ?? null;
       if (report.status === 'READY' && (report.generation.exitCode !== 0 || report.currentAfter.status !== 'ready')) {
         report.status = 'ENVIRONMENT_BLOCKED';
         report.taskImpact = 'adapter-dependent tasks blocked; unrelated tasks may proceed';
@@ -276,7 +306,13 @@ function main() {
   process.exitCode = report.exitCode;
 }
 
-try { main(); } catch (error) {
+if (require.main === module) try {
+  const targetRoot = path.resolve(parseArgs(process.argv.slice(2)).root);
+  const lockHeld = process.env.NANOFLOW_CODEGRAPH_WORKTREE_SETUP_LOCK_ROOT
+    && path.resolve(process.env.NANOFLOW_CODEGRAPH_WORKTREE_SETUP_LOCK_ROOT).toLowerCase() === targetRoot.toLowerCase();
+  if (lockHeld || !fs.existsSync(targetRoot) || process.argv.includes('--help') || process.argv.includes('-h')) main();
+  else withSetupLock(targetRoot, () => main());
+} catch (error) {
   process.stderr.write(`[codegraph-worktree-bootstrap] ENVIRONMENT_BLOCKED: ${error instanceof Error ? error.message : String(error)}\n`);
   process.exitCode = 78;
 }
@@ -287,4 +323,5 @@ module.exports = Object.freeze({
   TEST_CLOSURE,
   CLOSURE_CATEGORIES,
   currentState,
+  ensureNativeIndex,
 });

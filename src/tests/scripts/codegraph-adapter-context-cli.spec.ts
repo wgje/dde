@@ -371,6 +371,20 @@ function makeTempAdapterProject(): string {
 }
 
 describe('codegraph-adapter-context CLI', () => {
+  it('reports missing worktree setup without running a blocking bootstrap', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-codegraph-adapter-setup-failure-'));
+    tempRoots.push(root);
+    fs.writeFileSync(path.join(root, '.git'), 'gitdir: missing-worktree-metadata');
+    const adapter = requireCjs(adapterContextScriptPath) as {
+      inspectExactRootWorktree(options: { root: string }): { status: string; root: string; error: string };
+    };
+    expect(adapter.inspectExactRootWorktree({ root })).toMatchObject({
+      status: 'pending',
+      root,
+      error: 'worktree-setup-required',
+    });
+  });
+
   afterEach(() => {
     while (tempRoots.length > 0) {
       const root = tempRoots.pop();
@@ -1049,11 +1063,30 @@ describe('codegraph-adapter-context CLI', () => {
       return root;
     }
 
+    it.each(['fallback', 'direct', 'daemon'])('never launches a second direct writer for an indexed root with a %s holder', mode => {
+      const root = makeWriterRoot({ pid: process.pid, mode, startedAt: Date.now(), ready: true }, undefined);
+      fs.writeFileSync(path.join(root, '.codegraph', 'codegraph.db'), 'indexed fixture');
+      expect(resolveAdapterFallbackRuntime(root, { isProcessAlive: () => true })).toMatchObject({
+        mode: 'shared-daemon-proxy',
+        env: { CODEGRAPH_NO_DAEMON: '0', NANOFLOW_CODEGRAPH_ALLOW_DAEMON: '1' },
+      });
+    });
+    it('uses the proxy when the indexed database exists without lock metadata', () => {
+      const root = makeWriterRoot(undefined, undefined);
+      fs.writeFileSync(path.join(root, '.codegraph', 'codegraph.db'), 'indexed fixture');
+      expect(resolveAdapterFallbackRuntime(root)).toMatchObject({
+        mode: 'shared-daemon-proxy',
+        env: { CODEGRAPH_NO_DAEMON: '0', NANOFLOW_CODEGRAPH_ALLOW_DAEMON: '1' },
+      });
+    });
+
+
     it('reuses only a writer whose daemon identity and OS process start time match the exact root', () => {
       const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-codegraph-writer-'));
       tempRoots.push(root);
       fs.mkdirSync(path.join(root, '.codegraph'), { recursive: true });
       const socketPath = daemonSocketFor(root);
+      fs.writeFileSync(path.join(root, '.codegraph', 'codegraph.db'), 'existing indexed root');
       fs.writeFileSync(path.join(root, '.codegraph', 'writer.pid'), JSON.stringify({ pid: 9001, mode: 'daemon', startedAt: 1760000000000, ready: true }));
       fs.writeFileSync(path.join(root, '.codegraph', 'daemon.pid'), JSON.stringify({ pid: 9001, version: '1.6.2', socketPath, startedAt: 1760000000016 }));
       expect(resolveAdapterFallbackRuntime(root, {

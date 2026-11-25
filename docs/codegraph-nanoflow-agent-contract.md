@@ -39,6 +39,9 @@ Query/formatter 与 context-pack source-ordering 重复热点还必须在 manife
 Codex repair boundary: `.vscode/mcp.json` is not the active CodeGraph MCP configuration and must not be edited, repaired, or diagnosed as the fix target for Codex MCP failures.
 
 CodeGraph MCP log triage contract: when `Transport closed`, timeout, stale wrapper, config drift, or tool-registry absence appears, agents must read `diagnosticTriage.evidenceGaps` and `diagnosticTriage.requiredEvidenceBeforeConclusion` from `npm run codegraph:mcp:log:guard` or `node scripts/analyze-codegraph-mcp-log.cjs .codegraph\nanoflow-mcp-wrapper.log --text --observed-at now --direct-mcp-error "<error>"` before changing adapter code. If these fields say `fresh-adapter-fallback-result`, `adapter-doctor-config-snapshot`, `current-wrapper-log-evidence`, or `current-wrapper-transport-failure-evidence` is missing, the corresponding blocked conclusions (`adapter-source-regression`, `wrapper-transport-crash`, `nanoflow-ranking-regression`, `direct-mcp-healthy`, or `mcp-config-current`) must not be reported as root cause until the required evidence is collected.
+### 新建 worktree 的 CodeGraph 准备
+
+新 DDE worktree 创建后必须运行 `npm run codex:worktree:setup` 并检查结果；不要依赖自动生成的 Codex environment setup 文件，它当前不是 worktree 创建 hook。adapter fallback 只检查准备回执，不会在请求路径上安装依赖或建图。准备失败必须作为 `worktreeSetup.status=failed` 和具体错误保留在 adapter 诊断里，不能伪装成通用子进程退出；native CodeGraph 上下文仍须继续尝试和返回。每个 worktree 使用自己的依赖、index 与经认证的 CURRENT generation；禁止复制主 checkout 的 `.codegraph`。已有 index 不会被自动同步或覆盖。准备错误只阻断依赖 NanoFlow overlay 的操作，不阻断无关任务。
 
 在 codegraph MCP 失败后、NanoFlow adapter CLI fallback 也被尝试之前，禁止使用：`rg`、`grep`、`find`、`Get-Content`、`ls`、`dir`、git 检查、Context7、web 查询和任意普通文件系统探索。若 adapter CLI fallback 已失败但原生 codegraph CLI 还未尝试，仍禁止普通搜索；官方 CLI 成功后只能作为原生定位线索，涉及 Angular、Supabase、同步规则、AGENTS hard rules 或测试映射时仍必须回补 overlay 语义或明确说明语义层不可用。
 
