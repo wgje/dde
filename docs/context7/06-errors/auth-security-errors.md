@@ -5,6 +5,7 @@ audience: ai-agent, maintainer, operator
 last_verified: 2026-06-09
 source_paths:
   - src/services/auth*.ts
+  - src/services/guards/project.guard.ts
   - supabase/migrations/
   - scripts/contracts/check-secrets.cjs
 ---
@@ -17,6 +18,7 @@ source_paths:
 | offline edits rejected after reconnect | permission denied after local writes | use rejected-data isolation |
 | secret detected in source | key committed or template misuse | run `npm run audit:secrets` |
 | Edge Function CORS error | function response missing expected headers | inspect function boundary |
+| deep link stalls after snapshot prehydrate | initial owner captured before snapshot establishes identity, canceling first navigation | capture async session context after synchronous prehydrate; keep owner and generation change rejection; run project guard specs |
 | upload denied | storage policy or path ownership mismatch | inspect storage RLS |
 
 Read [../contracts/security-contract.md](../contracts/security-contract.md).

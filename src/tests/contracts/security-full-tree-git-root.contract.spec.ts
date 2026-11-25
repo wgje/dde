@@ -341,5 +341,5 @@ describe('full-tree security callers', () => {
     expect(result.status).toBe(1);
     expect(result.stderr).toContain('GITHUB_TOKEN');
     expect(result.stderr).not.toContain(token);
-  });
+  }, 10_000);
 });

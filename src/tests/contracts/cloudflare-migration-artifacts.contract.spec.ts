@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
@@ -188,6 +189,19 @@ describe('Cloudflare migration artifact contracts', () => {
     expect(workflow).toContain('wrangler@${WRANGLER_VERSION} deploy --config wrangler.workers-static-assets.dry-run.toml --dry-run');
     expect(workflow).not.toContain('CLOUDFLARE_API_TOKEN');
     expect(workflow).not.toContain('SENTRY_AUTH_TOKEN');
+  });
+
+  it('passes the dry-run workflow browser credentials through the actual build validator', () => {
+    const workflow = read('.github/workflows/deploy-cloudflare-pages-dry-run.yml');
+    const step = extractWorkflowStep(workflow, 'Deterministic build guard');
+    const processUrl = step.match(/NG_APP_SUPABASE_URL: '([^']+)'/)?.[1];
+    const processKey = step.match(/NG_APP_SUPABASE_ANON_KEY: '([^']+)'/)?.[1];
+    expect(processUrl).toBe('https://dryrun.invalid');
+    expect(processKey).toBeTruthy();
+    const { resolveSupabaseBrowserCredentials } = createRequire(import.meta.url)(
+      path.join(root, 'scripts/lib/supabase-browser-key-safety.cjs'),
+    ) as { resolveSupabaseBrowserCredentials: (sources: Record<string, unknown>) => { keyKind: string } };
+    expect(resolveSupabaseBrowserCredentials({ processUrl, processKey }).keyKind).toBe('publishable');
   });
 
   it('keeps the Workers Static Assets fallback as a non-production dry-run path', () => {

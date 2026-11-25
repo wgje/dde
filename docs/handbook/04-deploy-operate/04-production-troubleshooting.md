@@ -503,6 +503,10 @@ source_paths:
 
 只要这些证据还不完整，就先不要做更激进的清理、迁移或覆盖动作。
 
+## 深链接冷启动在快照恢复后停住
+
+若启动 trace 已出现 `app.bootstrap_complete` 与 `user_session.snapshot_prehydrate`（或 `user_session.offline_snapshot_prehydrate`），但没有工作区 handoff，应检查首次路由是否被守卫取消，不要直接归因于缓存。项目守卫需要在同步快照预填充确认初始身份后捕获异步会话上下文。空身份到已验证快照身份的同代初始化可继续；预填充中的账号或代次切换，以及后续等待中的切换仍必须拒绝。使用 `src/services/guards/project.guard.spec.ts` 回归冷启动和隔离场景，不要靠清除本地存储或移除恢复围栏绕过。
+
 ## 下一步
 
 - 继续核对 Supabase 项目、RLS、bucket 和 secrets：读 [Supabase 运维](02-supabase-operations.md)。

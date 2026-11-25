@@ -110,6 +110,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # Source-bound ledger checks require historical commit objects.
+          fetch-depth: 0
 
       - name: Setup Node.js
         uses: actions/setup-node@v4

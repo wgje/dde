@@ -55,7 +55,6 @@ async function ensureDataAvailable(
   const maxQuickWait = 200; // 最多等待 200ms 让本地数据加载完成
 
   if (!isSessionCurrent()) return { loaded: false, isFirstLoad: false };
-  userSession.prehydrateFromSnapshot();
   
   // 1. 快速检查：Store 中是否已有数据
   if (projectState.projects().length > 0) {
@@ -240,7 +239,15 @@ export const projectExistsGuard: CanActivateFn = async (route: ActivatedRouteSna
   const projectId = route.params['projectId'];
   if (!projectId) return true;
 
+  const beforePrehydrate = captureProjectGuardSession(dependencies.userSession);
+  dependencies.userSession.prehydrateFromSnapshot();
   const sessionContext = captureProjectGuardSession(dependencies.userSession);
+  // A verified startup snapshot can establish the first owner synchronously.
+  // Capture the async fence afterwards, but reject actual account/epoch changes.
+  if (beforePrehydrate.sessionGeneration !== sessionContext.sessionGeneration
+    || (beforePrehydrate.userId !== null && beforePrehydrate.userId !== sessionContext.userId)) {
+    return false;
+  }
   const isSessionCurrent = () => isProjectGuardSessionCurrent(
     dependencies.userSession,
     sessionContext,
