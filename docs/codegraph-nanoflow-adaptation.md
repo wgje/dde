@@ -1478,13 +1478,13 @@ relationship counts below.
   edges, initializer-reference edges, and TSX JSX component render edges use
   only native CodeGraph edge kinds; the specific reason is stored in
   `metadata.relation`.
-- Angular declaration and dependency-injection graph summary: `angularComponents=88`,
+- Angular declaration and dependency-injection graph summary: `angularComponents=89`,
   `angularDirectives=3`, `angularPipes=1`, `angularInjectables=277`,
-  `angularInjectorFiles=615`, `angularInjectorDependencyReferences=1975`, and
+  `angularInjectorFiles=616`, `angularInjectorDependencyReferences=1977`, and
   `angularApplicationProviders=1`.
-- Angular imports and reactive API graph summary: `standaloneImportEdges=171`,
-  `angularInputEdges=198`, `angularOutputEdges=220`, `angularModelEdges=0`,
-  `angularQueryEdges=22`, and `angularSignalEdges=513`. The real tree currently
+- Angular imports and reactive API graph summary: `standaloneImportEdges=172`,
+  `angularInputEdges=205`, `angularOutputEdges=224`, `angularModelEdges=0`,
+  `angularQueryEdges=23`, and `angularSignalEdges=527`. The real tree currently
   has no projected Angular model relation; fixture/spec coverage preserves that
   supported zero-count contract.
 - Context7 retrieval and source-map graph summary: `context7Documents=73`,
@@ -1502,9 +1502,9 @@ relationship counts below.
   queries; the current real tree has 0 `angular-route-provider` edges.
 - Route, template binding, template declaration usage, signal, input/output/model, provider/import,
   host-directive, host attribute, host binding/listener, Edge Function env, migration table, and migration policy edges are included
-  when present. Current Angular template extraction records 3,381 template bindings: 1,391 property, 1,078 event, 348 interpolation, 19 model, 539 control-flow, and 6 structural directive bindings, with 0 template-local
+  when present. Current Angular template extraction records 3,456 template bindings: 1,405 property, 1,096 event, 372 interpolation, 25 model, 552 control-flow, and 6 structural directive bindings, with 0 template-local
   alias/contextual-variable bindings, 0 pipe-name-as-binding entries, and 0
-  `@defer on` trigger-word bindings. The template declaration usage layer adds 75 `template-component` edges, 3 `template-directive` edges in the current
+  `@defer on` trigger-word bindings. The template declaration usage layer adds 77 `template-component` edges, 3 `template-directive` edges in the current
   real tree (the workspace shell slot `@Directive` declarations `app-workspace-overlays`, `app-workspace-sidebar`, and `app-workspace-shell-core` used as elements in `src/workspace-shell.component.html`), and 6 `template-pipe` edges; fixtures cover directive selector lists, `:not(...)` exclusions,
   quoted attribute values containing `.` or `,`, Angular `bind-` attribute
   prefixes, inline-template source line offsets, directive selector parsing, and
@@ -1513,7 +1513,7 @@ relationship counts below.
   `inputs` / `outputs` alias metadata; the current real tree has 0 host-directive edges because it does not use this Angular metadata yet.
   `host` metadata object entries are parsed into `host-attribute`,
   `host-binding`, and `host-listener` relationships with the static value or
-  expression preserved in edge metadata. The current real tree has 6 host-attribute edges, 5 host-binding edges, and 25 host-listener edges.
+  expression preserved in edge metadata. The current real tree has 6 host-attribute edges, 6 host-binding edges, and 25 host-listener edges.
 - 8 Supabase Edge Functions with 37 env-var references after following relative
   helper imports under `supabase/functions`, 24 followed source/helper files
   counted per Edge Function (`14` unique files), 17 recorded source import
@@ -1633,7 +1633,7 @@ relationship counts below.
 - The Supabase Edge Function header layer adds 46 `edge-function-header`
   native-shaped `variable` nodes and 46 native `references` edges across
   request auth, CORS, content-length, webhook-signature, and proxy-IP headers.
-- A synced diagnostic run reported 150,660 graph nodes and 286,313 graph edges in the native-shaped projection. `codegraph:overlay:sync` refreshes this
+- A synced diagnostic run reported 150,727 graph nodes and 286,591 graph edges in the native-shaped projection. `codegraph:overlay:sync` refreshes this
   top-level diagnostic summary, while the validator only requires the summary to
   be present because this document and `AGENTS.md` both participate in the graph
   and exact totals would otherwise oscillate as self-referential helper rows.
@@ -1653,10 +1653,10 @@ relationship counts below.
   549 `class-reference` edges. Supabase contributes 42 `path-reference` edges,
   2 `route-reference` edge, 0 `invoke-reference` edges, and 178
   `filename-reference` edges. Default JSON `relationshipGroups` and Markdown
-  render `testMapping`; 5,690 template/path/route/filename-derived edges also render
+  render `testMapping`; 5,770 template/path/route/filename-derived edges also render
   `matchedNeedle`, while strict native JSON strips it with the rest of NanoFlow
   metadata.
-- Angular external resource graph summary: 19 template-url edges and 10 style-url edges.
+- Angular external resource graph summary: 20 template-url edges and 11 style-url edges.
 - Latest overlay audit: 0 bad nodes, 0 bad edges, 0 unresolved call placeholder
   nodes, 0 migration variable-sourced semantic edges, and 0 noisy migration
   table anchors from `IF`, `ONLY`, `SCHEMA`, `CONFLICT`, `FUNCTION`, `SET`, or
