@@ -2,6 +2,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const os = require('node:os');
 const { spawnSync } = require('node:child_process');
 const { readOverlayCurrentReceipt } = require('./lib/codegraph-overlay-current-receipt.cjs');
 const { resolveCodegraphPackageLaunch, resolveNpmExecLaunch } = require('./lib/codegraph-package-launcher.cjs');
@@ -162,20 +163,30 @@ function copyMissingClosure(root, sourceRoot, overwrite, syncClean = false) {
     && hashFile(path.join(sourceRoot, relativePath)) !== hashFile(path.join(root, relativePath)));
   return { missingBefore, copied, overwritten, staleBefore, staleAfter, dirtyConflicts, skippedSourceMissing };
 }
+function resolveNpmCache(env = process.env, platform = process.platform, homeDirectory = os.homedir()) {
+  const configured = env.npm_config_cache || env.NPM_CONFIG_CACHE || env.NANOFLOW_CODEGRAPH_NPM_CACHE;
+  if (configured) return configured;
+  return platform === 'win32' ? 'D:/Code/tools/codegraph-npm-cache' : path.join(homeDirectory, '.npm');
+}
 function ensureNativeIndex(root, sourceRoot = null, dependencies = {}) {
   const databasePath = path.join(root, '.codegraph', 'codegraph.db');
   const current = currentState(root);
   if (fs.existsSync(databasePath)) return { status: 'ready', path: databasePath, bootstrapped: false, current };
-  const npmCache = process.env.npm_config_cache || process.env.NANOFLOW_CODEGRAPH_NPM_CACHE || 'D:/Code/tools/codegraph-npm-cache';
+  const inheritedEnv = dependencies.env || process.env;
+  const npmCache = resolveNpmCache(
+    inheritedEnv,
+    dependencies.platform || process.platform,
+    dependencies.homeDirectory || os.homedir(),
+  );
   const initArgs = ['init', '--yes', root];
-  const env = { ...process.env, npm_config_cache: npmCache };
+  const env = { ...inheritedEnv, npm_config_cache: npmCache };
   const launch = resolveCodegraphPackageLaunch('@colbymchenry/codegraph@1.6.2', initArgs, { root, env })
     || resolveNpmExecLaunch('@colbymchenry/codegraph@1.6.2', initArgs);
   if (!launch) return { status: 'failed', path: databasePath, bootstrapped: false, exitCode: 78, stderrTail: 'Node npm CLI unavailable; install npm before worktree setup' };
   const { command, args: commandArgs } = launch;
   const result = (dependencies.spawnSync || spawnSync)(command, commandArgs, {
     cwd: root, encoding: 'utf8', timeout: 20 * 60 * 1000, maxBuffer: 16 * 1024 * 1024,
-    env: { ...process.env, npm_config_cache: npmCache }, windowsHide: true,
+    env, windowsHide: true,
   });
   const ready = result.status === 0 && fs.existsSync(databasePath);
   return { status: ready ? 'ready' : 'failed', path: databasePath, bootstrapped: ready,
@@ -324,4 +335,5 @@ module.exports = Object.freeze({
   CLOSURE_CATEGORIES,
   currentState,
   ensureNativeIndex,
+  resolveNpmCache,
 });

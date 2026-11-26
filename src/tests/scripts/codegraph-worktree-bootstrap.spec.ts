@@ -41,6 +41,49 @@ function runBootstrap(root: string, extraArgs: string[] = []) {
 }
 
 describe('codegraph worktree bootstrap', () => {
+  it('uses the target platform npm cache for Linux native-index bootstrap', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-bootstrap-linux-cache-'));
+    tempRoots.push(root);
+    const homeDirectory = path.join(root, 'runner-home');
+    const databasePath = path.join(root, '.codegraph', 'codegraph.db');
+    let capturedCache: string | undefined;
+    let capturedArgs: string[] = [];
+    const bootstrap = requireCjs(bootstrapPath) as {
+      resolveNpmCache(env: NodeJS.ProcessEnv, platform: NodeJS.Platform, homeDirectory: string): string;
+      ensureNativeIndex(root: string, sourceRoot: null, dependencies: {
+        env: NodeJS.ProcessEnv;
+        platform: NodeJS.Platform;
+        homeDirectory: string;
+        spawnSync: (command: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv }) => {
+          status: number | null;
+          stderr: string;
+          stdout: string;
+        };
+      }): { status: string };
+    };
+
+    expect(bootstrap.resolveNpmCache({}, 'linux', homeDirectory)).toBe(path.join(homeDirectory, '.npm'));
+    expect(bootstrap.resolveNpmCache({}, 'win32', homeDirectory)).toBe('D:/Code/tools/codegraph-npm-cache');
+    expect(bootstrap.resolveNpmCache({ NPM_CONFIG_CACHE: '/runner/npm-cache' }, 'linux', homeDirectory)).toBe('/runner/npm-cache');
+
+    const result = bootstrap.ensureNativeIndex(root, null, {
+      env: {},
+      platform: 'linux',
+      homeDirectory,
+      spawnSync: (_command, args, options) => {
+        capturedArgs = args;
+        capturedCache = options.env.npm_config_cache;
+        fs.mkdirSync(path.dirname(databasePath), { recursive: true });
+        fs.writeFileSync(databasePath, 'native-index-fixture');
+        return { status: 0, stderr: '', stdout: '' };
+      },
+    });
+
+    expect(result.status).toBe('ready');
+    expect(capturedCache).toBe(path.join(homeDirectory, '.npm'));
+    expect(capturedArgs).toContain('--package=@colbymchenry/codegraph@1.6.2');
+    expect(capturedArgs).toContain('codegraph');
+  });
   it('uses the exact --root passed to the setup CLI', () => {
     const setup = requireCjs(path.join(repoRoot, 'scripts', 'setup-codegraph-worktree.cjs')) as {
       rootFromArgs(argv: string[], fallback?: string): string;

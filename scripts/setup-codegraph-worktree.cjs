@@ -4,6 +4,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 const { withSetupLock } = require('./lib/codegraph-worktree-setup-lock.cjs');
+const { resolveNpmCache } = require('./codegraph-worktree-bootstrap.cjs');
 
 function isInside(root, target) {
   const rel = path.relative(root, target);
@@ -25,7 +26,7 @@ function ensureTargetDependencies(root) {
     if (!npmCli) throw new Error('codegraph-setup-npm-cli-missing');
     const install = spawnSync(process.execPath, [npmCli, 'ci', '--no-audit', '--no-fund'], {
       cwd: root, encoding: 'utf8', windowsHide: true, timeout: 20 * 60 * 1000, maxBuffer: 16 * 1024 * 1024,
-      env: { ...process.env, npm_config_cache: process.env.npm_config_cache || 'D:/Code/tools/codegraph-npm-cache' },
+      env: { ...process.env, npm_config_cache: resolveNpmCache(process.env, process.platform, require('node:os').homedir()) },
     });
     if (install.status !== 0) throw new Error('codegraph-setup-npm-ci-failed: ' + String(install.stderr || install.stdout || install.error?.message));
   }
@@ -88,7 +89,7 @@ function prepareWorktree(root = process.cwd(), options = {}) {
     if (!fs.existsSync(bootstrap)) throw new Error('codegraph-setup-bootstrap-missing');
     const result = (options.spawnSync || spawnSync)(process.execPath, [bootstrap, '--root', root, '--source-root', sourceRoot, '--require-ready', '--json'], {
       cwd: root, encoding: 'utf8', windowsHide: true, timeout: 25 * 60 * 1000, maxBuffer: 16 * 1024 * 1024,
-      env: { ...process.env, NANOFLOW_CODEGRAPH_WORKTREE_SETUP_LOCK_ROOT: root, npm_config_cache: process.env.npm_config_cache || 'D:/Code/tools/codegraph-npm-cache' },
+      env: { ...process.env, NANOFLOW_CODEGRAPH_WORKTREE_SETUP_LOCK_ROOT: root, npm_config_cache: resolveNpmCache(process.env, process.platform, require('node:os').homedir()) },
     });
     if (result.status !== 0) throw new Error('codegraph-worktree-setup-incomplete: ' + String(result.stderr || result.stdout || result.error?.message));
     const report = JSON.parse(result.stdout);
