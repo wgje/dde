@@ -611,7 +611,6 @@ function createGraphRuntime({ contract, canonicalJson, canonicalRepositoryPath, 
   const collator = new runtimeIntl.Collator(ordering.locale, ordering.options);
   if (ordering.algorithm !== 'pinned-icu-collator-v1'
     || runtimeIcuVersion !== ordering.icuVersion
-    || new runtimeIntl.Collator().resolvedOptions().locale !== ordering.producerDefaultLocale
     || canonicalJson(collator.resolvedOptions()) !== canonicalJson(ordering.resolvedOptions)) {
     fail('OVERLAY_SCHEMA_ORDERING_RUNTIME_MISMATCH');
   }
@@ -791,7 +790,7 @@ function createGraphRuntime({ contract, canonicalJson, canonicalRepositoryPath, 
     validateEdge,
   });
 }
-const DESCRIPTOR_DIGEST = "d9c4de516950bcf6951d4d778d76dc46fdc5a2c895d44382136045f432e426ea";
+const DESCRIPTOR_DIGEST = "98e8c67f3ca2c54dd2daa1188177d188ff3b83ab23e754e6cad417d74bde4236";
 const DESCRIPTOR = {
   name: "graph",
   descriptorDigest: DESCRIPTOR_DIGEST,
