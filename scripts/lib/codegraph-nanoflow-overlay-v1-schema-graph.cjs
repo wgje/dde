@@ -609,10 +609,16 @@ function createGraphRuntime({ contract, canonicalJson, canonicalRepositoryPath, 
   const nodeIdSpecialRules = new Map(Object.entries(contract.nodeIdentity.specialRelations));
   const ordering = contract.graphOrdering;
   const collator = new runtimeIntl.Collator(ordering.locale, ordering.options);
-  if (ordering.algorithm !== 'pinned-icu-collator-v1'
+  const orderingMismatch = ordering.algorithm !== 'pinned-icu-collator-v1'
     || runtimeIcuVersion !== ordering.icuVersion
-    || canonicalJson(collator.resolvedOptions()) !== canonicalJson(ordering.resolvedOptions)) {
-    fail('OVERLAY_SCHEMA_ORDERING_RUNTIME_MISMATCH');
+    || canonicalJson(collator.resolvedOptions()) !== canonicalJson(ordering.resolvedOptions);
+  if (orderingMismatch) {
+    fail('OVERLAY_SCHEMA_ORDERING_RUNTIME_MISMATCH', '', {
+      runtimeIcuVersion,
+      expectedIcuVersion: ordering.icuVersion,
+      actualCollatorOptions: collator.resolvedOptions(),
+      expectedCollatorOptions: ordering.resolvedOptions,
+    });
   }
   function exactOrder(orders, sequence) {
     return orders?.some(order => (
@@ -790,7 +796,7 @@ function createGraphRuntime({ contract, canonicalJson, canonicalRepositoryPath, 
     validateEdge,
   });
 }
-const DESCRIPTOR_DIGEST = "98e8c67f3ca2c54dd2daa1188177d188ff3b83ab23e754e6cad417d74bde4236";
+const DESCRIPTOR_DIGEST = "f9615d834080e9978a455e8aa945a5f28dbfced82a26f12f4781dd12a09513d4";
 const DESCRIPTOR = {
   name: "graph",
   descriptorDigest: DESCRIPTOR_DIGEST,

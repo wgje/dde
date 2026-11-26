@@ -30,8 +30,8 @@ class OverlayV1SchemaError extends Error {
   }
 }
 
-function fail(code, schemaPath = '') {
-  throw new OverlayV1SchemaError(code, schemaPath);
+function fail(code, schemaPath = '', diagnostics) {
+  throw new OverlayV1SchemaError(code, schemaPath, diagnostics);
 }
 function deepFreeze(value) {
   if (!value || (typeof value !== 'object' && typeof value !== 'function') || Object.isFrozen(value)) return value;
