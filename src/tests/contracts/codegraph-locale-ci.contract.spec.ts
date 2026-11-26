@@ -42,10 +42,27 @@ describe('CodeGraph locale CI contract', () => {
     expect(step).toContain('NANOFLOW_CODEGRAPH_OVERLAY_PREWARM = "1"');
   });
 
+  it('bootstraps a native CodeGraph index in the CI main checkout before the adapter gate', () => {
+    const workflow = readFileSync(path.join(root, '.github/workflows/test-full-suite.yml'), 'utf8');
+    const setup = workflow.indexOf('      - name: Bootstrap exact-root CodeGraph index and overlay');
+    const configure = workflow.indexOf('      - name: Configure CodeGraph Adapter for CI', setup);
+    const gate = workflow.indexOf('npm run codegraph:adapter:gate');
+    const step = workflow.slice(setup, configure);
+
+    expect(setup).toBeGreaterThanOrEqual(0);
+    expect(configure).toBeGreaterThan(setup);
+    expect(step).toContain('node scripts/codegraph-worktree-bootstrap.cjs');
+    expect(step).toContain('--root "$GITHUB_WORKSPACE"');
+    expect(step).toContain('--source-root "$GITHUB_WORKSPACE"');
+    expect(step).toContain('--require-ready');
+    expect(step).toContain('--json');
+    expect(workflow).not.toContain('npm run codex:worktree:setup');
+    expect(gate).toBeGreaterThan(configure);
+  });
   it('prepares generated environment files before running CodeGraph infra tests', () => {
     const workflow = readFileSync(path.join(root, '.github/workflows/test-full-suite.yml'), 'utf8');
     const envSetup = workflow.indexOf('run: npm run test:prepare-env');
-    const codegraphSetup = workflow.indexOf('run: npm run codex:worktree:setup');
+    const codegraphSetup = workflow.indexOf('node scripts/codegraph-worktree-bootstrap.cjs');
     const gate = workflow.indexOf('npm run codegraph:adapter:gate');
 
     expect(envSetup).toBeGreaterThanOrEqual(0);
@@ -55,7 +72,7 @@ describe('CodeGraph locale CI contract', () => {
 
   it('prepares a fresh exact-root CodeGraph index before the adapter gate', () => {
     const workflow = readFileSync(path.join(root, '.github/workflows/test-full-suite.yml'), 'utf8');
-    const setup = workflow.indexOf('run: npm run codex:worktree:setup');
+    const setup = workflow.indexOf('node scripts/codegraph-worktree-bootstrap.cjs');
     const gate = workflow.indexOf('npm run codegraph:adapter:gate');
     expect(setup).toBeGreaterThanOrEqual(0);
     expect(gate).toBeGreaterThan(setup);

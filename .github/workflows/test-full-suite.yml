@@ -39,8 +39,13 @@ jobs:
       - name: Prepare test environment
         run: npm run test:prepare-env
 
-      - name: Prepare exact-root CodeGraph worktree
-        run: npm run codex:worktree:setup
+      - name: Bootstrap exact-root CodeGraph index and overlay
+        run: >-
+          node scripts/codegraph-worktree-bootstrap.cjs
+          --root "$GITHUB_WORKSPACE"
+          --source-root "$GITHUB_WORKSPACE"
+          --require-ready
+          --json
 
       - name: Configure CodeGraph Adapter for CI
         shell: bash
