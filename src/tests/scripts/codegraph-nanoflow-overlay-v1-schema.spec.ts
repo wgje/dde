@@ -12,14 +12,14 @@ const schemaPath = path.join(libRoot, 'codegraph-nanoflow-overlay-v1-schema.cjs'
 const contractPath = path.join(repoRoot, 'scripts', 'contracts', 'codegraph-nanoflow-overlay-v1.json');
 const currentOverlayPath = path.join(repoRoot, '.codegraph', 'nanoflow-overlay.json');
 const SOURCE_POLICY_DIGEST = 'ca78ea5e17d32399faac676bcab26fc1d7f48186a89792774d37a6b8549d0ca3';
-const SCHEMA_DIGEST = '8c9ad6bffab4e8e65237cba466ae874ce4430435d07ad3fedfe07a2dea630a32';
-const DESCRIPTOR_MANIFEST_DIGEST = '71a6bf74495902ff1517745881b419a9ca8c6c3be4449a1f3a3db71e0b27fbe0';
+const SCHEMA_DIGEST = '0cf35177cabc7261e0d8aa7040d083acc4c5c5c03a3c966a19982d35192a9e22';
+const DESCRIPTOR_MANIFEST_DIGEST = 'bbec805a1d437a4ba896fb873f8d0080b5e1a2eb3a615a6cb7940fbf72ababb0';
 const GENERATED_AT = '2026-08-03T00:00:00.000Z';
 const EXPECTED_DESCRIPTOR_DIGESTS = Object.freeze({
   typescript: 'cd2538e77f1abbe5aabe750e0a4ecda1807e006cecc2fc6acc03296dd7f2eabf',
   'angular-support': 'a68c9feed371bb4d107b7e458559431df0197a013e0434350f63285b38027bbc',
   'supabase-android': '7deba66271dd9253c05ff74b2000a3a6124a793da35c2c490d0e7bb03ae16e9d',
-  graph: '28abda206d35d19d1400ee4e724255d46cc4fe0bd2e10160fb9a434f2029422e',
+  graph: 'b9d90bc3c0a329c67f85f552849db34bef4b264f98c631f37e2e5cf659392ffc',
 });
 const EXPECTED_PRODUCER_NODE_ORDERS = Object.freeze([
   Object.freeze({
@@ -138,7 +138,7 @@ function descriptorDigest(descriptor: Descriptor): string {
   const { descriptorDigest: _literal, ...projection } = descriptor;
   const runtimeSource = descriptor.createRuntime
     ? Function.prototype.toString.call(descriptor.createRuntime) : '';
-  const runtimeFrame = runtimeSource ? `\0${digestFrame('runtime-source', runtimeSource)}` : '';
+  const runtimeFrame = runtimeSource ? `\0${digestFrame('runtime-source', runtimeSource.replaceAll('\r\n', '\n').replaceAll('\r', '\n'))}` : '';
   return sha256(`nanoflow-overlay-v1-descriptor\0${descriptor.name}\0${stableJson(projection)}${runtimeFrame}`);
 }
 function digestFrame(label: string, payload: string): string {

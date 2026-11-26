@@ -60,7 +60,7 @@ function descriptorContentDigest(descriptor) {
   const { descriptorDigest: _descriptorDigest, ...projection } = descriptor;
   const runtimeSource = typeof descriptor.createRuntime === 'function'
     ? Function.prototype.toString.call(descriptor.createRuntime) : '';
-  const runtimeFrame = runtimeSource ? `\0${digestFrame('runtime-source', runtimeSource)}` : '';
+  const runtimeFrame = runtimeSource ? `\0${digestFrame('runtime-source', runtimeSource.replaceAll('\r\n', '\n').replaceAll('\r', '\n'))}` : '';
   return crypto.createHash('sha256')
     .update(`nanoflow-overlay-v1-descriptor\0${descriptor.name}\0${canonicalJson(projection)}${runtimeFrame}`)
     .digest('hex');

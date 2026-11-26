@@ -798,7 +798,7 @@ function createGraphRuntime({ contract, canonicalJson, canonicalRepositoryPath, 
     validateEdge,
   });
 }
-const DESCRIPTOR_DIGEST = "28abda206d35d19d1400ee4e724255d46cc4fe0bd2e10160fb9a434f2029422e";
+const DESCRIPTOR_DIGEST = "b9d90bc3c0a329c67f85f552849db34bef4b264f98c631f37e2e5cf659392ffc";
 const DESCRIPTOR = {
   name: "graph",
   descriptorDigest: DESCRIPTOR_DIGEST,
