@@ -88,3 +88,8 @@ The earlier local `PAYLOAD_INVALID` was a separate contract drift: the generatio
 Focused verification after these changes: `79/79` tests green across the locale CI contract, overlay generation format, overlay stability, and full overlay schema suites. This is not full release evidence; production remains `NO_RELEASE`, `productionProof=false`, and `productionWrites=0`.
 
 The earlier “no generation was ... force-rebuilt” statement describes the pre-fix observation. The supported stable publisher has since created the new immutable sequence 27 generation; the old generation was retained.
+## Follow-up: Fresh Migration Ledger (2026-11-26)
+
+A read-only Supabase query against `supabase_migrations.schema_migrations` returned 172 rows with max version `20261124095737`. The checked-in snapshot had 170 rows and was beyond its 24-hour freshness window, so `quality:guard:migration-dry-run` correctly failed closed with `migration-ledger-snapshot-stale`.
+
+The snapshot was refreshed from that read-only result, adding versions `20261124091012` (`sync_rpc_single_device_canary`) and `20261124095737` (`rollback_sync_rpc_canary_until_client_release`), updating the capture time and evidence query id, and recomputing `canonicalRowsSha256` as `ACA51E6945D8F9E364241675EEC98DFA9A9709B325E2847532316B9766138962`. The migration dry-run/rollback validator now passes and reports 235 migration files, 218 transaction-safe, 11 out-of-transaction, and 17 requiring data-safety export review. No migration was applied.
