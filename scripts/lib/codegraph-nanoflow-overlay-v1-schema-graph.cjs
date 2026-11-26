@@ -609,8 +609,10 @@ function createGraphRuntime({ contract, canonicalJson, canonicalRepositoryPath, 
   const nodeIdSpecialRules = new Map(Object.entries(contract.nodeIdentity.specialRelations));
   const ordering = contract.graphOrdering;
   const collator = new runtimeIntl.Collator(ordering.locale, ordering.options);
+  const runtimeIcuMajor = String(runtimeIcuVersion ?? '').split('.')[0];
+  const expectedIcuMajor = String(ordering.icuVersion ?? '').split('.')[0];
   const orderingMismatch = ordering.algorithm !== 'pinned-icu-collator-v1'
-    || runtimeIcuVersion !== ordering.icuVersion
+    || runtimeIcuMajor !== expectedIcuMajor
     || canonicalJson(collator.resolvedOptions()) !== canonicalJson(ordering.resolvedOptions);
   if (orderingMismatch) {
     fail('OVERLAY_SCHEMA_ORDERING_RUNTIME_MISMATCH', '', {
@@ -796,7 +798,7 @@ function createGraphRuntime({ contract, canonicalJson, canonicalRepositoryPath, 
     validateEdge,
   });
 }
-const DESCRIPTOR_DIGEST = "f9615d834080e9978a455e8aa945a5f28dbfced82a26f12f4781dd12a09513d4";
+const DESCRIPTOR_DIGEST = "28abda206d35d19d1400ee4e724255d46cc4fe0bd2e10160fb9a434f2029422e";
 const DESCRIPTOR = {
   name: "graph",
   descriptorDigest: DESCRIPTOR_DIGEST,

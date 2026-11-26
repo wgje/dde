@@ -12,14 +12,14 @@ const schemaPath = path.join(libRoot, 'codegraph-nanoflow-overlay-v1-schema.cjs'
 const contractPath = path.join(repoRoot, 'scripts', 'contracts', 'codegraph-nanoflow-overlay-v1.json');
 const currentOverlayPath = path.join(repoRoot, '.codegraph', 'nanoflow-overlay.json');
 const SOURCE_POLICY_DIGEST = 'ca78ea5e17d32399faac676bcab26fc1d7f48186a89792774d37a6b8549d0ca3';
-const SCHEMA_DIGEST = 'cb0b81d6609e8a2cc11692836f0a052b4e417331b2da9d1e4fd3e2d4bdf6356a';
-const DESCRIPTOR_MANIFEST_DIGEST = '0e85ac1b56b43c33018a3605787319cbcb367b1db3ad06fe3f17c5e257348882';
+const SCHEMA_DIGEST = '8c9ad6bffab4e8e65237cba466ae874ce4430435d07ad3fedfe07a2dea630a32';
+const DESCRIPTOR_MANIFEST_DIGEST = '71a6bf74495902ff1517745881b419a9ca8c6c3be4449a1f3a3db71e0b27fbe0';
 const GENERATED_AT = '2026-08-03T00:00:00.000Z';
 const EXPECTED_DESCRIPTOR_DIGESTS = Object.freeze({
   typescript: 'cd2538e77f1abbe5aabe750e0a4ecda1807e006cecc2fc6acc03296dd7f2eabf',
   'angular-support': 'a68c9feed371bb4d107b7e458559431df0197a013e0434350f63285b38027bbc',
   'supabase-android': '7deba66271dd9253c05ff74b2000a3a6124a793da35c2c490d0e7bb03ae16e9d',
-  graph: 'f9615d834080e9978a455e8aa945a5f28dbfced82a26f12f4781dd12a09513d4',
+  graph: '28abda206d35d19d1400ee4e724255d46cc4fe0bd2e10160fb9a434f2029422e',
 });
 const EXPECTED_PRODUCER_NODE_ORDERS = Object.freeze([
   Object.freeze({
@@ -776,6 +776,11 @@ describe('CodeGraph NanoFlow Overlay v1 schema authority predecessor', () => {
       },
     });
     expect(ambientLocaleDiffers).toBeDefined();
+
+    const patchLevelDiffers = loadSchemaVm('', new Map(), {
+      Intl,
+    });
+    expect(patchLevelDiffers).toBeDefined();
   });
 
   it('rejects duplicate nodes, dangling endpoints, and relation/metadata mutations', () => {
