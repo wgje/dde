@@ -76,11 +76,11 @@ const runtimeDescriptorManifestDigest = crypto.createHash('sha256')
 for (const descriptor of DESCRIPTORS) {
   if (descriptor.descriptorDigest !== runtimeDescriptorDigests[descriptor.name]
     || contract.descriptorDigests[descriptor.name] !== runtimeDescriptorDigests[descriptor.name]) {
-    fail('OVERLAY_SCHEMA_DIGEST_MISMATCH');
+    fail('OVERLAY_SCHEMA_DIGEST_MISMATCH', '', { boundary: 'descriptor', descriptor: descriptor.name, literal: descriptor.descriptorDigest, contract: contract.descriptorDigests[descriptor.name], runtime: runtimeDescriptorDigests[descriptor.name] });
   }
 }
 if (contract.descriptorManifestDigest !== runtimeDescriptorManifestDigest) {
-  fail('OVERLAY_SCHEMA_DIGEST_MISMATCH');
+  fail('OVERLAY_SCHEMA_DIGEST_MISMATCH', '', { boundary: 'descriptor-manifest', contract: contract.descriptorManifestDigest, runtime: runtimeDescriptorManifestDigest });
 }
 const { schemaDigest: _schemaDigest, ...literalContractProjection } = contract;
 const contractProjection = {
@@ -156,7 +156,7 @@ class OverlaySchemaEngine {
     }
     if (contract.schemaVersion !== OVERLAY_V1_SCHEMA_VERSION
       || contract.schemaDigest !== COMPUTED_SCHEMA_DIGEST) {
-      fail('OVERLAY_SCHEMA_DIGEST_MISMATCH');
+      fail('OVERLAY_SCHEMA_DIGEST_MISMATCH', '', { boundary: 'schema', contract: contract.schemaDigest, runtime: COMPUTED_SCHEMA_DIGEST });
     }
     this.expectedProjectRoot = normalizedProjectRoot(options.expectedProjectRoot);
     this.limits = limits;
