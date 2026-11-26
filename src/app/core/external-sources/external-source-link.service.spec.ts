@@ -1,5 +1,5 @@
 import { TestBed } from '@angular/core/testing';
-import { signal } from '@angular/core';
+import { computed, signal } from '@angular/core';
 import { clear } from 'idb-keyval';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthService } from '../../../services/auth.service';
@@ -146,6 +146,30 @@ describe('ExternalSourceLinkService', () => {
     resetBrowserNetworkSuspensionTrackingForTests();
     setVisibilityState('visible');
     vi.useRealTimers();
+  });
+
+  it('defers link hydration when task links are queried in a reactive context', async () => {
+    const service = TestBed.inject(ExternalSourceLinkService);
+    await service.ensureLoaded();
+    await service.bindSiyuanBlock('task-1', '20260426123456-abc1234');
+    expect(service.links()).toHaveLength(1);
+    const nextOwnerLink = externalSourceLink({ targetId: '20260426123456-def5678' });
+    const cache = TestBed.inject(ExternalSourceCacheService);
+    const loadLinks = vi.spyOn(cache, 'loadLinks').mockResolvedValue([nextOwnerLink]);
+    authUser.set(SECOND_OWNER_ID);
+    authFence.set('auth-fence-b');
+    const activeLinks = computed(() => service.activeLinksForTask('task-1'));
+    const firstLink = computed(() => service.firstActiveLinkForTask('task-1'));
+
+    expect(activeLinks()).toEqual([]);
+    expect(firstLink()).toBeNull();
+    expect(loadLinks).not.toHaveBeenCalled();
+
+    await vi.waitFor(() => expect(firstLink()?.targetId).toBe(nextOwnerLink.targetId));
+
+    expect(loadLinks).toHaveBeenCalledExactlyOnceWith(SECOND_OWNER_ID);
+    expect(activeLinks().map(link => link.targetId)).toEqual([nextOwnerLink.targetId]);
+    expect(loggerCategoryMock.warn.mock.calls).toEqual([]);
   });
 
   it('creates a local-first SiYuan pointer with client uuid and standard deep link', async () => {

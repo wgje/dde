@@ -4,16 +4,15 @@ Updated: 2026-11-26 (Asia/Shanghai)
 
 ## Release State
 
-- `NO_RELEASE`
+- `PRODUCTION_DEPLOYED_PENDING_ACCEPTANCE`
 - `productionProof=false`
-- `productionWrites=0`
+- `productionWrites=UNVERIFIED` (bounded post-deploy edge-log window below observed no mutating request with the production referer)
 - Production URL: `https://nanoflow.pages.dev`
-- Production SHA observed in the prior bounded read-only check: `61e79ea4fe8e32841fe08328b5f0babe582f134a`
-- Candidate PR: [#78](https://github.com/wgje/dde/pull/78), draft, base `main`
-- Candidate branch: `codex/production-recovery-20261124`
-- Candidate HEAD verified from Git and GitHub: `cbea7309455afb8acf80eee6bf24c39860ab6320`
+- Current production SHA verified from `/version.json` and Cloudflare Pages deployment API: `02254645471c0d6a878f807a56df85f4e17ca856`
+- PR [#78](https://github.com/wgje/dde/pull/78) merged by the repository account at `2026-11-26T13:56:30Z`; candidate branch `codex/production-recovery-20261124`, candidate HEAD `da472c97598d963ea80accb12ff924fa82da5508`
+- Main workspace fast-forwarded to merge commit `02254645471c0d6a878f807a56df85f4e17ca856`; the pre-existing 54 dirty/untracked entries were preserved.
 
-No production deployment, migration, business-data write, Auth user edit, cache clear, or Service Worker removal was performed in this review slice.
+A production deployment has occurred; completion is still on HOLD. No migration was applied, no Auth user row was edited, and no browser cache or Service Worker was cleared/removed.
 
 ## Candidate CI Evidence
 
@@ -149,7 +148,7 @@ Other latest remote results: Cloudflare Preview, SQL/sync contracts, CodeGraph W
 - `npm run build:strict` is blocked before compilation because this machine lacks the required deployment identity values `NG_APP_SENTRY_ENVIRONMENT`, `NG_APP_DEPLOYMENT_TARGET`, and `NG_APP_SUPABASE_PROJECT_ALIAS`. No values were read or fabricated. Local deploy-artifact validation is consequently incomplete.
 - GitHub PR #78 remains Draft/Open at candidate HEAD `c4451ed5`; latest observed checks are 5 success, 9 failure, and 4 skipped. Failures include full-suite shards, CodeGraph adapter gate, determinism/local Pages smoke, perf-and-resume, and test-without-deploy-secrets. The Cloudflare Pages check is a preview check, not a production deployment. No merge or deploy was performed.
 
-Current state remains `NO_RELEASE`, `productionProof=false`, and `productionWrites=0`. Outstanding: get the guard fix and deferral logging fix through full CI and strict production artifact gates, deploy through the formal production workflow, then verify cold/warm direct entry, authenticated startup, queue replay, owner isolation, and the remaining Auth/database issues with task-bound evidence.
+At this earlier checkpoint (before the subsequent PR merge and Pages deployment), state was `NO_RELEASE`, `productionProof=false`, and `productionWrites=0`. Outstanding: get the guard fix and deferral logging fix through full CI and strict production artifact gates, deploy through the formal production workflow, then verify cold/warm direct entry, authenticated startup, queue replay, owner isolation, and the remaining Auth/database issues with task-bound evidence.
 ## Follow-up: Bounded Production Auth and Database Log Review (2026-11-26)
 
 Window: `2026-11-25T13:20:00Z` to `2026-11-26T13:20:00Z` (24 hours). Only aggregate log fields and error prefixes were queried; no user rows or SQL statement payloads were read.
@@ -159,3 +158,40 @@ Window: `2026-11-25T13:20:00Z` to `2026-11-26T13:20:00Z` (24 hours). Only aggreg
 - `postgres_logs`: two ERROR events were observed: `42702` (`column reference "oid" is ambiguous`) at `2026-11-25T15:06:29Z`, and `42703` (`column "stats_since" does not exist`) at `2026-11-25T18:25:11Z`. Both were `client backend` / `http_server`; no matching `edge_logs` or `postgrest_logs` request was found in the bounded five-second windows. `stats_since` has no match in the repository's `supabase`, `src`, `scripts`, or `docs` sources. Attribution remains `UNATTRIBUTED`; do not patch application SQL from these two events without a request/source correlation.
 - Read-only SQL confirmed PostgreSQL `17.6`, 21 Auth users, and 0 NULL `confirmation_token` values. No Auth user row was changed.
 - These aggregate findings do not explain the cold launch timeout or the client-side deferred focus RPC queue event. No production write was performed.
+
+## Follow-up: Merged Startup Fix, Production Deployment, and NG0600 Root Cause (2026-11-26)
+
+### Merge, deployment, and production entry
+
+- GitHub reports PR #78 merged at `2026-11-26T13:56:30Z` with merge commit `02254645471c0d6a878f807a56df85f4e17ca856`. Local `main` was fast-forwarded from `da472c97` to that exact merge commit after verifying identical trees and a clean index; 54 unrelated dirty/untracked entries remained preserved.
+- Cloudflare Pages API confirms project `nanoflow` uses GitHub source `wgje/dde`, production branch `main`, build command `npm run build:strict`, destination `dist/browser`. Deployment `455ef072-a338-4c23-a0a6-47375f263728` was triggered by `github:push` on `main`, commit SHA `02254645`; both Cloudflare `build` and `deploy` stages succeeded. Therefore, the earlier assumption that only a manual workflow_dispatch could deploy is not the live Pages configuration. The GitHub PR check `Build, Validate, Deploy` was skipped; this is separate from the Pages project integration.
+- Ego Lite read `/version.json`: SHA `02254645471c0d6a878f807a56df85f4e17ca856`, target `production`, build `2026-11-26T13:57:46Z`. After a direct project deep-link reload, the first sample at ~1.4s still showed `launch-shell` and no `<main>`; handoff completed at ~5.86s, and the page reached `ready` with `<main>` before the ~8s loader timeout. A subsequent warm direct reload completed handoff at ~1.66s. Service Worker/cache/local storage were retained.
+- Browser diagnostics after deployment captured 0 JS console errors and 0 uncaught JS exceptions in the sampled reload. Warnings were still present: repeated anchor hydration `NG0600`, deferred focus RPC warnings, and one optional font fallback warning. Thus entry is improved and verified on the deployed SHA, but not every post-entry error is resolved.
+
+### Post-deploy bounded data-write observation
+
+- Supabase Edge logs were queried from `2026-11-26T13:56:00Z` through `2026-11-26T15:13:00Z`, filtered to the `nanoflow.pages.dev` referer and HTTP method POST/PUT/PATCH/DELETE. The query observed only 7 successful read RPC requests: `get_server_time` (2), `get_resume_recovery_probe` (2), `get_user_projects_watermark` (2), `get_black_box_sync_watermark` (1). No mutating request was observed in that bounded log query. This does not prove no writes occurred outside retained edge logs or through another channel; keep `productionWrites=UNVERIFIED`, not zero.
+
+### Focus/RPC state remains a production issue
+
+- Sampled deferred focus operations still report `FOCUS_CONSOLE_SAVE_FAILED`, `reason=sync-rpc-unavailable`, `retryable=true`, `deferred=true`, `featureEnabled=false`, `clientRejected=false`. Runtime feature flag `syncRpcEnabled` is generated false by default when `NG_APP_SYNC_RPC_ENABLED` is absent; the deployed Cloudflare Pages deployment exposes no `NG_APP_SYNC_RPC_ENABLED` variable (only the variable name/type was checked, never its values). Do not enable this flag until exact production protocol/owner/ACL/queue-replay gates pass. Existing behavior intentionally avoids the legacy direct write and keeps operations queued; warning noise was reduced, but remote replay has not been proven.
+
+### Confirmed post-entry NG0600 fix in the local workspace (not deployed)
+
+- Reproduced `NG0600: Writing to signals is not allowed in a computed` in a synthetic owner-switch test. A cached owner-A link is loaded; a reactive read calls `activeLinksForTask` / `firstActiveLinkForTask`; those methods immediately invoke `ensureLoaded()`, whose pre-await owner isolation clears the old Store and writes `visibleOwnerId=null` during the reactive computation. Before the fix the regression logged two NG0600 warnings (one per getter).
+- The local fix defers only those background hydration starts to a microtask using `Promise.resolve().then(() => ensureLoaded())`. Both getters still return the current local result synchronously; owner filtering remains in place; the test proves no premature remote/cache load within the reactive read, then verifies the new owner's link hydrates and no background warning is logged.
+- Verification after the change: focused external-source/knowledge-anchor/restore/owner-RLS contract matrix `10/10` files, `101/101` tests passed; TypeScript typecheck passed; targeted ESLint and `git diff --check` passed. Local `npm run build` passed with existing budget warnings (initial JS 526.40kB > 520kB; radar-zone Sass 19.80kB > 16kB). The strict production build cannot run in this host because its deployment-identity environment values are absent, but the current deployed commit's Cloudflare Pages build stage reports success for the configured `build:strict` command. The local NG0600 fix is not yet committed, pushed, or deployed.
+
+### Release/review status and remaining proof
+
+- PR #78 head SHA `da472c97` checks were not green at merge time: all four Vitest shards, CodeGraph adapter gate, build/determinism/local Pages smoke, perf/resume, test-without-deploy-secrets, and Copilot setup failed; several individual checks passed. The successful Pages production integration build does not make these independent checks green.
+- Remaining: submit the NG0600 fix as a separate review candidate; resolve or attribute post-entry warning/error classes; obtain green relevant/full CI before the next production promotion; verify exact deployed launch and cached/bypass worker behavior under no-data-loss conditions; establish synthetic-owner offline queue replay/idempotency/conflict and account isolation; run migration replay/rollback; finish ACL/owner review and slow-query attribution. Keep `productionProof=false` and overall acceptance on HOLD until these task-bound proofs exist.
+
+## Follow-up: NG0600 Reactive Hydration Hotfix Candidate (2026-11-26)
+
+- Local change set is intentionally isolated to `src/app/core/external-sources/external-source-link.service.ts` and its regression spec. `activeLinksForTask` and `firstActiveLinkForTask` now schedule `ensureLoaded()` through a microtask before entering the background operation; their synchronous return remains owner-filtered and side-effect free. This prevents the owner-switch signal writes that Angular rejected inside a `computed`.
+- Regression coverage seeds owner-A data, switches to owner B, reads both task-link getters from computed signals, asserts no immediate cache load/write, then waits for the B owner hydration and verifies the B link is visible with no background NG0600 warning.
+- Targeted proof: external-source / knowledge-anchor / restore / owner-RLS contract matrix `10/10` files and `101/101` tests passed; startup/deep-link/guard smoke subset `5/5` files and `116/116` tests passed; TypeScript typecheck passed; targeted ESLint passed with no errors; diff check passed; local build passed with existing JS/Sass budget warnings.
+- Full local matrix was attempted. Browser minimal lanes passed; testbed service lane had one unrelated failure in the pre-existing untracked `src/services/demo-workspace.service.spec.ts` (`DemoWorkspaceService > marks and resets the isolated development demo in order`), and other lanes exposed pre-existing user-change failures (`project-shell-controller-delegation`, data-safety Angular harness, undo integration, tooling-security tracked-closure). The full contract wrapper also stops at the existing Context7 coupled-change gate because unrelated Flow/Parking/config changes lack matching docs. These are red gates, not attributed to this hotfix.
+- CodeGraph adapter doctor after the test run reports `fresh` overlay but `runtimeOk=false`, `pendingHostRestart=true`, and live wrapper configuration drift; no CodeGraph files or configuration were changed. Active local file/resource leases are zero at the last status check, with expired lease records retained as evidence.
+- This hotfix is not deployed. It is being prepared as a separate candidate branch from production merge SHA `02254645471c0d6a878f807a56df85f4e17ca856`; production remains on that SHA until candidate CI, artifact, smoke, and release evidence are acceptable.

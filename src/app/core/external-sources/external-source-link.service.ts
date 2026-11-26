@@ -192,13 +192,13 @@ export class ExternalSourceLinkService {
   };
 
   activeLinksForTask(taskId: string): ExternalSourceLink[] {
-    this.runInBackground(this.ensureLoaded(), "load links for task");
+    this.runInBackground(Promise.resolve().then(() => this.ensureLoaded()), "load links for task");
     if (this.visibleOwnerId() !== this.currentUserId()) return [];
     return this.store.activeLinksForTask(taskId);
   }
 
   firstActiveLinkForTask(taskId: string): ExternalSourceLink | null {
-    this.runInBackground(this.ensureLoaded(), "load first link for task");
+    this.runInBackground(Promise.resolve().then(() => this.ensureLoaded()), "load first link for task");
     if (this.visibleOwnerId() !== this.currentUserId()) return null;
     return this.store.firstActiveLinkForTask(taskId);
   }
