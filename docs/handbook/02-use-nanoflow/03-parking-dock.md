@@ -226,3 +226,6 @@ Focus 场景中的遮罩、雷达和 Zen 画面都是帮助收窄注意力的界
 - 学习当前时段如何收窄任务：[Focus 专注模式](04-focus-mode.md)。
 - 调整例行槽的日切和专注偏好：[项目、设置与回收站](09-project-settings-and-recovery.md#日常节律与-focus-偏好)。
 - 学习数据保护：[备份与恢复](../03-data-sync-safety/03-backup-and-restore.md)。
+## 2026-11-26 Parking Dock 数据边界
+
+停泊坞条目按账号和本地 owner 隔离。开发 Demo 的预置条目只属于本地开发空间，不应出现在已登录用户的停泊快照中；恢复异常时先导出再重试。

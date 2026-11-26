@@ -19,6 +19,15 @@ describe('CodeGraph locale CI contract', () => {
     expect(workflow).toMatch(/^\s*LANG:\s*['\"]?zh-CN['\"]?\s*$/m);
   });
 
+  it('pins the Node patch release that carries the contract ICU version', () => {
+    const workflow = readFileSync(path.join(root, '.github/workflows/test-full-suite.yml'), 'utf8');
+    const perfWorkflow = readFileSync(path.join(root, '.github/workflows/perf-and-resume-gates.yml'), 'utf8');
+    expect(workflow).toMatch(/node-version: 24\.11\.1/);
+    expect(perfWorkflow).toMatch(/node-version: 24\.11\.1/);
+    expect(workflow).not.toMatch(/node-version: 24\s*$/m);
+    expect(perfWorkflow).not.toMatch(/node-version: 24\s*$/m);
+  });
+
   it('configures all required overlay worker settings in the CI doctor config', () => {
     const workflow = readFileSync(path.join(root, '.github/workflows/test-full-suite.yml'), 'utf8');
     const start = workflow.indexOf('      - name: Configure CodeGraph Adapter for CI');

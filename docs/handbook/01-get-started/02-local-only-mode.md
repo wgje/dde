@@ -221,3 +221,6 @@ NanoFlow 会为本地模式使用独立的本地数据身份，避免把未登�
 - 先建立恢复习惯：[备份与恢复](../03-data-sync-safety/03-backup-and-restore.md)。
 - 准备跨设备使用：[云同步配置](04-cloud-sync-setup.md)。
 - 遇到离线、存储或可恢复错误：[PWA、离线与错误恢复](06-pwa-offline-and-error-recovery.md)。
+## 2026-11-26 本地模式边界
+
+本地 Demo 或访客数据必须保持 owner 隔离；登录切换前先完成导出或恢复检查。开发示例数据不应写入已认证账号的本地快照。

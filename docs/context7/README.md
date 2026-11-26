@@ -38,6 +38,7 @@ This directory is the canonical, machine-readable documentation corpus for NanoF
 | [08-migration/index.md](08-migration/index.md) | migration and versioning |
 | [overview.md](overview.md) | product scope, capabilities, boundaries |
 | [architecture.md](architecture.md) | modules, stores, services, rendering, dependency rules |
+| [production-recovery.md](production-recovery.md) | CI/runtime compatibility, CodeGraph recovery, and release evidence boundaries |
 | [data-model.md](data-model.md) | Task, Project, Connection, Parking Dock, Focus, Black Box fields |
 | [sync-offline.md](sync-offline.md) | IndexedDB, Supabase sync, RetryQueue, LWW, conflict handling |
 | [feature-workflows.md](feature-workflows.md) | Text, Flow, Parking Dock, Focus, Black Box, Android widget workflows |

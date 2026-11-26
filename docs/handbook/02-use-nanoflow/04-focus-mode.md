@@ -191,3 +191,6 @@ Focus 只是入口和历史层，不替代原始任务数据。怀疑入口异�
 - 学习快速记录、转写和恢复：[Black Box 黑匣子](05-black-box.md)。
 - 学习暂存任务：[Parking Dock 停泊坞](03-parking-dock.md)。
 - 学习同步状态：[同步与冲突处理](../03-data-sync-safety/02-sync-and-conflicts.md)。
+## 2026-11-26 Focus 与恢复说明
+
+Focus、Gate 和 Black Box 的状态恢复应保留本地证据与队列可重放能力。遇到会话切换或恢复中的状态，不要通过清空浏览器数据来规避状态围栏。

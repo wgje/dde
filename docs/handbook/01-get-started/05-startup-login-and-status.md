@@ -156,3 +156,6 @@ Android 小组件、通知或深链接可能带着一个“进入后应该打开
 - 使用多设备：读 [同步与冲突处理](../03-data-sync-safety/02-sync-and-conflicts.md)。
 - 从手机桌面进入：读 [Android 小组件](../02-use-nanoflow/07-android-widget.md)。
 - 安装 PWA、处理离线和可恢复错误：读 [应用安装、离线与错误恢复](06-pwa-offline-and-error-recovery.md)。
+## 2026-11-26 启动恢复说明
+
+深链接冷启动遇到加载超时，先保留本地快照和待同步队列；不要清除站点数据或卸载 Service Worker。发布验收应区分缓存路径与绕过缓存路径，并以实际版本 SHA 和会话状态作为证据。

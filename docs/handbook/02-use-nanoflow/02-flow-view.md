@@ -185,3 +185,6 @@ source_paths:
 - 回到主编辑界面：[文本视图](01-text-view.md)。
 - 需要暂存任务：读 [Parking Dock 停泊坞](03-parking-dock.md)。
 - 改 Flow 代码时参考 [UI lifecycle contract](../../context7/contracts/ui-lifecycle-contract.md)。
+## 2026-11-26 Flow 恢复说明
+
+移动端优先使用文本视图；Flow 图按需加载并在视图切换时释放图实例。小地图、图例和触控恢复异常应先保留任务数据，再用对应回归测试验证。
