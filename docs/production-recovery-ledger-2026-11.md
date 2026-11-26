@@ -125,3 +125,37 @@ Candidate `1f075d42` run `45775179972` verified the POSIX cache fix: the bootstr
 The subsequent adapter gate failed in the stale-wrapper smoke/infra lane, not during bootstrap. Its log reports 44 adapter tests with 41 failures and 612 passes; the principal failed assertion is `codegraph-mcp-smoke-stale-wrapper.spec-helpers.ts:48` where the smoke child exits `1`, alongside fake-wrapper environment mismatch diagnostics. The same smoke spec was run locally and reproduces 20 failures, all failing at `scripts/smoke-codegraph-mcp-wrapper.cjs:381` with `MCP initialize instructions did not preserve upstream CodeGraph guidance`. That wrapper file is an existing user-modified, unstaged path and was not changed or reverted. Treat this as a separate adapter-fixture/user-change gate; do not misattribute it to the npm cache fix.
 
 Other latest remote results: Cloudflare Preview, SQL/sync contracts, CodeGraph Windows identity, and Vitest perf passed; build/determinism/smoke, perf/resume, and Vitest shards remain red; deploy-secret-free testing was still running at the last read. Production remains `NO_RELEASE`, `productionProof=false`, `productionWrites=0`.
+## Follow-up: Cold Startup Reproduction and Deferred Focus Queue Error (2026-11-26)
+
+### Production reproduction (Ego Lite, read-only)
+
+- Direct cold navigation to a same-account `#/projects/<project>/text` route reproduced the production loader timeout on SHA `61e79ea4fe8e32841fe08328b5f0babe582f134a`, with the production Service Worker still controlling the page. `/version.json` reported `deploymentTarget=production` and NGSW hash `95076a73e8a4a80a1e147becd65f2f57784e251c55e41b8a17486a06317206e9`.
+- At ~1.2s the page remained in `launch-shell`, had no `<main>`, and the startup trace ended after `app.bootstrap_complete` and `user_session.snapshot_prehydrate`; no `handoff.resolve` or `handoff.trigger` had occurred. By ~8s the visible loader reported timeout. Sampled JS resources returned HTTP 200; no JS exception or 4xx resource was observed in this capture.
+- A same-tab route navigation to `#/projects` completed `handoff.resolve` / `handoff.trigger`, reached boot stage `ready`, and rendered `<main>` with the existing account's workspace. No cache, Service Worker, IndexedDB, localStorage, Auth row, or business data was cleared or edited.
+- The source-order defect is reproducible against the production baseline: `src/services/guards/project.guard.ts` captures the project guard's session fence before calling `prehydrateFromSnapshot()`. Candidate HEAD `c4451ed5567ed082568934280b3c18a936f603ea` moves verified snapshot prehydration before the async fence and allows only a first-owner establishment without a generation change; it has tests for a valid cold deep link and real owner/generation changes. This matches the observed missing handoff and route recovery, but production remains on the old SHA, so the candidate fix is not yet live.
+- Stale expired local writer lease records were not the root cause: the production baseline tracker already drops expired non-local writer records when reading active writers. No production cleanup was performed.
+
+### Errors after the workspace rendered
+
+- After route recovery, the workspace reached `ready` but emitted repeated `focus-session:update` processor errors. Read-only console diagnostics identified `FOCUS_CONSOLE_SAVE_FAILED`, `reason=sync-rpc-unavailable`, `retryable=true`, `deferred=true`, `featureEnabled=false`, `clientRejected=false`.
+- The supported client behavior is to skip legacy direct remote writes and retain this operation for queue retry while the Sync RPC capability is unavailable. No Sync RPC was enabled and no queue/payload was changed. The logging defect was that `isDeferredQueueError()` recognized browser suspension but not the explicit retryable+deferred contract, so expected deferrals were surfaced as `ERROR`.
+- Local-only fix now recognizes explicit `{retryable:true, deferred:true}` errors and logs the retry as `DEBUG` with an accurate generic deferral reason. A focused regression was added to `src/services/action-queue-processors.focus-routine.spec.ts`. This does not activate the disabled capability or claim that the pending operation has synchronized remotely.
+
+### Local verification and release gate
+
+- Startup / route / restore / action queue focused matrix: `8/8` files, `217/217` tests passed; final action-queue processor subset after the logging change: `2/2` files, `111/111` tests passed.
+- `npm run typecheck` passed after the final source change. Targeted ESLint had no errors; one existing complexity warning remains at `src/services/action-queue-task-focus-processors.service.ts:284`. `git diff --check` passed for the three changed files.
+- `npm run build` completed after the fix. It still reports known budget warnings: initial JS 526.40 kB vs 520 kB and `dock-radar-zone.component.scss` 19.80 kB vs 16 kB. The local build identifies itself as `deploymentTarget=local`; it is not deploy evidence.
+- `npm run build:strict` is blocked before compilation because this machine lacks the required deployment identity values `NG_APP_SENTRY_ENVIRONMENT`, `NG_APP_DEPLOYMENT_TARGET`, and `NG_APP_SUPABASE_PROJECT_ALIAS`. No values were read or fabricated. Local deploy-artifact validation is consequently incomplete.
+- GitHub PR #78 remains Draft/Open at candidate HEAD `c4451ed5`; latest observed checks are 5 success, 9 failure, and 4 skipped. Failures include full-suite shards, CodeGraph adapter gate, determinism/local Pages smoke, perf-and-resume, and test-without-deploy-secrets. The Cloudflare Pages check is a preview check, not a production deployment. No merge or deploy was performed.
+
+Current state remains `NO_RELEASE`, `productionProof=false`, and `productionWrites=0`. Outstanding: get the guard fix and deferral logging fix through full CI and strict production artifact gates, deploy through the formal production workflow, then verify cold/warm direct entry, authenticated startup, queue replay, owner isolation, and the remaining Auth/database issues with task-bound evidence.
+## Follow-up: Bounded Production Auth and Database Log Review (2026-11-26)
+
+Window: `2026-11-25T13:20:00Z` to `2026-11-26T13:20:00Z` (24 hours). Only aggregate log fields and error prefixes were queried; no user rows or SQL statement payloads were read.
+
+- `auth_logs`: 27 rows were retained in the interval (first observed `2026-11-25T23:54:31Z`, last `2026-11-26T12:29:48Z`); aggregate `level=error` count 0, HTTP 5xx count 0, and `confirmation_token` message mentions 0.
+- `edge_logs`: no HTTP 4xx/5xx rows were returned for this interval.
+- `postgres_logs`: two ERROR events were observed: `42702` (`column reference "oid" is ambiguous`) at `2026-11-25T15:06:29Z`, and `42703` (`column "stats_since" does not exist`) at `2026-11-25T18:25:11Z`. Both were `client backend` / `http_server`; no matching `edge_logs` or `postgrest_logs` request was found in the bounded five-second windows. `stats_since` has no match in the repository's `supabase`, `src`, `scripts`, or `docs` sources. Attribution remains `UNATTRIBUTED`; do not patch application SQL from these two events without a request/source correlation.
+- Read-only SQL confirmed PostgreSQL `17.6`, 21 Auth users, and 0 NULL `confirmation_token` values. No Auth user row was changed.
+- These aggregate findings do not explain the cold launch timeout or the client-side deferred focus RPC queue event. No production write was performed.

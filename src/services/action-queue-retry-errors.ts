@@ -203,9 +203,13 @@ export function buildProjectProcessorRetryError(
   };
 }
 
+function hasExplicitDeferredQueueRetry(details: Record<string, unknown> | undefined): boolean {
+  return details?.['retryable'] === true && details?.['deferred'] === true;
+}
+
 export function isDeferredQueueError(error: unknown): boolean {
   const details = (error as { details?: Record<string, unknown> } | null)?.details;
-  if (details?.['reason'] === 'browser-network-suspended') {
+  if (hasExplicitDeferredQueueRetry(details)) {
     return true;
   }
 
@@ -213,7 +217,7 @@ export function isDeferredQueueError(error: unknown): boolean {
   const message = error instanceof Error
     ? error.message
     : String((error as { message?: unknown } | null)?.message ?? error ?? '');
-  const normalized = `${String(code ?? '')} ${message}`.toLowerCase();
+  const normalized = `${String(code ?? '')} ${message} ${String(details?.['reason'] ?? '')}`.toLowerCase();
 
   return normalized.includes('browser-network-suspended')
     || normalized.includes('browsernetworksuspendederror')

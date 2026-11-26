@@ -98,6 +98,58 @@ describe('ActionQueueProcessorsService focus and routine processors', () => {
     );
   });
 
+  it('focus-session:update should log an unavailable-but-deferred sync RPC as a deferral', async () => {
+    mockSyncService.saveFocusSession.mockResolvedValueOnce({
+      ok: false,
+      error: {
+        code: 'FOCUS_CONSOLE_SAVE_FAILED',
+        message: '保存专注会话等待后台同步',
+        details: {
+          retryable: true,
+          deferred: true,
+          reason: 'sync-rpc-unavailable',
+          featureEnabled: false,
+          clientRejected: false,
+        },
+      },
+    });
+    const handler = getProcessor('focus-session:update');
+
+    await expect(handler({
+      payload: {
+        record: {
+          id: 'focus-deferred-rpc',
+          userId: 'test-user',
+          startedAt: '2026-04-08T00:00:00.000Z',
+          endedAt: null,
+          updatedAt: '2026-04-08T00:00:01.000Z',
+          snapshot: { version: 6 },
+        },
+        sourceUserId: 'test-user',
+      },
+    } as QueuedAction)).rejects.toMatchObject({
+      code: 'FOCUS_CONSOLE_SAVE_FAILED',
+      details: expect.objectContaining({
+        retryable: true,
+        deferred: true,
+        reason: 'sync-rpc-unavailable',
+      }),
+    });
+
+    expect(mockLoggerCategory.error).not.toHaveBeenCalledWith(
+      'focus-session:update 异常',
+      expect.anything(),
+    );
+    expect(mockLoggerCategory.debug).toHaveBeenCalledWith(
+      'focus-session:update 延后重试（等待可重试条件）',
+      expect.objectContaining({
+        error: expect.objectContaining({
+          code: 'FOCUS_CONSOLE_SAVE_FAILED',
+          details: expect.objectContaining({ reason: 'sync-rpc-unavailable' }),
+        }),
+      }),
+    );
+  });
   it('focus-session:create should return result.ok', async () => {
     const handler = getProcessor('focus-session:create');
     const record = { userId: 'test-user', sessionId: 's-1' };
