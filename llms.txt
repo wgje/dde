@@ -139,3 +139,4 @@ NanoFlow is an offline-first personal task workflow PWA. Use this file as the en
 When source, configuration, schema, migration, Supabase function, sync, security, or UI lifecycle behavior changes, the same change must update the relevant Context7 page. `npm run docs:context7:guard` enforces this by combining the structural validator with `scripts/contracts/check-context7-coupled-changes.cjs`.
 
 - Restore owner, journal, quiescence, and attachment fences -> `docs/context7/restore-attachment-safety-closeout.md`
+- Production recovery and CI compatibility: docs/context7/production-recovery.md

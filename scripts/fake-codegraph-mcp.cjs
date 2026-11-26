@@ -9,6 +9,21 @@ rl.on('line', line => {
   if (!line.trim()) return;
 
   const message = JSON.parse(line);
+  if (message.id === undefined && typeof message.method === 'string' && message.method.startsWith('notifications/')) {
+    return;
+  }
+  if (message.method === 'initialize') {
+    process.stdout.write(`${JSON.stringify({
+      jsonrpc: '2.0',
+      id: message.id,
+      result: {
+        protocolVersion: message.params?.protocolVersion ?? '2025-06-18',
+        capabilities: { tools: {} },
+        serverInfo: { name: 'fake-codegraph', version: '1.0.0' },
+      },
+    })}\n`);
+    return;
+  }
   if (message.method === 'tools/list') {
     process.stdout.write(`${JSON.stringify({
       jsonrpc: '2.0',

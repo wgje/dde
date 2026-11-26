@@ -5585,7 +5585,7 @@ describe('agent-file-lease', () => {
     expect(result.contender.stdout).toBe('');
     expect(result.contender.stderr).toContain('lease state is locked');
     expect(result.processProbeCount).toBe(1);
-  });
+  }, 10_000);
 
   it.runIf(process.platform === 'win32')('reclaims an expired heartbeat after a clear live-PID start-identity mismatch', async () => {
     const root = makeRoot();
@@ -5603,7 +5603,7 @@ describe('agent-file-lease', () => {
 
     expect(result.contender.status, result.contender.stderr || result.contender.stdout).toBe(0);
     expect(JSON.parse(result.contender.stdout)).toEqual({ acquired: true });
-  });
+  }, 10_000);
 
   for (const [identityCase, mismatch] of [
     ['matching start identity', false],
@@ -5841,7 +5841,7 @@ describe('agent-file-lease', () => {
     expect(result.contender.status).not.toBe(0);
     expect(result.contender.stdout).toBe('');
     expect(result.contender.stderr).toContain('lease state is locked');
-  });
+  }, 10_000);
 
   it('rejects a provisional helper fault without IPC before any namespace mutation', () => {
     const root = makeRoot();

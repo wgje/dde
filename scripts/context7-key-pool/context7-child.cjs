@@ -146,7 +146,7 @@ function inheritedValue(inheritedEnv, canonicalName) {
   return match === undefined ? undefined : inheritedEnv[match];
 }
 
-function buildChildEnvironment(inheritedEnv, apiKey, marker) {
+function buildChildEnvironment(inheritedEnv, apiKey, marker, useProxy = false) {
   const effective = { ...getDefaultEnvironment() };
   const names = process.platform === 'win32'
     ? SAFE_ENV_NAMES
@@ -159,6 +159,13 @@ function buildChildEnvironment(inheritedEnv, apiKey, marker) {
     if (name.toUpperCase().startsWith('CONTEXT7_API_KEY') || name === 'NANOFLOW_CONTEXT7_FAILURE_MARKER') {
       delete effective[name];
     }
+  }
+  delete effective.NANOFLOW_CONTEXT7_PROXY_URL;
+  if (useProxy) {
+    const proxyUrl = ['HTTPS_PROXY', 'ALL_PROXY', 'HTTP_PROXY']
+      .map(name => inheritedValue(inheritedEnv, name))
+      .find(value => typeof value === 'string' && /^https?:\/\//i.test(value));
+    if (proxyUrl) effective.NANOFLOW_CONTEXT7_PROXY_URL = proxyUrl;
   }
   if (apiKey !== undefined) effective.CONTEXT7_API_KEY = apiKey;
   effective.NANOFLOW_CONTEXT7_FAILURE_MARKER = marker;
@@ -237,6 +244,7 @@ async function createContext7Child(options) {
     connectTimeoutMs,
     callTimeoutMs,
     redact,
+    useProxy = false,
   } = options;
   if (apiKey !== undefined && typeof apiKey !== 'string') throw new Error('context7-child-api-key-invalid');
   if (!isPlainObject(inheritedEnv)) throw new Error('context7-child-inherited-env-invalid');
@@ -248,7 +256,7 @@ async function createContext7Child(options) {
   if (!Number.isInteger(callTimeoutMs) || callTimeoutMs <= 0) throw new Error('context7-child-call-timeout-invalid');
 
   const marker = crypto.randomBytes(32).toString('hex');
-  const env = buildChildEnvironment(inheritedEnv, apiKey, marker);
+  const env = buildChildEnvironment(inheritedEnv, apiKey, marker, useProxy);
   const client = new Client({ name: 'nanoflow-context7-key-pool', version: '1.0.0' }, { capabilities: {} });
   const transport = new StdioClientTransport({
     command,

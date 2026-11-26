@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
@@ -190,6 +191,19 @@ describe('Cloudflare migration artifact contracts', () => {
     expect(workflow).not.toContain('SENTRY_AUTH_TOKEN');
   });
 
+  it('passes the dry-run workflow browser credentials through the actual build validator', () => {
+    const workflow = read('.github/workflows/deploy-cloudflare-pages-dry-run.yml');
+    const step = extractWorkflowStep(workflow, 'Deterministic build guard');
+    const processUrl = step.match(/NG_APP_SUPABASE_URL: '([^']+)'/)?.[1];
+    const processKey = step.match(/NG_APP_SUPABASE_ANON_KEY: '([^']+)'/)?.[1];
+    expect(processUrl).toBe('https://dryrun.invalid');
+    expect(processKey).toBeTruthy();
+    const { resolveSupabaseBrowserCredentials } = createRequire(import.meta.url)(
+      path.join(root, 'scripts/lib/supabase-browser-key-safety.cjs'),
+    ) as { resolveSupabaseBrowserCredentials: (sources: Record<string, unknown>) => { keyKind: string } };
+    expect(resolveSupabaseBrowserCredentials({ processUrl, processKey }).keyKind).toBe('publishable');
+  });
+
   it('keeps the Workers Static Assets fallback as a non-production dry-run path', () => {
     const config = read('wrangler.workers-static-assets.dry-run.toml');
     const worker = read('cloudflare/workers-static-assets/shell-worker.js');
@@ -267,6 +281,39 @@ describe('Cloudflare migration artifact contracts', () => {
     expect(deployWorkflow).toContain('npm run quality:guard:artifact-trends');
     expect(dryRunWorkflow).toContain('npm run quality:guard:artifact-trends');
     expect(generator).toContain('gojsFlowChunkBytes');
+  });
+
+  it('anchors the trend baseline to a verified production deployment and its artifact manifest', () => {
+    const baseline = JSON.parse(read('docs/cloudflare-artifact-baseline.json')) as {
+      gitSha: string;
+      source: {
+        versionManifest: string;
+        artifactManifest: string;
+        verifiedAt: string;
+        versionManifestSha256: string;
+        artifactManifestSha256: string;
+      };
+      metrics: Record<string, unknown>;
+    };
+    const manifestUrl = new URL(baseline.source.artifactManifest);
+    const versionUrl = new URL(baseline.source.versionManifest);
+
+    expect(versionUrl.pathname).toBe('/version.json');
+    expect(manifestUrl.pathname).toBe('/artifact-manifest.json');
+    expect(versionUrl.origin).toBe('https://nanoflow.pages.dev');
+    expect(manifestUrl.origin).toBe(versionUrl.origin);
+    expect(baseline.source.verifiedAt).toBe('2026-11-25T14:37:17.815Z');
+    expect(baseline.source.versionManifestSha256).toBe('E234FBDF385C25A9F2D8CEA7CFD4D1FCF01861E3FC15C4CF91E0AA82922F9721');
+    expect(baseline.source.artifactManifestSha256).toBe('20E10479A05BC26B51BED01FCB4E81F10821B4EDCEC2D2AA79052256F417CC1A');
+    expect(baseline.gitSha).toBe('61e79ea4fe8e32841fe08328b5f0babe582f134a');
+    expect(baseline.metrics).toEqual({
+      fileCount: 259,
+      totalBytes: 8_399_899,
+      rootJsCount: 225,
+      headerRuleCount: 21,
+      ngswAssetCount: 249,
+      gojsFlowChunkBytes: 1_716_617,
+    });
   });
 
   it('blocks deployment on no-JIT, font, and Supabase readiness guards', () => {

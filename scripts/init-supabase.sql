@@ -362,47 +362,6 @@ AS $$
   SELECT auth.uid()
 $$;
 
--- 检查用户是否为项目所有者
-CREATE OR REPLACE FUNCTION public.user_is_project_owner(p_project_id UUID)
-RETURNS BOOLEAN
-LANGUAGE SQL
-STABLE
-PARALLEL SAFE
-SET search_path TO 'pg_catalog', 'public'
-AS $$
-  SELECT EXISTS (
-    SELECT 1 FROM public.projects p
-    WHERE p.id = p_project_id
-    AND p.owner_id = public.current_user_id()
-  )
-$$;
-
--- 检查用户是否为项目所有者（个人版 owner-only）
-CREATE OR REPLACE FUNCTION public.user_has_project_access(p_project_id UUID)
-RETURNS BOOLEAN
-LANGUAGE SQL
-STABLE
-PARALLEL SAFE
-SET search_path TO 'pg_catalog', 'public'
-AS $$
-  SELECT EXISTS (
-    SELECT 1 FROM public.projects p
-    WHERE p.id = p_project_id
-    AND p.owner_id = public.current_user_id()
-  )
-$$;
-
--- 获取用户可访问的所有项目 ID（个人版 owner-only）
-CREATE OR REPLACE FUNCTION public.user_accessible_project_ids()
-RETURNS SETOF UUID
-LANGUAGE SQL
-STABLE
-PARALLEL SAFE
-SET search_path TO 'pg_catalog', 'public'
-AS $$
-  SELECT id FROM public.projects WHERE owner_id = public.current_user_id()
-$$;
-
 -- ============================================
 -- 1. 项目表 (projects)
 -- ============================================
@@ -452,6 +411,47 @@ CREATE INDEX IF NOT EXISTS idx_projects_owner_id_active
 -- 注：以下索引已删除（未使用或被复合索引替代）：
 -- - idx_projects_owner_id: 被 idx_projects_owner_updated_id 完全覆盖
 -- - idx_projects_updated_at: 被复合索引替代
+
+-- 检查用户是否为项目所有者
+CREATE OR REPLACE FUNCTION public.user_is_project_owner(p_project_id UUID)
+RETURNS BOOLEAN
+LANGUAGE SQL
+STABLE
+PARALLEL SAFE
+SET search_path TO 'pg_catalog', 'public'
+AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM public.projects p
+    WHERE p.id = p_project_id
+    AND p.owner_id = public.current_user_id()
+  )
+$$;
+
+-- 检查用户是否为项目所有者（个人版 owner-only）
+CREATE OR REPLACE FUNCTION public.user_has_project_access(p_project_id UUID)
+RETURNS BOOLEAN
+LANGUAGE SQL
+STABLE
+PARALLEL SAFE
+SET search_path TO 'pg_catalog', 'public'
+AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM public.projects p
+    WHERE p.id = p_project_id
+    AND p.owner_id = public.current_user_id()
+  )
+$$;
+
+-- 获取用户可访问的所有项目 ID（个人版 owner-only）
+CREATE OR REPLACE FUNCTION public.user_accessible_project_ids()
+RETURNS SETOF UUID
+LANGUAGE SQL
+STABLE
+PARALLEL SAFE
+SET search_path TO 'pg_catalog', 'public'
+AS $$
+  SELECT id FROM public.projects WHERE owner_id = public.current_user_id()
+$$;
 
 -- ============================================
 -- 2. 项目成员表 (project_members)
@@ -2886,7 +2886,10 @@ GRANT EXECUTE ON FUNCTION public.purge_tasks_v2(uuid, uuid[]) TO service_role;
 
 -- 1) 创建视图：自动过滤已 tombstone 和软删除的任务
 CREATE OR REPLACE VIEW public.active_tasks AS
-SELECT t.*
+-- Keep this prefix aligned with the final view below; later fields append safely.
+SELECT t.id, t.project_id, t.parent_id, t.title, t.content, t.stage, t."order",
+       t.rank, t.status, t.x, t.y, t.short_id, t.priority, t.due_date, t.tags,
+       t.attachments, t.deleted_at, t.created_at, t.updated_at
 FROM public.tasks t
 WHERE NOT EXISTS (
   SELECT 1
@@ -13263,3 +13266,1084 @@ REVOKE ALL ON FUNCTION public.prevent_external_source_links_stale_write()
 -- ============================================================
 -- 初始化完成
 -- ============================================================
+-- FINAL CONVERGENCE: 20261115165939 offline command transport parity
+-- Keep capabilities empty: legacy ActionQueue remains the active transport until all command features are explicitly enabled.
+ALTER TABLE public.sync_protocol_state
+  ADD COLUMN IF NOT EXISTS capabilities JSONB NOT NULL DEFAULT '[]'::jsonb;
+UPDATE public.sync_protocol_state
+SET capabilities='[]'::jsonb
+WHERE capabilities IS NULL OR jsonb_typeof(capabilities)<>'array';
+
+-- Source migration 20261114030125_sync_command_capability_probe.sql sha256 2aa6af01b297fc8443c8a2aafc9ebc46ab1da5cee7d4527c7e53861676b0358b
+ALTER TABLE public.sync_protocol_state
+  ADD COLUMN IF NOT EXISTS capabilities JSONB NOT NULL DEFAULT '[]'::jsonb;
+
+UPDATE public.sync_protocol_state
+SET capabilities = '[]'::jsonb
+WHERE capabilities IS NULL
+   OR jsonb_typeof(capabilities) <> 'array';
+
+CREATE OR REPLACE FUNCTION public.sync_check_protocol()
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY INVOKER
+STABLE
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_min INTEGER;
+  v_epoch BIGINT;
+  v_capabilities JSONB;
+BEGIN
+  SELECT min_protocol_version, deployment_epoch, capabilities
+    INTO v_min, v_epoch, v_capabilities
+    FROM public.sync_protocol_state
+    WHERE scope = 'global';
+
+  RETURN jsonb_build_object(
+    'minProtocolVersion', COALESCE(v_min, 1),
+    'deploymentEpoch', COALESCE(v_epoch, 0),
+    'capabilities', CASE
+      WHEN jsonb_typeof(COALESCE(v_capabilities, '[]'::jsonb)) = 'array'
+        THEN COALESCE(v_capabilities, '[]'::jsonb)
+      ELSE '[]'::jsonb
+    END
+  );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.sync_check_protocol() FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.sync_check_protocol() TO authenticated;
+
+COMMENT ON COLUMN public.sync_protocol_state.capabilities IS
+  'Explicit server capabilities. Keep empty until the corresponding command transport and replay semantics are deployed and verified.';
+COMMENT ON FUNCTION public.sync_check_protocol() IS
+  'Returns server min protocol, deployment epoch, and explicit additive capabilities. Empty capabilities keep the new command path in shadow mode.';
+
+-- Source migration 20261114030454_sync_offline_command_ingest_pull.sql sha256 1aaf571d271c9708f803d1182d36a3568f7d24a5b2cf889806fcabd9ef710aee
+ALTER TABLE public.sync_protocol_state
+  ADD COLUMN IF NOT EXISTS capabilities JSONB NOT NULL DEFAULT '[]'::jsonb;
+
+CREATE TABLE IF NOT EXISTS public.sync_command_log (
+  operation_id UUID PRIMARY KEY,
+  user_id UUID NOT NULL,
+  installation_id TEXT NOT NULL,
+  device_id TEXT NOT NULL,
+  entity_type TEXT NOT NULL,
+  entity_id UUID NOT NULL,
+  command TEXT NOT NULL,
+  logical_clock_physical_ms BIGINT NOT NULL,
+  logical_clock_logical BIGINT NOT NULL,
+  base_version BIGINT,
+  base_updated_at TEXT,
+  dependency_operation_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+  intent JSONB NOT NULL DEFAULT '{}'::jsonb,
+  normalized_result_patch JSONB NOT NULL DEFAULT '{}'::jsonb,
+  field_versions JSONB NOT NULL DEFAULT '{}'::jsonb,
+  envelope JSONB NOT NULL,
+  status TEXT NOT NULL DEFAULT 'accepted-shadow',
+  received_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT sync_command_log_status_check CHECK (status IN ('accepted-shadow', 'idempotent-replay')),
+  CONSTRAINT sync_command_log_entity_type_check CHECK (entity_type IN ('task', 'project', 'connection', 'black_box_entry', 'preference', 'focus_session', 'routine_task', 'routine_completion'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_sync_command_log_owner_cursor
+  ON public.sync_command_log (user_id, logical_clock_physical_ms, logical_clock_logical, device_id, operation_id);
+CREATE INDEX IF NOT EXISTS idx_sync_command_log_owner_entity
+  ON public.sync_command_log (user_id, entity_type, entity_id);
+
+ALTER TABLE public.sync_command_log ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.sync_command_log FORCE ROW LEVEL SECURITY;
+REVOKE ALL ON public.sync_command_log FROM PUBLIC, anon;
+GRANT SELECT ON public.sync_command_log TO authenticated;
+GRANT ALL ON public.sync_command_log TO service_role;
+
+DROP POLICY IF EXISTS sync_command_log_owner_select ON public.sync_command_log;
+CREATE POLICY sync_command_log_owner_select ON public.sync_command_log FOR SELECT TO authenticated USING (user_id = (SELECT auth.uid()));
+
+CREATE OR REPLACE FUNCTION public.sync_apply_offline_command(payload JSONB)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, extensions, pg_temp
+AS $$
+DECLARE
+  v_user UUID := auth.uid();
+  v_operation_id UUID;
+  v_entity_id UUID;
+  v_operation_text TEXT := NULLIF(COALESCE(payload->>'operationId', payload->>'operation_id'), '');
+  v_entity_type TEXT := NULLIF(payload->>'entityType', '');
+  v_entity_id_text TEXT := NULLIF(payload->>'entityId', '');
+  v_command TEXT := NULLIF(payload->>'command', '');
+  v_installation_id TEXT := NULLIF(COALESCE(payload->>'installationId', payload->>'installation_id'), '');
+  v_device_id TEXT := NULLIF(payload->>'deviceId', '');
+  v_clock JSONB := COALESCE(payload->'logicalClock', '{}'::jsonb);
+  v_physical_ms BIGINT;
+  v_logical BIGINT;
+  v_existing public.sync_command_log%ROWTYPE;
+  v_capabilities JSONB;
+  v_capability_enabled BOOLEAN := false;
+  v_reason TEXT;
+BEGIN
+  IF v_user IS NULL THEN RETURN jsonb_build_object('status', 'unauthorized', 'reason', 'auth_required'); END IF;
+  IF jsonb_typeof(payload) <> 'object' OR v_operation_text IS NULL THEN RETURN jsonb_build_object('status', 'rejected', 'reason', 'invalid-command-envelope'); END IF;
+  BEGIN v_operation_id := v_operation_text::UUID; EXCEPTION WHEN invalid_text_representation THEN RETURN jsonb_build_object('status', 'rejected', 'reason', 'invalid-operation-id'); END;
+  IF v_entity_type IS NULL OR v_entity_id_text IS NULL OR v_command IS NULL OR v_installation_id IS NULL OR v_device_id IS NULL
+     OR jsonb_typeof(v_clock) IS DISTINCT FROM 'object'
+     OR jsonb_typeof(payload->'normalizedResultPatch') IS DISTINCT FROM 'object'
+     OR jsonb_typeof(COALESCE(payload->'dependencyOperationIds', '[]'::jsonb)) IS DISTINCT FROM 'array' THEN
+    RETURN jsonb_build_object('status', 'rejected', 'reason', 'invalid-command-envelope');
+  END IF;
+  IF jsonb_typeof(v_clock->'physicalMs') IS DISTINCT FROM 'number'
+     OR jsonb_typeof(v_clock->'logical') IS DISTINCT FROM 'number'
+     OR (payload ? 'baseVersion' AND NULLIF(payload->>'baseVersion', '') IS NOT NULL AND NULLIF(payload->>'baseVersion', '') !~ '^-?[0-9]+$')
+     OR (payload ? 'fieldVersions' AND EXISTS (SELECT 1 FROM jsonb_each(payload->'fieldVersions') AS field_entry WHERE jsonb_typeof(field_entry.value) IS DISTINCT FROM 'object' OR jsonb_typeof(field_entry.value->'physicalMs') IS DISTINCT FROM 'number' OR jsonb_typeof(field_entry.value->'logical') IS DISTINCT FROM 'number' OR jsonb_typeof(field_entry.value->'deviceId') IS DISTINCT FROM 'string' OR jsonb_typeof(field_entry.value->'operationId') IS DISTINCT FROM 'string')) THEN
+    RETURN jsonb_build_object('status', 'rejected', 'reason', 'invalid-logical-clock');
+  END IF;
+  IF v_entity_type NOT IN ('task', 'project', 'connection', 'black_box_entry', 'preference', 'focus_session', 'routine_task', 'routine_completion')
+     OR split_part(v_command, '.', 1) NOT IN ('task', 'project', 'connection', 'black_box_entry', 'preference', 'focus_session', 'routine_task', 'routine_completion')
+     OR split_part(v_command, '.', 1) <> v_entity_type THEN
+    v_reason := 'unsupported-command-entity';
+  ELSIF jsonb_typeof(payload->'fieldVersions') IS NOT NULL AND jsonb_typeof(payload->'fieldVersions') <> 'object' THEN
+    v_reason := 'invalid-field-versions';
+  END IF;
+  BEGIN
+    v_entity_id := v_entity_id_text::UUID;
+    v_physical_ms := (v_clock->>'physicalMs')::BIGINT;
+    v_logical := (v_clock->>'logical')::BIGINT;
+  EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+    RETURN jsonb_build_object('status', 'rejected', 'reason', 'invalid-identity-or-logical-clock');
+  END;
+  IF v_physical_ms < 0 OR v_logical < 0 THEN RETURN jsonb_build_object('status', 'rejected', 'reason', 'invalid-logical-clock'); END IF;
+  SELECT capabilities INTO v_capabilities FROM public.sync_protocol_state WHERE scope = 'global';
+  v_capability_enabled := COALESCE(v_capabilities, '[]'::jsonb) @> '["command-envelope-v1"]'::jsonb;
+  IF NOT v_capability_enabled THEN v_reason := COALESCE(v_reason, 'command-capability-disabled'); END IF;
+  IF v_reason IS NOT NULL THEN
+    PERFORM public.record_sync_write_quarantine(v_operation_id, v_user, COALESCE(v_entity_type, 'offline-command'), v_entity_id, NULL, NULL, v_reason, payload);
+    RETURN jsonb_build_object('status', 'quarantined', 'reason', v_reason, 'operationId', v_operation_id);
+  END IF;
+  SELECT * INTO v_existing FROM public.sync_command_log WHERE operation_id = v_operation_id;
+  IF FOUND THEN
+    IF v_existing.user_id <> v_user THEN RETURN jsonb_build_object('status', 'unauthorized', 'reason', 'operation_id_owned_by_other_user'); END IF;
+    RETURN jsonb_build_object('status', 'idempotent-replay', 'operationId', v_operation_id, 'entityType', v_existing.entity_type, 'entityId', v_existing.entity_id);
+  END IF;
+  INSERT INTO public.sync_command_log (operation_id, user_id, installation_id, device_id, entity_type, entity_id, command, logical_clock_physical_ms, logical_clock_logical, base_version, base_updated_at, dependency_operation_ids, intent, normalized_result_patch, field_versions, envelope, status)
+  VALUES (v_operation_id, v_user, v_installation_id, v_device_id, v_entity_type, v_entity_id, v_command, v_physical_ms, v_logical, NULLIF(payload->>'baseVersion', '')::BIGINT, NULLIF(COALESCE(payload->>'baseUpdatedAt', payload->>'base_updated_at'), ''), COALESCE(payload->'dependencyOperationIds', '[]'::jsonb), COALESCE(payload->'intent', '{}'::jsonb), payload->'normalizedResultPatch', COALESCE(payload->'fieldVersions', '{}'::jsonb), payload, 'accepted-shadow');
+  RETURN jsonb_build_object('status', 'accepted-shadow', 'operationId', v_operation_id, 'entityType', v_entity_type, 'entityId', v_entity_id, 'appliedToDomainTables', false, 'projectionApplied', COALESCE(v_capabilities, '[]'::jsonb) @> '["field-lww-v1"]'::jsonb);
+EXCEPTION WHEN unique_violation THEN
+  SELECT * INTO v_existing FROM public.sync_command_log WHERE operation_id = v_operation_id;
+  IF FOUND AND v_existing.user_id = v_user THEN RETURN jsonb_build_object('status', 'idempotent-replay', 'operationId', v_operation_id); END IF;
+  RETURN jsonb_build_object('status', 'unauthorized', 'reason', 'operation_id_owned_by_other_user');
+END;
+$$;
+REVOKE ALL ON FUNCTION public.sync_apply_offline_command(JSONB) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.sync_apply_offline_command(JSONB) TO authenticated;
+
+CREATE OR REPLACE FUNCTION public.sync_pull_offline_commands(p_after_physical_ms BIGINT DEFAULT 0, p_after_logical BIGINT DEFAULT 0, p_after_device_id TEXT DEFAULT '', p_after_operation_id UUID DEFAULT '00000000-0000-0000-0000-000000000000'::UUID, p_limit INTEGER DEFAULT 100)
+RETURNS TABLE (operation_id UUID, user_id UUID, installation_id TEXT, device_id TEXT, entity_type TEXT, entity_id UUID, command TEXT, logical_clock_physical_ms BIGINT, logical_clock_logical BIGINT, base_version BIGINT, base_updated_at TEXT, dependency_operation_ids JSONB, intent JSONB, normalized_result_patch JSONB, field_versions JSONB, envelope JSONB, status TEXT, received_at TIMESTAMPTZ)
+LANGUAGE sql SECURITY INVOKER STABLE SET search_path = public, pg_temp AS $$
+  SELECT c.operation_id, c.user_id, c.installation_id, c.device_id, c.entity_type, c.entity_id, c.command, c.logical_clock_physical_ms, c.logical_clock_logical, c.base_version, c.base_updated_at, c.dependency_operation_ids, c.intent, c.normalized_result_patch, c.field_versions, c.envelope, c.status, c.received_at
+  FROM public.sync_command_log AS c WHERE c.user_id = (SELECT auth.uid())
+    AND (c.logical_clock_physical_ms, c.logical_clock_logical, c.device_id, c.operation_id) > (p_after_physical_ms, p_after_logical, p_after_device_id, p_after_operation_id)
+  ORDER BY c.logical_clock_physical_ms, c.logical_clock_logical, c.device_id, c.operation_id LIMIT GREATEST(1, LEAST(COALESCE(p_limit, 100), 500));
+$$;
+REVOKE ALL ON FUNCTION public.sync_pull_offline_commands(BIGINT, BIGINT, TEXT, UUID, INTEGER) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.sync_pull_offline_commands(BIGINT, BIGINT, TEXT, UUID, INTEGER) TO authenticated;
+
+-- Source migration 20261114030701_sync_offline_command_field_lww_projection.sql sha256 871d29bd6abef5a6668b8c3925e5df15f535875481a78639052d0d9aa6cefacd
+CREATE TABLE IF NOT EXISTS public.sync_command_projection (
+  user_id UUID NOT NULL,
+  entity_type TEXT NOT NULL,
+  entity_id UUID NOT NULL,
+  fields JSONB NOT NULL DEFAULT '{}'::jsonb,
+  field_versions JSONB NOT NULL DEFAULT '{}'::jsonb,
+  tombstone JSONB,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, entity_type, entity_id),
+  CONSTRAINT sync_command_projection_entity_type_check CHECK (entity_type IN ('task', 'project', 'connection', 'black_box_entry', 'preference', 'focus_session', 'routine_task', 'routine_completion'))
+);
+CREATE INDEX IF NOT EXISTS idx_sync_command_projection_owner_entity ON public.sync_command_projection (user_id, entity_type, entity_id);
+ALTER TABLE public.sync_command_projection ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.sync_command_projection FORCE ROW LEVEL SECURITY;
+REVOKE ALL ON public.sync_command_projection FROM PUBLIC, anon;
+GRANT SELECT ON public.sync_command_projection TO authenticated;
+GRANT ALL ON public.sync_command_projection TO service_role;
+DROP POLICY IF EXISTS sync_command_projection_owner_select ON public.sync_command_projection;
+CREATE POLICY sync_command_projection_owner_select ON public.sync_command_projection FOR SELECT TO authenticated USING (user_id = (SELECT auth.uid()));
+CREATE OR REPLACE FUNCTION public.sync_compare_command_version(existing_version JSONB, incoming_version JSONB)
+RETURNS INTEGER LANGUAGE sql IMMUTABLE SET search_path = public, pg_temp AS $$
+  SELECT CASE
+    WHEN existing_version IS NULL THEN 1
+    WHEN (incoming_version->>'physicalMs')::BIGINT > (existing_version->>'physicalMs')::BIGINT THEN 1
+    WHEN (incoming_version->>'physicalMs')::BIGINT < (existing_version->>'physicalMs')::BIGINT THEN -1
+    WHEN (incoming_version->>'logical')::BIGINT > (existing_version->>'logical')::BIGINT THEN 1
+    WHEN (incoming_version->>'logical')::BIGINT < (existing_version->>'logical')::BIGINT THEN -1
+    WHEN incoming_version->>'deviceId' > existing_version->>'deviceId' THEN 1
+    WHEN incoming_version->>'deviceId' < existing_version->>'deviceId' THEN -1
+    WHEN incoming_version->>'operationId' > existing_version->>'operationId' THEN 1
+    WHEN incoming_version->>'operationId' < existing_version->>'operationId' THEN -1
+    ELSE 0 END;
+$$;
+CREATE OR REPLACE FUNCTION public.sync_apply_command_projection()
+RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, extensions, pg_temp AS $$
+DECLARE
+  capabilities JSONB;
+  current_row public.sync_command_projection%ROWTYPE;
+  next_fields JSONB;
+  next_versions JSONB;
+  incoming_version JSONB;
+  existing_version JSONB;
+  field_key TEXT;
+  field_value JSONB;
+  is_delete BOOLEAN := NEW.command LIKE '%.delete' OR NEW.command LIKE '%.permanently_delete';
+  is_restore BOOLEAN := NEW.command LIKE '%.restore';
+BEGIN
+  SELECT capabilities INTO capabilities FROM public.sync_protocol_state WHERE scope = 'global';
+  IF NOT (COALESCE(capabilities, '[]'::jsonb) @> '["field-lww-v1"]'::jsonb) THEN RETURN NEW; END IF;
+  SELECT * INTO current_row FROM public.sync_command_projection WHERE user_id = NEW.user_id AND entity_type = NEW.entity_type AND entity_id = NEW.entity_id FOR UPDATE;
+  next_fields := COALESCE(current_row.fields, '{}'::jsonb);
+  next_versions := COALESCE(current_row.field_versions, '{}'::jsonb);
+  incoming_version := jsonb_build_object('physicalMs', NEW.logical_clock_physical_ms, 'logical', NEW.logical_clock_logical, 'deviceId', NEW.device_id, 'operationId', NEW.operation_id);
+  IF current_row.tombstone IS NOT NULL AND NOT is_restore THEN
+    IF public.sync_compare_command_version(current_row.tombstone, incoming_version) >= 0 THEN RETURN NEW; END IF;
+  END IF;
+  IF is_delete OR is_restore THEN
+    IF current_row.tombstone IS NULL OR public.sync_compare_command_version(current_row.tombstone, incoming_version) > 0 THEN
+      INSERT INTO public.sync_command_projection(user_id, entity_type, entity_id, fields, field_versions, tombstone, updated_at)
+      VALUES (NEW.user_id, NEW.entity_type, NEW.entity_id, next_fields, next_versions, CASE WHEN is_delete THEN incoming_version ELSE NULL END, now())
+      ON CONFLICT (user_id, entity_type, entity_id) DO UPDATE SET fields = EXCLUDED.fields, field_versions = EXCLUDED.field_versions, tombstone = EXCLUDED.tombstone, updated_at = EXCLUDED.updated_at;
+    END IF;
+    RETURN NEW;
+  END IF;
+  FOR field_key, field_value IN SELECT key, value FROM jsonb_each(NEW.normalized_result_patch) LOOP
+    incoming_version := COALESCE(NEW.field_versions->field_key, jsonb_build_object('physicalMs', NEW.logical_clock_physical_ms, 'logical', NEW.logical_clock_logical, 'deviceId', NEW.device_id, 'operationId', NEW.operation_id));
+    existing_version := next_versions->field_key;
+    IF public.sync_compare_command_version(existing_version, incoming_version) > 0 THEN
+      next_fields := jsonb_set(next_fields, ARRAY[field_key], field_value, true);
+      next_versions := jsonb_set(next_versions, ARRAY[field_key], incoming_version, true);
+    END IF;
+  END LOOP;
+  INSERT INTO public.sync_command_projection(user_id, entity_type, entity_id, fields, field_versions, tombstone, updated_at)
+  VALUES (NEW.user_id, NEW.entity_type, NEW.entity_id, next_fields, next_versions, current_row.tombstone, now())
+  ON CONFLICT (user_id, entity_type, entity_id) DO UPDATE SET fields = EXCLUDED.fields, field_versions = EXCLUDED.field_versions, tombstone = EXCLUDED.tombstone, updated_at = EXCLUDED.updated_at;
+  RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS trg_sync_command_projection ON public.sync_command_log;
+CREATE TRIGGER trg_sync_command_projection AFTER INSERT ON public.sync_command_log FOR EACH ROW EXECUTE FUNCTION public.sync_apply_command_projection();
+CREATE OR REPLACE FUNCTION public.sync_pull_offline_projections()
+RETURNS TABLE (entity_type TEXT, entity_id UUID, fields JSONB, field_versions JSONB, tombstone JSONB, updated_at TIMESTAMPTZ)
+LANGUAGE sql SECURITY INVOKER STABLE SET search_path = public, pg_temp AS $$
+  SELECT entity_type, entity_id, fields, field_versions, tombstone, updated_at FROM public.sync_command_projection WHERE user_id = (SELECT auth.uid()) ORDER BY entity_type, entity_id;
+$$;
+REVOKE ALL ON FUNCTION public.sync_compare_command_version(JSONB, JSONB) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.sync_compare_command_version(JSONB, JSONB) TO service_role;
+REVOKE ALL ON FUNCTION public.sync_apply_command_projection() FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.sync_apply_command_projection() TO service_role;
+REVOKE ALL ON FUNCTION public.sync_pull_offline_projections() FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.sync_pull_offline_projections() TO authenticated;
+
+-- Source migration 20261114030826_sync_offline_command_domain_apply.sql sha256 b741a13d464865b961db7c965d024a965b35f0d1ab98bcfc37bbac208ea60d3e
+CREATE TABLE IF NOT EXISTS public.sync_command_domain_apply_log (
+  operation_id UUID PRIMARY KEY,
+  user_id UUID NOT NULL,
+  entity_type TEXT NOT NULL,
+  entity_id UUID NOT NULL,
+  status TEXT NOT NULL,
+  result JSONB,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_sync_command_domain_apply_log_user
+  ON public.sync_command_domain_apply_log (user_id);
+ALTER TABLE public.sync_command_domain_apply_log ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.sync_command_domain_apply_log FORCE ROW LEVEL SECURITY;
+REVOKE ALL ON public.sync_command_domain_apply_log FROM PUBLIC, anon;
+GRANT SELECT ON public.sync_command_domain_apply_log TO authenticated;
+GRANT ALL ON public.sync_command_domain_apply_log TO service_role;
+DROP POLICY IF EXISTS sync_command_domain_apply_log_owner_select ON public.sync_command_domain_apply_log;
+CREATE POLICY sync_command_domain_apply_log_owner_select ON public.sync_command_domain_apply_log FOR SELECT TO authenticated USING (user_id = (SELECT auth.uid()));
+CREATE OR REPLACE FUNCTION public.sync_apply_command_domain_tables()
+RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, extensions, pg_temp AS $$
+DECLARE
+  capabilities JSONB;
+  domain_result JSONB;
+  domain_status TEXT := 'skipped-capability-disabled';
+BEGIN
+  SELECT capabilities INTO capabilities FROM public.sync_protocol_state WHERE scope = 'global';
+  IF NOT (COALESCE(capabilities, '[]'::jsonb) @> '["domain-apply-v1"]'::jsonb) THEN RETURN NEW; END IF;
+  BEGIN
+    IF NEW.entity_type = 'project' AND NEW.command LIKE '%.delete' THEN
+      domain_result := public.sync_delete_project(jsonb_build_object('operation_id', NEW.operation_id, 'protocol_version', 1, 'base_updated_at', NEW.base_updated_at, 'project_id', NEW.entity_id, 'client_origin', 'offline-command-domain-apply'));
+    ELSIF NEW.entity_type = 'task' AND (NEW.command LIKE '%.delete' OR NEW.command LIKE '%.permanently_delete') THEN
+      domain_result := public.sync_delete_tasks(jsonb_build_object('operation_id', NEW.operation_id, 'protocol_version', 1, 'base_updated_at', NEW.base_updated_at, 'project_id', COALESCE(NEW.normalized_result_patch->>'project_id', NEW.normalized_result_patch->>'projectId'), 'task_ids', jsonb_build_array(NEW.entity_id), 'delete_mode', CASE WHEN NEW.command LIKE '%.permanently_delete' THEN 'purge' ELSE 'soft' END, 'client_origin', 'offline-command-domain-apply'));
+    ELSIF NEW.entity_type = 'task' THEN
+      domain_result := public.sync_upsert_task(jsonb_build_object('operation_id', NEW.operation_id, 'protocol_version', 1, 'base_updated_at', NEW.base_updated_at, 'task', NEW.normalized_result_patch, 'client_origin', 'offline-command-domain-apply'));
+    ELSIF NEW.entity_type = 'project' THEN
+      domain_result := public.sync_upsert_project(jsonb_build_object('operation_id', NEW.operation_id, 'protocol_version', 1, 'base_updated_at', NEW.base_updated_at, 'project', NEW.normalized_result_patch, 'client_origin', 'offline-command-domain-apply'));
+    ELSIF NEW.entity_type = 'connection' THEN
+      domain_result := public.sync_upsert_connection(jsonb_build_object('operation_id', NEW.operation_id, 'protocol_version', 1, 'base_updated_at', NEW.base_updated_at, 'connection', NEW.normalized_result_patch, 'client_origin', 'offline-command-domain-apply'));
+    ELSIF NEW.entity_type = 'black_box_entry' THEN
+      domain_result := public.sync_upsert_blackbox_entry(jsonb_build_object('operation_id', NEW.operation_id, 'protocol_version', 1, 'base_updated_at', NEW.base_updated_at, 'entry', NEW.normalized_result_patch, 'client_origin', 'offline-command-domain-apply'));
+    ELSIF NEW.entity_type = 'preference' THEN
+      domain_result := public.sync_upsert_user_preferences(jsonb_build_object('operation_id', NEW.operation_id, 'protocol_version', 1, 'base_updated_at', NEW.base_updated_at, 'user_id', NEW.user_id, 'preferences', NEW.normalized_result_patch, 'client_origin', 'offline-command-domain-apply'));
+    ELSIF NEW.entity_type = 'focus_session' THEN
+      domain_result := public.sync_upsert_focus_session(jsonb_build_object('operation_id', NEW.operation_id, 'protocol_version', 1, 'focus_session', NEW.normalized_result_patch, 'client_origin', 'offline-command-domain-apply'));
+    ELSIF NEW.entity_type = 'routine_task' THEN
+      domain_result := public.sync_upsert_routine_task(jsonb_build_object('operation_id', NEW.operation_id, 'protocol_version', 1, 'user_id', NEW.user_id, 'routine_task', NEW.normalized_result_patch, 'client_origin', 'offline-command-domain-apply'));
+    ELSIF NEW.entity_type = 'routine_completion' THEN
+      domain_result := public.sync_increment_routine_completion(jsonb_build_object('operation_id', NEW.operation_id, 'protocol_version', 1, 'user_id', NEW.user_id, 'routine_completion', NEW.normalized_result_patch, 'client_origin', 'offline-command-domain-apply'));
+    ELSE
+      domain_result := jsonb_build_object('status', 'unsupported-domain-entity');
+    END IF;
+    domain_status := COALESCE(domain_result->>'status', 'unknown');
+  EXCEPTION WHEN OTHERS THEN
+    domain_result := jsonb_build_object('status', 'domain-apply-error', 'message', SQLERRM);
+    domain_status := 'domain-apply-error';
+  END;
+  INSERT INTO public.sync_command_domain_apply_log(operation_id, user_id, entity_type, entity_id, status, result)
+  VALUES (NEW.operation_id, NEW.user_id, NEW.entity_type, NEW.entity_id, domain_status, domain_result)
+  ON CONFLICT (operation_id) DO UPDATE SET status = EXCLUDED.status, result = EXCLUDED.result;
+  RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS zzz_sync_command_domain_apply ON public.sync_command_log;
+CREATE TRIGGER zzz_sync_command_domain_apply AFTER INSERT ON public.sync_command_log FOR EACH ROW EXECUTE FUNCTION public.sync_apply_command_domain_tables();
+REVOKE ALL ON FUNCTION public.sync_apply_command_domain_tables() FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.sync_apply_command_domain_tables() TO service_role;
+
+-- Source migration 20261114032449_sync_offline_command_projection_ambiguity_fix.sql sha256 9a70b1b7701f7a2732e1680680c4631bb81db5d9ac3f5f7e222b58e76032959d
+CREATE OR REPLACE FUNCTION public.sync_apply_command_projection()
+RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, extensions, pg_temp AS $$
+DECLARE
+  v_capabilities JSONB;
+  current_row public.sync_command_projection%ROWTYPE;
+  next_fields JSONB;
+  next_versions JSONB;
+  incoming_version JSONB;
+  existing_version JSONB;
+  field_key TEXT;
+  field_value JSONB;
+  is_delete BOOLEAN := NEW.command LIKE '%.delete' OR NEW.command LIKE '%.permanently_delete';
+  is_restore BOOLEAN := NEW.command LIKE '%.restore';
+BEGIN
+  SELECT s.capabilities INTO v_capabilities FROM public.sync_protocol_state AS s WHERE s.scope = 'global';
+  IF NOT (COALESCE(v_capabilities, '[]'::jsonb) @> '["field-lww-v1"]'::jsonb) THEN RETURN NEW; END IF;
+  SELECT * INTO current_row FROM public.sync_command_projection WHERE user_id = NEW.user_id AND entity_type = NEW.entity_type AND entity_id = NEW.entity_id FOR UPDATE;
+  next_fields := COALESCE(current_row.fields, '{}'::jsonb);
+  next_versions := COALESCE(current_row.field_versions, '{}'::jsonb);
+  incoming_version := jsonb_build_object('physicalMs', NEW.logical_clock_physical_ms, 'logical', NEW.logical_clock_logical, 'deviceId', NEW.device_id, 'operationId', NEW.operation_id);
+  IF current_row.tombstone IS NOT NULL AND NOT is_restore THEN
+    IF public.sync_compare_command_version(current_row.tombstone, incoming_version) >= 0 THEN RETURN NEW; END IF;
+  END IF;
+  IF is_delete OR is_restore THEN
+    IF current_row.tombstone IS NULL OR public.sync_compare_command_version(current_row.tombstone, incoming_version) > 0 THEN
+      INSERT INTO public.sync_command_projection(user_id, entity_type, entity_id, fields, field_versions, tombstone, updated_at)
+      VALUES (NEW.user_id, NEW.entity_type, NEW.entity_id, next_fields, next_versions, CASE WHEN is_delete THEN incoming_version ELSE NULL END, now())
+      ON CONFLICT (user_id, entity_type, entity_id) DO UPDATE SET fields = EXCLUDED.fields, field_versions = EXCLUDED.field_versions, tombstone = EXCLUDED.tombstone, updated_at = EXCLUDED.updated_at;
+    END IF;
+    RETURN NEW;
+  END IF;
+  FOR field_key, field_value IN SELECT key, value FROM jsonb_each(NEW.normalized_result_patch) LOOP
+    incoming_version := COALESCE(NEW.field_versions->field_key, jsonb_build_object('physicalMs', NEW.logical_clock_physical_ms, 'logical', NEW.logical_clock_logical, 'deviceId', NEW.device_id, 'operationId', NEW.operation_id));
+    existing_version := next_versions->field_key;
+    IF public.sync_compare_command_version(existing_version, incoming_version) > 0 THEN
+      next_fields := jsonb_set(next_fields, ARRAY[field_key], field_value, true);
+      next_versions := jsonb_set(next_versions, ARRAY[field_key], incoming_version, true);
+    END IF;
+  END LOOP;
+  INSERT INTO public.sync_command_projection(user_id, entity_type, entity_id, fields, field_versions, tombstone, updated_at)
+  VALUES (NEW.user_id, NEW.entity_type, NEW.entity_id, next_fields, next_versions, current_row.tombstone, now())
+  ON CONFLICT (user_id, entity_type, entity_id) DO UPDATE SET fields = EXCLUDED.fields, field_versions = EXCLUDED.field_versions, tombstone = EXCLUDED.tombstone, updated_at = EXCLUDED.updated_at;
+  RETURN NEW;
+END;
+$$;
+REVOKE ALL ON FUNCTION public.sync_apply_command_projection() FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.sync_apply_command_projection() TO service_role;
+
+-- Source migration 20261114032615_sync_offline_command_domain_apply_ambiguity_fix.sql sha256 1574d531ac82b45fc48b9aeb019121cd89cb21e116b814d0b1be1befa88d5cea
+CREATE OR REPLACE FUNCTION public.sync_apply_command_domain_tables()
+RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, extensions, pg_temp AS $$
+DECLARE
+  v_capabilities JSONB;
+  domain_result JSONB;
+  domain_status TEXT := 'skipped-capability-disabled';
+BEGIN
+  SELECT s.capabilities INTO v_capabilities FROM public.sync_protocol_state AS s WHERE s.scope = 'global';
+  IF NOT (COALESCE(v_capabilities, '[]'::jsonb) @> '["domain-apply-v1"]'::jsonb) THEN RETURN NEW; END IF;
+  BEGIN
+    IF NEW.entity_type = 'project' AND NEW.command LIKE '%.delete' THEN
+      domain_result := public.sync_delete_project(jsonb_build_object('operation_id', NEW.operation_id, 'protocol_version', 1, 'base_updated_at', NEW.base_updated_at, 'project_id', NEW.entity_id, 'client_origin', 'offline-command-domain-apply'));
+    ELSIF NEW.entity_type = 'task' AND (NEW.command LIKE '%.delete' OR NEW.command LIKE '%.permanently_delete') THEN
+      domain_result := public.sync_delete_tasks(jsonb_build_object('operation_id', NEW.operation_id, 'protocol_version', 1, 'base_updated_at', NEW.base_updated_at, 'project_id', COALESCE(NEW.normalized_result_patch->>'project_id', NEW.normalized_result_patch->>'projectId'), 'task_ids', jsonb_build_array(NEW.entity_id), 'delete_mode', CASE WHEN NEW.command LIKE '%.permanently_delete' THEN 'purge' ELSE 'soft' END, 'client_origin', 'offline-command-domain-apply'));
+    ELSIF NEW.entity_type = 'task' THEN
+      domain_result := public.sync_upsert_task(jsonb_build_object('operation_id', NEW.operation_id, 'protocol_version', 1, 'base_updated_at', NEW.base_updated_at, 'task', NEW.normalized_result_patch, 'client_origin', 'offline-command-domain-apply'));
+    ELSIF NEW.entity_type = 'project' THEN
+      domain_result := public.sync_upsert_project(jsonb_build_object('operation_id', NEW.operation_id, 'protocol_version', 1, 'base_updated_at', NEW.base_updated_at, 'project', NEW.normalized_result_patch, 'client_origin', 'offline-command-domain-apply'));
+    ELSIF NEW.entity_type = 'connection' THEN
+      domain_result := public.sync_upsert_connection(jsonb_build_object('operation_id', NEW.operation_id, 'protocol_version', 1, 'base_updated_at', NEW.base_updated_at, 'connection', NEW.normalized_result_patch, 'client_origin', 'offline-command-domain-apply'));
+    ELSIF NEW.entity_type = 'black_box_entry' THEN
+      domain_result := public.sync_upsert_blackbox_entry(jsonb_build_object('operation_id', NEW.operation_id, 'protocol_version', 1, 'base_updated_at', NEW.base_updated_at, 'entry', NEW.normalized_result_patch, 'client_origin', 'offline-command-domain-apply'));
+    ELSIF NEW.entity_type = 'preference' THEN
+      domain_result := public.sync_upsert_user_preferences(jsonb_build_object('operation_id', NEW.operation_id, 'protocol_version', 1, 'base_updated_at', NEW.base_updated_at, 'user_id', NEW.user_id, 'preferences', NEW.normalized_result_patch, 'client_origin', 'offline-command-domain-apply'));
+    ELSIF NEW.entity_type = 'focus_session' THEN
+      domain_result := public.sync_upsert_focus_session(jsonb_build_object('operation_id', NEW.operation_id, 'protocol_version', 1, 'focus_session', NEW.normalized_result_patch, 'client_origin', 'offline-command-domain-apply'));
+    ELSIF NEW.entity_type = 'routine_task' THEN
+      domain_result := public.sync_upsert_routine_task(jsonb_build_object('operation_id', NEW.operation_id, 'protocol_version', 1, 'user_id', NEW.user_id, 'routine_task', NEW.normalized_result_patch, 'client_origin', 'offline-command-domain-apply'));
+    ELSIF NEW.entity_type = 'routine_completion' THEN
+      domain_result := public.sync_increment_routine_completion(jsonb_build_object('operation_id', NEW.operation_id, 'protocol_version', 1, 'user_id', NEW.user_id, 'routine_completion', NEW.normalized_result_patch, 'client_origin', 'offline-command-domain-apply'));
+    ELSE
+      domain_result := jsonb_build_object('status', 'unsupported-domain-entity');
+    END IF;
+    domain_status := COALESCE(domain_result->>'status', 'unknown');
+  EXCEPTION WHEN OTHERS THEN
+    domain_result := jsonb_build_object('status', 'domain-apply-error', 'message', SQLERRM);
+    domain_status := 'domain-apply-error';
+  END;
+  INSERT INTO public.sync_command_domain_apply_log(operation_id, user_id, entity_type, entity_id, status, result)
+  VALUES (NEW.operation_id, NEW.user_id, NEW.entity_type, NEW.entity_id, domain_status, domain_result)
+  ON CONFLICT (operation_id) DO UPDATE SET status = EXCLUDED.status, result = EXCLUDED.result;
+  RETURN NEW;
+END;
+$$;
+REVOKE ALL ON FUNCTION public.sync_apply_command_domain_tables() FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.sync_apply_command_domain_tables() TO service_role;
+
+-- Source migration 20261114033537_sync_offline_command_domain_apply_nested_payload_fix.sql sha256 daa429635bf41bdd9f5f5461051571e97fa5a0d94a0abd671bf4c0ef89e86800
+CREATE OR REPLACE FUNCTION public.sync_apply_command_domain_tables()
+RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, extensions, pg_temp AS $$
+DECLARE
+  v_capabilities JSONB;
+  domain_result JSONB;
+  domain_status TEXT := 'skipped-capability-disabled';
+BEGIN
+  SELECT s.capabilities INTO v_capabilities FROM public.sync_protocol_state AS s WHERE s.scope = 'global';
+  IF NOT (COALESCE(v_capabilities, '[]'::jsonb) @> '["domain-apply-v1"]'::jsonb) THEN RETURN NEW; END IF;
+  BEGIN
+    IF NEW.entity_type = 'project' AND NEW.command LIKE '%.delete' THEN
+      domain_result := public.sync_delete_project(jsonb_build_object('operation_id', NEW.operation_id, 'protocol_version', 1, 'base_updated_at', NEW.base_updated_at, 'project_id', NEW.entity_id, 'client_origin', 'offline-command-domain-apply'));
+    ELSIF NEW.entity_type = 'task' AND (NEW.command LIKE '%.delete' OR NEW.command LIKE '%.permanently_delete') THEN
+      domain_result := public.sync_delete_tasks(jsonb_build_object('operation_id', NEW.operation_id, 'protocol_version', 1, 'base_updated_at', NEW.base_updated_at, 'project_id', COALESCE(NEW.normalized_result_patch->>'project_id', NEW.normalized_result_patch->>'projectId'), 'task_ids', jsonb_build_array(NEW.entity_id), 'delete_mode', CASE WHEN NEW.command LIKE '%.permanently_delete' THEN 'purge' ELSE 'soft' END, 'client_origin', 'offline-command-domain-apply'));
+    ELSIF NEW.entity_type = 'task' THEN
+      domain_result := public.sync_upsert_task(jsonb_build_object('operation_id', NEW.operation_id, 'protocol_version', 1, 'base_updated_at', NEW.base_updated_at, 'task', COALESCE(NEW.normalized_result_patch->'task', NEW.normalized_result_patch), 'client_origin', 'offline-command-domain-apply'));
+    ELSIF NEW.entity_type = 'project' THEN
+      domain_result := public.sync_upsert_project(jsonb_build_object('operation_id', NEW.operation_id, 'protocol_version', 1, 'base_updated_at', NEW.base_updated_at, 'project', COALESCE(NEW.normalized_result_patch->'project', NEW.normalized_result_patch), 'client_origin', 'offline-command-domain-apply'));
+    ELSIF NEW.entity_type = 'connection' THEN
+      domain_result := public.sync_upsert_connection(jsonb_build_object('operation_id', NEW.operation_id, 'protocol_version', 1, 'base_updated_at', NEW.base_updated_at, 'connection', COALESCE(NEW.normalized_result_patch->'connection', NEW.normalized_result_patch), 'client_origin', 'offline-command-domain-apply'));
+    ELSIF NEW.entity_type = 'black_box_entry' THEN
+      domain_result := public.sync_upsert_blackbox_entry(jsonb_build_object('operation_id', NEW.operation_id, 'protocol_version', 1, 'base_updated_at', NEW.base_updated_at, 'entry', COALESCE(NEW.normalized_result_patch->'entry', NEW.normalized_result_patch), 'client_origin', 'offline-command-domain-apply'));
+    ELSIF NEW.entity_type = 'preference' THEN
+      domain_result := public.sync_upsert_user_preferences(jsonb_build_object('operation_id', NEW.operation_id, 'protocol_version', 1, 'base_updated_at', NEW.base_updated_at, 'user_id', NEW.user_id, 'preferences', COALESCE(NEW.normalized_result_patch->'preferences', NEW.normalized_result_patch), 'client_origin', 'offline-command-domain-apply'));
+    ELSIF NEW.entity_type = 'focus_session' THEN
+      domain_result := public.sync_upsert_focus_session(jsonb_build_object('operation_id', NEW.operation_id, 'protocol_version', 1, 'focus_session', COALESCE(NEW.normalized_result_patch->'focus_session', NEW.normalized_result_patch), 'client_origin', 'offline-command-domain-apply'));
+    ELSIF NEW.entity_type = 'routine_task' THEN
+      domain_result := public.sync_upsert_routine_task(jsonb_build_object('operation_id', NEW.operation_id, 'protocol_version', 1, 'user_id', NEW.user_id, 'routine_task', COALESCE(NEW.normalized_result_patch->'routine_task', NEW.normalized_result_patch), 'client_origin', 'offline-command-domain-apply'));
+    ELSIF NEW.entity_type = 'routine_completion' THEN
+      domain_result := public.sync_increment_routine_completion(jsonb_build_object('operation_id', NEW.operation_id, 'protocol_version', 1, 'user_id', NEW.user_id, 'routine_completion', COALESCE(NEW.normalized_result_patch->'routine_completion', NEW.normalized_result_patch), 'client_origin', 'offline-command-domain-apply'));
+    ELSE
+      domain_result := jsonb_build_object('status', 'unsupported-domain-entity');
+    END IF;
+    domain_status := COALESCE(domain_result->>'status', 'unknown');
+  EXCEPTION WHEN OTHERS THEN
+    domain_result := jsonb_build_object('status', 'domain-apply-error', 'message', SQLERRM);
+    domain_status := 'domain-apply-error';
+  END;
+  INSERT INTO public.sync_command_domain_apply_log(operation_id, user_id, entity_type, entity_id, status, result)
+  VALUES (NEW.operation_id, NEW.user_id, NEW.entity_type, NEW.entity_id, domain_status, domain_result)
+  ON CONFLICT (operation_id) DO UPDATE SET status = EXCLUDED.status, result = EXCLUDED.result;
+  RETURN NEW;
+END;
+$$;
+REVOKE ALL ON FUNCTION public.sync_apply_command_domain_tables() FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.sync_apply_command_domain_tables() TO service_role;
+
+-- Source migration 20261114094736_sync_offline_command_domain_apply_ack.sql sha256 954223940b5040dc0c95a5a36c0d3a63a39ba4eedd6e722f11b24b6ef1ac019d
+-- Gate command-mode acknowledgements on owner-scoped domain apply evidence.
+-- Unsupported command kinds are recorded but never translated into an upsert.
+
+CREATE OR REPLACE FUNCTION public.sync_apply_command_domain_tables()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, extensions, pg_temp
+AS $$
+DECLARE
+  v_capabilities JSONB;
+  domain_result JSONB;
+  domain_status TEXT := 'skipped-capability-disabled';
+  v_supported BOOLEAN := false;
+BEGIN
+  SELECT s.capabilities INTO v_capabilities
+    FROM public.sync_protocol_state AS s WHERE s.scope = 'global';
+  IF NOT (COALESCE(v_capabilities, '[]'::jsonb) @> '["domain-apply-v1"]'::jsonb) THEN
+    RETURN NEW;
+  END IF;
+
+  v_supported := CASE NEW.entity_type
+    WHEN 'project' THEN NEW.command IN ('project.create', 'project.update', 'project.delete', 'project.restore')
+    WHEN 'task' THEN NEW.command IN (
+      'task.create', 'task.update', 'task.delete', 'task.permanently_delete', 'task.restore',
+      'task.move', 'task.reorder', 'task.detach', 'task.assign', 'task.tags.update',
+      'task.parking_meta.update', 'task.attention_items.update', 'task.todo.update'
+    )
+    WHEN 'connection' THEN NEW.command IN ('connection.create', 'connection.update', 'connection.restore', 'connection.reorder')
+    WHEN 'black_box_entry' THEN NEW.command IN ('black_box_entry.create', 'black_box_entry.update')
+    WHEN 'preference' THEN NEW.command IN ('preference.create', 'preference.update')
+    WHEN 'focus_session' THEN NEW.command IN ('focus_session.create', 'focus_session.update')
+    WHEN 'routine_task' THEN NEW.command IN ('routine_task.create', 'routine_task.update')
+    WHEN 'routine_completion' THEN NEW.command = 'routine_completion.create'
+    ELSE false
+  END;
+
+  IF NOT v_supported THEN
+    domain_result := jsonb_build_object('status', 'unsupported-domain-command', 'command', NEW.command, 'entityType', NEW.entity_type);
+    domain_status := 'unsupported-domain-command';
+  ELSE
+    BEGIN
+      IF NEW.entity_type = 'project' AND NEW.command = 'project.delete' THEN
+        domain_result := public.sync_delete_project(jsonb_build_object(
+          'operation_id', NEW.operation_id, 'protocol_version', 1,
+          'base_updated_at', NEW.base_updated_at, 'project_id', NEW.entity_id,
+          'client_origin', 'offline-command-domain-apply'
+        ));
+      ELSIF NEW.entity_type = 'task' AND NEW.command IN ('task.delete', 'task.permanently_delete') THEN
+        domain_result := public.sync_delete_tasks(jsonb_build_object(
+          'operation_id', NEW.operation_id, 'protocol_version', 1,
+          'base_updated_at', NEW.base_updated_at,
+          'project_id', COALESCE(
+            NEW.normalized_result_patch->>'project_id',
+            NEW.normalized_result_patch->>'projectId',
+            NEW.normalized_result_patch->'task'->>'project_id',
+            NEW.normalized_result_patch->'task'->>'projectId',
+            NEW.envelope->>'projectId',
+            NEW.envelope->>'project_id'
+          ),
+          'task_ids', jsonb_build_array(NEW.entity_id),
+          'delete_mode', CASE WHEN NEW.command = 'task.permanently_delete' THEN 'purge' ELSE 'soft' END,
+          'client_origin', 'offline-command-domain-apply'
+        ));
+      ELSIF NEW.entity_type = 'task' THEN
+        domain_result := public.sync_upsert_task(jsonb_build_object(
+          'operation_id', NEW.operation_id, 'protocol_version', 1,
+          'base_updated_at', NEW.base_updated_at,
+          'task', COALESCE(NEW.normalized_result_patch->'task', NEW.normalized_result_patch),
+          'client_origin', 'offline-command-domain-apply'
+        ));
+      ELSIF NEW.entity_type = 'project' THEN
+        domain_result := public.sync_upsert_project(jsonb_build_object(
+          'operation_id', NEW.operation_id, 'protocol_version', 1,
+          'base_updated_at', NEW.base_updated_at,
+          'project', COALESCE(NEW.normalized_result_patch->'project', NEW.normalized_result_patch),
+          'client_origin', 'offline-command-domain-apply'
+        ));
+      ELSIF NEW.entity_type = 'connection' THEN
+        domain_result := public.sync_upsert_connection(jsonb_build_object(
+          'operation_id', NEW.operation_id, 'protocol_version', 1,
+          'base_updated_at', NEW.base_updated_at,
+          'connection', COALESCE(NEW.normalized_result_patch->'connection', NEW.normalized_result_patch),
+          'client_origin', 'offline-command-domain-apply'
+        ));
+      ELSIF NEW.entity_type = 'black_box_entry' THEN
+        domain_result := public.sync_upsert_blackbox_entry(jsonb_build_object(
+          'operation_id', NEW.operation_id, 'protocol_version', 1,
+          'base_updated_at', NEW.base_updated_at,
+          'entry', COALESCE(NEW.normalized_result_patch->'entry', NEW.normalized_result_patch),
+          'client_origin', 'offline-command-domain-apply'
+        ));
+      ELSIF NEW.entity_type = 'preference' THEN
+        domain_result := public.sync_upsert_user_preferences(jsonb_build_object(
+          'operation_id', NEW.operation_id, 'protocol_version', 1,
+          'base_updated_at', NEW.base_updated_at, 'user_id', NEW.user_id,
+          'preferences', COALESCE(NEW.normalized_result_patch->'preferences', NEW.normalized_result_patch),
+          'client_origin', 'offline-command-domain-apply'
+        ));
+      ELSIF NEW.entity_type = 'focus_session' THEN
+        domain_result := public.sync_upsert_focus_session(jsonb_build_object(
+          'operation_id', NEW.operation_id, 'protocol_version', 1,
+          'focus_session', COALESCE(NEW.normalized_result_patch->'focus_session', NEW.normalized_result_patch),
+          'client_origin', 'offline-command-domain-apply'
+        ));
+      ELSIF NEW.entity_type = 'routine_task' THEN
+        domain_result := public.sync_upsert_routine_task(jsonb_build_object(
+          'operation_id', NEW.operation_id, 'protocol_version', 1,
+          'user_id', NEW.user_id,
+          'routine_task', COALESCE(NEW.normalized_result_patch->'routine_task', NEW.normalized_result_patch),
+          'client_origin', 'offline-command-domain-apply'
+        ));
+      ELSIF NEW.entity_type = 'routine_completion' THEN
+        domain_result := public.sync_increment_routine_completion(jsonb_build_object(
+          'operation_id', NEW.operation_id, 'protocol_version', 1,
+          'user_id', NEW.user_id,
+          'routine_completion', COALESCE(NEW.normalized_result_patch->'routine_completion', NEW.normalized_result_patch),
+          'client_origin', 'offline-command-domain-apply'
+        ));
+      END IF;
+      domain_status := COALESCE(domain_result->>'status', 'unknown');
+    EXCEPTION WHEN OTHERS THEN
+      domain_result := jsonb_build_object('status', 'domain-apply-error', 'message', SQLERRM);
+      domain_status := 'domain-apply-error';
+    END;
+  END IF;
+
+  INSERT INTO public.sync_command_domain_apply_log(
+    operation_id, user_id, entity_type, entity_id, status, result
+  ) VALUES (
+    NEW.operation_id, NEW.user_id, NEW.entity_type, NEW.entity_id, domain_status, domain_result
+  ) ON CONFLICT (operation_id) DO UPDATE SET status = EXCLUDED.status, result = EXCLUDED.result;
+  RETURN NEW;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.sync_apply_command_domain_tables() FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.sync_apply_command_domain_tables() TO service_role;
+
+CREATE OR REPLACE FUNCTION public.sync_get_offline_command_status(payload JSONB)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY INVOKER
+STABLE
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_user UUID := auth.uid();
+  v_operation_id UUID;
+  v_command_status TEXT;
+  v_entity_type TEXT;
+  v_entity_id UUID;
+  v_domain_status TEXT;
+  v_domain_result JSONB;
+BEGIN
+  IF v_user IS NULL THEN
+    RETURN jsonb_build_object('status', 'unauthorized', 'reason', 'auth_required');
+  END IF;
+  IF jsonb_typeof(payload) IS DISTINCT FROM 'object' THEN
+    RETURN jsonb_build_object('status', 'rejected', 'reason', 'invalid-payload');
+  END IF;
+  BEGIN
+    v_operation_id := NULLIF(COALESCE(payload->>'operationId', payload->>'operation_id'), '')::UUID;
+  EXCEPTION WHEN invalid_text_representation THEN
+    RETURN jsonb_build_object('status', 'rejected', 'reason', 'invalid-operation-id');
+  END;
+  IF v_operation_id IS NULL THEN
+    RETURN jsonb_build_object('status', 'rejected', 'reason', 'missing-operation-id');
+  END IF;
+
+  SELECT c.status, c.entity_type, c.entity_id, d.status, d.result
+    INTO v_command_status, v_entity_type, v_entity_id, v_domain_status, v_domain_result
+    FROM public.sync_command_log AS c
+    LEFT JOIN public.sync_command_domain_apply_log AS d
+      ON d.operation_id = c.operation_id AND d.user_id = c.user_id
+    WHERE c.operation_id = v_operation_id AND c.user_id = v_user;
+
+  IF NOT FOUND THEN
+    RETURN jsonb_build_object('status', 'rejected', 'reason', 'offline-command-not-found', 'operationId', v_operation_id);
+  END IF;
+
+  RETURN jsonb_build_object(
+    'status', CASE WHEN v_domain_status IN ('applied', 'idempotent-replay') THEN v_domain_status ELSE 'rejected' END,
+    'operationId', v_operation_id,
+    'commandStatus', v_command_status,
+    'entityType', v_entity_type,
+    'entityId', v_entity_id,
+    'domainApplyStatus', COALESCE(v_domain_status, 'missing'),
+    'domainApplyResult', v_domain_result,
+    'appliedToDomainTables', v_domain_status IN ('applied', 'idempotent-replay')
+  );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.sync_get_offline_command_status(JSONB) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.sync_get_offline_command_status(JSONB) TO authenticated;
+COMMENT ON FUNCTION public.sync_get_offline_command_status(JSONB) IS
+  'Owner-scoped readback for command replay acknowledgement. accepted-shadow is not success until domain-apply status is confirmed.';
+
+-- Source migration 20261114123814_sync_offline_command_exact_allowlist.sql sha256 83d459c669961a7d8ee1c1ae71eacab6eeef242cd68f4c644643d20b73ef5c71
+-- Reject unsupported command/entity pairs before they enter the shadow command log.
+-- Keep this allowlist aligned with OFFLINE_SYNC_SERVER_DOMAIN_COMMANDS and the domain-apply trigger.
+CREATE OR REPLACE FUNCTION public.sync_apply_offline_command(payload JSONB)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, extensions, pg_temp
+AS $$
+DECLARE
+  v_user UUID := auth.uid();
+  v_operation_id UUID;
+  v_entity_id UUID;
+  v_operation_text TEXT := NULLIF(COALESCE(payload->>'operationId', payload->>'operation_id'), '');
+  v_entity_type TEXT := NULLIF(payload->>'entityType', '');
+  v_entity_id_text TEXT := NULLIF(payload->>'entityId', '');
+  v_command TEXT := NULLIF(payload->>'command', '');
+  v_installation_id TEXT := NULLIF(COALESCE(payload->>'installationId', payload->>'installation_id'), '');
+  v_device_id TEXT := NULLIF(payload->>'deviceId', '');
+  v_clock JSONB := COALESCE(payload->'logicalClock', '{}'::jsonb);
+  v_physical_ms BIGINT;
+  v_logical BIGINT;
+  v_existing public.sync_command_log%ROWTYPE;
+  v_capabilities JSONB;
+  v_capability_enabled BOOLEAN := false;
+  v_reason TEXT;
+  v_supported_command BOOLEAN := false;
+BEGIN
+  IF v_user IS NULL THEN
+    RETURN jsonb_build_object('status', 'unauthorized', 'reason', 'auth_required');
+  END IF;
+
+  IF jsonb_typeof(payload) <> 'object' OR v_operation_text IS NULL THEN
+    RETURN jsonb_build_object('status', 'rejected', 'reason', 'invalid-command-envelope');
+  END IF;
+
+  BEGIN
+    v_operation_id := v_operation_text::UUID;
+  EXCEPTION WHEN invalid_text_representation THEN
+    RETURN jsonb_build_object('status', 'rejected', 'reason', 'invalid-operation-id');
+  END;
+
+  IF v_entity_type IS NULL OR v_entity_id_text IS NULL OR v_command IS NULL
+     OR v_installation_id IS NULL OR v_device_id IS NULL
+     OR jsonb_typeof(v_clock) IS DISTINCT FROM 'object'
+     OR jsonb_typeof(payload->'normalizedResultPatch') IS DISTINCT FROM 'object'
+     OR jsonb_typeof(COALESCE(payload->'dependencyOperationIds', '[]'::jsonb)) IS DISTINCT FROM 'array'
+     THEN
+    RETURN jsonb_build_object('status', 'rejected', 'reason', 'invalid-command-envelope');
+  END IF;
+
+  IF payload ? 'fieldVersions' AND jsonb_typeof(payload->'fieldVersions') IS DISTINCT FROM 'object' THEN
+    RETURN jsonb_build_object('status', 'rejected', 'reason', 'invalid-field-versions');
+  END IF;
+
+  IF jsonb_typeof(v_clock->'physicalMs') IS DISTINCT FROM 'number'
+     OR jsonb_typeof(v_clock->'logical') IS DISTINCT FROM 'number'
+     OR (payload ? 'baseVersion' AND NULLIF(payload->>'baseVersion', '') IS NOT NULL
+       AND NULLIF(payload->>'baseVersion', '') !~ '^-?[0-9]+$')
+     OR (payload ? 'fieldVersions' AND EXISTS (
+       SELECT 1 FROM jsonb_each(payload->'fieldVersions') AS field_entry
+       WHERE jsonb_typeof(field_entry.value) IS DISTINCT FROM 'object'
+          OR jsonb_typeof(field_entry.value->'physicalMs') IS DISTINCT FROM 'number'
+          OR jsonb_typeof(field_entry.value->'logical') IS DISTINCT FROM 'number'
+          OR jsonb_typeof(field_entry.value->'deviceId') IS DISTINCT FROM 'string'
+          OR jsonb_typeof(field_entry.value->'operationId') IS DISTINCT FROM 'string'
+     )) THEN
+    RETURN jsonb_build_object('status', 'rejected', 'reason', 'invalid-logical-clock');
+  END IF;
+
+  IF v_entity_type NOT IN ('task', 'project', 'connection', 'black_box_entry', 'preference', 'focus_session', 'routine_task', 'routine_completion')
+     OR split_part(v_command, '.', 1) <> v_entity_type THEN
+    v_reason := 'unsupported-command-entity';
+  ELSE
+    v_supported_command := CASE v_entity_type
+      WHEN 'project' THEN v_command IN ('project.create', 'project.update', 'project.delete', 'project.restore')
+      WHEN 'task' THEN v_command IN (
+        'task.create', 'task.update', 'task.delete', 'task.permanently_delete', 'task.restore',
+        'task.move', 'task.reorder', 'task.detach', 'task.assign', 'task.tags.update',
+        'task.parking_meta.update', 'task.attention_items.update', 'task.todo.update'
+      )
+      WHEN 'connection' THEN v_command IN ('connection.create', 'connection.update', 'connection.restore', 'connection.reorder')
+      WHEN 'black_box_entry' THEN v_command IN ('black_box_entry.create', 'black_box_entry.update')
+      WHEN 'preference' THEN v_command IN ('preference.create', 'preference.update')
+      WHEN 'focus_session' THEN v_command IN ('focus_session.create', 'focus_session.update')
+      WHEN 'routine_task' THEN v_command IN ('routine_task.create', 'routine_task.update')
+      WHEN 'routine_completion' THEN v_command = 'routine_completion.create'
+      ELSE false
+    END;
+
+    IF NOT v_supported_command THEN
+      v_reason := 'unsupported-domain-command';
+    ELSIF jsonb_typeof(payload->'fieldVersions') IS NOT NULL
+          AND jsonb_typeof(payload->'fieldVersions') <> 'object' THEN
+      v_reason := 'invalid-field-versions';
+    END IF;
+  END IF;
+
+  BEGIN
+    v_entity_id := v_entity_id_text::UUID;
+    v_physical_ms := (v_clock->>'physicalMs')::BIGINT;
+    v_logical := (v_clock->>'logical')::BIGINT;
+  EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+    RETURN jsonb_build_object('status', 'rejected', 'reason', 'invalid-identity-or-logical-clock');
+  END;
+
+  IF v_physical_ms < 0 OR v_logical < 0 THEN
+    RETURN jsonb_build_object('status', 'rejected', 'reason', 'invalid-logical-clock');
+  END IF;
+
+  SELECT capabilities
+    INTO v_capabilities
+    FROM public.sync_protocol_state
+    WHERE scope = 'global';
+  v_capability_enabled := COALESCE(v_capabilities, '[]'::jsonb) @> '["command-envelope-v1"]'::jsonb;
+
+  IF NOT v_capability_enabled THEN
+    v_reason := COALESCE(v_reason, 'command-capability-disabled');
+  END IF;
+
+  IF v_reason IS NOT NULL THEN
+    PERFORM public.record_sync_write_quarantine(
+      v_operation_id,
+      v_user,
+      COALESCE(v_entity_type, 'offline-command'),
+      v_entity_id,
+      NULL,
+      NULL,
+      v_reason,
+      payload
+    );
+    RETURN jsonb_build_object('status', 'quarantined', 'reason', v_reason, 'operationId', v_operation_id);
+  END IF;
+
+  SELECT * INTO v_existing
+    FROM public.sync_command_log
+    WHERE operation_id = v_operation_id;
+  IF FOUND THEN
+    IF v_existing.user_id <> v_user THEN
+      RETURN jsonb_build_object('status', 'unauthorized', 'reason', 'operation_id_owned_by_other_user');
+    END IF;
+    RETURN jsonb_build_object(
+      'status', 'idempotent-replay',
+      'operationId', v_operation_id,
+      'entityType', v_existing.entity_type,
+      'entityId', v_existing.entity_id
+    );
+  END IF;
+
+  INSERT INTO public.sync_command_log (
+    operation_id, user_id, installation_id, device_id, entity_type, entity_id,
+    command, logical_clock_physical_ms, logical_clock_logical, base_version,
+    base_updated_at, dependency_operation_ids, intent, normalized_result_patch,
+    field_versions, envelope, status
+  ) VALUES (
+    v_operation_id,
+    v_user,
+    v_installation_id,
+    v_device_id,
+    v_entity_type,
+    v_entity_id,
+    v_command,
+    v_physical_ms,
+    v_logical,
+    NULLIF(payload->>'baseVersion', '')::BIGINT,
+    NULLIF(COALESCE(payload->>'baseUpdatedAt', payload->>'base_updated_at'), ''),
+    COALESCE(payload->'dependencyOperationIds', '[]'::jsonb),
+    COALESCE(payload->'intent', '{}'::jsonb),
+    payload->'normalizedResultPatch',
+    COALESCE(payload->'fieldVersions', '{}'::jsonb),
+    payload,
+    'accepted-shadow'
+  );
+
+  RETURN jsonb_build_object(
+    'status', 'accepted-shadow',
+    'operationId', v_operation_id,
+    'entityType', v_entity_type,
+    'entityId', v_entity_id,
+    'appliedToDomainTables', false,
+    'projectionApplied', COALESCE(v_capabilities, '[]'::jsonb) @> '["field-lww-v1"]'::jsonb
+  );
+EXCEPTION WHEN unique_violation THEN
+  SELECT * INTO v_existing
+    FROM public.sync_command_log
+    WHERE operation_id = v_operation_id;
+  IF FOUND AND v_existing.user_id = v_user THEN
+    RETURN jsonb_build_object('status', 'idempotent-replay', 'operationId', v_operation_id);
+  END IF;
+  RETURN jsonb_build_object('status', 'unauthorized', 'reason', 'operation_id_owned_by_other_user');
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.sync_apply_offline_command(JSONB) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.sync_apply_offline_command(JSONB) TO authenticated;
+COMMENT ON FUNCTION public.sync_apply_offline_command(JSONB) IS
+  'Capability-gated command ingest with an exact entity/operation allowlist. Unsupported commands are quarantined before command-log insert.';
+
+-- Source migration 20261114153135_sync_offline_command_projection_index_cleanup.sql sha256 1ee1b02ea643e874d333e5df27f9e79f7b73213ed8b14ba040cbec258de7aeeb
+-- The composite primary key already covers owner/entity projection lookups.
+-- Remove the identical secondary index to avoid duplicated write and storage cost.
+DROP INDEX IF EXISTS public.idx_sync_command_projection_owner_entity;
+
+-- Source migration 20261115165939_sync_offline_command_final_domain_apply_fence.sql sha256 b7fd4200fb91c3ab676af03e2c5b01ed5d6008c2b78d373a86b7fe2ec9e38e3f
+-- Final domain-apply override after the exact-allowlist migration sequence.
+-- Keeps production capability enabled while fail-closing connection tombstones
+-- and stale legacy RPC acknowledgements.
+
+CREATE OR REPLACE FUNCTION public.sync_apply_command_domain_tables()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, extensions, pg_temp
+AS $$
+DECLARE
+  v_capabilities JSONB;
+  domain_result JSONB;
+  domain_status TEXT := 'skipped-capability-disabled';
+  v_supported BOOLEAN := false;
+BEGIN
+  SELECT s.capabilities INTO v_capabilities
+    FROM public.sync_protocol_state AS s WHERE s.scope = 'global';
+  IF NOT (COALESCE(v_capabilities, '[]'::jsonb) @> '["domain-apply-v1"]'::jsonb) THEN
+    RETURN NEW;
+  END IF;
+
+  v_supported := CASE NEW.entity_type
+    WHEN 'project' THEN NEW.command IN ('project.create', 'project.update', 'project.delete', 'project.restore')
+    WHEN 'task' THEN NEW.command IN (
+      'task.create', 'task.update', 'task.delete', 'task.permanently_delete', 'task.restore',
+      'task.move', 'task.reorder', 'task.detach', 'task.assign', 'task.tags.update',
+      'task.parking_meta.update', 'task.attention_items.update', 'task.todo.update'
+    )
+    WHEN 'connection' THEN NEW.command IN ('connection.create', 'connection.update', 'connection.restore', 'connection.reorder')
+    WHEN 'black_box_entry' THEN NEW.command IN ('black_box_entry.create', 'black_box_entry.update')
+    WHEN 'preference' THEN NEW.command IN ('preference.create', 'preference.update')
+    WHEN 'focus_session' THEN NEW.command IN ('focus_session.create', 'focus_session.update')
+    WHEN 'routine_task' THEN NEW.command IN ('routine_task.create', 'routine_task.update')
+    WHEN 'routine_completion' THEN NEW.command = 'routine_completion.create'
+    ELSE false
+  END;
+
+  IF NOT v_supported THEN
+    domain_result := jsonb_build_object('status', 'unsupported-domain-command', 'command', NEW.command, 'entityType', NEW.entity_type);
+    domain_status := 'unsupported-domain-command';
+  ELSE
+    BEGIN
+      IF NEW.entity_type = 'project' AND NEW.command = 'project.delete' THEN
+        domain_result := public.sync_delete_project(jsonb_build_object(
+          'operation_id', NEW.operation_id, 'protocol_version', 1,
+          'base_updated_at', NEW.base_updated_at, 'project_id', NEW.entity_id,
+          'client_origin', 'offline-command-domain-apply'
+        ));
+      ELSIF NEW.entity_type = 'task' AND NEW.command IN ('task.delete', 'task.permanently_delete') THEN
+        domain_result := public.sync_delete_tasks(jsonb_build_object(
+          'operation_id', NEW.operation_id, 'protocol_version', 1,
+          'base_updated_at', NEW.base_updated_at,
+          'project_id', COALESCE(
+            NEW.normalized_result_patch->>'project_id',
+            NEW.normalized_result_patch->>'projectId',
+            NEW.normalized_result_patch->'task'->>'project_id',
+            NEW.normalized_result_patch->'task'->>'projectId',
+            NEW.envelope->>'projectId',
+            NEW.envelope->>'project_id'
+          ),
+          'task_ids', jsonb_build_array(NEW.entity_id),
+          'delete_mode', CASE WHEN NEW.command = 'task.permanently_delete' THEN 'purge' ELSE 'soft' END,
+          'client_origin', 'offline-command-domain-apply'
+        ));
+      ELSIF NEW.entity_type = 'task' THEN
+        domain_result := public.sync_upsert_task(jsonb_build_object(
+          'operation_id', NEW.operation_id, 'protocol_version', 1,
+          'base_updated_at', NEW.base_updated_at,
+          'task', COALESCE(NEW.normalized_result_patch->'task', NEW.normalized_result_patch),
+          'client_origin', 'offline-command-domain-apply'
+        ));
+      ELSIF NEW.entity_type = 'project' THEN
+        domain_result := public.sync_upsert_project(jsonb_build_object(
+          'operation_id', NEW.operation_id, 'protocol_version', 1,
+          'base_updated_at', NEW.base_updated_at,
+          'project', COALESCE(NEW.normalized_result_patch->'project', NEW.normalized_result_patch),
+          'client_origin', 'offline-command-domain-apply'
+        ));
+      ELSIF NEW.entity_type = 'connection' THEN
+        domain_result := public.sync_upsert_connection(jsonb_build_object(
+          'operation_id', NEW.operation_id, 'protocol_version', 1,
+          'base_updated_at', NEW.base_updated_at,
+          'connection', jsonb_build_object(
+            'id', COALESCE(NEW.normalized_result_patch->'connection'->>'id', NEW.entity_id::TEXT),
+            'project_id', COALESCE(
+              NEW.normalized_result_patch->'connection'->>'project_id',
+              NEW.normalized_result_patch->'connection'->>'projectId',
+              NEW.normalized_result_patch->>'project_id',
+              NEW.normalized_result_patch->>'projectId'
+            ),
+            'source_id', COALESCE(
+              NEW.normalized_result_patch->'connection'->>'source_id',
+              NEW.normalized_result_patch->'connection'->>'sourceId',
+              NEW.normalized_result_patch->'connection'->>'source'
+            ),
+            'target_id', COALESCE(
+              NEW.normalized_result_patch->'connection'->>'target_id',
+              NEW.normalized_result_patch->'connection'->>'targetId',
+              NEW.normalized_result_patch->'connection'->>'target'
+            ),
+            'title', NEW.normalized_result_patch->'connection'->>'title',
+            'description', NEW.normalized_result_patch->'connection'->>'description',
+            'updated_at', COALESCE(
+              NEW.normalized_result_patch->'connection'->>'updated_at',
+              NEW.normalized_result_patch->'connection'->>'updatedAt'
+            ),
+            'deleted_at', COALESCE(
+              NEW.normalized_result_patch->'connection'->>'deleted_at',
+              NEW.normalized_result_patch->'connection'->>'deletedAt'
+            )
+          ),
+          'client_origin', 'offline-command-domain-apply'
+        ));
+      ELSIF NEW.entity_type = 'black_box_entry' THEN
+        domain_result := public.sync_upsert_blackbox_entry(jsonb_build_object(
+          'operation_id', NEW.operation_id, 'protocol_version', 1,
+          'base_updated_at', NEW.base_updated_at,
+          'entry', COALESCE(NEW.normalized_result_patch->'entry', NEW.normalized_result_patch),
+          'client_origin', 'offline-command-domain-apply'
+        ));
+      ELSIF NEW.entity_type = 'preference' THEN
+        domain_result := public.sync_upsert_user_preferences(jsonb_build_object(
+          'operation_id', NEW.operation_id, 'protocol_version', 1,
+          'base_updated_at', NEW.base_updated_at, 'user_id', NEW.user_id,
+          'preferences', COALESCE(NEW.normalized_result_patch->'preferences', NEW.normalized_result_patch),
+          'client_origin', 'offline-command-domain-apply'
+        ));
+      ELSIF NEW.entity_type = 'focus_session' THEN
+        domain_result := public.sync_upsert_focus_session(jsonb_build_object(
+          'operation_id', NEW.operation_id, 'protocol_version', 1,
+          'focus_session', COALESCE(NEW.normalized_result_patch->'focus_session', NEW.normalized_result_patch),
+          'client_origin', 'offline-command-domain-apply'
+        ));
+      ELSIF NEW.entity_type = 'routine_task' THEN
+        domain_result := public.sync_upsert_routine_task(jsonb_build_object(
+          'operation_id', NEW.operation_id, 'protocol_version', 1,
+          'user_id', NEW.user_id,
+          'routine_task', COALESCE(NEW.normalized_result_patch->'routine_task', NEW.normalized_result_patch),
+          'client_origin', 'offline-command-domain-apply'
+        ));
+      ELSIF NEW.entity_type = 'routine_completion' THEN
+        domain_result := public.sync_increment_routine_completion(jsonb_build_object(
+          'operation_id', NEW.operation_id, 'protocol_version', 1,
+          'user_id', NEW.user_id,
+          'routine_completion', COALESCE(NEW.normalized_result_patch->'routine_completion', NEW.normalized_result_patch),
+          'client_origin', 'offline-command-domain-apply'
+        ));
+      END IF;
+      domain_status := COALESCE(domain_result->>'status', 'unknown');
+      IF NEW.entity_type = 'connection'
+        AND COALESCE(domain_result->>'stale_payload', 'false') = 'true'
+        AND domain_status IN ('applied', 'idempotent-replay')
+      THEN
+        domain_result := jsonb_build_object(
+          'status', 'stale-payload',
+          'reason', 'legacy-rpc-reported-stale-payload',
+          'entityType', NEW.entity_type,
+          'entityId', NEW.entity_id,
+          'rawRpcResult', domain_result
+        );
+        domain_status := 'stale-payload';
+      END IF;
+    EXCEPTION WHEN OTHERS THEN
+      domain_result := jsonb_build_object('status', 'domain-apply-error', 'message', SQLERRM);
+      domain_status := 'domain-apply-error';
+    END;
+  END IF;
+
+  INSERT INTO public.sync_command_domain_apply_log(
+    operation_id, user_id, entity_type, entity_id, status, result
+  ) VALUES (
+    NEW.operation_id, NEW.user_id, NEW.entity_type, NEW.entity_id, domain_status, domain_result
+  ) ON CONFLICT (operation_id) DO UPDATE SET status = EXCLUDED.status, result = EXCLUDED.result;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS zzz_sync_command_domain_apply ON public.sync_command_log;
+CREATE TRIGGER zzz_sync_command_domain_apply
+AFTER INSERT ON public.sync_command_log
+FOR EACH ROW EXECUTE FUNCTION public.sync_apply_command_domain_tables();
+
+REVOKE ALL ON FUNCTION public.sync_apply_command_domain_tables() FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.sync_apply_command_domain_tables() TO service_role;
+
+-- Offline command capture is feature/capability gated; fresh-init leaves capabilities at their empty default.

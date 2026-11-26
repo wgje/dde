@@ -17,6 +17,7 @@ const CLI_TRANSACTION_TEST_STAGES = new Set([
 const BARRIER_ACTIVE_STATES = new Set(['CLOSING', 'WAITING', 'HELD']);
 const BARRIER_WRITE_CLOSING_STATES = new Set(['CLOSING', 'WAITING']);
 const BARRIER_CAPABILITY_PATTERN = /^[a-f0-9]{64}$/i;
+const ABANDONED_WAIT_STALE_MS = 2 * 60 * 1000;
 const RESOURCE_LEASE_COMMANDS = new Set([
   'resource-lease-acquire',
   'resource-lease-heartbeat',
@@ -50,6 +51,7 @@ function parseArgs(argv) {
     canonicalBarrierToken: null,
     barrierTokenFlagCount: 0,
     barrierTokenStdinCount: 0,
+    confirmAbandonedBarrierOwner: null,
     resourceKind: null,
     resourceKindFlagCount: 0,
     resourceId: null,
@@ -83,6 +85,10 @@ function parseArgs(argv) {
     }
     if (arg === '--barrier-token-stdin') {
       parsed.barrierTokenStdinCount += 1;
+      continue;
+    }
+    if (arg === '--confirm-abandoned-barrier-owner') {
+      parsed.confirmAbandonedBarrierOwner = requireValue(argv, ++index, '--confirm-abandoned-barrier-owner');
       continue;
     }
     if (arg === '--resource-kind') {
@@ -151,6 +157,14 @@ function readBarrierAcquisitionTokenFromStdin() {
 }
 
 function prepareBarrierToken(args) {
+  if (args.confirmAbandonedBarrierOwner !== null
+    && args.command !== 'barrier-recover-abandoned-wait') {
+    throw new Error('--confirm-abandoned-barrier-owner is only supported for barrier-recover-abandoned-wait');
+  }
+  if (args.command === 'barrier-recover-abandoned-wait'
+    && args.confirmAbandonedBarrierOwner === null) {
+    throw new Error('barrier-recover-abandoned-wait requires --confirm-abandoned-barrier-owner');
+  }
   if (args.barrierTokenFlagCount > 1) {
     throw new Error('barrier acquisition token source --barrier-token must not be repeated');
   }
@@ -705,6 +719,77 @@ function barrierRecoverStaleOverlayGenerator(state, owner) {
     status: 0,
     body: barrierBody('barrier-recover-stale', state, barrier, {
       recovered: true, ownerPid: pid, releasedResourceLeaseCount: boundLeases.length,
+    }),
+    stateChanged: true,
+    state,
+  };
+}
+
+function barrierRecoverAbandonedWait(state, owner, confirmedOwner) {
+  const barrier = effectiveBarrier(state);
+  if (barrier.state !== 'WAITING' || barrier.owner !== owner
+    || confirmedOwner !== barrier.owner) {
+    return rejectedBarrierBody(
+      'barrier-recover-abandoned-wait',
+      state,
+      barrier,
+      'abandoned-barrier-confirmation-mismatch',
+    );
+  }
+  if (barrier.heldEpoch !== null || barrier.fence !== null) {
+    return rejectedBarrierBody(
+      'barrier-recover-abandoned-wait',
+      state,
+      barrier,
+      'waiting-barrier-binding-invalid',
+    );
+  }
+  const heartbeatAt = Date.parse(barrier.heartbeatAt);
+  if (!Number.isFinite(heartbeatAt) || Date.now() - heartbeatAt < ABANDONED_WAIT_STALE_MS) {
+    return rejectedBarrierBody(
+      'barrier-recover-abandoned-wait',
+      state,
+      barrier,
+      'barrier-not-stale',
+      { staleAfterMs: ABANDONED_WAIT_STALE_MS },
+    );
+  }
+  const { active: activeFileLeases } = splitLeasesByExpiry(state);
+  if (Object.keys(activeFileLeases).length > 0) {
+    return rejectedBarrierBody(
+      'barrier-recover-abandoned-wait',
+      state,
+      barrier,
+      'active-file-leases',
+      { blockers: Object.keys(activeFileLeases).sort() },
+    );
+  }
+  const activeResourceLeases = Object.values(effectiveResourceLeases(state))
+    .filter(lease => lease?.state === 'ACTIVE' && lease.expiresAtMs > Date.now());
+  if (activeResourceLeases.length > 0) {
+    return rejectedBarrierBody(
+      'barrier-recover-abandoned-wait',
+      state,
+      barrier,
+      'active-resource-leases',
+      { blockers: activeResourceLeases.map(lease => ({
+        owner: lease.owner,
+        resourceId: lease.resourceId,
+        tokenFingerprint: lease.tokenFingerprint,
+      })) },
+    );
+  }
+  const releasedAt = nextTimestampAtOrAfter(
+    barrier.heartbeatAt,
+    barrier.transitions.at(-1)?.at,
+  );
+  appendBarrierTransition(barrier, 'RELEASED', releasedAt);
+  barrier.releasedAt = releasedAt;
+  return {
+    status: 0,
+    body: barrierBody('barrier-recover-abandoned-wait', state, barrier, {
+      recovered: true,
+      releasedResourceLeaseCount: 0,
     }),
     stateChanged: true,
     state,
@@ -1433,6 +1518,13 @@ async function main() {
       if (args.command === 'barrier-recover-stale') {
         return barrierRecoverStaleOverlayGenerator(state, args.owner);
       }
+      if (args.command === 'barrier-recover-abandoned-wait') {
+        return barrierRecoverAbandonedWait(
+          state,
+          args.owner,
+          args.confirmAbandonedBarrierOwner,
+        );
+      }
       if (args.command === 'barrier-release') {
         return barrierRelease(state, args.owner, args.barrierToken);
       }
@@ -1465,7 +1557,7 @@ async function main() {
           args.canonicalResourceToken,
         );
       }
-      throw new Error('usage: agent-file-lease [--root <dir>] [--owner <id>] [--barrier-token <token>|--barrier-token-stdin] [--resource-kind <read|build> --resource-id <id> --resource-token-stdin] <claim|release|status|prune|reconcile-expired-exact|barrier-acquire|barrier-heartbeat|barrier-release|barrier-recover-stale|resource-lease-acquire|resource-lease-heartbeat|resource-lease-release> [files...]');
+      throw new Error('usage: agent-file-lease [--root <dir>] [--owner <id>] [--barrier-token <token>|--barrier-token-stdin] [--resource-kind <read|build> --resource-id <id> --resource-token-stdin] <claim|release|status|prune|reconcile-expired-exact|barrier-acquire|barrier-heartbeat|barrier-release|barrier-recover-stale|barrier-recover-abandoned-wait|resource-lease-acquire|resource-lease-heartbeat|resource-lease-release> [files...]');
     }, ownerRef);
     await waitForCliTransactionTestCheckpoint(args.root, 'after-commit-before-release');
     return transactionResult;

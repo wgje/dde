@@ -200,6 +200,7 @@ function createApplication(env) {
       connectTimeoutMs: 10_000,
       callTimeoutMs: 70_000,
       redact,
+      useProxy: !testFixtureMode(env),
     }),
   });
   return { redact, runtime, store };

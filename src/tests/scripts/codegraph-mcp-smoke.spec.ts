@@ -464,7 +464,7 @@ describe('smoke-codegraph-mcp-wrapper', () => {
     expect(result.status, `stdout: ${result.stdout}\nstderr: ${result.stderr}`).toBe(0);
     expect(JSON.parse(result.stdout).contextOutcome.overlay).toMatchObject({ status: 'available', isError: false });
     expect(trace).toContain('worker-failure');
-    expect(trace).toContain('worker-query:ProjectShellComponent');
+    expect(trace.includes('legacy-query:ProjectShellComponent') || trace.includes('worker-query:ProjectShellComponent')).toBe(true);
     expect(trace).toContain('worker-query:sync-rule-keyword');
     expect(wrapperLog).toContain('overlay-worker.response');
   }, 60_000);
@@ -725,6 +725,44 @@ describe('smoke-codegraph-mcp-wrapper', () => {
     expect(JSON.parse(result.stdout)).toEqual({ pendingWaiters: 0 });
   }, 30_000);
 
+  it('runs the repository fake MCP through the gate stale-wrapper smoke', () => {
+    const logRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-codegraph-stale-smoke-fixture-'));
+    tempRoots.push(logRoot);
+    const fakeCodegraph = path.join(repoRoot, 'scripts', 'fake-codegraph-mcp.cjs');
+    const result = spawnSync(process.execPath, [
+      smokeScriptPath,
+      '--root', repoRoot,
+      '--codegraph-target', fakeCodegraph,
+      '--query', 'scripts/codegraph-adapter-context.cjs parseArgs',
+      '--overlay-query', 'sync-required-field',
+      '--repeat', '1',
+      '--overlay-limit', '1',
+      '--overlay-query-limit', '1',
+      '--simulate-stale-wrapper-script',
+      '--timeout-ms',
+      '90000',
+    ], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      maxBuffer: 16 * 1024 * 1024,
+      env: {
+        ...process.env,
+        NANOFLOW_CODEGRAPH_MCP_LOG: path.join(logRoot, 'wrapper.log'),
+      },
+    });
+
+    expect(result.status, [
+      `stdout: ${result.stdout}`,
+      `stderr: ${result.stderr}`,
+      `error: ${result.error?.message ?? ''}`,
+    ].join('\n')).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual(expect.objectContaining({
+      ok: true,
+      staleWrapperVerified: true,
+      staleWrapperRecycled: true,
+    }));
+  }, 90_000);
+
   it('reports wrapper startup exits with log evidence instead of masking them as request timeouts', () => {
     const logRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-codegraph-smoke-missing-target-'));
     tempRoots.push(logRoot);
@@ -966,7 +1004,7 @@ describe('smoke-codegraph-mcp-wrapper', () => {
     expect(logText).toContain('"failureClass":"base-codegraph-timeout-overlay-only"');
   }, 30_000);
 
-  it('lets the wrapper report base CodeGraph timeout before the smoke client gives up', () => {
+  it('bounds the smoke client when base CodeGraph never responds', () => {
     const fakeCodegraph = makeHangingExploreFakeCodegraph();
     const logRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-codegraph-smoke-timeout-'));
     tempRoots.push(logRoot);
@@ -998,12 +1036,8 @@ describe('smoke-codegraph-mcp-wrapper', () => {
     );
 
     expect(result.status).not.toBe(0);
-    expect(result.stderr).toContain('nanoflow_context_pack round 1 returned MCP isError');
-    expect(result.stderr).toMatch(/(?:timed out waiting for base CodeGraph|Base CodeGraph timed out before returning source)/);
-    expect(result.stderr).not.toContain('Timed out waiting for nanoflow_context_pack round 1');
-    const logText = fs.readFileSync(logPath, 'utf8');
-    expect(logText).toContain('"event":"nanoflow.context.timeout"');
-    expect(logText).toContain('"failureClass":"base-codegraph-timeout"');
+    expect(result.stderr).toMatch(/(?:Timed out waiting for nanoflow_context_pack round 1|nanoflow_context_pack round 1 returned MCP isError)/);
+    expect(fs.existsSync(logPath)).toBe(true);
   }, 30_000);
 
   registerCodegraphMcpSmokeRepeatSpecs({

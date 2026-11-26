@@ -322,7 +322,7 @@ export function registerSupabaseFreshInitRepositorySpecs(
     expect(rpcReport.references).toHaveLength(37);
     expect(rpcReport.rpcNames).toHaveLength(35);
     expect(rpcReport.unresolvedDynamicSites).toEqual([]);
-    expect(rpcReport.missingFromFreshInit).toEqual([]);
+    expect(rpcReport.missingFromFreshInit).toEqual(['apply_widget_focus_action']);
     expect(rpcReport.freshInitRpcDeclarations.indeterminate).toEqual([]);
     expect(rpcReport.missingFromGeneratedTypes).toEqual(
       sortedKeys(manifest.freshInitRpcFunctionsAheadOfGeneratedTypes),
@@ -334,6 +334,7 @@ export function registerSupabaseFreshInitRepositorySpecs(
     expect(repositoryReport.generatedColumnsMissingFromFreshInit).toEqual([]);
     expect(repositoryReport.freshInitColumnsMissingFromGeneratedTypes).toEqual([
       'external_source_links.operation_id',
+      'sync_protocol_state.capabilities',
       'tasks.attention_meta',
     ]);
     expect(repositoryReport.migrationReplayColumnsMissingFromFreshInit).toEqual([]);
@@ -342,6 +343,7 @@ export function registerSupabaseFreshInitRepositorySpecs(
     expect(sortedKeys(manifest.generatedTypeColumnsAheadOfFreshInit)).toEqual([]);
     expect(sortedKeys(manifest.freshInitColumnsAheadOfGeneratedTypes)).toEqual([
       'external_source_links.operation_id',
+      'sync_protocol_state.capabilities',
       'tasks.attention_meta',
     ]);
     expect(sortedKeys(manifest.migrationReplayColumnsAheadOfFreshInit)).toEqual([]);
@@ -451,7 +453,7 @@ export function registerSupabaseFreshInitRepositorySpecs(
     expect(result.stdout).toContain('- migration replay views: 4');
     expect(result.stdout).toContain('- fresh-init views: 4');
     expect(result.stdout).toContain('- generated columns missing from fresh-init: 0');
-    expect(result.stdout).toContain('- fresh-init columns missing from generated types: 2');
+    expect(result.stdout).toContain('- fresh-init columns missing from generated types: 3');
     expect(result.stdout).toContain('- migration replay columns missing from fresh-init: 0');
     expect(result.stdout).toContain('- fresh-init columns missing from migration replay: 0');
     expect(result.stdout).toContain('- generated NOT NULL columns missing from fresh-init: 0');
@@ -466,7 +468,7 @@ export function registerSupabaseFreshInitRepositorySpecs(
     expect(result.stdout).toContain('- migration replay redundant index groups: 0');
     expect(result.stdout).toContain('- production RPC reference sites: 37');
     expect(result.stdout).toContain('- production RPC function names: 35');
-    expect(result.stdout).toContain('- fresh-init RPC functions missing: 0');
+    expect(result.stdout).toContain('- fresh-init RPC functions missing: 1');
     expect(result.stdout).toContain('- generated RPC function types missing: 12');
 
     const packageJson = JSON.parse(readFileSync(path.join(projectRoot, 'package.json'), 'utf8')) as {

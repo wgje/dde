@@ -66,6 +66,7 @@
     "guides": [
       "docs/context7/overview.md",
       "docs/context7/architecture.md",
+      "docs/context7/production-recovery.md",
       "docs/context7/data-model.md",
       "docs/context7/sync-offline.md",
       "docs/context7/feature-workflows.md",

@@ -30,8 +30,8 @@ class OverlayV1SchemaError extends Error {
   }
 }
 
-function fail(code, schemaPath = '') {
-  throw new OverlayV1SchemaError(code, schemaPath);
+function fail(code, schemaPath = '', diagnostics) {
+  throw new OverlayV1SchemaError(code, schemaPath, diagnostics);
 }
 function deepFreeze(value) {
   if (!value || (typeof value !== 'object' && typeof value !== 'function') || Object.isFrozen(value)) return value;
@@ -60,7 +60,7 @@ function descriptorContentDigest(descriptor) {
   const { descriptorDigest: _descriptorDigest, ...projection } = descriptor;
   const runtimeSource = typeof descriptor.createRuntime === 'function'
     ? Function.prototype.toString.call(descriptor.createRuntime) : '';
-  const runtimeFrame = runtimeSource ? `\0${digestFrame('runtime-source', runtimeSource)}` : '';
+  const runtimeFrame = runtimeSource ? `\0${digestFrame('runtime-source', runtimeSource.replaceAll('\r\n', '\n').replaceAll('\r', '\n'))}` : '';
   return crypto.createHash('sha256')
     .update(`nanoflow-overlay-v1-descriptor\0${descriptor.name}\0${canonicalJson(projection)}${runtimeFrame}`)
     .digest('hex');
@@ -76,11 +76,11 @@ const runtimeDescriptorManifestDigest = crypto.createHash('sha256')
 for (const descriptor of DESCRIPTORS) {
   if (descriptor.descriptorDigest !== runtimeDescriptorDigests[descriptor.name]
     || contract.descriptorDigests[descriptor.name] !== runtimeDescriptorDigests[descriptor.name]) {
-    fail('OVERLAY_SCHEMA_DIGEST_MISMATCH');
+    fail('OVERLAY_SCHEMA_DIGEST_MISMATCH', '', { boundary: 'descriptor', descriptor: descriptor.name, literal: descriptor.descriptorDigest, contract: contract.descriptorDigests[descriptor.name], runtime: runtimeDescriptorDigests[descriptor.name] });
   }
 }
 if (contract.descriptorManifestDigest !== runtimeDescriptorManifestDigest) {
-  fail('OVERLAY_SCHEMA_DIGEST_MISMATCH');
+  fail('OVERLAY_SCHEMA_DIGEST_MISMATCH', '', { boundary: 'descriptor-manifest', contract: contract.descriptorManifestDigest, runtime: runtimeDescriptorManifestDigest });
 }
 const { schemaDigest: _schemaDigest, ...literalContractProjection } = contract;
 const contractProjection = {
@@ -156,7 +156,7 @@ class OverlaySchemaEngine {
     }
     if (contract.schemaVersion !== OVERLAY_V1_SCHEMA_VERSION
       || contract.schemaDigest !== COMPUTED_SCHEMA_DIGEST) {
-      fail('OVERLAY_SCHEMA_DIGEST_MISMATCH');
+      fail('OVERLAY_SCHEMA_DIGEST_MISMATCH', '', { boundary: 'schema', contract: contract.schemaDigest, runtime: COMPUTED_SCHEMA_DIGEST });
     }
     this.expectedProjectRoot = normalizedProjectRoot(options.expectedProjectRoot);
     this.limits = limits;

@@ -159,6 +159,11 @@ function makeCheck(name, ok, details = {}) {
   };
 }
 
+function boundedDiagnostic(value, maxLength = 4_000) {
+  const text = String(value ?? '');
+  return text.length <= maxLength ? text : text.slice(-maxLength);
+}
+
 function buildReport(args) {
   const checks = [];
   const git = {
@@ -172,6 +177,11 @@ function buildReport(args) {
   checks.push(makeCheck('doctor', doctorOk, {
     status: doctor.status,
     healthy: doctor.body?.ok === true,
+    ...(doctor.body ? {} : {
+      stdoutTail: boundedDiagnostic(doctor.stdout),
+      stderrTail: boundedDiagnostic(doctor.stderr),
+      spawnError: doctor.error?.message ?? doctor.error?.code ?? null,
+    }),
   }));
 
   const leaseStatus = runJsonScript(args.root, 'agent-file-lease.cjs', ['status']);

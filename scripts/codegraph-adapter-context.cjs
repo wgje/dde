@@ -232,7 +232,12 @@ function readActiveCodegraphWriterLock(root, dependencies = {}) {
 
 function resolveAdapterFallbackRuntime(root, dependencies = {}) {
   const writerLock = readActiveCodegraphWriterLock(root, dependencies);
-  if (!writerLock.active) {
+  // An indexed project must use the upstream proxy even when writer.pid is
+  // absent, stale, direct or fallback-owned. Only the upstream atomic lock can
+  // decide whether to create a daemon or open a read-only fallback. A local
+  // precheck cannot reserve writer ownership across process startup.
+  const indexed = fs.existsSync(path.join(codegraphDataDir(root, dependencies.environment || process.env), 'codegraph.db'));
+  if (!indexed) {
     return {
       mode: 'direct-session',
       writerLock,
@@ -242,8 +247,7 @@ function resolveAdapterFallbackRuntime(root, dependencies = {}) {
       },
     };
   }
-  // Reuse only a writer lock whose daemon identity is bound to this exact root.
-  // A live unrelated or PID-reused process must never switch fallback topology.
+  // Keep exact-root identity evidence, but delegate lock arbitration to CodeGraph.
   return {
     mode: 'shared-daemon-proxy',
     writerLock,
@@ -1893,9 +1897,37 @@ async function shutdownProcessTree(child, closeTracker, options = {}) {
   return closeTracker.wait(forcedTimeoutMs);
 }
 
+function inspectExactRootWorktree(options = {}) {
+    const root = path.resolve(options.root || process.cwd());
+    const gitPath = path.join(root, '.git');
+    if (!fs.existsSync(gitPath) || !fs.statSync(gitPath).isFile()) return { status: 'not-applicable', root };
+    const markerPath = path.join(root, '.codegraph', 'worktree-runtime.json');
+    const currentPath = path.join(root, '.codegraph', 'nanoflow-generations', 'CURRENT.json');
+    try {
+      const marker = JSON.parse(fs.readFileSync(markerPath, 'utf8'));
+      const currentBytes = fs.readFileSync(currentPath);
+      const current = require('./lib/codegraph-overlay-current-receipt.cjs').readOverlayCurrentReceipt(root);
+      const databasePath = path.join(root, '.codegraph', 'codegraph.db');
+      const receiptMatches = marker.schemaVersion === 1
+        && path.resolve(marker.root).toLowerCase() === root.toLowerCase()
+        && marker.currentSha256 === require('node:crypto').createHash('sha256').update(currentBytes).digest('hex')
+        && fs.existsSync(databasePath);
+      return current.ok && receiptMatches
+        ? { status: 'READY', root, generationId: current.current.generationId, error: null }
+        : { status: 'pending', root, error: current.errorCode || 'worktree-setup-receipt-mismatch' };
+    } catch {
+      return { status: 'pending', root, error: fs.existsSync(currentPath) ? 'worktree-setup-receipt-invalid' : 'worktree-setup-required' };
+    }
+}
+
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   const invocation = resolveWrapperInvocation(options);
+  // Never block a context request on dependency installation or graph building.
+  // Provision a new root explicitly with codex:worktree:setup.
+  const worktreeSetup = invocation.codegraphTarget === DEFAULT_CODEGRAPH_TARGET
+    ? inspectExactRootWorktree({ root: options.root })
+    : { status: 'not-applicable', error: null };
   const adapterRuntime = resolveAdapterFallbackRuntime(options.root);
   const workerEnv = invocation.configEnv?.NANOFLOW_CODEGRAPH_OVERLAY_WORKER_ENABLED;
   const workerEnabled = workerEnv === '0'
@@ -2075,6 +2107,7 @@ async function main() {
         activeWrappers: logAnalysis.activeWrappers,
         adapterFallbackTopology: adapterRuntime.mode,
         adapterWriterLock: adapterRuntime.writerLock,
+        worktreeSetup,
       },
     };
 
@@ -2113,5 +2146,7 @@ module.exports = {
   readActiveCodegraphWriterLock,
   readProcessStartIdentity,
   resolveAdapterFallbackRuntime,
+  inspectExactRootWorktree,
+
   codegraphDataDirNameFor,
 };

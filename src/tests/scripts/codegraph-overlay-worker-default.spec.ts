@@ -174,4 +174,5 @@ describe('shared-daemon overlay worker default and prewarm contract', () => {
     }));
     expect(result.events.some(event => event.event === 'overlay.worker.pool.selected')).toBe(false);
   }, 15_000);
+
 });

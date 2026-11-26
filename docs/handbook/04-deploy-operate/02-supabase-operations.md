@@ -2,7 +2,7 @@
 title: Supabase 运维
 status: canonical
 audience: operator
-last_verified: 2026-11-10
+last_verified: 2026-11-25
 category: deploy-operate
 source_paths:
   - README.md
@@ -351,6 +351,12 @@ npm run db:types
 
 5. 检查 `src/types/supabase.ts` 是否与这次 schema 变化一致。
 
+离线命令协议的表、RPC 和投影属于兼容性预备结构，不代表该写路径已开放。`sync_protocol_state.capabilities` 在 fresh-init 默认保持空数组；初始化只修复 NULL 或非数组脏值，不应清除已由运维显式启用的 capability。未完成独立验证前，客户端继续使用现有 durable queue。
+
+`connection.delete` 暂不允许走离线命令 domain-apply：旧连接 upsert 不等价于已验证的 tombstone 删除。该命令必须留在客户端 quarantine，直到迁移能用删除时间、base version 和幂等回执正确表达 tombstone 语义。owner-scoped domain receipt 的 `user_id` 索引只改善 RLS 过滤性能，不改变权限。
+
+涉及这些 migration 的正式 Cloudflare 发布仍需在 `main` 上明确触发 `workflow_dispatch`，同时选择 `target=production` 和 `deploy=true`；预览构建、静态检查和本地通过不代表生产已修复。
+
 为什么必须补第 4 步：
 
 - `package.json` 明确把 `db:types` 定义成 `node scripts/supabase-cli.cjs gen types typescript --linked > src/types/supabase.ts`；
@@ -497,3 +503,7 @@ Supabase 相关问题不要一上来就写 SQL、删缓存或改 policy。先按
 - 部署和环境变量边界：读 [私有部署](01-private-deployment.md)。
 - 处理函数故障和线上症状：读 [生产排障](04-production-troubleshooting.md#edge-function-功能失败)。
 - 面向用户的数据恢复入口和限制：读 [备份与恢复](../03-data-sync-safety/03-backup-and-restore.md)。
+
+## 空库初始化验证
+
+初始化脚本需先创建 `projects` 再创建引用它的 SQL owner/access helper；`active_tasks` 的初始列顺序需与后续替换兼容。应在任务专用的本地空库执行脚本并保持函数体校验开启，再演练候选迁移及回滚。只读 Storage schema 前置依赖、fresh-init、升级迁移和线上读回属于不同证据，不可互相替代。

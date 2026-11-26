@@ -42,6 +42,21 @@ describe('analyze-codegraph-mcp-log', () => {
     cleanupAnalyzerTempRoots();
   });
 
+  it('writes large JSON reports completely before exiting', () => {
+    const logPath = makeLog(Array.from({ length: 1_000 }, (_, index) => ({
+      ts: '2026-11-25T00:00:00.000Z',
+      event: 'fixture.large-report',
+      failureClass: `fixture-${index}-${'x'.repeat(180)}`,
+    })));
+
+    const result = runAnalyzer(logPath);
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(Buffer.byteLength(result.stdout)).toBeGreaterThan(200_000);
+    const summary = JSON.parse(result.stdout) as { failureClassCounts: Record<string, number> };
+    expect(Object.keys(summary.failureClassCounts)).toHaveLength(1_000);
+  }, ANALYZER_SPEC_TIMEOUT_MS);
+
   it('treats host stdin shutdown and idle child exit as non-critical', () => {
     const logPath = makeLog([
       {

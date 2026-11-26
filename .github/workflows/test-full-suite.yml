@@ -15,6 +15,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  LANG: 'zh-CN'
+
 jobs:
   codegraph-adapter-gate:
     runs-on: ubuntu-latest
@@ -27,11 +30,22 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: 24.11.1
           cache: npm
 
       - name: Install Dependencies
         run: npm ci
+
+      - name: Prepare test environment
+        run: npm run test:prepare-env
+
+      - name: Bootstrap exact-root CodeGraph index and overlay
+        run: >-
+          node scripts/codegraph-worktree-bootstrap.cjs
+          --root "$GITHUB_WORKSPACE"
+          --source-root "$GITHUB_WORKSPACE"
+          --require-ready
+          --json
 
       - name: Configure CodeGraph Adapter for CI
         shell: bash
@@ -50,6 +64,9 @@ jobs:
           CODEGRAPH_NO_WATCH = "0"
           NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS = "30000"
           NANOFLOW_CODEGRAPH_OVERLAY_QUERY_TIMEOUT_MS = "60000"
+          NANOFLOW_CODEGRAPH_OVERLAY_WORKER_ENABLED = "1"
+          NANOFLOW_CODEGRAPH_OVERLAY_WORKER_POOL_SIZE = "1"
+          NANOFLOW_CODEGRAPH_OVERLAY_PREWARM = "1"
           NANOFLOW_CODEGRAPH_REFRESH_ON_STARTUP = "0"
           NANOFLOW_CODEGRAPH_STALE_WRAPPER_AUTO_RECYCLE = "0"
           EOF
@@ -81,7 +98,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: 24.11.1
           cache: npm
 
       - name: Install Dependencies
@@ -110,11 +127,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # Source-bound ledger checks require historical commit objects.
+          fetch-depth: 0
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: 24.11.1
           cache: npm
 
       - name: Install Dependencies

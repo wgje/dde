@@ -183,3 +183,6 @@ npm run docs:validate
 
 - 准备 Supabase：[Supabase 运维](02-supabase-operations.md)。
 - 部署函数：[Edge Functions](03-edge-functions.md)。
+## 2026-11-26 发布证据边界
+
+构建或 Preview 成功不等于生产修复完成。生产发布前必须有候选 SHA、迁移演练、artifact 校验和回滚证据；发布后还要读回版本、headers、登录、同步重放和账号隔离结果。

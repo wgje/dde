@@ -1,5 +1,6 @@
 import { isValidUUID } from '../../../../utils/validation';
 import { supabaseErrorToError } from '../../../../utils/supabase-error';
+import type { RetryQueueItemTerminalReason } from '../../../../services/retry-queue-item-terminal-reason';
 
 export type RetryQueueBlockReason =
   | 'already-processing'
@@ -255,13 +256,6 @@ export interface RetryQueuePreflightItem {
   sourceUserId?: string;
   writeIntent?: string;
 }
-
-export type RetryQueueItemTerminalReason =
-  | 'missing-project-id'
-  | 'invalid-data-id'
-  | 'task-upsert-missing-updated-at'
-  | 'drop-legacy-local-user'
-  | 'drop-legacy-missing-source-user';
 
 export type RetryQueueItemPreflightDecision =
   | { kind: 'process' }

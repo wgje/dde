@@ -628,22 +628,19 @@ export class LocalBackupUIService {
   }
 
   private async readBackupDataFromFile(file: File): Promise<BackupData | null> {
+    let parsed: unknown;
+    let parseFailed = false;
     try {
-      const parsed = JSON.parse(await file.text()) as unknown;
-      if (!parsed || typeof parsed !== 'object') {
-        return null;
-      }
-
-      const candidate = parsed as Record<string, unknown>;
-      if (typeof candidate['payloadVersion'] !== 'string' || !candidate['localState']) {
-        return null;
-      }
-
-      return parsed as BackupData;
+      parsed = JSON.parse(await file.text()) as unknown;
     } catch {
       // Malformed local backup files keep the UI contract: null triggers the restore error state.
+      parseFailed = true;
     }
-    return null;
+    if (parseFailed || !parsed || typeof parsed !== 'object') return null;
+
+    const candidate = parsed as Record<string, unknown>;
+    if (typeof candidate['payloadVersion'] !== 'string' || !candidate['localState']) return null;
+    return parsed as BackupData;
   }
 
   private buildLocalStateRestorePreview(
@@ -873,24 +870,28 @@ function readOwnerQueueSnapshot(ownerUserId: string): unknown[] | null {
   if (typeof localStorage === 'undefined') return null;
   const raw = localStorage.getItem(`${LOCAL_QUEUE_CONFIG.QUEUE_STORAGE_KEY}.${ownerUserId}`);
   if (raw === null) return [];
+  let parsed: unknown;
+  let parseFailed = false;
   try {
-    const parsed = JSON.parse(raw) as unknown;
-    return Array.isArray(parsed) ? parsed : null;
+    parsed = JSON.parse(raw) as unknown;
   } catch {
-    return null;
+    parseFailed = true;
   }
+  return !parseFailed && Array.isArray(parsed) ? parsed : null;
 }
 
 function readOwnerDeadLetterSnapshot(ownerUserId: string): unknown[] | null {
   if (typeof localStorage === 'undefined') return null;
   const raw = localStorage.getItem(`${LOCAL_QUEUE_CONFIG.DEAD_LETTER_STORAGE_KEY}.${ownerUserId}`);
   if (raw === null) return [];
+  let parsed: unknown;
+  let parseFailed = false;
   try {
-    const parsed = JSON.parse(raw) as unknown;
-    return Array.isArray(parsed) ? parsed : null;
+    parsed = JSON.parse(raw) as unknown;
   } catch {
-    return null;
+    parseFailed = true;
   }
+  return !parseFailed && Array.isArray(parsed) ? parsed : null;
 }
 
 function stableSerialize(value: unknown): string {

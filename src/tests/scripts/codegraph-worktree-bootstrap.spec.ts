@@ -1,3 +1,4 @@
+import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -6,6 +7,7 @@ import { describe, expect, it } from 'vitest';
 
 const repoRoot = path.resolve(__dirname, '../../..');
 const bootstrapPath = path.join(repoRoot, 'scripts', 'codegraph-worktree-bootstrap.cjs');
+const requireCjs = createRequire(import.meta.url);
 const tempRoots: string[] = [];
 
 afterEach(() => {
@@ -39,6 +41,91 @@ function runBootstrap(root: string, extraArgs: string[] = []) {
 }
 
 describe('codegraph worktree bootstrap', () => {
+  it('uses the target platform npm cache for Linux native-index bootstrap', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-bootstrap-linux-cache-'));
+    tempRoots.push(root);
+    const homeDirectory = path.join(root, 'runner-home');
+    const databasePath = path.join(root, '.codegraph', 'codegraph.db');
+    let capturedCache: string | undefined;
+    let capturedArgs: string[] = [];
+    const bootstrap = requireCjs(bootstrapPath) as {
+      resolveNpmCache(env: NodeJS.ProcessEnv, platform: NodeJS.Platform, homeDirectory: string): string;
+      ensureNativeIndex(root: string, sourceRoot: null, dependencies: {
+        env: NodeJS.ProcessEnv;
+        platform: NodeJS.Platform;
+        homeDirectory: string;
+        spawnSync: (command: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv }) => {
+          status: number | null;
+          stderr: string;
+          stdout: string;
+        };
+      }): { status: string };
+    };
+
+    expect(bootstrap.resolveNpmCache({}, 'linux', homeDirectory)).toBe(path.join(homeDirectory, '.npm'));
+    expect(bootstrap.resolveNpmCache({}, 'win32', homeDirectory)).toBe('D:/Code/tools/codegraph-npm-cache');
+    expect(bootstrap.resolveNpmCache({ NPM_CONFIG_CACHE: '/runner/npm-cache' }, 'linux', homeDirectory)).toBe('/runner/npm-cache');
+
+    const result = bootstrap.ensureNativeIndex(root, null, {
+      env: {},
+      platform: 'linux',
+      homeDirectory,
+      spawnSync: (_command, args, options) => {
+        capturedArgs = args;
+        capturedCache = options.env.npm_config_cache;
+        fs.mkdirSync(path.dirname(databasePath), { recursive: true });
+        fs.writeFileSync(databasePath, 'native-index-fixture');
+        return { status: 0, stderr: '', stdout: '' };
+      },
+    });
+
+    expect(result.status).toBe('ready');
+    expect(capturedCache).toBe(path.join(homeDirectory, '.npm'));
+    expect(capturedArgs).toContain('--package=@colbymchenry/codegraph@1.6.2');
+    expect(capturedArgs).toContain('codegraph');
+  });
+  it('uses the exact --root passed to the setup CLI', () => {
+    const setup = requireCjs(path.join(repoRoot, 'scripts', 'setup-codegraph-worktree.cjs')) as {
+      rootFromArgs(argv: string[], fallback?: string): string;
+    };
+    expect(setup.rootFromArgs(['--root', 'D:\\Code\\candidate'], 'D:\\Code\\dde')).toBe('D:\\Code\\candidate');
+    expect(() => setup.rootFromArgs(['--root'])).toThrow('codegraph-setup-root-argument-missing');
+  });
+
+  it('recovers setup lock only when the recorded owner PID is dead', () => {
+    const { withSetupLock } = requireCjs(path.join(repoRoot, 'scripts', 'lib', 'codegraph-worktree-setup-lock.cjs')) as {
+      withSetupLock<T>(root: string, callback: () => T, options?: { isProcessAlive?: (pid: number) => boolean }): T;
+    };
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-bootstrap-stale-lock-'));
+    tempRoots.push(root);
+    fs.mkdirSync(path.join(root, '.codegraph-worktree-setup.lock'), { recursive: true });
+    fs.writeFileSync(path.join(root, '.codegraph-worktree-setup.lock', 'owner.json'), JSON.stringify({ pid: 456789, startedAt: new Date().toISOString() }));
+    expect(withSetupLock(root, () => 'recovered', { isProcessAlive: () => false })).toBe('recovered');
+    expect(fs.existsSync(path.join(root, '.codegraph-worktree-setup.lock'))).toBe(false);
+  });
+
+  it('recovers a setup lock abandoned before its owner record was written', () => {
+    const { withSetupLock } = requireCjs(path.join(repoRoot, 'scripts', 'lib', 'codegraph-worktree-setup-lock.cjs')) as {
+      withSetupLock<T>(root: string, callback: () => T, options?: { ownerRecordGraceMs?: number }): T;
+    };
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-bootstrap-empty-lock-'));
+    tempRoots.push(root);
+    fs.mkdirSync(path.join(root, '.codegraph-worktree-setup.lock'));
+    expect(withSetupLock(root, () => 'held', { ownerRecordGraceMs: -1 })).toBe('held');
+    expect(fs.existsSync(path.join(root, '.codegraph-worktree-setup.lock'))).toBe(false);
+  });
+
+  it('serializes exact-root setup and returns a deterministic lock timeout', () => {
+    const { withSetupLock } = requireCjs(path.join(repoRoot, 'scripts', 'lib', 'codegraph-worktree-setup-lock.cjs')) as {
+      withSetupLock<T>(root: string, callback: () => T, options?: { timeoutMs?: number }): T;
+    };
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-bootstrap-lock-'));
+    tempRoots.push(root);
+    expect(withSetupLock(root, () => 'prepared')).toBe('prepared');
+    fs.mkdirSync(path.join(root, '.codegraph-worktree-setup.lock'));
+    expect(() => withSetupLock(root, () => 'unreachable', { timeoutMs: 1 })).toThrow('codegraph-worktree-setup-lock-timeout');
+  });
+
   it('fails closed when no source root supplies a missing runtime closure', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-bootstrap-blocked-'));
     tempRoots.push(root);
@@ -168,7 +255,20 @@ describe('codegraph worktree bootstrap', () => {
     expect(bootstrap.REQUIRED_RUNTIME_CLOSURE).toEqual(expect.arrayContaining([
       'scripts/query-codegraph-nanoflow-overlay.mjs',
       'scripts/lib/codegraph-overlay-worker-pool.cjs',
+      'scripts/lib/codegraph-native-graph-sidecar.cjs',
     ]));
+  });
+
+
+  it('never mutates an existing exact-root index when CURRENT is missing', () => {
+    const bootstrap = require(bootstrapPath) as { ensureNativeIndex(root: string): { status: string; bootstrapped?: boolean; current?: { status: string } } };
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-bootstrap-preserve-index-'));
+    tempRoots.push(root);
+    const database = path.join(root, '.codegraph', 'codegraph.db');
+    fs.mkdirSync(path.dirname(database), { recursive: true });
+    fs.writeFileSync(database, 'existing indexed bytes');
+    expect(bootstrap.ensureNativeIndex(root)).toEqual(expect.objectContaining({ status: 'ready', bootstrapped: false, current: expect.objectContaining({ status: 'missing' }) }));
+    expect(fs.readFileSync(database, 'utf8')).toBe('existing indexed bytes');
   });
 
   it('copies the allow-listed closure and leaves generation pending without claiming readiness', () => {

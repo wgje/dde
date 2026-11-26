@@ -34,6 +34,7 @@ env:
   CANONICAL_PRODUCTION_ORIGIN: ${{ vars.CANONICAL_PRODUCTION_ORIGIN || 'https://nanoflow.pages.dev' }}
   VERCEL_DEPLOYMENT_TARGET: ${{ inputs.mode == 'legacy-export-only' && 'vercel-legacy' || 'production' }}
   VERCEL_ORIGIN_GATE_MODE: ${{ inputs.mode == 'legacy-export-only' && 'export-only' || 'redirect' }}
+  LANG: 'zh-CN'
 
 jobs:
   prebuilt-recovery:

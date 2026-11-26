@@ -218,3 +218,6 @@ NanoFlow 的实体 ID 应该由客户端生成，例如使用 `crypto.randomUUID
 当 RetryQueue 写入或清理结果未知时，NanoFlow 会保留 owner、队列项和 `operationId` 绑定的诊断 fence。清理未被确认前不会解除 `storage_unknown_outcome` 压力状态；恢复、重试和处理完成后的清理都遵守同一规则。
 
 因此，看到待处理或压力状态时不要手动删除本地队列或回退游标。先保留诊断证据，再按导出、恢复和重试路径处理。
+## 2026-11-26 离线恢复验收
+
+离线写入必须先落本地，再由 RetryQueue 重放；验证同步修复时记录 operationId、owner、updatedAt 基线和 RPC 结果。未知结果不能直接删除队列或推进游标。

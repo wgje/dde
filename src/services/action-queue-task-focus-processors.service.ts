@@ -87,7 +87,11 @@ export class ActionQueueTaskFocusProcessorsService {
 
   private logProcessorFailure(actionType: string, error: unknown, context?: Record<string, unknown>): void {
     if (isDeferredQueueError(error)) {
-      this.logger.debug(`${actionType} 延后重试（浏览器恢复中）`, { error, ...context });
+      const deferredReason = (error as { details?: Record<string, unknown> } | null)?.details?.['reason'];
+      const retryContext = deferredReason === 'browser-network-suspended'
+        ? '浏览器恢复中'
+        : '等待可重试条件';
+      this.logger.debug(`${actionType} 延后重试（${retryContext}）`, { error, ...context });
       return;
     }
 

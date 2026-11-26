@@ -62,8 +62,8 @@ describe('widget focus action durable receipt candidate', () => {
     const edge = read(edgePath);
     const migration = read(migrationPath);
     expect(edge).toContain('operationId?: string;');
-    expect(edge).toContain("code: 'INVALID_OPERATION_ID'");
-    expect(edge).toContain("client.rpc('apply_widget_focus_action'");
+    expect(edge).toContain("errorResponse(responseHeaders, 400, 'INVALID_OPERATION_ID', 'operationId must be a UUID')");
+    expect(edge).toContain("client.rpc<WidgetFocusActionRpcResult>('apply_widget_focus_action'");
     expect(edge).toContain('p_apply: false');
     expect(edge).toContain('p_apply: true');
     expect(edge).toContain('p_device_id: device.id');
@@ -84,7 +84,7 @@ describe('widget focus action durable receipt candidate', () => {
     expect(edge).toContain('if (operationId) {');
     expect(edge).toContain(".from('focus_sessions')");
     expect(edge).toContain(".eq('updated_at', session.updated_at)");
-    expect(edge).toContain("code: 'FOCUS_SESSION_CHANGED'");
+    expect(edge).toContain("errorResponse(responseHeaders, 409, 'FOCUS_SESSION_CHANGED', 'Focus session changed before update')");
     expect(edge).toContain('return jsonResponse(');
   });
 });

@@ -46,6 +46,11 @@ const laneConfig = {
       'src/app/core/shell/workspace-shell-sidebar-resize-delegation.spec.ts',
       'src/app/core/shell/workspace-shell-startup-entry-intent.factory.spec.ts',
       'src/workspace-shell.component.spec.ts',
+      // These suites use Angular TestBed and process-local data-safety fallback state.
+      // Keep them out of the shared no-isolate lane so static fixtures cannot cross files.
+      'src/services/data-safety-audit-persistence.spec.ts',
+      'src/services/data-safety-write-audit.service.spec.ts',
+      'src/services/data-safety-indexeddb-adapter.spec.ts',
     ],
     exclusiveFiles: [
       'src/tests/scripts/analyze-codegraph-mcp-log.spec.ts',

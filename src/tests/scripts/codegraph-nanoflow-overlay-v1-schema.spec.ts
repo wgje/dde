@@ -12,14 +12,14 @@ const schemaPath = path.join(libRoot, 'codegraph-nanoflow-overlay-v1-schema.cjs'
 const contractPath = path.join(repoRoot, 'scripts', 'contracts', 'codegraph-nanoflow-overlay-v1.json');
 const currentOverlayPath = path.join(repoRoot, '.codegraph', 'nanoflow-overlay.json');
 const SOURCE_POLICY_DIGEST = 'ca78ea5e17d32399faac676bcab26fc1d7f48186a89792774d37a6b8549d0ca3';
-const SCHEMA_DIGEST = 'b249654318ff8d1c9c2fb997c0976a04ea90e81d8782faa36c1c2d826503a618';
-const DESCRIPTOR_MANIFEST_DIGEST = 'fc2b6c5144b181a7e22d24a68407f4d783b9459e89c76a9c800c228a1f16eead';
+const SCHEMA_DIGEST = '0cf35177cabc7261e0d8aa7040d083acc4c5c5c03a3c966a19982d35192a9e22';
+const DESCRIPTOR_MANIFEST_DIGEST = 'bbec805a1d437a4ba896fb873f8d0080b5e1a2eb3a615a6cb7940fbf72ababb0';
 const GENERATED_AT = '2026-08-03T00:00:00.000Z';
 const EXPECTED_DESCRIPTOR_DIGESTS = Object.freeze({
   typescript: 'cd2538e77f1abbe5aabe750e0a4ecda1807e006cecc2fc6acc03296dd7f2eabf',
   'angular-support': 'a68c9feed371bb4d107b7e458559431df0197a013e0434350f63285b38027bbc',
   'supabase-android': '7deba66271dd9253c05ff74b2000a3a6124a793da35c2c490d0e7bb03ae16e9d',
-  graph: 'd9c4de516950bcf6951d4d778d76dc46fdc5a2c895d44382136045f432e426ea',
+  graph: 'b9d90bc3c0a329c67f85f552849db34bef4b264f98c631f37e2e5cf659392ffc',
 });
 const EXPECTED_PRODUCER_NODE_ORDERS = Object.freeze([
   Object.freeze({
@@ -138,7 +138,7 @@ function descriptorDigest(descriptor: Descriptor): string {
   const { descriptorDigest: _literal, ...projection } = descriptor;
   const runtimeSource = descriptor.createRuntime
     ? Function.prototype.toString.call(descriptor.createRuntime) : '';
-  const runtimeFrame = runtimeSource ? `\0${digestFrame('runtime-source', runtimeSource)}` : '';
+  const runtimeFrame = runtimeSource ? `\0${digestFrame('runtime-source', runtimeSource.replaceAll('\r\n', '\n').replaceAll('\r', '\n'))}` : '';
   return sha256(`nanoflow-overlay-v1-descriptor\0${descriptor.name}\0${stableJson(projection)}${runtimeFrame}`);
 }
 function digestFrame(label: string, payload: string): string {
@@ -761,6 +761,26 @@ describe('CodeGraph NanoFlow Overlay v1 schema authority predecessor', () => {
     expectCode(() => loadSchemaVm('', new Map(), {
       Intl: { Collator: class { resolvedOptions(): object { return { locale: 'en-US' }; } } },
     }), 'OVERLAY_SCHEMA_ORDERING_RUNTIME_MISMATCH');
+
+    const ambientLocaleDiffers = loadSchemaVm('', new Map(), {
+      Intl: {
+        Collator: class {
+          constructor(locale?: string) {}
+          resolvedOptions(): object {
+            return {
+              locale: 'zh-CN', usage: 'sort', sensitivity: 'variant', ignorePunctuation: false,
+              collation: 'default', numeric: false, caseFirst: 'false',
+            };
+          }
+        },
+      },
+    });
+    expect(ambientLocaleDiffers).toBeDefined();
+
+    const patchLevelDiffers = loadSchemaVm('', new Map(), {
+      Intl,
+    });
+    expect(patchLevelDiffers).toBeDefined();
   });
 
   it('rejects duplicate nodes, dangling endpoints, and relation/metadata mutations', () => {

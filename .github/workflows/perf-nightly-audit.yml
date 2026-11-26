@@ -18,6 +18,9 @@ on:
         required: false
         type: string
 
+env:
+  LANG: 'zh-CN'
+
 jobs:
   perf-nightly-audit:
     runs-on: ubuntu-latest

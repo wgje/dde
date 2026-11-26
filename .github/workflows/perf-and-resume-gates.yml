@@ -10,9 +10,13 @@ on:
       - main
       - master
 
+env:
+  LANG: 'zh-CN'
+
 jobs:
   perf-and-resume-gates:
-    runs-on: ubuntu-latest
+    # Playwright 1.60 supports Ubuntu 24.04, not the newer ubuntu-latest image.
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     outputs:
       perf_auth_available: ${{ steps.perf_auth.outputs.available }}
@@ -24,7 +28,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: 24.11.1
           cache: npm
 
       - name: Install dependencies
@@ -134,7 +138,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: 24.11.1
           cache: npm
 
       - name: Install dependencies

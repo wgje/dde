@@ -2,7 +2,7 @@
 title: Supabase Schema Reference
 status: canonical
 audience: ai-agent, maintainer, operator
-last_verified: 2026-11-10
+last_verified: 2026-11-25
 source_paths:
   - supabase/migrations/
   - supabase/functions/
@@ -59,6 +59,15 @@ Recent migration files include:
 | `20260609010000_task_attachment_payload_sync.sql` | attachment payload sync |
 | `20260609020000_drop_entity_uuid_defaults.sql` | remove database UUID defaults to enforce client IDs |
 | `20260609020100_active_connections_view_permissions.sql` | active connections view permissions |
+| `20261125120000_offline_command_quarantine_connection_delete.sql` | keep connection-delete out of server domain apply until tombstone translation is verified; index owner-scoped domain-apply receipts |
+
+## Offline Command Storage
+
+The command transport schema is additive and remains opt-in. `sync_protocol_state.capabilities` defaults to an empty JSON array; fresh-init repairs only malformed or null values and does not clear explicitly configured capabilities. Keep the legacy durable queue active unless the corresponding server and client replay paths have been separately enabled and verified.
+
+Internal command state is stored in `sync_command_log`, `sync_command_projection`, and `sync_command_domain_apply_log`. These tables use forced RLS, authenticated owner-scoped reads where required, and service-role writes. The receipt table has an index on `user_id` for its owner policy; this supports the same RLS filter and does not grant additional access.
+
+`connection.delete` remains quarantined from server domain apply. The legacy connection upsert path is not a verified tombstone translation, so enabling this command there could acknowledge a delete without applying the correct tombstone semantics. Other replayable commands remain bounded by the final domain-apply allowlist.
 
 ## Storage Contract
 
@@ -133,3 +142,7 @@ Incremental sync uses `updated_at > last_sync_time` with a safety lookback where
 7. Update Context7 docs under `docs/context7`.
 8. Run `npm run docs:context7:validate`.
 9. Run affected service and contract tests.
+
+## Fresh-init execution order
+
+Create `public.projects` before SQL-language owner/access helpers that reference it. The initial `active_tasks` view must use an explicit stable column prefix compatible with its final replacement; a changing `SELECT t.*` prefix can make PostgreSQL reject the later view. Validate a fresh database with function-body checks enabled. Local replay and rollback receipts do not establish production parity.

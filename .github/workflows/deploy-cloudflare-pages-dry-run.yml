@@ -17,6 +17,7 @@ env:
   NODE_VERSION: '22'
   WRANGLER_VERSION: '3.112.0'
   ENABLE_SENTRY_SOURCEMAPS: 'false'
+  LANG: 'zh-CN'
 
 jobs:
   dry-run:
@@ -47,7 +48,8 @@ jobs:
       - name: Deterministic build guard
         env:
           NG_APP_SUPABASE_URL: 'https://dryrun.invalid'
-          NG_APP_SUPABASE_ANON_KEY: 'dryrun-placeholder-with-enough-length-for-build-validation-000000000000000000000000000000000000000000'
+          # Synthetic public-key shape for offline builds; dryrun.invalid cannot reach a real project.
+          NG_APP_SUPABASE_ANON_KEY: 'sb_publishable_abcdefghijklmnopqrstuv_abcdefgh'
           NG_APP_SENTRY_ENVIRONMENT: 'preview'
           NG_APP_CANONICAL_ORIGIN: ''
           NG_APP_ORIGIN_GATE_MODE: 'off'

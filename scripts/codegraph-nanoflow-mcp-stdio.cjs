@@ -2495,6 +2495,19 @@ function resolveProjectRoot(args) {
 function spawnCodegraph(target, childArgs) {
   const childEnv = createCodegraphChildEnv();
   if (target.startsWith('@colbymchenry/codegraph@')) {
+    // The helper is optional for older copied wrapper fixtures/worktrees.
+    const launcherPath = path.join(__dirname, 'lib', 'codegraph-package-launcher.cjs');
+    const launch = fs.existsSync(launcherPath)
+      ? (require(launcherPath).resolveCodegraphPackageLaunch(target, childArgs, { root: projectRoot, env: childEnv })
+        || require(launcherPath).resolveNpmExecLaunch(target, childArgs))
+      : null;
+    if (launch) {
+      diagnostics.log('child.spawn', {
+        ...launch, target, env: pickEnv(childEnv, CODEGRAPH_CHILD_ENV_KEYS),
+        runtimeTopology: summarizeCodegraphRuntimeTopology(childEnv),
+      });
+      return spawn(launch.command, launch.args, createSpawnOptions(childEnv));
+    }
     const npxArgs = ['-y', target, ...childArgs];
     diagnostics.log('child.spawn', {
       mode: 'npx-package',

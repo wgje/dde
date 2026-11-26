@@ -10,7 +10,7 @@ const cachePath = 'src/app/core/external-sources/external-source-cache.service.t
 const servicePath = 'src/app/core/external-sources/external-source-link.service.ts';
 const marker = '-- FINAL CONVERGENCE: 20260731000000 external source link operation identity';
 const banner = '-- ============================================================\n-- 初始化完成';
-const initPreimage = '6e3ca05759184db0250eab7f29e0f4a25155d3615efb484f26e9d8aa2a394a77';
+const initPreimage = 'e9746ff0af3856bc9e3743a17a000dff1ce27f4b23713fbb7fba2ac26b3d7c76';
 const widgetMarker = '-- FINAL CONVERGENCE: 20260729000000 widget black box action idempotency';
 const quotaMarker = '-- FINAL CONVERGENCE: 20260730000000 transcription usage quota immutability';
 const widgetHash = 'b8c0e4eaf5598216f2efc5afb8b0841879fc36de03e32939f6b2ac457b539ff1';
