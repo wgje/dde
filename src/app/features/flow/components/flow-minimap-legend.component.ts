@@ -34,6 +34,11 @@ export const FLOW_MINIMAP_TEMPLATE = `
     >
       <title>流程图小地图</title>
       <defs>
+        <radialGradient [attr.id]="selectionGlowGradientId">
+          <stop offset="0" class="selection-glow-core" />
+          <stop offset="0.4" class="selection-glow-middle" />
+          <stop offset="1" class="selection-glow-edge" />
+        </radialGradient>
         <radialGradient
           [attr.id]="attentionGradientId"
           gradientUnits="userSpaceOnUse"
@@ -82,7 +87,10 @@ export const FLOW_MINIMAP_TEMPLATE = `
         [attr.fill]="attentionLensGradientFill"
         pointer-events="none"
       />
-      <g class="minimap-map-layer" [attr.mask]="attentionActive() ? attentionMaskFill : null">
+      <g
+        class="minimap-map-layer"
+        [attr.mask]="attentionActive() ? attentionMaskFill : null"
+      >
         @if (showLinks) {
           @for (link of linkShapes(); track link.key) {
             <line
@@ -99,7 +107,7 @@ export const FLOW_MINIMAP_TEMPLATE = `
           }
         }
 
-        @for (node of nodeShapes(); track node.key) {
+        @for (node of renderedNodeShapes(); track node.key) {
           <g class="minimap-node-glyph">
             <rect
               class="minimap-node-body"
@@ -117,7 +125,7 @@ export const FLOW_MINIMAP_TEMPLATE = `
           </g>
         }
 
-        @for (marker of visibleSemanticMarkers(); track marker.key) {
+        @for (marker of renderedSemanticMarkers(); track marker.key) {
           @switch (marker.kind) {
             @case ('sidecar') {
               <path
@@ -183,6 +191,30 @@ export const FLOW_MINIMAP_TEMPLATE = `
         }
       </g>
 
+      <!-- Selection is separate from the attention mask: a click must remain discoverable without hover. -->
+      <g class="minimap-selection-layer" pointer-events="none">
+        @for (link of selectionLinks(); track link.key) {
+          <line class="minimap-selection-link" [attr.data-minimap-selection-link]="link.key"
+            [attr.x1]="link.x1" [attr.y1]="link.y1" [attr.x2]="link.x2" [attr.y2]="link.y2"
+            [attr.stroke-dasharray]="link.dashed ? '4 3' : null" vector-effect="non-scaling-stroke" />
+        }
+        @for (node of relatedNodes(); track node.key) {
+          <circle class="minimap-related-node" [attr.data-minimap-related]="node.key"
+            [attr.cx]="node.x + node.w / 2" [attr.cy]="node.y + node.h / 2"
+            [attr.r]="selectionRadius() * 0.5" vector-effect="non-scaling-stroke" />
+        }
+        @for (node of selectedNodes(); track node.key) {
+          <g [attr.data-minimap-selected]="node.key">
+            <circle class="minimap-selection-glow" data-minimap-selection-glow
+              [attr.cx]="node.x + node.w / 2" [attr.cy]="node.y + node.h / 2"
+              [attr.r]="selectionRadius() * 2.2" [attr.fill]="selectionGlowFill" />
+            <circle class="minimap-selection-halo" [attr.cx]="node.x + node.w / 2" [attr.cy]="node.y + node.h / 2"
+              [attr.r]="selectionRadius()" vector-effect="non-scaling-stroke" />
+            <circle class="minimap-selection-core" [attr.cx]="node.x + node.w / 2" [attr.cy]="node.y + node.h / 2"
+              [attr.r]="selectionRadius() * 0.28" />
+          </g>
+        }
+      </g>
       <rect
         class="minimap-viewport"
         [attr.x]="viewportRect().x"
@@ -196,6 +228,7 @@ export const FLOW_MINIMAP_TEMPLATE = `
         pointer-events="none"
       />
     </svg>
+    <span class="minimap-selection-status" role="status" aria-live="polite">{{ selectedNodes().length ? '已在小地图标出 ' + selectedNodes().length + ' 个选中任务及其直接关系' : '' }}</span>
 
     @if (mobile) {
       <button
@@ -316,6 +349,17 @@ export const FLOW_MINIMAP_STYLES = `
     fill: var(--minimap-node-fill);
     stroke-opacity: 1;
   }
+  .minimap-selection-layer { color: var(--minimap-focused); }
+  .selection-glow-core { stop-color: var(--minimap-focused); stop-opacity: 0.65; }
+  .selection-glow-middle { stop-color: var(--minimap-focused); stop-opacity: 0.3; }
+  .selection-glow-edge { stop-color: var(--minimap-focused); stop-opacity: 0; }
+  .minimap-selection-glow { opacity: 0.9; transform-box: fill-box; transform-origin: center; animation: minimap-selection-arrive 600ms ease-out; }
+  @keyframes minimap-selection-arrive { from { opacity: 0.25; transform: scale(0.72); } 45% { opacity: 1; transform: scale(1.15); } to { opacity: 0.9; transform: scale(1); } }
+  .minimap-selection-link { stroke: currentColor; stroke-width: 1.6; opacity: 0.85; }
+  .minimap-related-node { fill: var(--overview-surface, #efeee9); stroke: currentColor; stroke-width: 1.2; }
+  .minimap-selection-halo { fill: var(--overview-surface, #efeee9); fill-opacity: 0.8; stroke: currentColor; stroke-width: 2; filter: drop-shadow(0 0 3px var(--minimap-focused)); }
+  .minimap-selection-core { fill: currentColor; }
+  .minimap-selection-status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
   .minimap-attention-active .minimap-link { opacity: 0.44; }
   .semantic-marker {
     fill: none;
@@ -380,7 +424,7 @@ export const FLOW_MINIMAP_STYLES = `
   .minimap-legend-anchor-desktop {
     left: 8px;
     right: 8px;
-    bottom: 8px;
+    bottom: calc(100% + 8px);
     animation: minimap-legend-in 140ms ease-out both;
   }
   .minimap-legend-anchor-mobile {
@@ -413,6 +457,7 @@ export const FLOW_MINIMAP_STYLES = `
     --minimap-control-border: rgba(148, 163, 184, 0.3);
   }
   @media (prefers-reduced-motion: reduce) {
+    .minimap-selection-glow { animation: none; }
     .minimap-map-layer { transition: none; }
     .minimap-attention-lens { transition: none; }
     .minimap-viewport { transition: none; }

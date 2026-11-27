@@ -168,3 +168,17 @@ Common frontend variables:
 - `NG_APP_GOJS_LICENSE_KEY`
 
 Widget and transcription secrets must not be exposed to frontend builds.
+
+## Isolated minimap development previews
+
+Development builds expose `/#/dev-preview/flow/overview-dense`, `overview-selected`,
+`overview-zoomed`, and `overview-dense-mobile`. These mount the production minimap
+on a component-scoped GoJS memory fixture with 124 UUID-keyed tasks in four trees.
+The route is omitted from the production route table. Selection glow is independent
+of the hover mask; direct neighbor links retain their cross-tree dash encoding.
+Zoom changes the SVG viewBox uniformly, relative to a canvas-derived fit baseline,
+instead of enlarging individual blocks while leaving tree spacing unchanged.
+
+Run `npm run quality:guard:demo-preview` and the `src/app/dev-preview` fixture specs
+when changing this surface. The guard verifies real selector reachability in both
+preview renderers; it is not a substitute for browser pixel/interaction evidence.

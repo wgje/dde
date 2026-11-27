@@ -1,0 +1,9 @@
+{
+  "minimumScenarioCount": 4,
+  "requiredWidgets": ["flow"],
+  "exceptions": {},
+  "selectorFixtureHints": {
+    "app-flow-minimap": {"test":"src/app/dev-preview/demo-flow-preview.component.spec.ts","scenario":{"widget":"flow","state":"overview-dense"}},
+    "app-flow-minimap-legend": {"test":"src/app/dev-preview/demo-flow-preview.component.spec.ts","scenario":{"widget":"flow","state":"legend"}}
+  }
+}

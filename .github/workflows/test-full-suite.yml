@@ -19,6 +19,35 @@ env:
   LANG: 'zh-CN'
 
 jobs:
+  demo-preview-coverage-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run test:prepare-env
+      - name: Resolve verified comparison baseline
+        shell: bash
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PUSH_BASE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then base="$PR_BASE"; mode=merge-base;
+          elif [ "$GITHUB_EVENT_NAME" = push ]; then base="$PUSH_BASE"; mode=endpoint;
+          else base="${GITHUB_SHA}~1"; mode=endpoint; fi
+          git rev-parse --verify "${base}^{commit}"
+          echo "DEMO_PREVIEW_BASE_SHA=$base" >> "$GITHUB_ENV"
+          echo "DEMO_PREVIEW_DIFF_MODE=$mode" >> "$GITHUB_ENV"
+      - run: npm run quality:guard:demo-preview
+      - run: npx vitest run src/app/dev-preview src/tests/scripts/demo-preview-coverage.spec.ts --maxWorkers=1 --no-file-parallelism
+
   codegraph-adapter-gate:
     runs-on: ubuntu-latest
     timeout-minutes: 95
@@ -117,6 +146,7 @@ jobs:
           src/tests/scripts/codegraph-read-identity-win32.integration.spec.ts
 
   vitest-full-suite:
+    needs: demo-preview-coverage-gate
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:

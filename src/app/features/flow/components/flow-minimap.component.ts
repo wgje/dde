@@ -130,13 +130,26 @@ export class FlowMinimapComponent implements AfterViewInit, OnDestroy {
   private readonly nodesBounds = signal<MinimapWorldRect | null>(null);
   private readonly viewport = signal<MinimapWorldRect | null>(null);
   readonly nodeShapes = this.nodeShapesSig.asReadonly();
+  readonly renderedNodeShapes = this.nodeShapes;
   readonly linkShapes = this.linkShapesSig.asReadonly();
   readonly pipShapes = this.pipShapesSig.asReadonly();
   readonly semanticMarkerShapes = this.semanticMarkerShapesSig.asReadonly();
+  readonly diagramScale = signal(1);
+  private readonly referenceScale = signal<number | null>(null);
   readonly hiddenCategories = signal<ReadonlySet<MinimapLegendCategory>>(new Set());
   readonly visibleSemanticMarkers = computed(() => (
     filterMinimapSemanticMarkers(this.semanticMarkerShapes(), this.hiddenCategories())
   ));
+  readonly renderedSemanticMarkers = this.visibleSemanticMarkers;
+  private readonly selectedKeys = signal<ReadonlySet<string>>(new Set());
+  readonly selectedNodes = computed(() => this.nodeShapes().filter(node => this.selectedKeys().has(node.key)));
+  readonly selectionLinks = computed(() => this.linkShapes().filter(link =>
+    this.selectedKeys().has(link.fromKey ?? '') || this.selectedKeys().has(link.toKey ?? '')));
+  readonly relatedNodes = computed(() => {
+    const keys = new Set(this.selectionLinks().flatMap(link => [link.fromKey, link.toKey]));
+    return this.nodeShapes().filter(node => keys.has(node.key) && !this.selectedKeys().has(node.key));
+  });
+  readonly selectionRadius = computed(() => Math.max(this.viewBox().w / this.width, this.viewBox().h / this.height) * 6);
   readonly attentionLens = signal<MinimapAttentionPoint | null>(null);
   readonly attentionActive = signal(false);
   readonly attentionLegendVisible = signal(false);
@@ -147,6 +160,8 @@ export class FlowMinimapComponent implements AfterViewInit, OnDestroy {
   readonly attentionGradientFill = `url(#${this.attentionGradientId})`;
   readonly attentionMaskFill = `url(#${this.attentionMaskId})`;
   readonly attentionLensGradientFill = `url(#${this.attentionLensGradientId})`;
+  readonly selectionGlowGradientId = `${this.attentionGradientId}-selection-glow`;
+  readonly selectionGlowFill = `url(#${this.selectionGlowGradientId})`;
   private readonly attention = new FlowMinimapAttentionController({
     setLens: point => this.attentionLens.set(point),
     setActive: active => this.attentionActive.set(active),
@@ -160,7 +175,18 @@ export class FlowMinimapComponent implements AfterViewInit, OnDestroy {
    */
   readonly viewBox = computed<MinimapWorldRect>(() => {
     const bounding = unionWorldRect(this.nodesBounds(), this.viewport()) ?? FALLBACK_WORLD;
-    return computeViewBox(bounding, this.widthInput(), this.heightInput());
+    const base = computeViewBox(bounding, this.widthInput(), this.heightInput());
+    // Zoom the coordinate system once: blocks, tree spacing and links must stay aligned.
+    // Full-graph fitting alone otherwise plateaus once node bounds dominate the viewport.
+    const scale = this.diagramScale();
+    const zoom = Number.isFinite(scale) && scale > 0 ? scale / (this.referenceScale() ?? 1) : 1;
+    const selected = this.selectedNodes();
+    const anchor = selected.length ? {
+      x: selected.reduce((sum, node) => sum + node.x + node.w / 2, 0) / selected.length,
+      y: selected.reduce((sum, node) => sum + node.y + node.h / 2, 0) / selected.length,
+    } : { x: base.x + base.w / 2, y: base.y + base.h / 2 };
+    return { x: anchor.x + (base.x - anchor.x) / zoom, y: anchor.y + (base.y - anchor.y) / zoom,
+      w: base.w / zoom, h: base.h / zoom };
   });
   readonly viewBoxStr = computed<string>(() => {
     const v = this.viewBox();
@@ -293,7 +319,10 @@ export class FlowMinimapComponent implements AfterViewInit, OnDestroy {
 
   private attachTo(diagram: go.Diagram): void {
     this.viewportHandler = () => this.onViewportChanged();
-    this.selectionHandler = () => this.scheduleRebuild();
+    this.selectionHandler = () => {
+      this.syncSelection(diagram);
+      this.scheduleRebuild(); // Selection bindings can also change the actual node geometry.
+    };
     this.documentHandler = () => this.scheduleRebuild();
     this.modelHandler = () => this.scheduleRebuild();
     diagram.addDiagramListener('ViewportBoundsChanged', this.viewportHandler);
@@ -304,6 +333,7 @@ export class FlowMinimapComponent implements AfterViewInit, OnDestroy {
     this.boundDiagram = diagram;
     this.syncViewportNow(diagram);
     this.rebuildSnapshot();
+    this.syncSelection(diagram);
   }
 
   private detachFrom(diagram: go.Diagram): void {
@@ -325,6 +355,15 @@ export class FlowMinimapComponent implements AfterViewInit, OnDestroy {
     this.documentHandler = null;
     this.modelHandler = null;
     this.boundDiagram = null;
+    this.selectedKeys.set(new Set());
+    this.referenceScale.set(null);
+  }
+
+  private syncSelection(diagram: go.Diagram): void {
+    if (this.destroyed || diagram !== this.boundDiagram) return;
+    const keys = new Set<string>();
+    diagram.selection?.each(part => { if (part.key !== undefined && part.key !== null) keys.add(String(part.key)); });
+    this.zone.run(() => this.selectedKeys.set(keys));
   }
 
   private removeDiagramListenerSafely(
@@ -353,6 +392,8 @@ export class FlowMinimapComponent implements AfterViewInit, OnDestroy {
   // ===================== 被动同步（zone 外触发，必须 zone.run） =====================
 
   private onViewportChanged(): void {
+    const diagram = this.diagram.diagramInstance;
+    if (diagram) this.zone.run(() => this.diagramScale.set(diagram.scale));
     this.scheduleRebuild();
     if (this.dragging) return; // 拖动时由 onPointerMove 乐观更新 viewport signal
     if (this.vpRaf !== null) return;
@@ -365,6 +406,7 @@ export class FlowMinimapComponent implements AfterViewInit, OnDestroy {
   }
 
   private syncViewportNow(diagram: go.Diagram): void {
+    this.diagramScale.set(diagram.scale);
     const vb = diagram.viewportBounds;
     if (!vb.isReal()) return;
     const rect: MinimapWorldRect = { x: vb.x, y: vb.y, w: vb.width, h: vb.height };
@@ -391,6 +433,13 @@ export class FlowMinimapComponent implements AfterViewInit, OnDestroy {
       ? collectMinimapLinks(diagram, this.config.currentStyles().link)
       : [];
     this.zone.run(() => {
+      if (bounds && this.referenceScale() === null) {
+        const viewport = diagram.viewportBounds;
+        // Derive the fit baseline from canvas pixels, not the saved/current zoom.
+        // Binding after a saved zoom must not silently redefine that zoom as full overview.
+        const fit = Math.min(1, viewport.width * diagram.scale / bounds.w, viewport.height * diagram.scale / bounds.h);
+        this.referenceScale.set(Number.isFinite(fit) && fit > 0 ? fit : 1);
+      }
       this.nodeShapesSig.set(shapes);
       this.linkShapesSig.set(links);
       this.pipShapesSig.set(pips);

@@ -27,6 +27,8 @@ export interface MinimapNodeShape {
 }
 
 export interface MinimapLinkShape {
+  fromKey?: string;
+  toKey?: string;
   /** 稳定 track key（= link.key 或 from->to）。 */
   key: string;
   x1: number;
@@ -112,6 +114,8 @@ export function collectMinimapLinks(
     shapes.push({
       key,
       x1: from.x + from.width / 2,
+      fromKey: String(link.fromNode?.key ?? ''),
+      toKey: String(link.toNode?.key ?? ''),
       y1: from.y + from.height / 2,
       x2: to.x + to.width / 2,
       y2: to.y + to.height / 2,
