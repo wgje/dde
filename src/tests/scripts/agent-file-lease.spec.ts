@@ -18,6 +18,8 @@ const SERIALIZATION_CHILD_TIMEOUT_MS = 2_000;
 const OWNER_LOCK_SCENARIO_DEADLINE_MS = 3_000;
 const LEASE_WORKER_TEARDOWN_DEADLINE_MS = 1_000;
 const LEASE_SPAWN_SYNC_TIMEOUT_MS = 5_000;
+const READ_RESOURCE_SCENARIO_BUDGET_MS = LEASE_SPAWN_SYNC_TIMEOUT_MS;
+const READ_RESOURCE_SCENARIO_TEST_TIMEOUT_MS = READ_RESOURCE_SCENARIO_BUDGET_MS + LEASE_WORKER_TEARDOWN_DEADLINE_MS;
 const PARTIAL_JSON_BLOCKER_TIMEOUT_MS = 1_000;
 const RESOURCE_TOKEN_BOUNDED_STDIN_DEADLINE_MS = 1_000;
 const CONCURRENT_WORKSPACE_EPOCH_CLAIM_COUNT = 12;
@@ -429,41 +431,52 @@ function untrackLeaseWorkerIfExited(worker: ReturnType<typeof fork>): void {
   }
 }
 
-function runLeaseAsync(root: string, args: string[]): Promise<WorkerCommandResult> {
+function runLeaseAsync(
+  root: string, args: string[], timeoutMs = LEASE_SPAWN_SYNC_TIMEOUT_MS,
+  requireClose = false, scenarioLeaseScriptPath = leaseScriptPath,
+): Promise<WorkerCommandResult> {
   const canonicalRoot = realpathSync(root);
   return new Promise((resolve, reject) => {
-    const worker = fork(leaseScriptPath, ['--root', canonicalRoot, ...args], {
-      cwd: projectRoot,
-      silent: true,
-    });
+    const worker = fork(scenarioLeaseScriptPath, ['--root', canonicalRoot, ...args], { cwd: projectRoot, silent: true });
     let settled = false;
+    let timingOut = false;
+    let closed = false;
+    const closeObserved = new Promise<void>(done => worker.once('close', () => { closed = true; done(); }));
     let outputCollector: ReturnType<typeof observeScenarioProcessOutput> | undefined;
+    const cleanup = async () => {
+      if (!requireClose) return terminateLeaseWorker(worker);
+      if (!closed && worker.exitCode === null && worker.signalCode === null) worker.kill();
+      await waitForLeaseWorkerTermination(closeObserved, LEASE_WORKER_TEARDOWN_DEADLINE_MS);
+      activeLeaseWorkers.delete(worker);
+    };
     const deadline = setTimeout(() => {
-      const timeoutError = new Error(`async agent-file-lease CLI exceeded ${LEASE_SPAWN_SYNC_TIMEOUT_MS}ms`);
-      void terminateLeaseWorker(worker).then(
+      timingOut = true;
+      const timeoutError = new Error(`async agent-file-lease CLI exceeded ${timeoutMs}ms`);
+      void cleanup().then(
         () => settle(timeoutError),
         teardownError => settle(leaseWorkerSettlementError(timeoutError, teardownError)),
       );
-    }, LEASE_SPAWN_SYNC_TIMEOUT_MS);
-
-    const cleanup = () => terminateLeaseWorker(worker);
+    }, timeoutMs);
     activeLeaseWorkers.set(worker, cleanup);
-
     function settle(error?: Error, result?: WorkerCommandResult): void {
       if (settled) return;
       settled = true;
       clearTimeout(deadline);
       outputCollector?.detach();
-      untrackLeaseWorkerIfExited(worker);
+      if (!requireClose || closed) untrackLeaseWorkerIfExited(worker);
       if (error) reject(error);
       else if (result) resolve(result);
       else reject(new Error('async agent-file-lease CLI settled without a result'));
     }
-
     outputCollector = observeScenarioProcessOutput(
       worker,
-      result => settle(undefined, result),
-      error => settle(error),
+      result => { if (!timingOut) settle(undefined, result); },
+      error => {
+        if (timingOut) return;
+        if (!requireClose) { settle(error); return; }
+        timingOut = true;
+        void cleanup().then(() => settle(error), cleanupError => settle(leaseWorkerSettlementError(error, cleanupError)));
+      },
     );
     endMarkedReadResourceTokenInput(worker, args);
   });
@@ -548,19 +561,30 @@ function storedReadResourceLease(
   };
 }
 
+function runWithinReadResourceScenario<T>(
+  deadlineAt: number,
+  run: (timeoutMs: number) => T,
+  now: () => number = () => performance.now(),
+): T {
+  const remainingMs = Math.floor(deadlineAt - now());
+  if (remainingMs <= 0) throw new Error('READ resource scenario deadline exhausted before spawn');
+  return run(Math.min(LEASE_SPAWN_SYNC_TIMEOUT_MS, remainingMs));
+}
+
 async function readResourceAcquireWithLockRetry(
   root: string,
   owner: string,
   resourceId: string,
   token: string,
+  deadlineAt?: number,
 ): Promise<WorkerCommandResult> {
   for (let attempt = 0; attempt < 100; attempt += 1) {
-    const result = await runLeaseAsync(root, readResourceLeaseArgs(
-      'resource-lease-acquire',
-      owner,
-      resourceId,
-      token,
-    ));
+    const run = (timeoutMs: number) => runLeaseAsync(root, readResourceLeaseArgs(
+      'resource-lease-acquire', owner, resourceId, token,
+    ), timeoutMs, deadlineAt !== undefined);
+    const result = await (deadlineAt === undefined
+      ? run(LEASE_SPAWN_SYNC_TIMEOUT_MS)
+      : runWithinReadResourceScenario(deadlineAt, run));
     if (result.status === 0) return result;
     if (!result.stderr.includes('lease state is locked')) {
       throw new Error(result.stderr || result.stdout || 'resource lease acquire failed without diagnostics');
@@ -2878,13 +2902,50 @@ describe('agent-file-lease', () => {
       }
     });
 
+    it('READ scenario child timeout waits for actual close and removes its tracked worker', async () => {
+      const root = makeRoot();
+      const script = path.join(root, 'blocked-read-child.cjs');
+      writeFileSync(script, 'setInterval(() => {}, 1000);');
+      const before = new Set(activeLeaseWorkers.keys());
+      const pending = runLeaseAsync(root, [], 80, true, script);
+      const worker = [...activeLeaseWorkers.keys()].find(item => !before.has(item));
+      expect(worker).toBeDefined();
+      let closeObserved = false;
+      worker!.once('close', () => { closeObserved = true; });
+      await expect(pending).rejects.toThrow('async agent-file-lease CLI exceeded 80ms');
+      expect(closeObserved).toBe(true);
+      expect(worker!.exitCode !== null || worker!.signalCode !== null).toBe(true);
+      expect(activeLeaseWorkers.has(worker!)).toBe(false);
+    });
+    it('READ scenario deadline exhaustion prevents dispatch and forwards only remaining child budget', async () => {
+      let calls = 0;
+      const observed: number[] = [];
+      const dispatch = (timeout: number) => { calls += 1; observed.push(timeout); return 'dispatched'; };
+      expect(() => runWithinReadResourceScenario(100, dispatch, () => 100)).toThrow('deadline exhausted before spawn');
+      expect(() => runWithinReadResourceScenario(100, dispatch, () => 101)).toThrow('deadline exhausted before spawn');
+      expect(calls).toBe(0);
+      expect(runWithinReadResourceScenario(6000, dispatch, () => 1250)).toBe('dispatched');
+      expect(runWithinReadResourceScenario(6000, dispatch, () => 5990.25)).toBe('dispatched');
+      expect(runWithinReadResourceScenario(60000, dispatch, () => 0)).toBe('dispatched');
+      expect(observed).toEqual([4750, 9, LEASE_SPAWN_SYNC_TIMEOUT_MS]);
+      await expect(readResourceAcquireWithLockRetry(
+        'must-not-realpath-or-spawn', 'reader-a', 'generation-a', readResourceToken('a'), -1,
+      )).rejects.toThrow('deadline exhausted before spawn');
+      expect(READ_RESOURCE_SCENARIO_TEST_TIMEOUT_MS).toBe(6000);
+    });
     it('supports concurrent independent readers and serializes a shared caller token to one record', async () => {
       const root = makeRoot();
+      const deadlineAt = performance.now() + READ_RESOURCE_SCENARIO_BUDGET_MS;
       const sharedToken = readResourceToken('a');
-      const results = await Promise.all(Array.from({ length: 12 }, (_, index) => (
-        readResourceAcquireWithLockRetry(root, 'reader-a', 'generation-a', sharedToken)
+      // Wait for every bounded child (including close on timeout) before surfacing a failure.
+      const settlements = await Promise.allSettled(Array.from({ length: 12 }, (_, index) => (
+        readResourceAcquireWithLockRetry(root, 'reader-a', 'generation-a', sharedToken, deadlineAt)
           .then(result => ({ index, result }))
       )));
+      const results = settlements.map(settlement => {
+        if (settlement.status === 'rejected') throw settlement.reason;
+        return settlement.value;
+      });
       const reports = results.map(({ result }) => {
         expect(result.status, result.stderr || result.stdout).toBe(0);
         return JSON.parse(result.stdout);
@@ -2902,18 +2963,13 @@ describe('agent-file-lease', () => {
         ['reader-a', 'generation-b', readResourceToken('d')],
       ] as const;
       for (const [owner, resourceId, token] of independent) {
-        const result = runLease(root, readResourceLeaseArgs(
-          'resource-lease-acquire',
-          owner,
-          resourceId,
-          token,
-        ));
+        const result = await readResourceAcquireWithLockRetry(root, owner, resourceId, token, deadlineAt);
         expect(result.status, result.stderr || result.stdout).toBe(0);
       }
       const finalRegistry = JSON.parse(readFileSync(registryPath, 'utf8'));
       expect(Object.keys(finalRegistry.resourceLeases)).toHaveLength(4);
       expect(finalRegistry.workspaceEpoch).toBe(0);
-    });
+    }, READ_RESOURCE_SCENARIO_TEST_TIMEOUT_MS);
 
     it('projects and preserves expired ACTIVE/RELEASED tombstones through generic prune and stale retries', () => {
       const tokens = {
