@@ -157,6 +157,7 @@ describe('FocusConsoleSyncService', () => {
         updated_at: '2026-03-03T01:00:00.000Z',
         session_state: {
           version: 6,
+          savedAt: '2026-03-03T01:00:00.000Z',
           entries: [
             {
               taskId: 'dock-created',
@@ -219,7 +220,7 @@ describe('FocusConsoleSyncService', () => {
         started_at: '2026-03-03T00:00:00.000Z',
         ended_at: null,
         updated_at: '2026-03-03T10:00:00.000Z',
-        session_state: { version: 6, entries: [] },
+        session_state: { version: 6, entries: [], savedAt: '2026-03-03T10:00:00.000Z' },
       },
       error: null,
     });
