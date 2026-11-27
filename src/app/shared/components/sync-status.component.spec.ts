@@ -449,6 +449,16 @@ describe('SyncStatusComponent', () => {
     );
   });
 
+  it('manual sync reports retained failures and unknown-owner existence without deleting records', async () => {
+    const review = TestBed.inject(RetryQueueService) as unknown as { hasUnknownOwnerLegacyReview: () => boolean };
+    review.hasUnknownOwnerLegacyReview = () => true;
+    const toast = TestBed.inject(ToastService);
+    await fixture.componentInstance.retryAll();
+    expect(toast.warning).toHaveBeenCalledWith('同步仍需核对', expect.stringContaining('未归属材料'));
+    expect(actionQueueMock.clearDeadLetterQueue).not.toHaveBeenCalled();
+    expect(actionQueueMock.dismissDeadLetter).not.toHaveBeenCalled();
+  });
+
   it('嵌入模式在成功同步时应显示绿色状态点', () => {
     const embeddedFixture = TestBed.createComponent(SyncStatusComponent);
     (embeddedFixture.componentInstance as unknown as { embedded: ReturnType<typeof signal<boolean>> }).embedded = signal(true);

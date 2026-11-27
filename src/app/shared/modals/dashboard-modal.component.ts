@@ -157,7 +157,14 @@ export class DashboardModalComponent implements OnInit {
     try {
       await this.retryQueue.processQueue(undefined, true);
       await this.actionQueue.processQueue();
-      this.toastService.success('同步完成', '所有待处理操作已成功同步');
+      const reviewCount = this.retryQueue.legacyReviewCount?.() ?? 0;
+      const unknownReview = this.retryQueue.hasUnknownOwnerLegacyReview?.() ?? false;
+      const pending = this.pendingCount() + (this.syncService.syncState().pendingCount ?? 0);
+      if (this.deadLetterCount() > 0 || reviewCount > 0 || unknownReview || pending > 0 || this.hasIssues()) {
+        this.toastService.warning('同步仍需核对', `本地数据仍保留：${this.deadLetterCount()} 个失败操作，${reviewCount} 个待核对记录${unknownReview ? '；另有未归属材料（未自动认领）' : ''}。请先导出完整队列备份；本次不确认全部同步成功。`);
+      } else {
+        this.toastService.warning('同步检查已结束', '当前未显示待处理操作；这不确认历史写入全部成功，请核对关键数据。');
+      }
     } catch {
       this.toastService.error('同步失败', '部分操作同步失败，请稍后重试');
     } finally {

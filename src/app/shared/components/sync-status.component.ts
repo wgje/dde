@@ -412,6 +412,15 @@ export class SyncStatusComponent {
     try {
       await this.retryQueue.processQueue(undefined, true);
       await this.actionQueue.processQueue();
+      const reviewCount = this.legacyReviewCount();
+      const unknownReview = this.retryQueue.hasUnknownOwnerLegacyReview?.() ?? false;
+      if (this.deadLetterCount() > 0 || reviewCount > 0 || unknownReview || this.pendingCount() > 0 || this.visibleSyncError()) {
+        this.toastService.warning('同步仍需核对', `本地数据仍保留：${this.deadLetterCount()} 个失败操作，${reviewCount} 个待核对记录${unknownReview ? '；另有未归属材料（未自动认领）' : ''}。请先下载完整队列备份，不要清除站点数据。`);
+      } else {
+        this.toastService.warning('同步检查已结束', '当前未显示待处理操作；这不确认历史写入全部成功，请核对关键数据。');
+      }
+    } catch {
+      this.toastService.error('同步未完成', '本地数据和失败记录仍保留，请检查同步状态并先导出备份。');
     } finally {
       this.isRetrying.set(false);
     }

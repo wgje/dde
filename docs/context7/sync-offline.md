@@ -208,3 +208,8 @@ Durable settlement recognizes focus-snapshot-reconciliation-pending only with bo
 
 
 The shared withTimeout helper rejects an already-aborted external signal before allocating a timer, even for an already-resolved input promise. The supplied promise was started by its caller and is still observed for rejection, preventing cancellation from introducing an unhandled rejection; this helper cannot undo side effects already started outside it. Later abort/timeout paths keep their existing listener cleanup.
+
+
+## Legacy retry evidence retention and manual feedback
+
+Quarantine preserves the first envelope and adds later same-ID operation/payload/reason evidence as flat retainedVersions instead of replacing history. Exact repeated business evidence is idempotent without rewriting timestamps, while conservative local BlackBox repair may retry. Backup validation and merge preserve incoming top-level and retained versions, enforce same owner/queue identity and detect active-queue overlap. Unknown-owner evidence is existence-only and is never claimed by the logged-in account. Manual queue checks report unresolved/pending evidence rather than interpreting void runner completion as all cloud writes succeeding. These controls do not automatically replay legacy payloads or resolve historical Focus conflicts.

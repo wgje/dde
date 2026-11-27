@@ -477,7 +477,17 @@ describe('DashboardModalComponent conflict resolution', () => {
     expect(retryQueueMock.processQueue.mock.invocationCallOrder[0]).toBeLessThan(
       actionQueueMock.processQueue.mock.invocationCallOrder[0],
     );
-    expect(toastMock.success).toHaveBeenCalledOnce();
+    expect(toastMock.success).not.toHaveBeenCalled();
+    expect(toastMock.warning).toHaveBeenCalled();
+  });
+
+  it('manual retry never acknowledges isolated or failed operations as successful', async () => {
+    actionQueueMock.deadLetterSize.set(1);
+    try {
+      await component.retryAll();
+      expect(toastMock.success).not.toHaveBeenCalled();
+      expect(toastMock.warning).toHaveBeenCalled();
+    } finally { actionQueueMock.deadLetterSize.set(0); }
   });
 
   describe('backgroundSyncNotice 通道（partial-handoff UI 修复）', () => {

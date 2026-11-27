@@ -16,7 +16,24 @@ export interface LegacyRetryReviewBackupItem extends UnknownRecord {
   ownerUserId: string;
 }
 
-export function collectLegacyRetryReviewValidationErrors(
+export function collectLegacyRetryReviewValidationErrors(value: unknown, ownerUserId: unknown, prefix = 'legacyRetryReview'): string[] {
+  const errors = collectLegacyRetryReviewBaseValidationErrors(value, ownerUserId, prefix);
+  if (!Array.isArray(value)) return errors;
+  for (const [index, candidate] of value.entries()) {
+    if (!isRecord(candidate) || candidate['retainedVersions'] === undefined) continue;
+    const label = `${prefix}[${index}].retainedVersions`;
+    const versions = candidate['retainedVersions'];
+    if (!Array.isArray(versions)) { errors.push(`${label} must be an array`); continue; }
+    for (const [versionIndex, version] of versions.entries()) {
+      errors.push(...collectLegacyRetryReviewBaseValidationErrors([version], ownerUserId, `${label}[${versionIndex}]`));
+      if (!isRecord(version)) continue;
+      if (version['retainedVersions'] !== undefined) errors.push(`${label} must be flat`);
+      if (isRecord(version['item']) && isRecord(candidate['item']) && version['item']['id'] !== candidate['item']['id']) errors.push(`${label} queue id must match`);
+    }
+  }
+  return errors;
+}
+function collectLegacyRetryReviewBaseValidationErrors(
   value: unknown,
   ownerUserId: unknown,
   prefix = 'legacyRetryReview',
@@ -102,7 +119,9 @@ export function collectLegacyRetryReviewQueueIdentityOverlapErrors(
   }
 
   const errors: string[] = [];
-  reviewItems.forEach((reviewItem, index) => {
+  const allReviewItems = reviewItems.flatMap(reviewItem => isRecord(reviewItem) && Array.isArray(reviewItem['retainedVersions'])
+    ? [reviewItem, ...reviewItem['retainedVersions']] : [reviewItem]);
+  allReviewItems.forEach((reviewItem, index) => {
     if (!isRecord(reviewItem) || !isRecord(reviewItem['item'])) return;
     const id = nonEmptyString(reviewItem['item']['id']);
     const operationId = nonEmptyString(reviewItem['item']['operationId']);
@@ -147,6 +166,21 @@ export function parseLegacyRetryReviewStorageValue(
   }
 }
 
+function reviewEvidenceIdentity(value: unknown): string {
+  if (!isRecord(value)) return JSON.stringify(value);
+  const keys = new Set<string>();
+  const pending: unknown[] = [{ item: value['item'], reason: value['reason'], ownerUserId: value['ownerUserId'] }];
+  const evidence = pending[0];
+  const visited = new WeakSet<object>();
+  while (pending.length > 0) {
+    const entry = pending.pop();
+    if (entry && typeof entry === 'object' && !visited.has(entry)) {
+      visited.add(entry);
+      for (const [key, item] of Object.entries(entry)) { keys.add(key); pending.push(item); }
+    }
+  }
+  return JSON.stringify(evidence, [...keys].sort());
+}
 export function mergeLegacyRetryReviewItems(
   currentItems: unknown,
   incomingItems: unknown,
@@ -163,6 +197,16 @@ export function mergeLegacyRetryReviewItems(
     if ((existingById && existingById.item.operationId !== item.item.operationId)
       || (existingByOperationId && existingByOperationId.item.id !== item.item.id)) {
       throw new Error('legacy retry review identity conflict');
+    }
+    if (existingById) {
+      const versions = Array.isArray(existingById['retainedVersions']) ? [...existingById['retainedVersions']] : [];
+      const { retainedVersions: _versions, ...incomingBase } = item;
+      const incomingVersions = [incomingBase, ...(Array.isArray(item['retainedVersions']) ? item['retainedVersions'] : [])];
+      for (const version of incomingVersions) {
+        const identity = reviewEvidenceIdentity(version);
+        if (reviewEvidenceIdentity(existingById) !== identity && !versions.some(existing => reviewEvidenceIdentity(existing) === identity)) versions.push(version);
+      }
+      if (versions.length > 0) existingById['retainedVersions'] = versions;
     }
     if (!existingById && !existingByOperationId) {
       byId.set(item.item.id, item);

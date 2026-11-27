@@ -20,6 +20,17 @@ export abstract class RetryQueueLegacyReviewLayer extends RetryQueueCapacityLaye
     return LEGACY_UNKNOWN_OWNER_USER_ID;
   }
 
+  /** Existence only: unknown-owner payloads must never be claimed by the signed-in account. */
+  hasUnknownOwnerLegacyReview(): boolean {
+    if (typeof localStorage === 'undefined') return false;
+    try {
+      const raw = localStorage.getItem(this.getLegacyReviewStorageKey(LEGACY_UNKNOWN_OWNER_USER_ID));
+      if (!raw) return false;
+      const records: unknown = JSON.parse(raw);
+      return !Array.isArray(records) || records.length > 0;
+    } catch { return true; }
+  }
+
   refreshLegacyReviewCount(): void {
     const ownerUserId = this.authService.currentUserId() ?? AUTH_CONFIG.LOCAL_MODE_USER_ID;
     if (typeof localStorage === 'undefined') {
@@ -211,6 +222,20 @@ export abstract class RetryQueueLegacyReviewLayer extends RetryQueueCapacityLaye
     return this.quarantineLegacyRetryItem(item, reason);
   }
 
+  private legacyReviewEvidenceFingerprint(item: RetryQueueItem): string {
+    const { retryCount: _retryCount, ...evidence } = item;
+    const keys = new Set<string>();
+    const pending: unknown[] = [evidence];
+    const visited = new WeakSet<object>();
+    while (pending.length > 0) {
+      const value = pending.pop();
+      if (value && typeof value === 'object' && !visited.has(value)) {
+        visited.add(value);
+        for (const [key, entry] of Object.entries(value)) { keys.add(key); pending.push(entry); }
+      }
+    }
+    return JSON.stringify(evidence, [...keys].sort());
+  }
   protected quarantineLegacyRetryItem(item: RetryQueueItem, reason: string): boolean {
     const ownerUserId = this.resolveLegacyReviewOwnerUserId(item);
     const record: LegacyRetryReviewItem = {
@@ -231,10 +256,25 @@ export abstract class RetryQueueLegacyReviewLayer extends RetryQueueCapacityLaye
     const key = this.getLegacyReviewStorageKey(ownerUserId);
     try {
       const existing = localStorage.getItem(key);
-      const records = existing ? JSON.parse(existing) as LegacyRetryReviewItem[] : [];
-      const deduped = records.filter(entry => entry.item.id !== item.id);
-      deduped.push(record);
-      localStorage.setItem(key, JSON.stringify(deduped));
+      const records = existing ? JSON.parse(existing) as Array<LegacyRetryReviewItem & { retainedVersions?: LegacyRetryReviewItem[] }> : [];
+      if (!Array.isArray(records)) throw new Error('legacy review storage is not an array');
+      const previous = records.find(entry => entry.item.id === item.id);
+      if (previous) {
+        const versions = [previous, ...(previous.retainedVersions ?? [])];
+        const fingerprint = this.legacyReviewEvidenceFingerprint(item);
+        if (versions.some(version => this.legacyReviewEvidenceFingerprint(version.item) === fingerprint && version.reason === reason)) {
+          this.refreshLegacyReviewCount();
+          const currentOwner = this.getCurrentOwnerUserId();
+          if (this.isCloudBackedUserId(currentOwner)) this.repairBlackBoxConflictForLegacyItem(item, currentOwner);
+          return true;
+        }
+        // Keep the original queue/operation IDs, and retain later evidence inside
+        // the same review envelope so existing backup identity contracts stay valid.
+        previous.retainedVersions = [...(previous.retainedVersions ?? []), record];
+      } else {
+        records.push(record);
+      }
+      localStorage.setItem(key, JSON.stringify(records));
       this.refreshLegacyReviewCount();
     } catch (error) {
       this.logger.warn('保存 legacy retry 隔离记录失败', { error, itemId: item.id, reason });

@@ -40,6 +40,26 @@ describe('legacy RetryQueue review backup helpers', () => {
     ]);
   });
 
+  it('merges same-id evidence versions without remapping, and preserves all versions on repeated restore', () => {
+    const a = makeReviewItem('same', 'op-a');
+    const b = makeReviewItem('same', 'op-b');
+    const incoming = { ...a, retainedVersions: [b] };
+    const merged = mergeLegacyRetryReviewItems([a], [incoming], 'user-1');
+    expect(merged[0]['retainedVersions']).toEqual([b]);
+    expect(mergeLegacyRetryReviewItems(merged, [incoming], 'user-1')).toEqual(merged);
+    expect(() => parseLegacyRetryReviewItems([{ ...a, retainedVersions: [{ ...b, ownerUserId: 'foreign' }] }], 'user-1')).toThrow(/ownerUserId/);
+    expect(collectLegacyRetryReviewQueueIdentityOverlapErrors([{ id: 'other', operationId: 'op-b' }], merged)).not.toEqual([]);
+  });
+
+  it('retains an incoming top-level same-ID same-operation changed payload and explanation', () => {
+    const original = makeReviewItem('same', 'same-op');
+    const changed = { ...original, item: { ...original.item, data: { ...original.item.data, content: 'changed' } }, reason: 'new failure evidence' };
+    const merged = mergeLegacyRetryReviewItems([original], [changed], 'user-1');
+    expect(merged[0].item.data.content).toBe('review only');
+    expect(merged[0]['retainedVersions']).toEqual([changed]);
+    expect(mergeLegacyRetryReviewItems(merged, [changed], 'user-1')).toEqual(merged);
+  });
+
   it('rejects owner mismatches, missing identity, and duplicate queue identity', () => {
     const foreign = makeReviewItem('retry-foreign', 'operation-foreign', 'user-2');
     expect(() => parseLegacyRetryReviewItems([foreign], 'user-1')).toThrow(/ownerUserId/);
