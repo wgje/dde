@@ -409,6 +409,32 @@ describe('SyncStatusComponent', () => {
     expect(embeddedFixture.nativeElement.textContent).toContain('导出待同步数据');
   });
 
+  it.each([false, true])('retained Focus snapshots cannot be discarded in sidebar embedded=%s', embedded => {
+    const view = TestBed.createComponent(SyncStatusComponent);
+    (view.componentInstance as unknown as { embedded: ReturnType<typeof signal<boolean>> }).embedded = signal(embedded);
+    view.componentInstance.isExpanded.set(true);
+    view.componentInstance.showDeadLetters.set(true);
+    const retained = createDeadLetter('focus-session', 'FOCUS_CONSOLE_SAVE_FAILED | 远端专注会话已更新，本地变更已保留等待处理');
+    const ordinary = createDeadLetter('project', 'network failed');
+    deadLetters.set([retained, ordinary]);
+    view.detectChanges();
+    const dismissButtons = [...view.nativeElement.querySelectorAll('button[title="放弃"],button[title="待核对的本地快照不能放弃"]')] as HTMLButtonElement[];
+    expect(dismissButtons).toHaveLength(2);
+    expect(dismissButtons[0].disabled).toBe(true);
+    expect(dismissButtons[1].disabled).toBe(false);
+    view.componentInstance.retryDeadLetter(retained.action.id);
+    view.componentInstance.dismissDeadLetter(retained.action.id);
+    view.componentInstance.clearAllDeadLetters();
+    expect(actionQueueMock.retryDeadLetter).not.toHaveBeenCalled();
+    expect(actionQueueMock.dismissDeadLetter).not.toHaveBeenCalled();
+    expect(actionQueueMock.clearDeadLetterQueue).not.toHaveBeenCalled();
+    view.componentInstance.retryDeadLetter(ordinary.action.id);
+    view.componentInstance.dismissDeadLetter(ordinary.action.id);
+    expect(actionQueueMock.retryDeadLetter).toHaveBeenCalledWith(ordinary.action.id);
+    expect(actionQueueMock.dismissDeadLetter).toHaveBeenCalledWith(ordinary.action.id);
+    view.destroy();
+  });
+
   it('retryAll 应先重放 RetryQueue，再处理 ActionQueue', async () => {
     const retryQueue = TestBed.inject(RetryQueueService) as unknown as {
       processQueue: ReturnType<typeof vi.fn>;

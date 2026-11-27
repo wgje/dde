@@ -421,6 +421,8 @@ export class SyncStatusComponent {
    * 重试单个死信
    */
   retryDeadLetter(itemId: string) {
+    const item = this.deadLetters().find(candidate => candidate.action.id === itemId);
+    if (!item || this.isPreservedRemoteFocusConflict(item)) return;
     this.actionQueue.retryDeadLetter(itemId);
   }
   
@@ -428,6 +430,8 @@ export class SyncStatusComponent {
    * 放弃单个死信
    */
   dismissDeadLetter(itemId: string) {
+    const item = this.deadLetters().find(candidate => candidate.action.id === itemId);
+    if (!item || this.isPreservedRemoteFocusConflict(item)) return;
     this.actionQueue.dismissDeadLetter(itemId);
   }
   
@@ -435,6 +439,7 @@ export class SyncStatusComponent {
    * 清空所有死信
    */
   clearAllDeadLetters() {
+    if (this.preservedRemoteFocusConflictCount() > 0) return;
     this.actionQueue.clearDeadLetterQueue();
     this.showDeadLetters.set(false);
   }
