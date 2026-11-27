@@ -1,7 +1,8 @@
 import 'fake-indexeddb/auto';
 
 import { Injector, runInInjectionContext, signal } from '@angular/core';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { clear as clearKeyvalStore, get as getKeyvalValue, set as setKeyvalValue } from 'idb-keyval';
 import { ActionQueueService } from './action-queue.service';
 import { LOCAL_QUEUE_CONFIG } from './action-queue-storage.helpers';
 import { LoggerService } from './logger.service';
@@ -113,17 +114,27 @@ function createActionQueueOwnerStorageService(): ActionQueueOwnerStorageService 
 describe('DisasterBackupService', () => {
   let trackedConflictStorage: ConflictStorageService | null = null;
 
+  beforeAll(async () => {
+    // A previous shared-worker suite may already have opened idb-keyval's cached default store.
+    // Keep this real connection warm so fixture isolation cannot rely on file execution order.
+    await getKeyvalValue('disaster-backup-fixture-connection-probe');
+  });
+
   beforeEach(async () => {
     localStorage.clear();
     resetBrowserNetworkSuspensionTrackingForTests();
     trackedConflictStorage = null;
+
+    // idb-keyval caches the default DB connection across shared-worker files. Deleting that
+    // database leaves a blocked deletion that queues later readers forever; clear its real
+    // object store instead so subsequent seed/export calls use the same live durable source.
+    await clearKeyvalStore();
 
     for (const name of [
       'nanoflow-offline-snapshots',
       'focus_mode',
       'nanoflow-retry-queue',
       'nanoflow-queue-backup',
-      'keyval-store',
       'nanoflow-conflicts',
       'nanoflow-store-cache',
       'nanoflow-offline-command-store',
@@ -563,6 +574,18 @@ describe('DisasterBackupService', () => {
     expect(open).toHaveBeenCalledWith(FOCUS_CONFIG.SYNC.IDB_NAME);
     expect(transaction).toHaveBeenCalledWith(FOCUS_CONFIG.IDB_STORES.BLACK_BOX_ENTRIES, 'readonly');
     expect(put).not.toHaveBeenCalled(); expect(remove).not.toHaveBeenCalled(); expect(clear).not.toHaveBeenCalled();
+  });
+
+  it('exports the real default keyval store through its existing cached connection', async () => {
+    const snapshot = {
+      savedAt: '2026-11-27T00:00:00.000Z',
+      entries: [{ taskId: 'synthetic-cached-store-task' }],
+    };
+    await setKeyvalValue('nanoflow.focus-session.v5.user-1', snapshot);
+    const payload = await createLocalBackupService().buildLocalPayload([createProject()], {
+      autoBackupEnabled: false, autoBackupIntervalMs: 900000,
+    });
+    expect(payload.localState?.dockSnapshot?.indexedDb).toEqual(snapshot);
   });
 
   it.each([
