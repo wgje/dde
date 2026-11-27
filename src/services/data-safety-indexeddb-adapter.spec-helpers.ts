@@ -8,6 +8,7 @@ import { deleteRawIndexedDbDatabase } from '../app/core/state/persistence/backup
 import { del as deleteKeyvalValue } from 'idb-keyval';
 import { createDerivedSyncOperationId } from '../utils/sync-operation-id';
 import { deleteDataSafetyRestoreMarkerJournalDatabaseForTests } from './data-safety-restore-marker-journal';
+import { openIndexedDBAdaptive } from '../utils/indexeddb-open';
 
 export const DATA_SAFETY_ADAPTER_TEST_DB_NAME = 'data-safety-indexeddb-adapter-test';
 
@@ -529,7 +530,7 @@ function makeActionQueueFixture(
   };
 }
 
-async function clearInterruptedRestoreParkedTaskCache(): Promise<void> {
+export async function clearInterruptedRestoreParkedTaskCache(): Promise<void> {
   const db = await openInterruptedRestoreFocusDb();
   try {
     const tx = db.transaction([
@@ -545,18 +546,20 @@ async function clearInterruptedRestoreParkedTaskCache(): Promise<void> {
 }
 
 function openInterruptedRestoreFocusDb(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open(FOCUS_CONFIG.SYNC.IDB_NAME, FOCUS_CONFIG.SYNC.IDB_VERSION);
-    request.onerror = () => reject(request.error);
-    request.onupgradeneeded = () => {
-      const db = request.result;
+  return openIndexedDBAdaptive({
+    dbName: FOCUS_CONFIG.SYNC.IDB_NAME,
+    targetVersion: FOCUS_CONFIG.SYNC.IDB_VERSION,
+    requiredStores: [
+      FOCUS_CONFIG.IDB_STORES.PARKED_TASKS,
+      FOCUS_CONFIG.IDB_STORES.SYNC_METADATA,
+    ],
+    ensureStores: db => {
       if (!db.objectStoreNames.contains(FOCUS_CONFIG.IDB_STORES.PARKED_TASKS)) {
         db.createObjectStore(FOCUS_CONFIG.IDB_STORES.PARKED_TASKS, { keyPath: 'taskId' });
       }
       if (!db.objectStoreNames.contains(FOCUS_CONFIG.IDB_STORES.SYNC_METADATA)) {
         db.createObjectStore(FOCUS_CONFIG.IDB_STORES.SYNC_METADATA, { keyPath: 'key' });
       }
-    };
-    request.onsuccess = () => resolve(request.result);
+    },
   });
 }
