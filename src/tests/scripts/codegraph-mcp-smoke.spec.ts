@@ -43,6 +43,8 @@ function makeFreshMcpProject(): string {
     'query-codegraph-nanoflow-overlay.mjs',
     path.join('contracts', 'codegraph-nanoflow-overlay-v1.json'),
     path.join('contracts', 'codegraph-overlay-generation-v1.json'),
+    path.join('contracts', 'codegraph-overlay-current-schema.json'),
+    path.join('contracts', 'codegraph-overlay-current-generation.json'),
     path.join('lib', 'codegraph-context-outcome.cjs'),
     path.join('lib', 'codegraph-nanoflow-overlay-v1-schema.cjs'),
     path.join('lib', 'codegraph-nanoflow-overlay-v1-schema-angular-support.cjs'),
@@ -53,6 +55,8 @@ function makeFreshMcpProject(): string {
     path.join('lib', 'codegraph-overlay-candidate-index.mjs'),
     path.join('lib', 'codegraph-overlay-context-assembly.mjs'),
     path.join('lib', 'codegraph-overlay-current-receipt.cjs'),
+    path.join('lib', 'codegraph-overlay-current-schema.cjs'),
+    path.join('lib', 'codegraph-nanoflow-overlay-current-graph.cjs'),
     path.join('lib', 'codegraph-overlay-generation-format.cjs'),
     path.join('lib', 'codegraph-overlay-native-codeblock-evidence.mjs'),
     path.join('lib', 'codegraph-overlay-native-codeblock-selection.mjs'),
@@ -805,6 +809,23 @@ describe('smoke-codegraph-mcp-wrapper', () => {
     expect(logText).toContain('"failureClass":"child-spawn-missing-target"');
   }, 15_000);
 
+  it('copies current schema runtime closure into smoke roots and rejects unknown selector digests', () => {
+    const projectRoot = makeFreshMcpProject();
+    const reader = path.join(projectRoot, 'scripts/lib/codegraph-overlay-current-receipt.cjs');
+    const read = () => spawnSync(process.execPath, ['-e',
+      'const r=require(process.argv[1]).readOverlayCurrentReceipt(process.argv[2]);console.log(JSON.stringify({ok:r.ok,errorCode:r.errorCode}));', reader, projectRoot,
+    ], { cwd: repoRoot, encoding: 'utf8' });
+    const first = read();
+    expect(first.status, first.stderr).toBe(0);
+    expect(JSON.parse(first.stdout)).toMatchObject({ ok: true });
+    const currentPath = path.join(projectRoot, '.codegraph/nanoflow-generations/CURRENT.json');
+    const current = JSON.parse(fs.readFileSync(currentPath, 'utf8'));
+    current.overlaySchemaDigest = 'f'.repeat(64);
+    fs.writeFileSync(currentPath, JSON.stringify(current));
+    const rejected = read();
+    expect(rejected.status, rejected.stderr).toBe(0);
+    expect(JSON.parse(rejected.stdout)).toMatchObject({ ok: false, errorCode: 'CURRENT_INVALID' });
+  }, 15_000);
   it('keeps one wrapper process alive across tools/list, resource discovery, context pack, overlay query, and tools/list', () => {
     const fakeCodegraph = makeFakeCodegraph();
     const projectRoot = makeFreshMcpProject();
