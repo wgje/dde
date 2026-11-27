@@ -585,6 +585,33 @@ describe('FocusConsoleSyncService', () => {
     },
   );
 
+  it.each((['focus-session', 'routine-task', 'routine-completion'] as const).flatMap(kind =>
+    (['owner-change', 'session-reset', 'lease-abort'] as const).map(transition => [kind, transition] as const)))(
+    'blocks enabled %s replay when %s happens at the capability await boundary', async (kind, transition) => {
+      const controller = new AbortController();
+      mockSyncRpc.isFeatureEnabled.mockImplementationOnce(() => {
+        queueMicrotask(() => {
+          if (transition === 'owner-change') mockAuthService.currentUserId.mockReturnValue('user-2');
+          if (transition === 'session-reset') mockSessionRuntimeReset.resetAll('logout' as never);
+          if (transition === 'lease-abort') controller.abort();
+        });
+        return true;
+      });
+      const fence = { leaseSignal: controller.signal, isCurrent: () => true };
+      const result = kind === 'focus-session'
+        ? await service.saveFocusSession({ userId: 'user-1' } as never, 'op-fast-stale', fence)
+        : kind === 'routine-task'
+          ? await service.upsertRoutineTask('user-1', { id: 'routine-fast-stale' } as never, 'op-fast-stale', fence)
+          : await service.incrementRoutineCompletion({ userId: 'user-1' } as never, 'op-fast-stale', fence);
+      expect(result.ok).toBe(false);
+      expect(mockSyncRpc.checkProtocol).not.toHaveBeenCalled();
+      expect(mockSyncRpc.upsertFocusSession).not.toHaveBeenCalled();
+      expect(mockSyncRpc.upsertRoutineTask).not.toHaveBeenCalled();
+      expect(mockSyncRpc.incrementRoutineCompletion).not.toHaveBeenCalled();
+      expect(mockClient.from).not.toHaveBeenCalled();
+    },
+  );
+
   it('saveFocusSession should use Sync RPC when operationId is provided', async () => {
     const record = {
       id: 'session-1',

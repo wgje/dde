@@ -227,3 +227,10 @@ Window: `2026-11-25T13:20:00Z` to `2026-11-26T13:20:00Z` (24 hours). Only aggreg
 - Adversarial review of candidate 422852fc exposed a missing network suspension recheck after awaiting protocol priming. Three new tests (focus session, routine task, completion) transitioned the browser to hidden during probing and initially observed RPC success instead of a deferred result.
 - Added a suspension-window recheck after the owner/generation/lease fence and before RPC dispatch on all three paths. No production write or feature flag change occurred.
 - RED: three cases failed. GREEN: four related suites / 124 tests passed; TypeScript, targeted ESLint and diff check passed. This is a correction to the previous candidate, not a claim that its earlier tests covered this boundary. Production replay and full release acceptance remain unproven.
+
+
+## Enabled-capability await identity fence (2026-11-27)
+
+- Adversarial review found that the enabled-RPC fast path still yields at await. A microtask owner change or session runtime reset after the helper computed true could reach mutation dispatch. New focus tests failed for owner change and reset; lease abort was already rejected.
+- Each mutation caller now captures the runtime generation before capability priming and checks that generation plus owner after await, in addition to existing lease and suspension guards. Expanded the cases across all three mutation kinds and owner-change/session-reset/lease-abort transitions.
+- Four related suites: 133/133 passed. TypeScript, targeted ESLint, diff and documentation validation passed. No production flag, data, migration or deployment changed. This closes a candidate-introduced async gap; production acceptance and remaining tool gates remain open.

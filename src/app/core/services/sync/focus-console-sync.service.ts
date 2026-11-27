@@ -554,7 +554,9 @@ export class FocusConsoleSyncService implements OnDestroy {
     }
 
     try {
-      if (!await this.primeFocusSyncRpcCapability(record.userId, operationId, replayFence)) {
+      const replayGeneration = this.readGeneration;
+      if (!await this.primeFocusSyncRpcCapability(record.userId, operationId, replayFence)
+        || !this.isReadRequestCurrent(record.userId, replayGeneration)) {
         return this.buildReplayFenceFailure(ErrorCodes.FOCUS_CONSOLE_SAVE_FAILED, '专注会话重放上下文已失效');
       }
       if (isBrowserNetworkSuspendedWindow()) return this.buildBrowserSuspendedFailure();
@@ -675,7 +677,9 @@ export class FocusConsoleSyncService implements OnDestroy {
     }
 
     try {
-      if (!await this.primeFocusSyncRpcCapability(userId, operationId, replayFence)) {
+      const replayGeneration = this.readGeneration;
+      if (!await this.primeFocusSyncRpcCapability(userId, operationId, replayFence)
+        || !this.isReadRequestCurrent(userId, replayGeneration)) {
         return this.buildReplayFenceFailure(ErrorCodes.FOCUS_CONSOLE_ROUTINE_FAILED, '日常任务重放上下文已失效');
       }
       if (isBrowserNetworkSuspendedWindow()) return this.buildBrowserSuspendedFailure();
@@ -720,7 +724,9 @@ export class FocusConsoleSyncService implements OnDestroy {
       return this.buildBrowserSuspendedFailure();
     }
 
-    if (!await this.primeFocusSyncRpcCapability(mutation.userId, operationId, replayFence)) {
+    const replayGeneration = this.readGeneration;
+    if (!await this.primeFocusSyncRpcCapability(mutation.userId, operationId, replayFence)
+      || !this.isReadRequestCurrent(mutation.userId, replayGeneration)) {
       return this.buildReplayFenceFailure(ErrorCodes.FOCUS_CONSOLE_INCREMENT_FAILED, '日常完成重放上下文已失效');
     }
     if (isBrowserNetworkSuspendedWindow()) return this.buildBrowserSuspendedFailure();

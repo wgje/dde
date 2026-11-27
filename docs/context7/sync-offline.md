@@ -169,3 +169,8 @@ After protocol priming, recheck the browser suspension window immediately before
 selecting the write RPC. A hidden page or newly armed reconnect grace period during
 the probe must return SYNC_OFFLINE with retryable/deferred evidence and must not
 dispatch any focus, routine-task or completion mutation.
+
+Capture the session runtime generation in the mutation caller before awaiting
+capability priming, then revalidate that generation and owner after the await.
+Even an already-enabled capability returns through a microtask; a boolean checked
+inside the helper before return is not a sufficient post-await identity fence.
