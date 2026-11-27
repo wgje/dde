@@ -310,7 +310,7 @@ export function registerAuthServiceSignedOutPendingBridgeSpecs(
       const second = context.service.signOut();
 
       expect(second).toBe(first);
-      await Promise.resolve();
+      await vi.waitFor(() => expect(context.mockSupabaseClient.signOut).toHaveBeenCalledOnce());
       expect(context.mockSupabaseClient.signOut).toHaveBeenCalledTimes(1);
       context.dispatchAuthStateChange('SIGNED_OUT', null);
       remote.resolve();
@@ -328,7 +328,7 @@ export function registerAuthServiceSignedOutPendingBridgeSpecs(
       context.mockSupabaseClient.signOut.mockReturnValueOnce(remote.promise);
 
       const signOut = context.service.signOut();
-      await Promise.resolve();
+      await vi.waitFor(() => expect(context.mockSupabaseClient.signOut).toHaveBeenCalledOnce());
       context.dispatchAuthStateChange('SIGNED_OUT', null);
       const error = new Error('unexpected remote sign-out error');
       remote.reject(error);
@@ -359,7 +359,7 @@ export function registerAuthServiceSignedOutPendingBridgeSpecs(
       context.mockSupabaseClient.signOut.mockReturnValueOnce(remote.promise);
 
       const signOut = context.service.signOut();
-      await Promise.resolve();
+      await vi.waitFor(() => expect(context.mockSupabaseClient.signOut).toHaveBeenCalledOnce());
       context.dispatchAuthStateChange('SIGNED_OUT', null);
       const error = new Error('unexpected remote sign-out error');
       remote.reject(error);
@@ -458,13 +458,14 @@ export function registerAuthServiceSignedOutPendingBridgeSpecs(
         .mockReturnValueOnce(oldRemote.promise)
         .mockReturnValueOnce(newRemote.promise);
       const oldFlight = context.service.signOut();
-      await Promise.resolve();
+      await vi.waitFor(() => expect(context.mockSupabaseClient.signOut).toHaveBeenCalledOnce());
 
       context.service.reset();
       await context.ensureRuntimeAuthReady();
       seedConfirmedSessionIdentity(context, 'user-b', 'b@example.com', 'token-b');
       const newFlight = context.service.signOut();
       expect(newFlight).not.toBe(oldFlight);
+      await vi.waitFor(() => expect(context.mockSupabaseClient.signOut).toHaveBeenCalledTimes(2));
       oldRemote.resolve();
       await expect(oldFlight).resolves.toBe(false);
 
