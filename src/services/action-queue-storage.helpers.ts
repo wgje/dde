@@ -7,6 +7,7 @@ import { QUEUE_CONFIG } from '../config';
 import type { DeadLetterItem, QueuedAction } from './action-queue.types';
 import {
   isAuthPendingRetryError as isAuthPendingRetryErrorPure,
+  isFocusSnapshotReconciliationRetryError as isFocusSnapshotReconciliationRetryErrorPure,
   isBrowserSuspensionError as isBrowserSuspensionErrorPure,
   isPartialRetryHandoffError as isPartialRetryHandoffErrorPure,
   isRateLimitRetryError as isRateLimitRetryErrorPure,
@@ -156,6 +157,7 @@ export function classifyQueueRetryError(error: string | QueueRetryError): QueueR
     || isRateLimitRetryErrorPure(normalizedError)
     || isServerPressureRetryErrorPure(normalizedError)
     || isSyncRpcCapabilityRetryErrorPure(normalizedError)
+    || isFocusSnapshotReconciliationRetryErrorPure(normalizedError)
   ) {
     return 'deferred';
   }
