@@ -164,3 +164,8 @@ replay lease before invoking a mutation RPC. A missing operation ID, unavailable
 probe or rejected protocol retains the operation locally without remote success.
 Protocol priming runs in background replay, never as a prerequisite for rendering
 the workspace or editing local text.
+
+After protocol priming, recheck the browser suspension window immediately before
+selecting the write RPC. A hidden page or newly armed reconnect grace period during
+the probe must return SYNC_OFFLINE with retryable/deferred evidence and must not
+dispatch any focus, routine-task or completion mutation.

@@ -557,6 +557,7 @@ export class FocusConsoleSyncService implements OnDestroy {
       if (!await this.primeFocusSyncRpcCapability(record.userId, operationId, replayFence)) {
         return this.buildReplayFenceFailure(ErrorCodes.FOCUS_CONSOLE_SAVE_FAILED, '专注会话重放上下文已失效');
       }
+      if (isBrowserNetworkSuspendedWindow()) return this.buildBrowserSuspendedFailure();
       if (this.shouldUseSyncRpc(operationId)) {
         return await this.saveFocusSessionViaSyncRpc(record, operationId, replayFence);
       }
@@ -677,6 +678,7 @@ export class FocusConsoleSyncService implements OnDestroy {
       if (!await this.primeFocusSyncRpcCapability(userId, operationId, replayFence)) {
         return this.buildReplayFenceFailure(ErrorCodes.FOCUS_CONSOLE_ROUTINE_FAILED, '日常任务重放上下文已失效');
       }
+      if (isBrowserNetworkSuspendedWindow()) return this.buildBrowserSuspendedFailure();
       if (this.shouldUseSyncRpc(operationId)) {
         return await this.upsertRoutineTaskViaSyncRpc(userId, task, operationId, replayFence);
       }
@@ -721,6 +723,7 @@ export class FocusConsoleSyncService implements OnDestroy {
     if (!await this.primeFocusSyncRpcCapability(mutation.userId, operationId, replayFence)) {
       return this.buildReplayFenceFailure(ErrorCodes.FOCUS_CONSOLE_INCREMENT_FAILED, '日常完成重放上下文已失效');
     }
+    if (isBrowserNetworkSuspendedWindow()) return this.buildBrowserSuspendedFailure();
     if (this.shouldUseSyncRpc(operationId)) {
       return await this.incrementRoutineCompletionViaSyncRpc(mutation, operationId, replayFence);
     }

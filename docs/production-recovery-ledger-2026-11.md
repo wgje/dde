@@ -220,3 +220,10 @@ Window: `2026-11-25T13:20:00Z` to `2026-11-26T13:20:00Z` (24 hours). Only aggreg
 - Client checkProtocol already auto-enables accepted capabilities; focus mutation paths instead checked the initially disabled flag without priming the probe. Prior attribution to the absent build variable alone was incomplete.
 - Added local protocol priming to focus-session, routine-task and routine-completion mutation paths, preserving existing operation-ID requirements and no legacy writes. Captured owner/session generation/replay lease are rechecked after the probe await.
 - RED: new focus startup-disabled and expired-lease probe cases failed. GREEN: 4 files / 121 tests passed, including protocol client and action-queue focus processors; typecheck, targeted ESLint and diff check passed. Added unavailable/rejected/owner-change no-write cases. Candidate not deployed; production replay/owner isolation and full release gates remain unproven.
+
+
+## Focus probe suspension fence follow-up (2026-11-27)
+
+- Adversarial review of candidate 422852fc exposed a missing network suspension recheck after awaiting protocol priming. Three new tests (focus session, routine task, completion) transitioned the browser to hidden during probing and initially observed RPC success instead of a deferred result.
+- Added a suspension-window recheck after the owner/generation/lease fence and before RPC dispatch on all three paths. No production write or feature flag change occurred.
+- RED: three cases failed. GREEN: four related suites / 124 tests passed; TypeScript, targeted ESLint and diff check passed. This is a correction to the previous candidate, not a claim that its earlier tests covered this boundary. Production replay and full release acceptance remain unproven.

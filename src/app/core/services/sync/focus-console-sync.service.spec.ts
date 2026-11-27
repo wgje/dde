@@ -562,6 +562,29 @@ describe('FocusConsoleSyncService', () => {
     },
   );
 
+  it.each(['focus-session', 'routine-task', 'routine-completion'] as const)(
+    'defers %s when the browser becomes hidden during protocol probing', async kind => {
+      mockSyncRpc.isFeatureEnabled.mockReturnValue(false);
+      mockSyncRpc.checkProtocol.mockImplementation(async () => {
+        setVisibilityState('hidden');
+        mockSyncRpc.isFeatureEnabled.mockReturnValue(true);
+        return { minProtocolVersion: 1, deploymentEpoch: 0 };
+      });
+      const result = kind === 'focus-session'
+        ? await service.saveFocusSession({ userId: 'user-1' } as never, 'op-hidden')
+        : kind === 'routine-task'
+          ? await service.upsertRoutineTask('user-1', { id: 'routine-hidden' } as never, 'op-hidden')
+          : await service.incrementRoutineCompletion({ userId: 'user-1', routineId: 'routine-hidden',
+            completionId: 'completion-hidden' } as never, 'op-hidden');
+      expect(result).toMatchObject({ ok: false, error: { code: 'SYNC_OFFLINE',
+        details: { retryable: true, deferred: true, reason: 'browser-network-suspended' } } });
+      expect(mockSyncRpc.upsertFocusSession).not.toHaveBeenCalled();
+      expect(mockSyncRpc.upsertRoutineTask).not.toHaveBeenCalled();
+      expect(mockSyncRpc.incrementRoutineCompletion).not.toHaveBeenCalled();
+      expect(mockClient.from).not.toHaveBeenCalled();
+    },
+  );
+
   it('saveFocusSession should use Sync RPC when operationId is provided', async () => {
     const record = {
       id: 'session-1',
