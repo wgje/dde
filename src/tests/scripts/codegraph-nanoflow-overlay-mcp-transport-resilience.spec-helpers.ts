@@ -531,7 +531,7 @@ export function registerCodegraphOverlayMcpTransportResilienceSpecs(
       expect(contextEvent).toEqual(expect.objectContaining({
         failureClass: 'overlay-timeout',
         overlayIsError: true,
-        overlayRecoveryTimedOut: false,
+        overlayRecoveryTimedOut: expect.any(Boolean),
         overlayRecoveryTimeoutMs: expect.any(Number),
         queryPlan: expect.objectContaining({
           contextTimeoutMs: 300,
@@ -547,6 +547,18 @@ export function registerCodegraphOverlayMcpTransportResilienceSpecs(
         }),
       }));
 
+      // execFile-close and the recovery sentinel race legitimately. Both must
+      // preserve the same bounded failure result and coherent diagnostic state.
+      expect((contextEvent.queryPlan as Record<string, unknown>).overlayRecoveryTimedOut)
+        .toBe(contextEvent.overlayRecoveryTimedOut);
+      const text = contextResponse.result.content[0].text;
+      if (contextEvent.overlayRecoveryTimedOut) {
+        expect(text).toContain('while building the context pack');
+      } else {
+        expect(text).not.toContain('while building the context pack');
+      }
+      expect(contextEvent.overlayRecoveryTimeoutMs).toBeGreaterThan(0);
+      expect(contextEvent.overlayRecoveryTimeoutMs).toBeLessThanOrEqual(1050);
       const toolsResponsePromise = readJsonLine(child, 2_000);
       child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 62, method: 'tools/list' })}\n`);
       const toolsResponse = await toolsResponsePromise as {

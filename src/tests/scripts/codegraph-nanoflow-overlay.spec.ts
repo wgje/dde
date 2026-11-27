@@ -57,7 +57,20 @@ const WRAPPER_REPO_OVERLAY_ENV = {
   NANOFLOW_CODEGRAPH_OVERLAY_QUERY_TIMEOUT_MS: String(WRAPPER_REPO_OVERLAY_RESPONSE_TIMEOUT_MS),
   NANOFLOW_CODEGRAPH_CONTEXT_PACK_TIMEOUT_MS: String(WRAPPER_REPO_OVERLAY_RESPONSE_TIMEOUT_MS),
   NANOFLOW_CODEGRAPH_REFRESH_ON_STARTUP: '0',
+  // These fixtures implement one-shot JSON, not the resident worker protocol.
+  NANOFLOW_CODEGRAPH_OVERLAY_WORKER_ENABLED: '0',
+  NANOFLOW_CODEGRAPH_OVERLAY_PREWARM: '0',
 };
+const DIRECT_FIXTURE_ENV = {
+  NANOFLOW_CODEGRAPH_OVERLAY_WORKER_ENABLED: '0',
+  NANOFLOW_CODEGRAPH_OVERLAY_PREWARM: '0',
+};
+const directFixtureEnvNames = new Set(Object.keys(DIRECT_FIXTURE_ENV).map(key => key.toLowerCase()));
+const originalDirectFixtureEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => directFixtureEnvNames.has(key.toLowerCase())));
+function applyDirectFixtureEnv(env: NodeJS.ProcessEnv): void {
+  for (const key of Object.keys(env)) if (directFixtureEnvNames.has(key.toLowerCase())) delete env[key];
+  Object.assign(env, DIRECT_FIXTURE_ENV);
+}
 const tempRoots: string[] = [];
 const dirtyFixtureRoots = new Set<string>();
 const originalWrapperLogPath = process.env.NANOFLOW_CODEGRAPH_MCP_LOG;
@@ -708,6 +721,7 @@ describe('generate-codegraph-nanoflow-overlay', { timeout: 10_000 }, () => {
   });
 
   beforeEach(() => {
+    applyDirectFixtureEnv(process.env);
     removeAndroidSourceDefaultEnvAliases(process.env);
     process.env[androidFunctionSourceDefaultEnv] = 'local';
     const logRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-codegraph-test-log-'));
@@ -716,6 +730,8 @@ describe('generate-codegraph-nanoflow-overlay', { timeout: 10_000 }, () => {
   });
 
   afterEach(async () => {
+    for (const key of Object.keys(process.env)) if (directFixtureEnvNames.has(key.toLowerCase())) delete process.env[key];
+    Object.assign(process.env, originalDirectFixtureEnv);
     removeAndroidSourceDefaultEnvAliases(process.env);
     Object.assign(process.env, originalAndroidSourceDefaultEnv);
     if (originalWrapperLogPath === undefined) {
@@ -728,6 +744,21 @@ describe('generate-codegraph-nanoflow-overlay', { timeout: 10_000 }, () => {
       const root = tempRoots.pop();
       if (root) await removeTempRoot(root);
     }
+  });
+
+  it('isolates one-shot fixture worker flags from inherited warm-worker environment aliases', () => {
+    const inherited: NodeJS.ProcessEnv = {
+      NANOFLOW_CODEGRAPH_OVERLAY_WORKER_ENABLED: '1',
+      nanoflow_codegraph_overlay_worker_enabled: '1',
+      NANOFLOW_CODEGRAPH_OVERLAY_PREWARM: '1',
+      nanoflow_codegraph_overlay_prewarm: '1',
+      CODEGRAPH_NO_DAEMON: '0',
+    };
+    applyDirectFixtureEnv(inherited);
+    expect(inherited).toEqual({ ...DIRECT_FIXTURE_ENV, CODEGRAPH_NO_DAEMON: '0' });
+    expect(process.env.NANOFLOW_CODEGRAPH_OVERLAY_WORKER_ENABLED).toBe('0');
+    expect(process.env.NANOFLOW_CODEGRAPH_OVERLAY_PREWARM).toBe('0');
+    expect(WRAPPER_REPO_OVERLAY_ENV).toEqual(expect.objectContaining(DIRECT_FIXTURE_ENV));
   });
 
   const context: CodegraphOverlaySpecContext = {

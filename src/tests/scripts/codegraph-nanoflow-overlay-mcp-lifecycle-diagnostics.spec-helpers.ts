@@ -109,9 +109,14 @@ export function registerCodegraphOverlayMcpLifecycleDiagnosticSpecs(
     try {
       const spawnEvent = await waitForLogEvent(logPath, 'child.spawn');
       expect(spawnEvent).toEqual(expect.objectContaining({
-        mode: 'npx-package',
+        mode: 'npm-cli-argv',
+        command: process.execPath,
+        args: [
+          path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+          'exec', '--yes', '--package=@colbymchenry/codegraph@1.6.2', '--',
+          'codegraph', 'serve', '--mcp', '--path', repoRoot,
+        ],
         target: '@colbymchenry/codegraph@1.6.2',
-        packageVersion: '1.6.2',
         env: expect.objectContaining({
           CODEGRAPH_NO_DAEMON: '0',
           CODEGRAPH_NO_WATCH: '0',
