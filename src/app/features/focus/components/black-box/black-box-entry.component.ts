@@ -37,7 +37,7 @@ import { AUTH_CONFIG } from '../../../../../config/auth.config';
       </p>
 
       <!-- 底部栏 -->
-      <div class="mt-1.5 flex items-center justify-between">
+      <div class="mt-1.5 flex flex-wrap items-center justify-between gap-x-2 gap-y-1.5">
         <!-- 时间戳 -->
         <span class="text-[10px] font-mono" [class]="timeClass()">
           {{ entry().createdAt | date:'HH:mm' }}
@@ -45,10 +45,15 @@ import { AUTH_CONFIG } from '../../../../../config/auth.config';
 
         <!-- 同步状态指示 -->
         @if (shouldShowSyncPendingIndicator()) {
-          <span class="text-[9px]" [class]="syncPendingClass()"
+          <span class="inline-flex items-center gap-1 text-[9px]" [class]="syncPendingClass()"
                 data-testid="sync-pending-indicator"
                 [attr.data-sync-debug]="syncDebugAttribute()">
-            ⏳ 待同步
+            <svg class="h-3 w-3 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+              <path d="M20 7v5h-5M4 17v-5h5" />
+              <path d="M6.1 7a7 7 0 0 1 11.6-1L20 9M4 15l2.3 3A7 7 0 0 0 17.9 17" />
+            </svg>
+            待同步
           </span>
         } @else if (shouldShowSyncConflictIndicator()) {
           <span class="text-[9px]" [class]="syncConflictClass()"
@@ -59,8 +64,7 @@ import { AUTH_CONFIG } from '../../../../../config/auth.config';
         }
 
         <!-- 操作按钮 -->
-        <div class="flex gap-1 opacity-0 group-hover:opacity-100
-                    group-focus-within:opacity-100 transition-opacity duration-150">
+        <div class="ml-auto flex shrink-0 gap-1" data-testid="black-box-entry-actions">
 
           <!-- 已读按钮 -->
           @if (!entry().isRead) {
@@ -70,7 +74,12 @@ import { AUTH_CONFIG } from '../../../../../config/auth.config';
               (click)="onMarkRead($event)"
               title="标记已读"
               aria-label="标记已读">
-              👁️
+              <svg class="h-3.5 w-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"
+                   stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z" />
+                <circle cx="12" cy="12" r="3" />
+              </svg>
+              <span>已读</span>
             </button>
           }
 
@@ -82,7 +91,11 @@ import { AUTH_CONFIG } from '../../../../../config/auth.config';
               (click)="onMarkCompleted($event)"
               title="标记完成"
               aria-label="标记完成">
-              ✅
+              <svg class="h-3.5 w-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"
+                   stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                <path d="m5 12 4 4L19 6" />
+              </svg>
+              <span>完成</span>
             </button>
           }
 
@@ -94,7 +107,11 @@ import { AUTH_CONFIG } from '../../../../../config/auth.config';
             title="删除"
             aria-label="删除"
             data-testid="black-box-entry-delete">
-            🗑️
+            <svg class="h-3.5 w-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+              <path d="M3 6h18M9 6V4h6v2M5 6l1 14h12l1-14M10 10v6M14 10v6" />
+            </svg>
+            <span>删除</span>
           </button>
         </div>
       </div>
@@ -115,11 +132,15 @@ import { AUTH_CONFIG } from '../../../../../config/auth.config';
   `,
   styles: [`
     .entry-action-btn {
-      @apply w-6 h-6 rounded flex items-center justify-center text-xs
+      @apply min-h-7 px-1.5 rounded inline-flex items-center justify-center gap-1 text-[10px] whitespace-nowrap
              bg-white/80 dark:bg-stone-600/80
              hover:bg-white dark:hover:bg-stone-500
              active:scale-90 transition-all duration-100
              focus-visible:ring-2 focus-visible:ring-amber-500;
+    }
+
+    @media (pointer: coarse) {
+      .entry-action-btn { min-height: 36px; padding-inline: 8px; }
     }
 
     .entry-action-btn.obsidian {

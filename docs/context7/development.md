@@ -182,3 +182,13 @@ instead of enlarging individual blocks while leaving tree spacing unchanged.
 Run `npm run quality:guard:demo-preview` and the `src/app/dev-preview` fixture specs
 when changing this surface. The guard verifies real selector reachability in both
 preview renderers; it is not a substitute for browser pixel/interaction evidence.
+
+## Isolated Black Box icon previews
+
+`/#/dev-preview/inbox/panel`, `mobile` and `strata` mount the production entry,
+inbox, mobile drawer and history components. A component-scoped in-memory service
+owns UUID fixtures, pending status and actions. It does not request a microphone,
+network access, authentication or durable user storage. Both the standalone page
+and Demo panel render the same fixture. Reloading creates fresh data; production
+route tables omit these development previews. SVG semantics and real action outputs
+are covered by `demo-black-box-preview.component.spec.ts`.

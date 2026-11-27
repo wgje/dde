@@ -161,3 +161,12 @@ Supported paths:
 - disaster backup and rejected-data isolation paths
 
 High-risk changes must preserve recoverability and avoid irreversible deletion.
+
+## Black Box SVG action semantics
+
+Entry, panel, mobile drawer and Strata restore icons use inline 24-unit SVGs with
+`currentColor`, rounded strokes and hidden decorative semantics. Visible labels
+remain the primary meaning: read, complete, delete, pending sync and restore.
+Actions are visible without hover; rows wrap rather than overflow on narrow screens.
+This changes presentation only: durable methods, sync decisions, confirmation,
+keyboard shortcuts and local-first persistence are unchanged.
