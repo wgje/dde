@@ -114,6 +114,13 @@ export class SyncStatusComponent {
     this.actionQueuePendingCount() === 0 &&
     (this.retryQueuePendingCount() > 0 || this.backgroundSyncNotice() !== null)
   );
+  private readonly ownerStorageRevision = signal(0);
+  readonly isQueueStorageReady = computed(() => {
+    this.authService.currentUserId();
+    this.ownerStorageRevision();
+    return this.actionQueue.getCurrentOwnerStorageLoadState() === 'loaded';
+  });
+  readonly queueStorageUnknownText = '本地同步队列尚未确认，请保留站点数据';
   readonly pendingCount = signal(0);
   readonly deadLetterCount = this.actionQueue.deadLetterSize;
   readonly deadLetters = this.actionQueue.deadLetterQueue;
@@ -125,6 +132,10 @@ export class SyncStatusComponent {
   readonly legacyReviewCount = this.retryQueue.legacyReviewCount;
 
   constructor() {
+    const unsubscribe = this.actionQueue.subscribeToOwnerStorageLoadStateChanges(() => {
+      this.ownerStorageRevision.update(revision => revision + 1);
+    });
+    this.destroyRef.onDestroy(unsubscribe);
     effect(() => this.reconcilePendingCount());
 
     this.destroyRef.onDestroy(() => this.clearPendingTimers());
@@ -249,7 +260,7 @@ export class SyncStatusComponent {
     ) {
       return 'bg-red-500';
     }
-    if (this.isBackgroundRetrying()) return 'bg-stone-400';
+    if (!this.isQueueStorageReady() || this.isBackgroundRetrying()) return 'bg-stone-400';
     if (!this.isOnline() || this.offlineMode() || this.pendingCount() > 0 || !this.isLoggedIn() || this.isCloudSyncPaused()) return 'bg-amber-500';
     return 'bg-green-500';
   });
@@ -262,6 +273,7 @@ export class SyncStatusComponent {
   
   // 计算属性 - 是否有需要关注的问题（包括 offlineMode 连接中断状态和冲突）
   readonly hasIssues = computed(() => 
+    !this.isQueueStorageReady() ||
     this.deadLetterCount() > 0 ||
     this.pendingCount() > 0 ||
     this.queueFrozen() ||
@@ -273,6 +285,7 @@ export class SyncStatusComponent {
   );
   
   readonly totalIssues = computed(() => 
+    (this.isQueueStorageReady() ? 0 : 1) +
     this.deadLetterCount() +
     (this.pendingCount() > 0 ? 1 : 0) +
     (this.queueFrozen() ? 1 : 0) +
@@ -371,6 +384,7 @@ export class SyncStatusComponent {
     if (!this.isLoggedIn()) {
       return '数据保存在本地 - 登录后可同步到云端';
     }
+    if (!this.isQueueStorageReady()) return this.queueStorageUnknownText;
     return '数据已保存到云端';
   });
   

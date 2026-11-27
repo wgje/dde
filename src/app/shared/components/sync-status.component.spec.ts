@@ -72,8 +72,15 @@ describe('SyncStatusComponent', () => {
   const isLoadingRemote = signal(false);
   const activeProjectId = signal('project-1');
   const legacyReviewCount = signal(0);
+  const ownerStorageLoadState = { value: 'loaded' as 'loading' | 'loaded' | 'unknown' };
+  const ownerStorageListeners = new Set<() => void>();
 
   const actionQueueMock = {
+    getCurrentOwnerStorageLoadState: () => ownerStorageLoadState.value,
+    subscribeToOwnerStorageLoadStateChanges: (listener: () => void) => {
+      ownerStorageListeners.add(listener);
+      return () => { ownerStorageListeners.delete(listener); };
+    },
     pendingActions,
     queueSize: computed(() => pendingActions().length),
     deadLetterQueue: deadLetters,
@@ -95,6 +102,7 @@ describe('SyncStatusComponent', () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    ownerStorageLoadState.value = 'loaded';
     pendingActions.set([]);
     deadLetters.set([]);
     queueFrozen.set(false);
@@ -157,6 +165,24 @@ describe('SyncStatusComponent', () => {
     fixture = TestBed.createComponent(SyncStatusComponent);
     fixture.detectChanges();
   }, 5000);
+
+  it.each(['loading', 'unknown'] as const)('队列恢复为 %s 时不得把空内存视图当作已保存', state => {
+    ownerStorageLoadState.value = state;
+    ownerStorageListeners.forEach(listener => listener());
+    fixture.detectChanges();
+    expect(fixture.componentInstance.statusDotClass()).toBe('bg-stone-400');
+    expect(fixture.componentInstance.detailedStatus()).toBe('本地同步队列尚未确认，请保留站点数据');
+    expect(fixture.componentInstance.hasIssues()).toBe(true);
+    ownerStorageLoadState.value = 'loaded';
+    ownerStorageListeners.forEach(listener => listener());
+    fixture.detectChanges();
+    expect(fixture.componentInstance.statusDotClass()).toBe('bg-green-500');
+  });
+  it('组件销毁时取消队列恢复监听，避免旧页面持有账号状态回调', () => {
+    const count = ownerStorageListeners.size;
+    fixture.destroy();
+    expect(ownerStorageListeners.size).toBe(count - 1);
+  });
 
   it('不应将后台 focus-session 自动同步显示为用户待同步', () => {
     pendingActions.set([createQueuedAction('focus-session')]);

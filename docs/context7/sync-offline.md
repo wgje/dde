@@ -183,3 +183,5 @@ download action must export complete pending actions and dead-letter payloads.
 Do not dismiss the dead letter or clear browser storage automatically.
 
 Full and compact-expanded sync panels must provide the same retained-focus conflict explanation and ActionQueue export as the embedded panel. The export includes complete queued operations, not account-wide project entities, sync cursors or attachments.
+
+Queue recovery is a prerequisite for claiming cloud-save status, not a prerequisite for editing. Sync status subscribes to the current-owner ActionQueue storage load state and retains neutral/unknown status until loaded; an empty in-memory queue during hydration does not prove there are no dead letters. Unsubscribe on component teardown and re-evaluate when the auth owner changes.

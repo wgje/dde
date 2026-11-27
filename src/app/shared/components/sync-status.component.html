@@ -25,6 +25,8 @@
           {{ deadLetterCount() }} 失败
         } @else if (visibleSyncError()) {
           同步错误
+        } @else if (!isQueueStorageReady()) {
+          {{ queueStorageUnknownText }}
         } @else if (isBackgroundRetrying()) {
           @if (retryQueuePendingCount() > 0) {
             后台同步({{ retryQueuePendingCount() }})...
@@ -100,6 +102,8 @@
             {{ deadLetterCount() }} 个同步失败
           } @else if (visibleSyncError()) {
             同步错误
+          } @else if (!isQueueStorageReady()) {
+            {{ queueStorageUnknownText }}
           } @else if (isBackgroundRetrying()) {
             @if (retryQueuePendingCount() > 0) {
               后台同步中（{{ retryQueuePendingCount() }} 项待重试）...
@@ -339,6 +343,9 @@
       </span>
     </div>
 
+    @if (!isQueueStorageReady()) {
+      <div class="px-3 py-2 text-[10px] text-stone-500 dark:text-stone-400">{{ queueStorageUnknownText }}</div>
+    }
     <!-- 状态概览 -->
     <div class="p-3 space-y-2">
       <!-- 同步错误 -->
