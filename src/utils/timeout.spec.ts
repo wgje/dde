@@ -85,6 +85,23 @@ describe('timeout — withTimeout', () => {
     expect((rejectionError as Error).message).toBe('pre-aborted');
   });
 
+  it('pre-aborted signal wins even when the supplied promise already resolved', async () => {
+    const controller = new AbortController(); controller.abort();
+    await expect(withTimeout(Promise.resolve('too late'), {
+      signal: controller.signal, timeoutMessage: 'already cancelled',
+    })).rejects.toThrow('already cancelled');
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('observes an already rejected input when cancellation prevents waiting', async () => {
+    const controller = new AbortController(); controller.abort();
+    await expect(withTimeout(Promise.reject(new Error('late original failure')), {
+      signal: controller.signal, timeoutMessage: 'cancelled input',
+    })).rejects.toThrow('cancelled input');
+    await Promise.resolve();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('启动后 abort 时立即拒绝并清理外部监听器', async () => {
     const controller = new AbortController();
     const removeSpy = vi.spyOn(controller.signal, 'removeEventListener');

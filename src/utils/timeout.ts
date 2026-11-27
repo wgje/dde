@@ -102,6 +102,13 @@ export async function withTimeout<T>(
 ): Promise<T> {
   const timeoutMs = getTimeoutMs(options.timeout);
   const timeoutMessage = options.timeoutMessage ?? `操作超时（${timeoutMs}ms）`;
+  if (options.signal?.aborted) {
+    // The caller already started this promise; observe its rejection without
+    // waiting or allocating a timer after cancellation has been established.
+    void promise.catch(() => undefined);
+    throw new Error(timeoutMessage);
+  }
+
   
   // 创建 AbortController 用于超时
   const controller = new AbortController();

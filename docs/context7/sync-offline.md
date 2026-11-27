@@ -205,3 +205,6 @@ Sidebar controls enforce the same retained-Focus restrictions as the dashboard, 
 
 
 Durable settlement recognizes focus-snapshot-reconciliation-pending only with both boolean retryable and deferred true, after terminal business-reason precedence. It preserves the retry budget and uses the existing base deferral delay, with a distinct diagnostic reason. Real parser-to-IndexedDB restart/export tests verify retention. This does not implement long-term reconciliation backoff or legacy CAS recovery; do not activate the logical-clock SQL on this evidence alone.
+
+
+The shared withTimeout helper rejects an already-aborted external signal before allocating a timer, even for an already-resolved input promise. The supplied promise was started by its caller and is still observed for rejection, preventing cancellation from introducing an unhandled rejection; this helper cannot undo side effects already started outside it. Later abort/timeout paths keep their existing listener cleanup.
