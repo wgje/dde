@@ -140,10 +140,13 @@ describe('run-ng Windows Node 22 launcher integrity', () => {
     expect(fs.existsSync(fixture.trustedMarker)).toBe(true);
   });
 
-  it('preserves the direct Node 22 path and set-env failure behavior', () => {
+  it('preserves the direct Node 22 path without requiring the fallback launcher', () => {
     const direct = createFixture('missing');
     expect(run(direct, { FAKE_NODE_VERSION: '22.14.0' }).status).toBe(0);
     expect(fs.existsSync(direct.angularMarker)).toBe(true);
+  });
+
+  it('propagates set-env failure before invoking the trusted fallback launcher', () => {
     const failedSetup = createFixture('file', { setEnvStatus: 9 });
     expect(run(failedSetup).status).toBe(9);
     expect(fs.existsSync(failedSetup.trustedMarker)).toBe(false);
