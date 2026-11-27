@@ -845,7 +845,7 @@ describe('CodeGraph NanoFlow Overlay v1 schema authority predecessor', () => {
       expectedArtifact: { bytes: bytes.length, sha256: '0'.repeat(64), counts: {} },
     }), 'OVERLAY_SCHEMA_PROFILE_MISMATCH');
   });
-  it('keeps the leaf import DAG parser-local and records gate/runtime adoption as deferred', () => {
+  it('keeps the predecessor leaf DAG parser-local and pins historical pre-current runtime evidence', () => {
     const sources = [
       'codegraph-nanoflow-overlay-v1-schema-typescript.cjs',
       'codegraph-nanoflow-overlay-v1-schema-angular-support.cjs',
@@ -857,7 +857,7 @@ describe('CodeGraph NanoFlow Overlay v1 schema authority predecessor', () => {
     expect(sources).not.toMatch(/readFile|createReadStream|require\(['"]node:fs/);
     const sourcePolicySource = fs.readFileSync(path.join(libRoot, 'codegraph-source-policy.cjs'), 'utf8');
     expect(sourcePolicySource).toMatch(/node:fs/);
-    expect([sha256(fs.readFileSync(path.join(repoRoot, 'scripts', 'generate-codegraph-nanoflow-overlay.mjs'))),
+    expect([sha256(fs.readFileSync(path.join(repoRoot, 'src/tests/fixtures/codegraph-overlay-v1/generator-pre-current.mjs.fixture'))),
       sha256(sourcePolicySource)]).toEqual(['27f44b92e1b5a9d63ceca28481e2396c5b198f07a591a82b8a4cdbef2995d2e0',
       '892d9aa9178db3196627d66f6d44d26665df2d8fb8dcc8bb0b5ce3d9bd2c3cfc']);
     const trace = spawnSync(process.execPath, ['-e', `

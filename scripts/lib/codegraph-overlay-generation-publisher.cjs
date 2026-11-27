@@ -17,6 +17,14 @@ const {
   createOverlayV1Validator,
 } = require('./codegraph-nanoflow-overlay-v1-schema.cjs');
 
+// Legacy generations retain their dependency closure and frozen validator.
+function selectOverlaySchemaProfile(digest) {
+  if (digest === CONTRACT.overlaySchemaDigest) return {
+    contract: CONTRACT, contractDigest: CONTRACT_DIGEST,
+    schema: { createOverlayV1Validator },
+  };
+  return require('./codegraph-overlay-current-schema.cjs').selectOverlaySchemaProfile(digest);
+}
 const SHA256 = new RegExp(CONTRACT.patterns.sha256);
 const SEQUENCE = new RegExp(CONTRACT.patterns.sequence);
 const TRANSACTION_ID = /^tx-[a-f0-9]{32}$/;
@@ -116,7 +124,9 @@ function readCurrentSequence(bytes) {
   return value.sequence;
 }
 
-function validateOverlay(overlay, projectRoot) {
+function validateOverlay(overlay, projectRoot, profile) {
+  const CONTRACT = profile.contract;
+  const createOverlayV1Validator = profile.schema.createOverlayV1Validator;
   try {
     const validator = createOverlayV1Validator({
       expectedProjectRoot: projectRoot.replace(/\\/g, '/'),
@@ -260,6 +270,9 @@ function createOverlayGenerationPublisher(dependencies = {}) {
   }
 
   function publish(options) {
+    const profile = selectOverlaySchemaProfile(options?.overlaySchemaDigest ?? CONTRACT.overlaySchemaDigest);
+    const generationContract = profile.contract;
+    const generationContractDigest = profile.contractDigest;
     const projectRoot = path.resolve(String(options?.projectRoot ?? ''));
     if (!path.isAbsolute(projectRoot) || !options?.overlay || typeof options.overlay !== 'object'
       || (options.sequence !== undefined && !SEQUENCE.test(options.sequence))
@@ -286,7 +299,7 @@ function createOverlayGenerationPublisher(dependencies = {}) {
     if (previousSequence !== null && BigInt(sequence) <= BigInt(previousSequence)) {
       throw new Error('codegraph-overlay-publication-sequence-rollback');
     }
-    const compatibilityEvidence = validateOverlay(options.overlay, projectRoot);
+    const compatibilityEvidence = validateOverlay(options.overlay, projectRoot, profile);
     let finalDirectory = null;
     let currentCommitted = false;
 
@@ -305,7 +318,7 @@ function createOverlayGenerationPublisher(dependencies = {}) {
 
       const generationProjection = {
         compatibilityDigest: compatibilityEvidence.sha256,
-        overlaySchemaDigest: CONTRACT.overlaySchemaDigest,
+        overlaySchemaDigest: generationContract.overlaySchemaDigest,
         sequence,
         sourceManifestDigest: options.sourceManifestDigest,
         sourcePolicyDigest: CONTRACT.sourcePolicyDigest,
@@ -324,9 +337,9 @@ function createOverlayGenerationPublisher(dependencies = {}) {
       const manifest = {
         arrays: payload.arrays,
         compatibility: payload.compatibility,
-        contractDigest: CONTRACT_DIGEST,
+        contractDigest: generationContractDigest,
         generationId,
-        overlaySchemaDigest: CONTRACT.overlaySchemaDigest,
+        overlaySchemaDigest: generationContract.overlaySchemaDigest,
         protocol: CONTRACT.protocol,
         schemaVersion: CONTRACT.schemaVersion,
         sequence,
@@ -341,10 +354,10 @@ function createOverlayGenerationPublisher(dependencies = {}) {
         barrier: firstLease,
         compatibilityDigest: payload.compatibility.sha256,
         configDigest: options.configDigest,
-        contractDigest: CONTRACT_DIGEST,
+        contractDigest: generationContractDigest,
         generationId,
         manifestDigest,
-        overlaySchemaDigest: CONTRACT.overlaySchemaDigest,
+        overlaySchemaDigest: generationContract.overlaySchemaDigest,
         protocol: CONTRACT.protocol,
         publishedAt: options.publishedAt,
         schemaVersion: CONTRACT.schemaVersion,
@@ -375,10 +388,10 @@ function createOverlayGenerationPublisher(dependencies = {}) {
       }
       const current = sortedObject({
         compatibilityDigest: payload.compatibility.sha256,
-        contractDigest: CONTRACT_DIGEST,
+        contractDigest: generationContractDigest,
         generationId,
         manifestDigest,
-        overlaySchemaDigest: CONTRACT.overlaySchemaDigest,
+        overlaySchemaDigest: generationContract.overlaySchemaDigest,
         protocol: CONTRACT.protocol,
         publishedAt: options.publishedAt,
         receiptDigest,

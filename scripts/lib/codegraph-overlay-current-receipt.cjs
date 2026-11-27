@@ -18,6 +18,14 @@ const {
 const GENERATION_ID = new RegExp(CONTRACT.patterns.generationId);
 const SEQUENCE = new RegExp(CONTRACT.patterns.sequence);
 const SHA256 = new RegExp(CONTRACT.patterns.sha256);
+// Legacy generations retain their dependency closure and frozen validator.
+function selectOverlaySchemaProfile(digest) {
+  if (digest === CONTRACT.overlaySchemaDigest) return {
+    contract: CONTRACT, contractDigest: CONTRACT_DIGEST,
+    schema: { createOverlayV1Validator },
+  };
+  return require('./codegraph-overlay-current-schema.cjs').selectOverlaySchemaProfile(digest);
+}
 const ERROR_CODES = new Set([
   'INVALID_PROJECT_ROOT',
   'CURRENT_MISSING',
@@ -115,9 +123,11 @@ function validateDigest(value, code) {
 }
 
 function validateCurrent(value) {
+  let profile;
+  try { profile = selectOverlaySchemaProfile(value.overlaySchemaDigest); } catch { fail('CURRENT_INVALID'); }
   if (value.schemaVersion !== CONTRACT.schemaVersion || value.protocol !== CONTRACT.protocol
-    || value.contractDigest !== CONTRACT_DIGEST
-    || value.overlaySchemaDigest !== CONTRACT.overlaySchemaDigest
+    || value.contractDigest !== profile.contractDigest
+    || value.overlaySchemaDigest !== profile.contract.overlaySchemaDigest
     || value.sourcePolicyDigest !== CONTRACT.sourcePolicyDigest
     || !GENERATION_ID.test(value.generationId) || !SEQUENCE.test(value.sequence)
     || !canonicalTimestamp(value.publishedAt)) fail('CURRENT_INVALID');
@@ -144,8 +154,9 @@ function validateFileDescriptor(descriptor, expectedPath, code) {
 }
 
 function validateManifest(value, current) {
+  const profile = selectOverlaySchemaProfile(current.overlaySchemaDigest);
   if (value.schemaVersion !== CONTRACT.schemaVersion || value.protocol !== CONTRACT.protocol
-    || value.contractDigest !== CONTRACT_DIGEST || value.generationId !== current.generationId
+    || value.contractDigest !== profile.contractDigest || value.generationId !== current.generationId
     || value.sequence !== current.sequence
     || value.overlaySchemaDigest !== current.overlaySchemaDigest
     || value.sourcePolicyDigest !== current.sourcePolicyDigest
@@ -161,8 +172,9 @@ function validateManifest(value, current) {
 }
 
 function validateReceipt(value, current, manifest) {
+  const profile = selectOverlaySchemaProfile(current.overlaySchemaDigest);
   if (value.schemaVersion !== CONTRACT.schemaVersion || value.protocol !== CONTRACT.protocol
-    || value.contractDigest !== CONTRACT_DIGEST || value.generationId !== current.generationId
+    || value.contractDigest !== profile.contractDigest || value.generationId !== current.generationId
     || value.sequence !== current.sequence || value.publishedAt !== current.publishedAt
     || value.manifestDigest !== current.manifestDigest
     || value.receiptDigest !== current.receiptDigest
@@ -277,13 +289,14 @@ function readPayload(generationDirectory, manifest, projectRoot) {
   if (expectedTotal !== manifest.totalBytes) fail('PAYLOAD_INVALID');
 
   try {
-    const validator = createOverlayV1Validator({
+    const profile = selectOverlaySchemaProfile(manifest.overlaySchemaDigest);
+    const validator = profile.schema.createOverlayV1Validator({
       expectedProjectRoot: projectRoot.replace(/\\/g, '/'),
       expectedSourcePolicyDigest: CONTRACT.sourcePolicyDigest,
     });
     writePrettyJson(skeleton, chunk => validator.write(chunk));
     const evidence = validator.finish();
-    if (evidence.schemaDigest !== CONTRACT.overlaySchemaDigest
+    if (evidence.schemaDigest !== profile.contract.overlaySchemaDigest
       || evidence.sourcePolicyDigest !== CONTRACT.sourcePolicyDigest
       || evidence.artifact.bytes !== manifest.compatibility.bytes
       || evidence.artifact.sha256 !== manifest.compatibility.sha256) fail('PAYLOAD_INVALID');

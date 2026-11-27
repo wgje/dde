@@ -8,6 +8,7 @@ import overlayGenerationPublisher from './lib/codegraph-overlay-generation-publi
 import overlayStability from './lib/codegraph-overlay-stability.cjs';
 import sourcePolicy from './lib/codegraph-source-policy.cjs';
 import graphSchema from './lib/codegraph-nanoflow-overlay-v1-schema-graph.cjs';
+import currentSchema from './lib/codegraph-overlay-current-schema.cjs';
 
 const {
   readNativeAndroidKotlinFunctionEndpoints,
@@ -217,6 +218,10 @@ const TYPESCRIPT_GLOBAL_VALUE_REFERENCES = new Set([
 
 const NODE_METADATA_ORDERS_BY_RELATION_AND_SHAPE = new Map();
 const NODE_METADATA_ORDERS_BY_SHAPE = new Map();
+// Current producer/reader shapes emitted by collectSupabase beyond the predecessor.
+// Their separate registered schema identity keeps the historical descriptor intact.
+// Any new key or unreviewed shape still fails closed in canonicalNodeMetadata.
+const PRODUCER_NODE_METADATA_ORDERS = currentSchema.CURRENT_NODE_METADATA_ORDERS;
 for (const [relation, orders] of graphSchema.nodeMetadataOrders) {
   for (const order of orders) {
     const sortedShape = JSON.stringify([...order].sort());
@@ -229,6 +234,17 @@ for (const [relation, orders] of graphSchema.nodeMetadataOrders) {
       shapeOrders.push(order);
     }
     NODE_METADATA_ORDERS_BY_SHAPE.set(sortedShape, shapeOrders);
+  }
+}
+
+// Add only exact relation+shape entries, never broaden the historical shape fallback.
+for (const [relation, orders] of PRODUCER_NODE_METADATA_ORDERS) {
+  for (const order of orders) {
+    const relationKey = `${relation}\0${JSON.stringify([...order].sort())}`;
+    if (NODE_METADATA_ORDERS_BY_RELATION_AND_SHAPE.has(relationKey)) {
+      throw new Error('codegraph-overlay-producer-metadata-order-overlap:' + relation);
+    }
+    NODE_METADATA_ORDERS_BY_RELATION_AND_SHAPE.set(relationKey, order);
   }
 }
 
@@ -292,6 +308,7 @@ try {
     const publication = publisher.publish({
       configDigest: digestRecord(overlayOptions),
       overlay: overlay2,
+      overlaySchemaDigest: currentSchema.CURRENT_SCHEMA_DIGEST,
       projectRoot: root,
       publishedAt: new Date().toISOString(),
       setupDigest: digestRecord(generationPlan),
