@@ -31,3 +31,7 @@ The launch path remains offline-first: local IndexedDB state and pending queues 
 ## Release evidence
 
 A green local or preview build is not production proof. Keep `NO_RELEASE`, `productionProof=false`, and `productionWrites=0` until the candidate has passed full CI, type/lint gates, migration replay and rollback, artifact checks, deployment SHA readback, bounded startup/login/sync smoke, and owner-isolation readback.
+
+## Entry static-closure follow-up (candidate)
+
+Service Worker provider code is loaded in the existing parallel startup-module batch rather than the main static import closure. The composed worker URL, production enablement, post-handoff registration delay and fallback remain unchanged. This reduces eager entry bytes without deleting caches, changing IndexedDB, modifying queues or removing offline registration. Static import-count and byte budgets remain unchanged and must pass against rebuilt production artifacts; source regression checks also retain the provider/strategy contract.

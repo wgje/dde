@@ -30,6 +30,17 @@ function createQueuedAction(entityType: QueuedAction['entityType']): QueuedActio
   };
 }
 
+function createDeadLetter(
+  entityType: QueuedAction['entityType'],
+  lastError: string,
+): DeadLetterItem {
+  return {
+    action: { ...createQueuedAction(entityType), lastError, syncState: 'dead_letter' },
+    failedAt: new Date().toISOString(),
+    reason: `业务错误: ${lastError}`,
+  };
+}
+
 type MutableSyncStatusComponent = {
   pendingClearTimer: ReturnType<typeof setTimeout> | null;
   schedulePendingClearTimer: (next: number) => void;
@@ -296,6 +307,48 @@ describe('SyncStatusComponent', () => {
 
     expect(fixture.componentInstance.detailedStatus()).toBe('2 个旧版离线同步项待确认');
     expect(fixture.componentInstance.hasIssues()).toBe(true);
+  });
+
+  it('远端较新的 Focus 快照应标记为保留冲突并导出完整队列，而非误报丢数据', () => {
+    const embeddedFixture = TestBed.createComponent(SyncStatusComponent);
+    (embeddedFixture.componentInstance as unknown as { embedded: ReturnType<typeof signal<boolean>> }).embedded = signal(true);
+    deadLetters.set([createDeadLetter(
+      'focus-session',
+      'FOCUS_CONSOLE_SAVE_FAILED | 远端专注会话已更新，本地变更已保留等待处理',
+    )]);
+    embeddedFixture.componentInstance.showDeadLetters.set(true);
+    embeddedFixture.detectChanges();
+
+    const text = embeddedFixture.nativeElement.textContent as string;
+    const exportButton = embeddedFixture.nativeElement.querySelector(
+      '[data-testid="sync-status-export-focus-conflict"]',
+    ) as HTMLButtonElement | null;
+
+    expect(embeddedFixture.componentInstance.preservedRemoteFocusConflictCount()).toBe(1);
+    expect(embeddedFixture.componentInstance.isCriticalState()).toBe(false);
+    expect(text).toContain('云端已有较新专注快照');
+    expect(text).toContain('本地快照已保留');
+    expect(text).not.toContain('数据可能丢失');
+    expect(embeddedFixture.nativeElement.querySelector('button[title="重试"]')).toBeNull();
+    expect(exportButton).not.toBeNull();
+
+    exportButton!.click();
+    expect(actionQueueMock.downloadEscapeExport).toHaveBeenCalledOnce();
+    expect(deadLetters()[0].action.lastError).toContain('本地变更已保留');
+  });
+
+  it('普通死信仍保留严重告警、完整队列导出和显式重试入口', () => {
+    const embeddedFixture = TestBed.createComponent(SyncStatusComponent);
+    (embeddedFixture.componentInstance as unknown as { embedded: ReturnType<typeof signal<boolean>> }).embedded = signal(true);
+    deadLetters.set([createDeadLetter('project', 'remote permission denied')]);
+    embeddedFixture.componentInstance.showDeadLetters.set(true);
+    embeddedFixture.detectChanges();
+
+    const text = embeddedFixture.nativeElement.textContent as string;
+    expect(embeddedFixture.componentInstance.isCriticalState()).toBe(true);
+    expect(text).toContain('1 个操作失败，请下载队列备份核对');
+    expect(embeddedFixture.nativeElement.querySelector('button[title="重试"]')).not.toBeNull();
+    expect(embeddedFixture.nativeElement.querySelector('[data-testid="sync-status-export-pending"]')).not.toBeNull();
   });
 
   it('队列冻结时应显示具体存储失败原因，避免本地持久化风险被静默隐藏', () => {

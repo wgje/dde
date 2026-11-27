@@ -101,7 +101,7 @@ function manifestEntry(entryPath: string, category = 'out-of-transaction') {
   };
 }
 
-function runGuard(root: string, manifestPath: string | null = path.join(root, 'scripts-migration-dry-run-manifest.json'), json = true, options: { aliasManifest?: string; ledgerSnapshot?: string; now?: string; currentTargetSha?: string } = {}) {
+function runGuard(root: string, manifestPath: string | null = path.join(root, 'scripts-migration-dry-run-manifest.json'), json = true, options: { aliasManifest?: string; ledgerSnapshot?: string; now?: string | null; currentTargetSha?: string } = {}) {
   const defaultAlias = path.join(root, 'scripts', 'migration-version-alias-manifest.json');
   const defaultLedger = path.join(root, 'scripts', 'migration-ledger-snapshot.json');
   mkdirSync(path.join(root, 'scripts'), { recursive: true });
@@ -110,7 +110,9 @@ function runGuard(root: string, manifestPath: string | null = path.join(root, 's
   if (manifestPath) args.push('--manifest', manifestPath);
   if (options.aliasManifest) args.push('--alias-manifest', options.aliasManifest);
   if (options.ledgerSnapshot) args.push('--ledger-snapshot', options.ledgerSnapshot);
-  if (options.now) args.push('--now', options.now);
+  // Ordinary fixtures use the capture clock; null explicitly exercises the CLI's real clock.
+  const now = options.now === undefined ? '2026-11-23T12:30:00Z' : options.now;
+  if (now !== null) args.push('--now', now);
   if (options.currentTargetSha) args.push('--current-target-sha', options.currentTargetSha);
   if (json) args.push('--json');
   return spawnSync(process.execPath, args, {
@@ -514,9 +516,18 @@ CREATE TABLE IF NOT EXISTS public.example_safe_comments (
       sourceApplied: true,
       appliedAliases: KNOWN_ALIASES,
     }]);
-    const result = runGuard(root);
+    const result = runGuard(root, undefined, true, { now: null });
     expect(result.status).toBe(1);
     expect(result.stderr).toContain('migration-ledger-snapshot-captured-in-future');
+  });
+
+  it('rejects expired ledger evidence with an explicit clock beyond the freshness window', () => {
+    const root = createMigrationRoot();
+    writeKnownSource(root);
+    writeManifest(root, []);
+    const result = runGuard(root, undefined, true, { now: '2026-11-24T12:30:01Z' });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('migration-ledger-snapshot-stale');
   });
 
   it('fails closed when the production ledger snapshot is missing', () => {

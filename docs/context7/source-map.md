@@ -32,6 +32,7 @@ This page routes common implementation questions to the canonical documentation 
 | How does speech transcription work? | [api-edge-functions.md](api-edge-functions.md) | `src/services/speech-to-text*.ts`, `supabase/functions/transcribe/`, `src/config/focus.config.ts` |
 | How does the Android widget work? | [feature-workflows.md](feature-workflows.md), [api-edge-functions.md](api-edge-functions.md) | `android/`, `supabase/functions/widget-*`, `docs/android-widget-host-scaffold.md` |
 | How are errors reported? | [api-edge-functions.md](api-edge-functions.md), [operations-security.md](operations-security.md) | `src/services/global-error-handler.service.ts`, `src/services/sentry-lazy-loader.service.ts`, `src/services/logger.service.ts` |
+| How are external-source knowledge anchors hydrated? | [architecture.md](architecture.md), [sync-offline.md](sync-offline.md) | `src/app/core/external-sources/external-source-link.service.ts`, `src/app/core/external-sources/external-source-link.store.ts`, `src/app/shared/components/knowledge-anchor/` |
 | How should an AI agent modify the repo? | [agent-rules.md](agent-rules.md) | `AGENTS.md`, `.github/instructions/*.instructions.md` |
 | How are docs kept Context7-ready? | [context7-maintenance.md](context7-maintenance.md) | `context7.json`, `llms.txt`, `scripts/validate-context7-docs.cjs`, `scripts/contracts/check-context7-coupled-changes.cjs`, `.github/workflows/context7-refresh.yml` |
 
@@ -67,3 +68,18 @@ Use broader verification for these paths:
 - `src/app/features/focus/`
 
 High-risk changes usually require targeted tests plus one wider verification lane from [development.md](development.md).
+
+## External-source reactive hydration
+
+`KnowledgeAnchorComponent.links` reads external-source links inside an Angular
+`computed`. `ExternalSourceLinkService.activeLinksForTask()` and
+`firstActiveLinkForTask()` must return owner-filtered local state synchronously
+without mutating signals in that reactive evaluation. They schedule
+`ensureLoaded()` on a microtask; the existing loader then applies its owner fence,
+loads durable local links, and performs the background remote refresh.
+
+Do not use `untracked` to make old-owner data visible or disable restore writer
+quiescence to avoid NG0600. Owner changes must immediately return an empty link
+view until the new owner's hydration is published. The regression in
+`external-source-link.service.spec.ts` verifies both computed getters, deferred
+cache loading, and publication of the new owner's links without NG0600 warnings.

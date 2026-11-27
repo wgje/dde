@@ -189,6 +189,18 @@
       </div>
     }
 
+    @if (preservedRemoteFocusConflictCount() > 0) {
+      <div class="p-2 bg-amber-50 dark:bg-amber-900/20 border border-amber-300 dark:border-amber-700 rounded-lg text-[10px] text-amber-900 dark:text-amber-200">
+        <div>云端已有较新专注快照。本地快照仍保留在失败操作中；下载完整队列备份后再核对，不要清除站点数据。</div>
+        <button
+          data-testid="sync-status-export-focus-conflict"
+          (click)="exportPendingData(); $event.stopPropagation()"
+          class="mt-1.5 px-2 py-1 font-medium bg-amber-700 hover:bg-amber-800 text-white rounded transition-colors">
+          下载完整队列备份
+        </button>
+      </div>
+    }
+
     <!-- 【Senior Consultant "Red Phone"】危险状态警告 -->
     @if (isCriticalState()) {
       <div class="p-2 bg-red-100 dark:bg-red-900/40 border-2 border-red-400 dark:border-red-600 rounded-lg animate-pulse">
@@ -197,8 +209,8 @@
           <div class="flex-1">
             <div class="text-[11px] font-bold text-red-700 dark:text-red-300">同步严重滞后</div>
             <div class="text-[10px] text-red-600 dark:text-red-400">
-              @if (deadLetterCount() > 0) {
-                {{ deadLetterCount() }} 个操作失败，数据可能丢失！
+              @if (deadLetterCount() > preservedRemoteFocusConflictCount()) {
+                {{ deadLetterCount() - preservedRemoteFocusConflictCount() }} 个操作失败，请下载队列备份核对。
               } @else {
                 {{ pendingCount() }} 个操作待同步，请连接网络
               }
@@ -206,7 +218,8 @@
           </div>
         </div>
         <button
-          (click)="downloadBackup(); $event.stopPropagation()"
+          data-testid="sync-status-export-pending"
+          (click)="exportPendingData(); $event.stopPropagation()"
           class="w-full mt-2 py-1.5 text-[11px] font-bold bg-red-600 hover:bg-red-700 text-white rounded transition-colors">
           ⬇️ 立即下载备份
         </button>
@@ -229,14 +242,21 @@
           <div class="space-y-1 max-h-24 overflow-y-auto">
             @for (item of deadLetters(); track item.action.id) {
               <div class="flex items-center justify-between p-1 bg-white dark:bg-stone-700 rounded border border-stone-100 dark:border-stone-600 text-[10px]">
-                <span class="text-stone-600 dark:text-stone-300 truncate flex-1">{{ getActionLabel(item.action) }}</span>
+                <div class="min-w-0 flex-1">
+                  <span class="text-stone-600 dark:text-stone-300 truncate">{{ getActionLabel(item.action) }}</span>
+                  @if (isPreservedRemoteFocusConflict(item)) {
+                    <div class="text-[9px] text-amber-700 dark:text-amber-300">云端较新；本地快照已保留</div>
+                  }
+                </div>
                 <div class="flex gap-0.5 ml-1">
-                  <button
-                    (click)="retryDeadLetter(item.action.id); $event.stopPropagation()"
-                    class="p-0.5 text-amber-600 hover:bg-amber-50 rounded"
-                    title="重试">
-                    ↻
-                  </button>
+                  @if (!isPreservedRemoteFocusConflict(item)) {
+                    <button
+                      (click)="retryDeadLetter(item.action.id); $event.stopPropagation()"
+                      class="p-0.5 text-amber-600 hover:bg-amber-50 rounded"
+                      title="重试">
+                      ↻
+                    </button>
+                  }
                   <button
                     (click)="dismissDeadLetter(item.action.id); $event.stopPropagation()"
                     class="p-0.5 text-stone-400 hover:bg-stone-100 rounded"

@@ -278,6 +278,24 @@ export class FocusConsoleSyncService implements OnDestroy {
       && !this.syncRpc.isClientRejected();
   }
 
+  private async primeFocusSyncRpcCapability(
+    ownerUserId: string,
+    operationId: string | undefined,
+    replayFence?: FocusConsoleReplayFence,
+  ): Promise<boolean> {
+    const generation = this.readGeneration;
+    const isCurrent = () => this.isReplayFenceCurrent(replayFence)
+      && this.isReadRequestCurrent(ownerUserId, generation);
+    if (!isCurrent()) return false;
+    if (!operationId || this.syncRpc.isFeatureEnabled() || this.syncRpc.isClientRejected()) return true;
+    try {
+      await this.syncRpc.checkProtocol();
+    } catch (error) {
+      this.logWarn('focus sync protocol probe failed; keeping the local operation queued', error);
+    }
+    return isCurrent();
+  }
+
   private isReplayFenceCurrent(replayFence?: FocusConsoleReplayFence): boolean {
     return !replayFence || (!!replayFence.leaseSignal
       && !replayFence.leaseSignal.aborted
@@ -536,6 +554,12 @@ export class FocusConsoleSyncService implements OnDestroy {
     }
 
     try {
+      const replayGeneration = this.readGeneration;
+      if (!await this.primeFocusSyncRpcCapability(record.userId, operationId, replayFence)
+        || !this.isReadRequestCurrent(record.userId, replayGeneration)) {
+        return this.buildReplayFenceFailure(ErrorCodes.FOCUS_CONSOLE_SAVE_FAILED, '专注会话重放上下文已失效');
+      }
+      if (isBrowserNetworkSuspendedWindow()) return this.buildBrowserSuspendedFailure();
       if (this.shouldUseSyncRpc(operationId)) {
         return await this.saveFocusSessionViaSyncRpc(record, operationId, replayFence);
       }
@@ -653,6 +677,12 @@ export class FocusConsoleSyncService implements OnDestroy {
     }
 
     try {
+      const replayGeneration = this.readGeneration;
+      if (!await this.primeFocusSyncRpcCapability(userId, operationId, replayFence)
+        || !this.isReadRequestCurrent(userId, replayGeneration)) {
+        return this.buildReplayFenceFailure(ErrorCodes.FOCUS_CONSOLE_ROUTINE_FAILED, '日常任务重放上下文已失效');
+      }
+      if (isBrowserNetworkSuspendedWindow()) return this.buildBrowserSuspendedFailure();
       if (this.shouldUseSyncRpc(operationId)) {
         return await this.upsertRoutineTaskViaSyncRpc(userId, task, operationId, replayFence);
       }
@@ -694,6 +724,12 @@ export class FocusConsoleSyncService implements OnDestroy {
       return this.buildBrowserSuspendedFailure();
     }
 
+    const replayGeneration = this.readGeneration;
+    if (!await this.primeFocusSyncRpcCapability(mutation.userId, operationId, replayFence)
+      || !this.isReadRequestCurrent(mutation.userId, replayGeneration)) {
+      return this.buildReplayFenceFailure(ErrorCodes.FOCUS_CONSOLE_INCREMENT_FAILED, '日常完成重放上下文已失效');
+    }
+    if (isBrowserNetworkSuspendedWindow()) return this.buildBrowserSuspendedFailure();
     if (this.shouldUseSyncRpc(operationId)) {
       return await this.incrementRoutineCompletionViaSyncRpc(mutation, operationId, replayFence);
     }

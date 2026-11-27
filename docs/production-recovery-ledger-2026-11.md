@@ -195,3 +195,65 @@ Window: `2026-11-25T13:20:00Z` to `2026-11-26T13:20:00Z` (24 hours). Only aggreg
 - Full local matrix was attempted. Browser minimal lanes passed; testbed service lane had one unrelated failure in the pre-existing untracked `src/services/demo-workspace.service.spec.ts` (`DemoWorkspaceService > marks and resets the isolated development demo in order`), and other lanes exposed pre-existing user-change failures (`project-shell-controller-delegation`, data-safety Angular harness, undo integration, tooling-security tracked-closure). The full contract wrapper also stops at the existing Context7 coupled-change gate because unrelated Flow/Parking/config changes lack matching docs. These are red gates, not attributed to this hotfix.
 - CodeGraph adapter doctor after the test run reports `fresh` overlay but `runtimeOk=false`, `pendingHostRestart=true`, and live wrapper configuration drift; no CodeGraph files or configuration were changed. Active local file/resource leases are zero at the last status check, with expired lease records retained as evidence.
 - This hotfix is not deployed. It is being prepared as a separate candidate branch from production merge SHA `02254645471c0d6a878f807a56df85f4e17ca856`; production remains on that SHA until candidate CI, artifact, smoke, and release evidence are acceptable.
+
+
+## Clean candidate gate recheck (2026-11-27)
+
+- Verification worktree D:/Code/dde-ng0600-verify-20261127 is on local candidate 0b471d2f, based on c60e1e07. Its migration fixture-clock fix and Context7 source-map companion passed the original commit hooks. test:contracts completed: 111 files / 1106 tests passed. This clears the candidate documentation companion gate but is not full-suite or production proof.
+- CodeGraph MCP smoke independently passed all 28 tests in 149.43s, without source changes or higher timeout. The stale-wrapper subset also passed. This contradicts attributing the original 15-minute segment timeout solely to MCP smoke.
+- The remaining nine-file tool batch was stopped after more than ten minutes without completion; it is incomplete, not green. The native graph sidecar suite had 32 passes; overlay schema had one observed failure.
+- The schema artifact case was independently reproduced: ENOENT opening .codegraph/nanoflow-overlay.json. Current setup publishes compatibility bytes under immutable CURRENT-selected generation directories, whereas this test requires an absent legacy path AND the historical 250558329-byte artifact digest. Earlier wording suggesting the failure was first a differing generated digest was inaccurate. Changing only the path or re-pinning a digest would not establish historical fixture equivalence. Keep the historical known-answer check distinct from current-generation integration.
+- No main push, production deployment, database write or unrelated user work cleanup occurred. Remaining red/incomplete gates include callback-manifest source identity, historical schema artifact provisioning, the stalled tool batch and full-suite acceptance.
+
+
+## Production entry revalidation (2026-11-27)
+
+- Previous Ego TaskSpace 49 no longer exists. Listed spaces first and preserved user GitHub and Parking QA tabs. Recreated this closed goal space as TaskSpace 52; no cache, cookies, Service Worker or persisted business data was cleared.
+- Production version read: 02254645471c0d6a878f807a56df85f4e17ca856, target production. First entry reached handoff at 766ms, main present, boot ready, no loader timeout and no observed resource HTTP >=400. A second reload also reached ready/main. This is a bounded entry check, not all startup/owner/offline acceptance.
+- Post-entry console observation still reports ExternalSourceLink background failure warnings (62) and deferred FocusConsoleSync save warnings (117), with no uncaught JS exception in that observation. The NG0600 hotfix is not on production; focus sync remains deferred. Counts may include console events retained by the page session and are not global rates.
+- No main push or deployment was performed; overall productionProof=false. Continue fixing post-entry behavior and candidate gates rather than declaring completion based on this successful entry.
+
+
+## Focus replay protocol priming candidate (2026-11-27)
+
+- Read-only server inspection confirms sync_check_protocol exists, public protocol state is min version 1 / epoch 0, and focus upsert checks auth owner, operation identity, payload digest and LWW baseline. No production mutation or environment flag change was performed.
+- Client checkProtocol already auto-enables accepted capabilities; focus mutation paths instead checked the initially disabled flag without priming the probe. Prior attribution to the absent build variable alone was incomplete.
+- Added local protocol priming to focus-session, routine-task and routine-completion mutation paths, preserving existing operation-ID requirements and no legacy writes. Captured owner/session generation/replay lease are rechecked after the probe await.
+- RED: new focus startup-disabled and expired-lease probe cases failed. GREEN: 4 files / 121 tests passed, including protocol client and action-queue focus processors; typecheck, targeted ESLint and diff check passed. Added unavailable/rejected/owner-change no-write cases. Candidate not deployed; production replay/owner isolation and full release gates remain unproven.
+
+
+## Focus probe suspension fence follow-up (2026-11-27)
+
+- Adversarial review of candidate 422852fc exposed a missing network suspension recheck after awaiting protocol priming. Three new tests (focus session, routine task, completion) transitioned the browser to hidden during probing and initially observed RPC success instead of a deferred result.
+- Added a suspension-window recheck after the owner/generation/lease fence and before RPC dispatch on all three paths. No production write or feature flag change occurred.
+- RED: three cases failed. GREEN: four related suites / 124 tests passed; TypeScript, targeted ESLint and diff check passed. This is a correction to the previous candidate, not a claim that its earlier tests covered this boundary. Production replay and full release acceptance remain unproven.
+
+
+## Enabled-capability await identity fence (2026-11-27)
+
+- Adversarial review found that the enabled-RPC fast path still yields at await. A microtask owner change or session runtime reset after the helper computed true could reach mutation dispatch. New focus tests failed for owner change and reset; lease abort was already rejected.
+- Each mutation caller now captures the runtime generation before capability priming and checks that generation plus owner after await, in addition to existing lease and suspension guards. Expanded the cases across all three mutation kinds and owner-change/session-reset/lease-abort transitions.
+- Four related suites: 133/133 passed. TypeScript, targeted ESLint, diff and documentation validation passed. No production flag, data, migration or deployment changed. This closes a candidate-introduced async gap; production acceptance and remaining tool gates remain open.
+
+
+## Focus candidate handbook companion (2026-11-27)
+
+- Running test:contracts after eb3c9c45 exposed the missing Chinese handbook companion for sync behavior. Added user-facing pending-focus-state meaning, safe preservation guidance, candidate-only protocol priming and identity/suspension guard boundaries to the mapped sync/conflicts page. No gate was bypassed and no production readiness claim was added.
+
+## Context7 restored, expanded candidate verification and read-only DB findings (2026-11-27)
+
+- DIRECT_MCP: Context7 resolve_library_id(Angular) and query_docs(/websites/angular_dev) both succeeded. Official https://angular.dev/errors/NG0600 confirms computed derivations must not write other signals. This verifies documentation transport recovery, not production recovery.
+- Candidate revision 6f393a5e107f76d63dacbe6f06aacf056a1f3915: expanded focus/replay/action-queue/dock/audit/export matrix 10 files / 294 tests passed; external-source and owner/data-safety matrix 5 files / 75 tests passed. Reports: test-results/recovery-expanded-20261127.json and test-results/recovery-owner-safety-20261127.json. A mistakenly supplied src/services/external-source-link.service.spec.ts filter matched no file in the first run; the correct src/app/core/external-sources/external-source-link.service.spec.ts ran in the second (46 tests). No test count is attributed to the unmatched filter.
+- Typecheck and git diff --check passed. Local npm run build passed, including shared launch markers, SW HTML hashes and launch asset closure. Artifact version is development/local at 6f393a5e; this is NOT a production artifact or deployment. Budget warnings remain: initial bundle 526.40kB versus 520kB and dock radar Sass 18.70kB versus 16kB.
+- npm run build:strict failed before compilation: this isolated worktree has no Supabase URL/browser key or Sentry/deployment/project identity configured. No dummy production values were supplied to bypass this check. Log: test-results/recovery-build-strict-20261127.log.
+- Exact-root CodeGraph doctor reports fresh CURRENT and no active file leases before this ledger claim, but config applicability is false: isolated root lacks project config, user fallback targets main checkout, and worker environment fields are missing. Direct explore returned source but must not be treated as fresh exact-root runtime/config proof. No configuration or shared host changed in this round.
+- Parallel DIRECT_MCP Supabase read-only audit confirmed target project and identified three source-level protocol gaps, not authenticated production reproductions: (1) focus RPC raw payload digest includes release metadata rather than using normalized replay digest; (2) legacy replay receipt with NULL normalized digest and unequal/NULL raw digest can return its old result without proving payload equivalence; (3) routine completion event-ID conflict returns idempotent replay without validating stored owner/routine/date tuple. Normal routine owner/auth checks, private internal-function ACL, locks, and RLS are present. Audit did not call business writes or expose customer payloads.
+- Next: local synthetic RED/GREEN SQL replay cases for these gaps, preserve legacy receipts/queues and fail-closed handling, resolve independent full-suite tooling failures, obtain target-bound production build/release evidence, then live entry/replay/owner smoke. No Auth rows, receipts, production flags, migrations, remote main or deployment changed in this round. productionProof=false; productionWrites=UNVERIFIED; NO_RELEASE remains.
+
+## Production console review and Focus conflict export correction (2026-11-27)
+
+- Ego Lite production review on SHA `016b4ac8dc4cdc8b53254fe2495bc2a9dbbfed64` reached `ready` with `<main>` present. The account page showed one Focus dead letter. Read-only owner-scoped queue inspection confirmed its operation remains in the local dead-letter backup; no record was removed, edited or replayed in this round.
+- The same operation has an owner-matched Supabase receipt with status `applied`, and the focus-session row exists. The deployed function returned `stale_payload=true` to a later write, so the LWW guard retained the newer remote snapshot and rejected the stale local write. This is a version conflict, not proof of data loss. The production function body currently uses raw `payload::text` digest replay checks, and its active definition differs from the July stable-digest candidate; do not retry this stale operation automatically or deploy an unreviewed migration.
+- Console observation also saw 4 `ERR_FAILED` font subset requests from jsDelivr and an earlier `ActionQueueTaskFocusProcessors` Focus business-error log. After a page reload, no new console errors were captured during the bounded observation; prior buffered errors are observations, not a rate. Main UI remained available.
+- Source review found the red-panel `downloadBackup()` exported only dead-letter metadata, omitting each operation payload. Replaced it with the established `downloadEscapeExport()` path, whose export serializes complete pending actions and dead-letter items. The panel now labels the recognized remote-newer Focus outcome as a retained conflict, avoids presenting it as generic data loss, and suppresses the futile retry button only for that classified item. It preserves explicit user dismissal and makes no automatic queue/storage mutation.
+- RED/GREEN verification: component test covers retained-focus-conflict messaging, no retry control, full queue export invocation and unchanged dead-letter payload; generic dead letters retain the critical warning and retry affordance. Focused panel/action-queue/backup-restore matrix: 3 files / 153 tests passed. TypeScript typecheck passed. Context7 and human-doc coupled guards passed after updating mapped docs. Candidate change is not yet built/deployed; production live state is unchanged. `productionProof=false`; `productionWrites=UNVERIFIED`; database replay and account-isolation acceptance remain open.

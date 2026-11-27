@@ -151,3 +151,33 @@ Conflict-related services live in `src/services/`:
 - `conflict-storage.service.ts`
 
 Use the existing Result Pattern and error conversion. Supabase errors should go through `supabaseErrorToError()`.
+
+
+## Focus console protocol priming
+
+Focus-session, routine-task and routine-completion replay with a durable operation
+ID must prime the existing Sync RPC protocol check when the capability starts
+disabled. The protocol client remains responsible for accepted-version/epoch
+auto-enable; callers must not force the feature flag or use legacy table writes.
+After the await, recheck the captured owner, session runtime generation and
+replay lease before invoking a mutation RPC. A missing operation ID, unavailable
+probe or rejected protocol retains the operation locally without remote success.
+Protocol priming runs in background replay, never as a prerequisite for rendering
+the workspace or editing local text.
+
+After protocol priming, recheck the browser suspension window immediately before
+selecting the write RPC. A hidden page or newly armed reconnect grace period during
+the probe must return SYNC_OFFLINE with retryable/deferred evidence and must not
+dispatch any focus, routine-task or completion mutation.
+
+Capture the session runtime generation in the mutation caller before awaiting
+capability priming, then revalidate that generation and owner after the await.
+Even an already-enabled capability returns through a microtask; a boolean checked
+inside the helper before return is not a sufficient post-await identity fence.
+
+When `sync_upsert_focus_session` reports `stale_payload=true`, the remote snapshot
+is newer and remains authoritative; retain the rejected local snapshot as a
+terminal, owner-scoped dead letter rather than retrying the same LWW write. The
+sync-status warning must call this a remote-newer conflict, not data loss, and its
+download action must export complete pending actions and dead-letter payloads.
+Do not dismiss the dead letter or clear browser storage automatically.
