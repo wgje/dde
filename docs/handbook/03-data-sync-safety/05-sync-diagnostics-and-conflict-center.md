@@ -226,3 +226,5 @@ source_paths:
 - 了解 LWW 和多设备行为：读 [同步与冲突处理](02-sync-and-conflicts.md)。
 - 恢复项目或附件：读 [备份与恢复](03-backup-and-restore.md)。
 - 处理 PWA 离线或存储受限：读 [应用安装、离线与错误恢复](../01-get-started/06-pwa-offline-and-error-recovery.md)。
+
+侧栏、完整面板和紧凑展开面板均可下载操作队列备份。该文件保留待同步与失败操作的完整载荷，不等于项目、附件和全部账户数据备份；完整恢复仍需按备份与恢复说明分别导出。

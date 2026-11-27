@@ -393,6 +393,12 @@
             </button>
           </div>
 
+          @if (preservedRemoteFocusConflictCount() > 0) {
+            <p class="mt-2 text-[10px] text-amber-800 dark:text-amber-200">云端已有较新专注快照；本地快照仍保留，请先下载队列备份核对，不要清除站点数据。</p>
+          }
+          <button data-testid="sync-status-export-full-panel" (click)="exportPendingData(); $event.stopPropagation()"
+            class="mt-2 px-2 py-1 text-[10px] bg-amber-700 text-white rounded">下载完整队列备份</button>
+
           <!-- 死信详情列表 -->
           @if (showDeadLetters()) {
             <div class="mt-2 space-y-1.5 max-h-32 overflow-y-auto">
@@ -400,12 +406,16 @@
                 <div class="flex items-center justify-between p-1.5 bg-white dark:bg-stone-700 rounded text-[10px]">
                   <div class="flex-1 min-w-0 mr-2">
                     <div class="font-medium text-red-700 dark:text-red-300 truncate">{{ getActionLabel(item.action) }}</div>
+                      @if (isPreservedRemoteFocusConflict(item)) {
+                        <div class="text-amber-700 dark:text-amber-300">云端较新；本地快照已保留</div>
+                      }
                   </div>
                   <div class="flex gap-0.5 flex-shrink-0">
                     <button
                       (click)="retryDeadLetter(item.action.id); $event.stopPropagation()"
                       class="p-0.5 bg-amber-100 dark:bg-amber-900/50 hover:bg-amber-200 dark:hover:bg-amber-800/50 text-amber-700 dark:text-amber-300 rounded"
-                      title="重试">
+                      [disabled]="isPreservedRemoteFocusConflict(item)"
+                      [title]="isPreservedRemoteFocusConflict(item) ? '云端较新，请先导出核对' : '重试'">
                       <svg class="w-2.5 h-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
                       </svg>

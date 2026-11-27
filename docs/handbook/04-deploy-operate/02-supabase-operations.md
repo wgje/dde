@@ -500,6 +500,16 @@ Supabase 相关问题不要一上来就写 SQL、删缓存或改 policy。先按
 
 ## 下一步
 
+### 项目头分页 RPC 漂移修复
+
+如果生产数据库仍有旧的 `list_project_heads_since`，但项目页请求
+`list_project_heads_page` 返回 404，先核对 `supabase_migrations.schema_migrations`
+和 `pg_proc`，不要改业务表或清理客户端队列。按迁移记录应用
+`20261127081154_restore_project_head_keyset_rpc.sql`：它只恢复 owner-scoped、
+`SECURITY INVOKER`、每页最多 100 行的 keyset RPC，并撤销旧的无界函数权限。
+应用后用 authenticated 只读请求验证 `(updated_at, project_id)` 游标、owner 隔离、
+deleted 排除和 anon 无 EXECUTE；生产 DDL 之后仍需回读版本和 bounded 页面结果。
+
 - 部署和环境变量边界：读 [私有部署](01-private-deployment.md)。
 - 处理函数故障和线上症状：读 [生产排障](04-production-troubleshooting.md#edge-function-功能失败)。
 - 面向用户的数据恢复入口和限制：读 [备份与恢复](../03-data-sync-safety/03-backup-and-restore.md)。

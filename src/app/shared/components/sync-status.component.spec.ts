@@ -337,6 +337,25 @@ describe('SyncStatusComponent', () => {
     expect(deadLetters()[0].action.lastError).toContain('本地变更已保留');
   });
 
+  it.each([false, true])('完整与紧凑展开面板保留冲突解释和完整队列导出 (compact=%s)', compact => {
+    (fixture.componentInstance as unknown as { compact: ReturnType<typeof signal<boolean>> }).compact = signal(compact);
+    fixture.componentInstance.isExpanded.set(true);
+    fixture.componentInstance.showDeadLetters.set(true);
+    deadLetters.set([
+      createDeadLetter('focus-session', 'FOCUS_CONSOLE_SAVE_FAILED | 远端专注会话已更新，本地变更已保留等待处理'),
+      createDeadLetter('project', 'remote permission denied'),
+    ]);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.textContent).toContain('云端已有较新专注快照');
+    const blocked = fixture.nativeElement.querySelector('button[title="云端较新，请先导出核对"]') as HTMLButtonElement;
+    expect(blocked.disabled).toBe(true);
+    expect(fixture.nativeElement.querySelector('button[title="重试"]')).not.toBeNull();
+    const exportButton = fixture.nativeElement.querySelector('[data-testid="sync-status-export-full-panel"]') as HTMLButtonElement;
+    exportButton.click();
+    expect(actionQueueMock.downloadEscapeExport).toHaveBeenCalledOnce();
+    expect(deadLetters()).toHaveLength(2);
+  });
+
   it('普通死信仍保留严重告警、完整队列导出和显式重试入口', () => {
     const embeddedFixture = TestBed.createComponent(SyncStatusComponent);
     (embeddedFixture.componentInstance as unknown as { embedded: ReturnType<typeof signal<boolean>> }).embedded = signal(true);

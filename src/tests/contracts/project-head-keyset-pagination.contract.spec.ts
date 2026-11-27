@@ -20,6 +20,11 @@ function normalize(source: string): string {
 }
 
 describe('bounded project-head keyset RPC', () => {
+  it('keeps the production repair identical to the original bounded RPC contract', () => {
+    const repair = read('supabase/migrations/20261127081154_restore_project_head_keyset_rpc.sql');
+    expect(normalize(repair)).toBe(normalize(read(migrationPath)));
+    expect(repair).not.toMatch(/\b(?:INSERT INTO|UPDATE public\.|DELETE FROM|TRUNCATE)\b/i);
+  });
   it('creates a bounded composite-cursor page and retires the unbounded RPC', () => {
     const migration = normalize(read(migrationPath));
     const initSource = read(initPath);

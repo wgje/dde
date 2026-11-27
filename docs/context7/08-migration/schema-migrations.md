@@ -30,3 +30,14 @@ Use [../migration-playbook.md](../migration-playbook.md) as the full checklist.
 npm run docs:context7:validate
 npm run test:run:services
 ```
+
+## Production drift repair: bounded project-head page
+
+The client-side project probe calls the bounded owner-scoped
+`list_project_heads_page(timestamptz, timestamptz, timestamptz, uuid, integer)`
+RPC. If a target project has the legacy `list_project_heads_since` function but
+not the bounded page function, apply the forward repair migration
+`20261127081154_restore_project_head_keyset_rpc.sql`. It changes no business
+rows: it restores the stable invoker function, limits pages to 100 rows, keeps
+the composite `(updated_at, project_id)` cursor deterministic, grants execute
+only to `authenticated`, and revokes the retired unbounded function grant.

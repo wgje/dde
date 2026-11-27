@@ -181,3 +181,5 @@ terminal, owner-scoped dead letter rather than retrying the same LWW write. The
 sync-status warning must call this a remote-newer conflict, not data loss, and its
 download action must export complete pending actions and dead-letter payloads.
 Do not dismiss the dead letter or clear browser storage automatically.
+
+Full and compact-expanded sync panels must provide the same retained-focus conflict explanation and ActionQueue export as the embedded panel. The export includes complete queued operations, not account-wide project entities, sync cursors or attachments.
