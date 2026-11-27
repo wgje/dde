@@ -23,78 +23,13 @@
         }
 
         @if (!strictSampleMode && engine.pendingDecision() && engine.pendingDecisionEntries().length > 0) {
-          <div
-            class="pending-decision-enter absolute left-1/2 -translate-x-1/2 z-30 glass-card rounded-2xl pointer-events-auto
-                   px-4 py-3 border border-indigo-400/25 shadow-2xl min-w-[380px] max-w-[540px]"
-            style="top: 40px;"
-            [class.pointer-events-none]="!focusSessionInteractive()"
+          <app-dock-pending-decision class="pending-decision-enter absolute left-1/2 -translate-x-1/2 z-30 pointer-events-auto min-w-[380px] max-w-[540px]"
+            style="top: 40px;" [class.pointer-events-none]="!focusSessionInteractive()"
             [attr.data-focus-phase]="focusSessionPhase()"
-            data-testid="dock-v3-pending-decision">
-            <div class="flex items-center gap-2 mb-2.5">
-              <div class="w-2 h-2 rounded-full bg-indigo-400 animate-pulse"></div>
-              <div class="text-[10px] text-indigo-300/80 font-mono tracking-wide flex-1">
-                {{ engine.pendingDecision()?.reason || '候选任务时长匹配异常，请手动决策' }}
-              </div>
-              <button
-                type="button"
-                class="text-[9px] px-2 py-1 rounded border border-slate-600/70 text-slate-300 hover:bg-slate-700/50"
-                (click)="cancelPendingDecisionAutoPromote()"
-                [disabled]="pendingDecisionActionsBlocked()"
-                aria-label="收起推荐"
-                [attr.aria-disabled]="pendingDecisionActionsBlocked() ? 'true' : null"
-                data-testid="dock-v3-pending-cancel">
-                收起推荐
-              </button>
-            </div>
-            <div class="text-[10px] text-stone-500 mb-3 font-mono">
-              主任务剩余窗口
-              <span class="text-stone-400 font-semibold">
-                {{ formatTime(pendingDecisionRemainingMinutes()) }}
-              </span>
-            </div>
-            <div class="grid grid-cols-3 gap-2.5">
-              @for (entry of engine.pendingDecisionEntries(); track entry.taskId; let i = $index) {
-                <button
-                  type="button"
-                  class="decision-card rounded-xl border px-3.5 py-2.5 text-left transition-colors transition-transform transition-shadow"
-                  [ngClass]="i % 3 === 0
-                    ? 'border-amber-400/40 bg-amber-500/8 hover:bg-amber-500/15'
-                    : (i % 3 === 1
-                      ? 'border-indigo-400/40 bg-indigo-500/8 hover:bg-indigo-500/15'
-                      : 'border-emerald-400/40 bg-emerald-500/8 hover:bg-emerald-500/15')"
-                  (click)="choosePendingDecisionCandidate(entry.taskId)"
-                  [disabled]="pendingDecisionActionsBlocked()"
-                  [attr.aria-label]="'选择候选任务：' + entry.title"
-                  [attr.aria-disabled]="pendingDecisionActionsBlocked() ? 'true' : null"
-                  [attr.data-testid]="'dock-v3-pending-choice-' + i">
-                  <div class="text-[10px] font-mono mb-1.5 font-semibold"
-                    [class.text-amber-300]="i % 3 === 0"
-                    [class.text-indigo-300]="i % 3 === 1"
-                    [class.text-emerald-300]="i % 3 === 2">
-                    {{ groupLabel(entry.group) }}
-                  </div>
-                  <div class="text-xs text-stone-100 font-medium truncate mb-1.5">{{ entry.title }}</div>
-                  <div class="flex items-center gap-1.5 flex-wrap">
-                    <span class="text-[9px] px-1.5 py-0.5 rounded"
-                      [ngClass]="entry.lane === 'combo-select'
-                        ? 'bg-sky-500/15 text-sky-400 border border-sky-500/20'
-                        : 'bg-teal-500/15 text-teal-400 border border-teal-500/20'">
-                      {{ entry.lane === 'combo-select' ? '组合选择' : '备选' }}
-                    </span>
-                    <span class="text-[9px] px-1.5 py-0.5 rounded"
-                      [ngClass]="entry.load === 'high'
-                        ? 'bg-red-500/15 text-red-400 border border-red-500/20'
-                        : 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/20'">
-                      {{ entry.load === 'low' ? '低负荷' : '高负荷' }}
-                    </span>
-                    <span class="text-[9px] text-stone-500 font-mono">
-                      {{ entry.expectedMinutes ? formatTime(entry.expectedMinutes) : '—' }}
-                    </span>
-                  </div>
-                </button>
-              }
-            </div>
-          </div>
+            [reason]="engine.pendingDecision()?.reason || ''" [remainingMinutes]="pendingDecisionRemainingMinutes()"
+            [entries]="engine.pendingDecisionEntries()" [blocked]="pendingDecisionActionsBlocked()"
+            (cancelRecommendation)="cancelPendingDecisionAutoPromote()" (chooseCandidate)="choosePendingDecisionCandidate($event)">
+          </app-dock-pending-decision>
         }
 
         @if (!strictSampleMode && blankPeriodActive()) {
@@ -122,9 +57,11 @@
           </div>
         }
 
-        <div class="absolute inset-0 z-10 pointer-events-none" [class.mobile-radar-layer]="isMobile()" [attr.data-focus-phase]="focusSessionPhase()">
-          <app-dock-radar-zone [isMobile]="isMobile()" [canMutate]="canMutateDock()" [interactive]="focusSessionInteractive()" [activeView]="activeView()"></app-dock-radar-zone>
-        </div>
+          @if (!isMobile()) {
+            <div class="absolute inset-0 z-10 pointer-events-none" [attr.data-focus-phase]="focusSessionPhase()">
+              <app-dock-radar-zone [canMutate]="canMutateDock()" [interactive]="focusSessionInteractive()" [activeView]="activeView()"></app-dock-radar-zone>
+            </div>
+          }
       }
     </app-dock-focus-scene>
 
@@ -262,33 +199,9 @@
           role="dialog"
           aria-modal="true"
           aria-label="碎片时间倒计时">
-          <div class="fragment-countdown-card rounded-2xl border border-emerald-500/30 bg-slate-900/95 px-6 py-5 text-center shadow-2xl max-w-[320px]">
-            <div class="text-emerald-400 text-[11px] font-semibold tracking-widest mb-2 uppercase">碎片时间</div>
-            <div class="text-slate-100 text-sm mb-3">
-              检测到短暂空闲，即将进入碎片任务推荐
-            </div>
-            <div class="text-3xl font-mono text-emerald-300 mb-4" data-testid="fragment-countdown-number">
-              {{ engine.fragmentEntryCountdown() }}s
-            </div>
-            <div class="flex gap-3 justify-center">
-              <button
-                type="button"
-                class="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition-colors"
-                (click)="engine.fragmentRest.acceptFragmentEntry()"
-                aria-label="立即进入碎片任务"
-                data-testid="fragment-countdown-accept">
-                立即进入
-              </button>
-              <button
-                type="button"
-                class="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 text-xs transition-colors"
-                (click)="engine.fragmentRest.skipFragmentEntry()"
-                aria-label="跳过碎片任务"
-                data-testid="fragment-countdown-skip">
-                跳过
-              </button>
-            </div>
-          </div>
+          <app-dock-fragment-countdown [seconds]="engine.fragmentEntryCountdown() ?? 0"
+            (accept)="engine.fragmentRest.acceptFragmentEntry()" (skip)="engine.fragmentRest.skipFragmentEntry()">
+          </app-dock-fragment-countdown>
         </div>
       }
 
@@ -414,8 +327,32 @@
       }
     }
 
-    <!-- ═══ 半圆形停泊坞入口（移动端流程图视图时隐藏，避免遮挡底部功能按键） ═══ -->
-    @if (!hideSemicircleOnMobileFlow()) {
+    @if (isMobile()) {
+      <app-dock-mobile-drawer
+        [entries]="engine.orderedDockEntries()"
+        [projects]="mobileDockProjects()"
+        [focusActive]="focusSessionMounted()"
+        [interactive]="!focusSessionMounted() || focusSessionInteractive()"
+        [readOnly]="!canMutateDock()"
+        [activeView]="activeView()"
+        [showTrigger]="!focusSessionMounted() || !engine.focusScrimOn()"
+        (taskConfirmed)="onDockCardClick($event)"
+        (focusRequested)="onFocusSessionToggle()"
+        (createRequested)="requestMobileDockCreate()"
+        (dismissed)="closePlannerQuickEdit(false)">
+        @if (showAdvancedUi && showInlineDockCreate() && showNewTaskForm()) {
+          <app-dock-inline-task-form
+            [(taskTitle)]="newTaskTitle" [(taskLane)]="newTaskLane" [(taskLoad)]="newTaskLoad"
+            [(expectedMinutes)]="newTaskExpectedMinutes" [(waitMinutes)]="newTaskWaitMinutes"
+            [(taskDetail)]="newTaskDetail" [createPending]="inlineDockCreatePending()"
+            [createEnabled]="canUseInlineDockCreate()" (createTask)="createTask()">
+          </app-dock-inline-task-form>
+        }
+      </app-dock-mobile-drawer>
+    }
+
+    <!-- ═══ 桌面半圆形入口 ═══ -->
+    @if (!isMobile() && !hideSemicircleOnMobileFlow()) {
       <div
         class="dock-semicircle dock-semicircle-enter"
         [class.expanded]="semicircleExpanded()"
@@ -466,6 +403,7 @@
     }
 
     <!-- ═══ 底部坞栏面板 ═══ -->
+    @if (!isMobile()) {
     <div
       class="dock-bar fixed -translate-x-1/2 z-40 w-full px-4"
       [style.left]="dockCenterLeft()"
@@ -510,6 +448,7 @@
               </button>
             }
 
+            @if (!isMobile()) {
             <button
               type="button"
               (click)="helpFeedback.toggleHelpOverlay()"
@@ -519,6 +458,7 @@
               data-testid="dock-v3-help-trigger-inline">
               操作帮助
             </button>
+            }
 
             <button
               type="button"
@@ -605,6 +545,7 @@
 
         <!-- 表单 + 卡片列表：当面板高度受限时可垂直滚动 -->
         <div class="flex flex-col gap-4 flex-1 min-h-0 overflow-y-auto hide-scrollbar">
+        @if (!isMobile()) {
         <!-- 新建任务表单 -->
         @if (showAdvancedUi && showInlineDockCreate() && showNewTaskForm()) {
           <app-dock-inline-task-form
@@ -703,7 +644,7 @@
                   }
                 </div>
 
-                @if (canUsePlannerQuickEdit()) {
+          @if (canUsePlannerQuickEdit()) {
                   <button
                     type="button"
                     class="inline-flex min-h-[46px] items-center justify-center whitespace-nowrap rounded-full border border-slate-600/45 bg-slate-900/55 px-3 py-2 text-[9px] font-medium leading-none text-slate-300 transition-all hover:-translate-y-[1px] hover:border-amber-300/45 hover:bg-amber-500/10 hover:text-amber-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/35"
@@ -749,6 +690,8 @@
           </div>
         </div>
 
+        }
         </div><!-- /scrollable body -->
       </div>
     </div>
+    }
