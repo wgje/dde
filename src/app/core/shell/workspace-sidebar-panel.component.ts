@@ -5,6 +5,7 @@ import {
   ElementRef,
   input,
   signal,
+  untracked,
   type OnDestroy,
   type OnInit,
   ViewChild,
@@ -76,6 +77,18 @@ export class WorkspaceSidebarPanelComponent implements OnDestroy, OnInit {
   private panelToolsIntentSubscription: WorkspaceShellPanelToolsIntentSubscription | null = null;
 
   constructor() {
+    // Opening the touch sidebar is intent; hover may never fire on mobile.
+    // Run after render and outside dependency tracking so loader state writes
+    // neither block Text startup nor turn failures into an automatic retry loop.
+    afterRenderEffect({
+      write: () => {
+        const template = this.template();
+        const mobile = template.state.isMobile();
+        const open = template.state.isSidebarOpen();
+        template.state.focusPrefs.isBlackBoxEnabled();
+        if (mobile && open) untracked(() => this.onToolsIntent());
+      },
+    });
     afterRenderEffect({
       write: () => {
         this.outletVersion();

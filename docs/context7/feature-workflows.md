@@ -4,6 +4,8 @@ status: canonical
 audience: ai-agent, maintainer
 last_verified: 2026-06-09
 source_paths:
+  - src/app/core/shell/workspace-sidebar-panel.component.ts
+  - src/app/core/shell/workspace-sidebar-focus-tools-load-state.controller.ts
   - src/app/features/text/
   - src/app/features/flow/
   - src/app/features/focus/
@@ -161,3 +163,11 @@ Supported paths:
 - disaster backup and rejected-data isolation paths
 
 High-risk changes must preserve recoverability and avoid irreversible deletion.
+
+## 候选：移动侧栏工具按可见意图加载
+
+状态：本地候选实现与组件测试，未据此证明生产发布。`WorkspaceSidebarPanelComponent` 在 mobile + sidebar-open 的 after-render write 阶段，以 untracked 调用现有 onToolsIntent；录音仍受 isBlackBoxEnabled 偏好控制。无 hover 触屏打开侧栏即可准备动态组件，不把 Focus/录音模块改为首屏静态依赖，也不等待模块后才显示 Text。
+
+`WorkspaceSidebarFocusToolsLoadStateController` 每次尝试保留 idle/loading/ready/failed 状态。模块未返回时约15秒截止到 failed，显示现有中文重试入口；重新显式激活建立新 attempt，晚到旧结果不改变已失败状态。deadline 不删除缓存、队列或用户数据；后台 timer throttling 不等于严格15秒墙钟保证。组件准备不自动切换专注、不自动录音、不触发麦克风许可。
+
+组件回归覆盖关闭不预载、打开无 hover 自动准备两工具、不抢焦点、loading/failure/retry可见、失败无渲染重试循环。控制器测试覆盖超时、晚到结果、重试与销毁。它们不证明真实网络、麦克风或生产功能已恢复。来源：`src/app/core/shell/workspace-sidebar-panel.component.ts`、`src/app/core/shell/workspace-sidebar-focus-tools-load-state.controller.ts`；用户说明见 handbook/02-use-nanoflow/04-focus-mode.md 与 05-black-box.md。

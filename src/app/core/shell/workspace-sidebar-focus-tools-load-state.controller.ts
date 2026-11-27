@@ -38,6 +38,7 @@ interface ToolRecord {
   readonly stateSignal: WritableSignal<WorkspaceSidebarFocusToolsLoadState>;
   generation: number;
   promise: Promise<void> | null;
+  cancelDeadline: (() => void) | null;
   readyComponent: Type<unknown> | null;
   fallbackFocused: boolean;
   focusLease: FocusLease | null;
@@ -49,6 +50,7 @@ function createToolRecord(): ToolRecord {
     stateSignal: signal({ phase: 'idle', attempt: 0 }),
     generation: 0,
     promise: null,
+    cancelDeadline: null,
     readyComponent: null,
     fallbackFocused: false,
     focusLease: null,
@@ -120,7 +122,7 @@ export class WorkspaceSidebarFocusToolsLoadStateController {
       loadResult = Promise.reject(error);
     }
 
-    const promise = Promise.resolve(loadResult)
+    const promise = this.withLoadDeadline(record, loadResult)
       .then(
         component => this.settleResolved(tool, attempt, generation, component),
         () => this.settleFailed(tool, attempt, generation),
@@ -195,10 +197,25 @@ export class WorkspaceSidebarFocusToolsLoadStateController {
     for (const record of Object.values(this.records)) {
       record.generation += 1;
       record.promise = null;
+      record.cancelDeadline?.();
+      record.cancelDeadline = null;
       record.focusLease = null;
       record.fallbackFocused = false;
       record.replacementBlurArmed = false;
     }
+  }
+
+  private withLoadDeadline(record: ToolRecord, load: Promise<unknown>): Promise<unknown> {
+    // A lost chunk/network request must not leave a touch-only user on a permanent placeholder.
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('sidebar-tool-load-timeout')), 15000);
+      const cancel = () => clearTimeout(timer);
+      record.cancelDeadline = cancel;
+      Promise.resolve(load).then(resolve, reject).finally(cancel);
+    }).finally(() => {
+      record.cancelDeadline?.();
+      record.cancelDeadline = null;
+    });
   }
 
   private settleResolved(

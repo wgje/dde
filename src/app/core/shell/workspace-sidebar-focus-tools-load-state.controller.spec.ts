@@ -58,6 +58,45 @@ const FOCUS: WorkspaceSidebarFocusTool = 'FOCUS_SESSION_TRIGGER';
 const RECORDER: WorkspaceSidebarFocusTool = 'BLACK_BOX_RECORDER';
 
 describe('WorkspaceSidebarFocusToolsLoadStateController', () => {
+  it('ends a stalled import in retryable failure and ignores its late completion', async () => {
+    vi.useFakeTimers();
+    const load = deferred<unknown>();
+    const { controller, focusComponent, loadFocusSessionTrigger } = createHarness();
+    loadFocusSessionTrigger.mockReturnValueOnce(load.promise);
+    try {
+      void controller.activate(FOCUS);
+      await vi.advanceTimersByTimeAsync(15000);
+      expect(controller.state(FOCUS).phase).toBe('failed');
+      focusComponent.set(FocusTriggerFixture);
+      load.resolve(FocusTriggerFixture);
+      await Promise.resolve(); await Promise.resolve();
+      expect(controller.state(FOCUS).phase).toBe('failed');
+      loadFocusSessionTrigger.mockResolvedValue(FocusTriggerFixture);
+      await controller.activate(FOCUS);
+      expect(controller.state(FOCUS)).toEqual({ phase: 'ready', attempt: 1 });
+    } finally { controller.teardown(); vi.useRealTimers(); }
+  });
+
+  it('keeps the new attempt deadline when a timed-out old import completes late', async () => {
+    vi.useFakeTimers();
+    const oldLoad = deferred<unknown>();
+    const newLoad = deferred<unknown>();
+    const { controller, loadFocusSessionTrigger } = createHarness();
+    loadFocusSessionTrigger.mockReturnValueOnce(oldLoad.promise).mockReturnValueOnce(newLoad.promise);
+    try {
+      void controller.activate(FOCUS);
+      await vi.advanceTimersByTimeAsync(15000);
+      expect(controller.state(FOCUS).phase).toBe('failed');
+      void controller.activate(FOCUS);
+      expect(controller.state(FOCUS)).toEqual({ phase: 'loading', attempt: 1 });
+      oldLoad.resolve(FocusTriggerFixture);
+      await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+      expect(controller.state(FOCUS)).toEqual({ phase: 'loading', attempt: 1 });
+      await vi.advanceTimersByTimeAsync(15000);
+      expect(controller.state(FOCUS)).toEqual({ phase: 'failed', attempt: 1 });
+    } finally { controller.teardown(); vi.useRealTimers(); }
+  });
+
   it('starts both tools in independent idle attempt zero states', () => {
     const { controller } = createHarness();
 

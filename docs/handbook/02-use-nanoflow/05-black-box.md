@@ -5,6 +5,8 @@ audience: user
 last_verified: 2026-07-15
 category: use-nanoflow
 source_paths:
+  - src/app/core/shell/workspace-sidebar-panel.component.ts
+  - src/app/core/shell/workspace-sidebar-focus-tools-load-state.controller.ts
   - README.md
   - docs/transcribe-troubleshooting.md
   - src/app/features/focus/
@@ -202,3 +204,15 @@ Black Box 堆积过多会带来两个直接问题：
 - 学习入口审查和 Strata 恢复：[Focus 专注模式](04-focus-mode.md)。
 - 学习同步冲突处理：[同步与冲突处理](../03-data-sync-safety/02-sync-and-conflicts.md)。
 - 继续查语音排障：[transcribe-troubleshooting.md](../../transcribe-troubleshooting.md)。
+
+## 手机侧栏工具的加载与重试（候选修复）
+
+> 本节按本地候选代码核验，不表示生产环境已经发布；线上状态以实际版本和实机验证为准。
+
+手机打开侧栏会在侧栏渲染后异步准备专注入口，以及已启用的录音工具；不需要鼠标悬停，也不用先点占位按钮。关闭的手机侧栏不会因为这个触发器提前加载。桌面仍保留悬停、键盘聚焦或点击触发；工具继续按需加载，不阻塞 Text 首屏编辑。
+
+- 显示“正在加载专注模式工具”或“正在加载录音组件”时，仍可继续操作其他区域。
+- 当前尝试超过约 15 秒或加载失败，会显示“重试加载…”；连接恢复后可点击重试，不需要清除站点数据或本地队列。浏览器后台节流时，提示时间可能稍晚。
+- 失败不会因重复渲染而无限自动重试；重新打开侧栏也可再次表达加载意图。
+- 准备组件不是执行功能：不会自动进入专注、开始录音、索要麦克风权限或创建黑匣子条目。真正开始功能仍需明确点击已加载的操作按钮。
+- 关闭的录音偏好不会因打开侧栏而被启用。此入口加载修复也不解决账号、转写服务或云同步错误；已有数据应继续保留，可先导出再排查。

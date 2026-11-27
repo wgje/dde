@@ -89,6 +89,59 @@ describe('WorkspaceSidebarPanelComponent', () => {
     return fallback;
   }
 
+  it('loads visible mobile sidebar tools without hover, focus or click', async () => {
+    const { fixture, raw } = createFixture();
+    raw.state.isMobile.set(true);
+    raw.state.isSidebarOpen.set(false);
+    raw.state.focusPrefs.isBlackBoxEnabled.set(true);
+    fixture.detectChanges();
+    raw.tools.sidebar.loadFocusSessionTriggerComponent.mockImplementation(async () => {
+      raw.tools.bindings.focusSessionTriggerComponent.set(FocusPrimaryFixture);
+      return FocusPrimaryFixture;
+    });
+    raw.tools.sidebar.loadBlackBoxRecorderComponent.mockImplementation(async () => {
+      raw.tools.bindings.blackBoxRecorderComponent.set(FocusPrimaryFixture);
+      return FocusPrimaryFixture;
+    });
+    await settle(fixture);
+    expect(raw.tools.sidebar.loadFocusSessionTriggerComponent).not.toHaveBeenCalled();
+    raw.state.isSidebarOpen.set(true);
+    await settle(fixture);
+    expect(raw.tools.sidebar.loadFocusSessionTriggerComponent).toHaveBeenCalledTimes(1);
+    expect(raw.tools.sidebar.loadBlackBoxRecorderComponent).toHaveBeenCalledTimes(1);
+    expect(fixture.nativeElement.querySelector('[data-testid="focus-tool-fallback"]')).toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-testid="recorder-tool-fallback"]')).toBeNull();
+    expect(FocusPrimaryFixture.focusCalls).toBe(0);
+    fixture.destroy();
+  });
+
+  it('shows loading then a clickable retry after mobile visibility load fails, without an automatic loop', async () => {
+    const { fixture, raw } = createFixture();
+    raw.state.isMobile.set(true);
+    raw.state.isSidebarOpen.set(false);
+    const load = deferred<Type<unknown> | null>();
+    raw.tools.sidebar.loadFocusSessionTriggerComponent.mockReturnValueOnce(load.promise);
+    fixture.detectChanges();
+    raw.state.isSidebarOpen.set(true);
+    fixture.detectChanges();
+    expect(fixture.componentInstance.focusToolState().phase).toBe('loading');
+    fixture.detectChanges();
+    expect(fixture.nativeElement.textContent).toContain('正在加载专注模式工具');
+    load.reject(new Error('chunk unavailable'));
+    await settle(fixture);
+    expect(fixture.nativeElement.textContent).toContain('重试加载专注模式工具');
+    await settle(fixture);
+    expect(raw.tools.sidebar.loadFocusSessionTriggerComponent).toHaveBeenCalledTimes(1);
+    raw.tools.sidebar.loadFocusSessionTriggerComponent.mockImplementation(async () => {
+      raw.tools.bindings.focusSessionTriggerComponent.set(FocusPrimaryFixture);
+      return FocusPrimaryFixture;
+    });
+    (fixture.nativeElement.querySelector('[data-testid="focus-tool-fallback"]') as HTMLButtonElement).click();
+    await settle(fixture);
+    expect(fixture.componentInstance.focusToolState().phase).toBe('ready');
+    fixture.destroy();
+  });
+
   it('渲染项目列表与侧栏骨架', () => {
     const { fixture } = createFixture();
     const host = fixture.nativeElement as HTMLElement;
