@@ -17,7 +17,7 @@ describe('startup service worker module boundary', () => {
     expect(call.expression.getText(file)).toBe('Promise.all');
     const imports = call.arguments[0] as ts.ArrayLiteralExpression;
     const binding = declaration!.name as ts.ArrayBindingPattern;
-    const index = binding.elements.findIndex(e => e.name?.getText(file) === 'serviceWorkerModule');
+    const index = binding.elements.findIndex(e => ts.isBindingElement(e) && e.name.getText(file) === 'serviceWorkerModule');
     expect(imports.elements[index].getText(file)).toBe("import('@angular/service-worker')");
     expect(imports.elements.some(e => e.getText(file) === "import('./src/app.component')")).toBe(true);
   });
