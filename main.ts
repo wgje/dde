@@ -1,7 +1,6 @@
 import { bootstrapApplication } from '@angular/platform-browser';
 import { isDevMode, ErrorHandler, VERSION, NgZone, APP_INITIALIZER } from '@angular/core';
 import { provideRouter, withComponentInputBinding, withHashLocation, withRouterConfig } from '@angular/router';
-import { provideServiceWorker } from '@angular/service-worker';
 import { createPostHandoffSwRegistrationStrategy } from './src/services/sw-registration-strategy';
 import { pushStartupTrace } from './src/utils/startup-trace';
 import { ensureBrowserNetworkSuspensionTracking } from './src/utils/browser-network-suspension';
@@ -538,17 +537,20 @@ async function startApplication() {
       appRoutesModule,
       globalErrorHandlerModule,
       sentryLoaderModule,
+      serviceWorkerModule,
     ] = await Promise.all([
       import('./src/app.component'),
       import('./src/app.routes'),
       import('./src/services/global-error-handler.service'),
       import('./src/services/sentry-lazy-loader.service'),
+      import('@angular/service-worker'),
     ]);
     pushStartupTrace('app.start_phase_complete', { phase: startupPhase, atMs: Date.now() - START_TIME });
     const AppComponent = appComponentModule.AppComponent;
     const routes = appRoutesModule.routes;
     const GlobalErrorHandler = globalErrorHandlerModule.GlobalErrorHandler;
     const SentryLazyLoaderService = sentryLoaderModule.SentryLazyLoaderService;
+    const { provideServiceWorker } = serviceWorkerModule;
 
     startupPhase = 'angular-bootstrap';
     pushStartupTrace('app.start_phase', { phase: startupPhase, atMs: Date.now() - START_TIME });
