@@ -35,3 +35,7 @@ A green local or preview build is not production proof. Keep `NO_RELEASE`, `prod
 ## Entry static-closure follow-up (candidate)
 
 Service Worker provider code is loaded in the existing parallel startup-module batch rather than the main static import closure. The composed worker URL, production enablement, post-handoff registration delay and fallback remain unchanged. This reduces eager entry bytes without deleting caches, changing IndexedDB, modifying queues or removing offline registration. Static import-count and byte budgets remain unchanged and must pass against rebuilt production artifacts; source regression checks also retain the provider/strategy contract.
+
+## Font asset recovery (candidate)
+
+Supplementary WenKai Screen 1.7.0 regular WOFF2 faces are served from the same origin rather than a second full CDN stylesheet. Later overlapping font-face declarations take precedence, so the old CDN stylesheet could override already-local subsets. The supplement contains only the remaining 83 subsets, preserving the 14 existing files and their bytes. Keep font-display swap, interaction/timeout loading and the local-fonts lazy service-worker group; do not prefetch every font or wait for fonts before displaying the workspace. Carry upstream SHA evidence and MIT/OFL notices. Uncached glyphs on the first fully offline visit still use system fallback; no claim is made that every glyph is pre-cached.

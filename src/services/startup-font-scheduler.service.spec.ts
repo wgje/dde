@@ -63,10 +63,11 @@ describe('StartupFontSchedulerService', () => {
     appendedLinks[0].onload?.(new Event('load'));
     expect(service.isEnhancedFontLoaded()).toBe(true);
 
-    // 自托管字体加载成功后应注入 CDN 补充字体
+    // 自托管字体加载成功后应注入 同源补充字体
     expect(appendedLinks.length).toBe(2);
-    expect(appendedLinks[1].href).toContain('cdn.jsdelivr.net');
-    expect(appendedLinks[1].getAttribute('data-nanoflow-cdn-font')).toBe('true');
+    expect(new URL(appendedLinks[1].href).origin).toBe(window.location.origin);
+    expect(new URL(appendedLinks[1].href).pathname).toBe('/fonts/lxgw-wenkai-screen-supplement.css');
+    expect(appendedLinks[1].getAttribute('data-nanoflow-supplement-font')).toBe('true');
   });
 
   it('无交互时应在兜底延迟后加载增强字体', () => {
@@ -77,9 +78,9 @@ describe('StartupFontSchedulerService', () => {
 
     appendedLinks[0].onload?.(new Event('load'));
     expect(service.isEnhancedFontLoaded()).toBe(true);
-    // CDN 补充字体也应被注入
+    // 同源补充字体也应被注入
     expect(appendedLinks.length).toBe(2);
-    expect(appendedLinks[1].getAttribute('data-nanoflow-cdn-font')).toBe('true');
+    expect(appendedLinks[1].getAttribute('data-nanoflow-supplement-font')).toBe('true');
   });
 
   it('交互监听解绑失败时仍应继续加载增强字体', () => {
@@ -172,7 +173,7 @@ describe('StartupFontSchedulerService', () => {
     expect(appendedLinks.length).toBe(2);
   });
 
-  it('销毁后 late onload 不应标记字体已加载或注入 CDN link', () => {
+  it('销毁后 late onload 不应标记字体已加载或注入同源 link', () => {
     service.initialize();
     window.dispatchEvent(new Event('pointerdown'));
     expect(appendedLinks.length).toBe(1);
@@ -242,18 +243,18 @@ describe('StartupFontSchedulerService', () => {
     expect(appendedLinks.length).toBe(1);
   });
 
-  it('CDN 补充字体不应重复注入', () => {
+  it('同源补充字体不应重复注入', () => {
     service.initialize();
     window.dispatchEvent(new Event('pointerdown'));
     appendedLinks[0].onload?.(new Event('load'));
-    // 第一次注入 CDN
+    // 第一次注入 同源
     expect(appendedLinks.length).toBe(2);
 
-    // 模拟 DOM 查询到已有 CDN link
+    // 模拟 DOM 查询到已有 同源 link
     const originalQuerySelector = document.querySelector.bind(document);
     vi.spyOn(document, 'querySelector').mockImplementation((selector: string) => {
-      if (selector === 'link[data-nanoflow-cdn-font]') {
-        return appendedLinks[1]; // 返回已注入的 CDN link
+      if (selector === 'link[data-nanoflow-supplement-font]') {
+        return appendedLinks[1]; // 返回已注入的 同源 link
       }
       return originalQuerySelector(selector);
     });
@@ -261,5 +262,30 @@ describe('StartupFontSchedulerService', () => {
     // 再次触发不应增加新的 link
     appendedLinks[0].onload?.(new Event('load'));
     expect(appendedLinks.length).toBe(2);
+  });
+  it('补充字体加载失败应保持基础字体可用且不引入外部备用源', () => {
+    service.initialize();
+    window.dispatchEvent(new Event('pointerdown'));
+    appendedLinks[0].onload?.(new Event('load'));
+    const supplement = appendedLinks[1];
+    expect(supplement.media).toBe('print');
+    supplement.onerror?.(new Event('error'));
+    expect(service.isEnhancedFontLoaded()).toBe(true);
+    expect(appendedLinks).toHaveLength(2);
+    expect(supplement.onload).toBeNull();
+    expect(supplement.onerror).toBeNull();
+    expect(appendedLinks.every(link => new URL(link.href).origin === window.location.origin)).toBe(true);
+  });
+
+  it('销毁后补充字体 late onload 不应改变媒体状态', () => {
+    service.initialize();
+    window.dispatchEvent(new Event('pointerdown'));
+    appendedLinks[0].onload?.(new Event('load'));
+    const supplement = appendedLinks[1];
+    const lateOnload = supplement.onload;
+    TestBed.resetTestingModule();
+    lateOnload?.call(supplement, new Event('load'));
+    expect(supplement.media).toBe('print');
+    expect(appendedLinks).toHaveLength(2);
   });
 });
