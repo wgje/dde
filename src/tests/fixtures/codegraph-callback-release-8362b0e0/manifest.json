@@ -5,55 +5,55 @@
   "files": [
     {
       "sourcePath": "scripts/query-codegraph-nanoflow-overlay.mjs",
-      "file": "scripts/query-codegraph-nanoflow-overlay.mjs",
+      "file": "scripts/query-codegraph-nanoflow-overlay.mjs.fixture",
       "bytes": 18969,
       "sha256": "1eda64dbdec47fe002e76be6d7af16ecc0cb576f88d6e2f22a44de7581681e61"
     },
     {
       "sourcePath": "scripts/lib/codegraph-overlay-current-receipt.cjs",
-      "file": "scripts/lib/codegraph-overlay-current-receipt.cjs",
+      "file": "scripts/lib/codegraph-overlay-current-receipt.cjs.fixture",
       "bytes": 13649,
       "sha256": "7c971f4e6651d841f2ba92c8c2b9a71a36ca92e914f5b882842950b9a972830d"
     },
     {
       "sourcePath": "scripts/lib/codegraph-overlay-query-terms.mjs",
-      "file": "scripts/lib/codegraph-overlay-query-terms.mjs",
+      "file": "scripts/lib/codegraph-overlay-query-terms.mjs.fixture",
       "bytes": 26269,
       "sha256": "0ab0960ba8085eb459b948341f3306679971ba847524553de0010bee13fbdb2d"
     },
     {
       "sourcePath": "scripts/lib/codegraph-overlay-native-codeblock-evidence.mjs",
-      "file": "scripts/lib/codegraph-overlay-native-codeblock-evidence.mjs",
+      "file": "scripts/lib/codegraph-overlay-native-codeblock-evidence.mjs.fixture",
       "bytes": 27607,
       "sha256": "6c59275f5bb62fa62d3eb2663e26d81a7d0217f2901ad48c7f4e9885bc78bcdd"
     },
     {
       "sourcePath": "scripts/lib/codegraph-overlay-candidate-index.mjs",
-      "file": "scripts/lib/codegraph-overlay-candidate-index.mjs",
+      "file": "scripts/lib/codegraph-overlay-candidate-index.mjs.fixture",
       "bytes": 26912,
       "sha256": "9dfff9d2a6f0d0b293f0e670453379ab8ffdd8a35a9e9958a9d327d67bc7533a"
     },
     {
       "sourcePath": "scripts/lib/codegraph-overlay-semantic-selection.mjs",
-      "file": "scripts/lib/codegraph-overlay-semantic-selection.mjs",
+      "file": "scripts/lib/codegraph-overlay-semantic-selection.mjs.fixture",
       "bytes": 34270,
       "sha256": "417350bf7f7a5f4e1c39ed2d63e09feb949ca5bd1356be47d440c9152ea84a76"
     },
     {
       "sourcePath": "scripts/lib/codegraph-overlay-context-assembly.mjs",
-      "file": "scripts/lib/codegraph-overlay-context-assembly.mjs",
+      "file": "scripts/lib/codegraph-overlay-context-assembly.mjs.fixture",
       "bytes": 31759,
       "sha256": "61b33839231aa6e936eb63240f8bef4d1475a9bb332503608fdce44ece49923e"
     },
     {
       "sourcePath": "scripts/lib/codegraph-overlay-native-codeblock-selection.mjs",
-      "file": "scripts/lib/codegraph-overlay-native-codeblock-selection.mjs",
+      "file": "scripts/lib/codegraph-overlay-native-codeblock-selection.mjs.fixture",
       "bytes": 33349,
       "sha256": "bc5595d3d3827e90956669c8217f1d97c8212f6a70b36d851599e433af8e54b8"
     },
     {
       "sourcePath": "scripts/lib/codegraph-overlay-output-projection.mjs",
-      "file": "scripts/lib/codegraph-overlay-output-projection.mjs",
+      "file": "scripts/lib/codegraph-overlay-output-projection.mjs.fixture",
       "bytes": 33670,
       "sha256": "c77e44e5679ab8ed04ac48580c9abfe75fb284c998e02792f17c305c08ad8eed"
     }

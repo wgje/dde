@@ -2,7 +2,6 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
-import { pathToFileURL } from 'node:url';
 import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 const repoRoot = path.resolve(__dirname, '../../..');
@@ -27,6 +26,14 @@ const releasedExecutionSourceShas = new Map([
 ]);
 const releasedNormalizedDigest = 'dd75d6377dcf78eb2b0590332b1d90f23ad04752c62931f17110cb54dd2e5248';
 const manifestPath = path.join(releaseFixtureRoot, 'docs', 'codegraph-nanoflow-dedup-contract.json');
+const fixtureSources = JSON.parse(fs.readFileSync(path.join(releaseFixtureRoot, 'manifest.json'), 'utf8')) as {
+  files: Array<{ sourcePath: string; file: string }>;
+};
+function readReleasedSource(sourcePath: string): string {
+  const entry = fixtureSources.files.find(value => value.sourcePath === sourcePath);
+  if (!entry) throw new Error('Unknown frozen release source: ' + sourcePath);
+  return fs.readFileSync(path.join(releaseFixtureRoot, entry.file), 'utf8');
+}
 const ownerNames = ['queryOverlay', 'scoreCandidate', 'selectGraphResults', 'formatStrictNativeMarkdown',
   'toNativeJsonFormatterResponse', 'formatNativeMarkdown'] as const;
 type OwnerName = typeof ownerNames[number];
@@ -423,7 +430,7 @@ describe('CodeGraph callback reachability release-8362b0e0 known-answer', { time
     expect(fixture.commit).toBe('8362b0e0249f4ebf0029500051d96629c001173a');
     expect(fixture.files.map(value => value.sourcePath).sort()).toEqual([...releasedExecutionSourceShas.keys()].sort());
     for (const entry of fixture.files) {
-      expect(entry.file).toBe(entry.sourcePath);
+      expect(entry.file).toBe(entry.sourcePath + '.fixture');
       const bytes = fs.readFileSync(path.join(releaseFixtureRoot, entry.file));
       expect(bytes.length).toBe(entry.bytes);
       expect(entry.sha256).toBe(releasedExecutionSourceShas.get(entry.sourcePath));
@@ -440,10 +447,10 @@ describe('CodeGraph callback reachability release-8362b0e0 known-answer', { time
   it('classifies the exact 68 real callsites and solves six owners through one isolated shared worklist', async () => {
     const sources = [...sourcePaths, currentReceiptSourcePath].map(sourcePath => ({
       sourcePath,
-      text: fs.readFileSync(path.join(releaseFixtureRoot, sourcePath), 'utf8'),
+      text: readReleasedSource(sourcePath),
     }));
     for (const [sourcePath, expectedSha] of releasedExecutionSourceShas) {
-      expect(crypto.createHash('sha256').update(fs.readFileSync(path.join(releaseFixtureRoot, sourcePath))).digest('hex'),
+      expect(crypto.createHash('sha256').update(readReleasedSource(sourcePath)).digest('hex'),
         `${sourcePath} released execution source`).toBe(expectedSha);
     }
     const facadeSource = sources.find(source => source.sourcePath === facadeSourcePath)!.text;
@@ -461,7 +468,9 @@ describe('CodeGraph callback reachability release-8362b0e0 known-answer', { time
     const guard = '    const graphEdges = Array.isArray(graph.edges) ? graph.edges : [];\n';
     expect.soft(semanticSource.split('\n').filter(line => line.includes('graph.edges'))).toEqual([guard.trimEnd()]);
     expect.soft(semanticSource.indexOf(guard)).toBeLessThan(semanticSource.indexOf('const graphIndexes = buildGraphIndexes'));
-    const semantic = await import(`${pathToFileURL(path.join(releaseFixtureRoot, sourcePaths[4])).href}?a-prime`);
+    // This standalone frozen module has no imports. Load its verified bytes without
+    // recreating an executable source under the repository's current-source scan.
+    const semantic = await import(`data:text/javascript;base64,${Buffer.from(semanticSource).toString('base64')}#a-prime`);
     const indexedEdges: unknown[] = [];
     const emptyIndexes = () => ({ nodesById: new Map(), nodesByName: new Map(), exportEdgesByName: new Map(),
       equivalentIdsByDisplayKey: new Map(), edgesByNodeId: new Map() });
