@@ -171,3 +171,8 @@ High-risk changes must preserve recoverability and avoid irreversible deletion.
 `WorkspaceSidebarFocusToolsLoadStateController` 每次尝试保留 idle/loading/ready/failed 状态。模块未返回时约15秒截止到 failed，显示现有中文重试入口；重新显式激活建立新 attempt，晚到旧结果不改变已失败状态。deadline 不删除缓存、队列或用户数据；后台 timer throttling 不等于严格15秒墙钟保证。组件准备不自动切换专注、不自动录音、不触发麦克风许可。
 
 组件回归覆盖关闭不预载、打开无 hover 自动准备两工具、不抢焦点、loading/failure/retry可见、失败无渲染重试循环。控制器测试覆盖超时、晚到结果、重试与销毁。它们不证明真实网络、麦克风或生产功能已恢复。来源：`src/app/core/shell/workspace-sidebar-panel.component.ts`、`src/app/core/shell/workspace-sidebar-focus-tools-load-state.controller.ts`；用户说明见 handbook/02-use-nanoflow/04-focus-mode.md 与 05-black-box.md。
+
+
+## Mobile sidebar viewport resize safety
+
+The shell normalizes its window provider once at the viewport-resize host boundary and passes the same provider to listener registration and the lazy resize controller. A browser default uses window; an explicit no-window provider remains a no-op. Cleanup and generation fencing discard late callbacks. Import failures remain visible as warnings, while a missing provider cannot be misreported as a chunk failure. This boundary is independent of Flow viewport persistence: Flow pan/zoom is local owner-scoped snapshot state and does not initiate task cloud writes.
