@@ -174,3 +174,10 @@ Capture the session runtime generation in the mutation caller before awaiting
 capability priming, then revalidate that generation and owner after the await.
 Even an already-enabled capability returns through a microtask; a boolean checked
 inside the helper before return is not a sufficient post-await identity fence.
+
+When `sync_upsert_focus_session` reports `stale_payload=true`, the remote snapshot
+is newer and remains authoritative; retain the rejected local snapshot as a
+terminal, owner-scoped dead letter rather than retrying the same LWW write. The
+sync-status warning must call this a remote-newer conflict, not data loss, and its
+download action must export complete pending actions and dead-letter payloads.
+Do not dismiss the dead letter or clear browser storage automatically.

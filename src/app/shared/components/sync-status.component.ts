@@ -3,14 +3,13 @@ import { CommonModule } from '@angular/common';
 import { ActionQueueService } from '../../../services/action-queue.service';
 import { SyncStateService } from '../../core/services/sync/sync-state.service';
 import { SyncCoordinatorService } from '../../../services/sync-coordinator.service';
-import { ProjectStateService } from '../../../services/project-state.service';
 import { AuthService } from '../../../services/auth.service';
 import { ConflictStorageService } from '../../../services/conflict-storage.service';
 import { RetryQueueService } from '../../core/services/sync/retry-queue.service';
 import { ToastService } from '../../../services/toast.service';
 import { LoggerService } from '../../../services/logger.service';
 import { SYNC_CONFIG } from '../../../config/sync.config';
-import type { QueuedAction } from '../../../services/action-queue.types';
+import type { DeadLetterItem, QueuedAction } from '../../../services/action-queue.types';
 
 /**
  * 同步状态组件
@@ -64,7 +63,6 @@ export class SyncStatusComponent {
   private authService = inject(AuthService);
   private conflictStorage = inject(ConflictStorageService);
   private syncCoordinator = inject(SyncCoordinatorService);
-  private projectState = inject(ProjectStateService);
   private retryQueue = inject(RetryQueueService);
   private toastService = inject(ToastService);
   private readonly logger = inject(LoggerService);
@@ -119,6 +117,9 @@ export class SyncStatusComponent {
   readonly pendingCount = signal(0);
   readonly deadLetterCount = this.actionQueue.deadLetterSize;
   readonly deadLetters = this.actionQueue.deadLetterQueue;
+  readonly preservedRemoteFocusConflictCount = computed(() =>
+    this.deadLetters().filter(item => this.isPreservedRemoteFocusConflict(item)).length
+  );
   readonly queueFrozen = this.actionQueue.queueFrozen;
   readonly queueFreezeReason = this.actionQueue.queueFreezeReason;
   readonly legacyReviewCount = this.retryQueue.legacyReviewCount;
@@ -284,10 +285,10 @@ export class SyncStatusComponent {
   
   /**
    * 【Senior Consultant "Red Phone"】是否处于危险状态
-   * 当死信队列有内容或待同步队列超过阈值时，显示紧急警告
+   * 未解决的死信或大量用户操作待同步时，显示紧急警告；已保留的远端版本冲突单独说明。
    */
   readonly isCriticalState = computed(() => {
-    const deadCount = this.deadLetterCount();
+    const deadCount = this.deadLetterCount() - this.preservedRemoteFocusConflictCount();
     const pendingCount = this.pendingCount();
     const criticalThreshold = Math.floor(SYNC_CONFIG.MAX_RETRY_QUEUE_SIZE * 0.8);
     return deadCount > 0 || pendingCount > criticalThreshold;
@@ -467,6 +468,11 @@ export class SyncStatusComponent {
     this.actionQueue.downloadEscapeExport();
   }
 
+  isPreservedRemoteFocusConflict(item: DeadLetterItem): boolean {
+    return item.action.entityType === 'focus-session'
+      && item.action.lastError?.includes('远端专注会话已更新，本地变更已保留等待处理') === true;
+  }
+
   /**
    * 获取操作的可读标签
    */
@@ -505,49 +511,4 @@ export class SyncStatusComponent {
     return `${diffDays} 天前`;
   }
   
-  /**
-   * 【Senior Consultant "Red Phone"】紧急下载备份
-   * 当同步严重滞后时，允许用户下载本地数据备份
-   */
-  async downloadBackup() {
-    try {
-      // 获取当前项目的本地数据
-      const _activeProjectId = this.projectState.activeProjectId() || '';
-      
-      // 构建备份数据
-      const backupData = {
-        timestamp: new Date().toISOString(),
-        version: '1.0',
-        source: 'nanoflow-emergency-backup',
-        pendingOperations: this.pendingCount(),
-        failedOperations: this.deadLetterCount(),
-        // 死信队列中的数据
-        deadLetterQueue: this.deadLetters().map(item => ({
-          type: item.action.type,
-          entityType: item.action.entityType,
-          entityId: item.action.entityId,
-          failedAt: item.failedAt,
-          reason: item.reason
-        }))
-      };
-      
-      // 创建下载文件
-      const blob = new Blob([JSON.stringify(backupData, null, 2)], { 
-        type: 'application/json' 
-      });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `nanoflow-backup-${new Date().toISOString().slice(0, 10)}.json`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-      
-      this.toastService.success('备份已下载', '请妥善保存备份文件');
-    } catch (e) {
-      this.toastService.error('下载失败', '无法创建备份文件');
-      this.logger.error('SyncStatus', 'Backup download failed', e);
-    }
-  }
 }
