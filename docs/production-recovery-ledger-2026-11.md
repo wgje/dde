@@ -234,3 +234,8 @@ Window: `2026-11-25T13:20:00Z` to `2026-11-26T13:20:00Z` (24 hours). Only aggreg
 - Adversarial review found that the enabled-RPC fast path still yields at await. A microtask owner change or session runtime reset after the helper computed true could reach mutation dispatch. New focus tests failed for owner change and reset; lease abort was already rejected.
 - Each mutation caller now captures the runtime generation before capability priming and checks that generation plus owner after await, in addition to existing lease and suspension guards. Expanded the cases across all three mutation kinds and owner-change/session-reset/lease-abort transitions.
 - Four related suites: 133/133 passed. TypeScript, targeted ESLint, diff and documentation validation passed. No production flag, data, migration or deployment changed. This closes a candidate-introduced async gap; production acceptance and remaining tool gates remain open.
+
+
+## Focus candidate handbook companion (2026-11-27)
+
+- Running test:contracts after eb3c9c45 exposed the missing Chinese handbook companion for sync behavior. Added user-facing pending-focus-state meaning, safe preservation guidance, candidate-only protocol priming and identity/suspension guard boundaries to the mapped sync/conflicts page. No gate was bypassed and no production readiness claim was added.
