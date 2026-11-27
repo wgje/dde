@@ -497,6 +497,31 @@ function buildCoordinatorProviders() {
 describe('SyncCoordinatorService', () => {
   let service: SyncCoordinatorService;
   let injector: Injector;
+  it('viewport-only persistence saves local snapshot without entity dirty or remote save', async () => {
+    const project = createTestProject({ id: 'viewport-local', pendingSync: false,
+      viewState: { scale: 1.4, positionX: 14, positionY: 28 } });
+    mockProjectStateService.activeProject.set(project); mockProjectStateService.activeProjectId.set(project.id);
+    mockProjectStateService.projects.set([project]);
+    service.persistViewportLocally();
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(mockSyncService.saveOfflineSnapshot).toHaveBeenCalledWith(expect.arrayContaining([
+      expect.objectContaining({ id: project.id, pendingSync: false, viewState: project.viewState }) ]));
+    expect(service.hasPendingLocalChanges()).toBe(false);
+    expect(mockSyncService.saveProjectSmart).not.toHaveBeenCalled();
+    expect(mockActionQueueService.enqueueForOwner).not.toHaveBeenCalled();
+  });
+
+  it('viewport persistence neither cancels nor confirms an existing entity debounce', async () => {
+    const project = createTestProject({ id: 'viewport-existing-edit' });
+    mockProjectStateService.activeProject.set(project); mockProjectStateService.activeProjectId.set(project.id);
+    mockProjectStateService.projects.set([project]);
+    service.markLocalChanges('content'); service.schedulePersist();
+    service.persistViewportLocally();
+    expect(service.hasPendingLocalChanges()).toBe(true);
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(mockSyncService.saveProjectSmart).toHaveBeenCalledOnce();
+  });
+
   const originalResumeWatermarkFlag = FEATURE_FLAGS.RESUME_WATERMARK_RPC_V1;
   const originalUserProjectsWatermarkFlag = FEATURE_FLAGS.USER_PROJECTS_WATERMARK_RPC_V1;
   const originalBlackBoxWatermarkFlag = FEATURE_FLAGS.BLACKBOX_WATERMARK_PROBE_V1;

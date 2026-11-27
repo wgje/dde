@@ -307,6 +307,8 @@ export class SyncCoordinatorService {
   /**
    * 标记有本地变更待同步
    */
+  persistViewportLocally(): void { this.persistCoordinator.persistViewportLocally(); }
+
   markLocalChanges(updateType: 'content' | 'structure' | 'position' = 'structure') {
     this.persistCoordinator.markLocalChanges(updateType);
   }

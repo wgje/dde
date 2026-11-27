@@ -213,3 +213,8 @@ The shared withTimeout helper rejects an already-aborted external signal before 
 ## Legacy retry evidence retention and manual feedback
 
 Quarantine preserves the first envelope and adds later same-ID operation/payload/reason evidence as flat retainedVersions instead of replacing history. Exact repeated business evidence is idempotent without rewriting timestamps, while conservative local BlackBox repair may retry. Backup validation and merge preserve incoming top-level and retained versions, enforce same owner/queue identity and detect active-queue overlap. Unknown-owner evidence is existence-only and is never claimed by the logged-in account. Manual queue checks report unresolved/pending evidence rather than interpreting void runner completion as all cloud writes succeeding. These controls do not automatically replay legacy payloads or resolve historical Focus conflicts.
+
+
+### Flow 视口仅本地持久化（2026-11-27）
+
+生产 projects schema 与现有 RPC serializer 都没有 viewState/scale/position 云端字段。流程图平移、缩放及首次 fit 的 viewport 状态是本地项目元数据：只保存 owner-scoped 本地完整快照，不标记实体 dirty、不置 pendingSync、不调度远端全项目保存。真实节点拖动仍是 task position mutation，继续原有 durable outbox/重试同步，不与 viewport 混淆。已有实体 debounce 不取消、不清 dirty，项目/owner 代际变化后旧 viewport 回调拒绝写入。视口随离线快照保留，可导出和按原项目 ID 恢复；本变更不声称新增云端视口同步，也不修复真实实体写缺 operationId 的剩余谱系问题。

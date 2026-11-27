@@ -120,6 +120,11 @@ export class SyncCoordinatorPersistService {
     this.scheduleLocalSnapshotSave();
   }
 
+  /** Flow pan/zoom is local project metadata, not an entity mutation. */
+  persistViewportLocally(): void {
+    this.scheduleLocalSnapshotSave();
+  }
+
   getLastUpdateType(): 'content' | 'structure' | 'position' {
     return this.persistState().lastUpdateType;
   }

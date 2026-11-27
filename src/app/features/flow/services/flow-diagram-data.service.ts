@@ -72,8 +72,7 @@ export class FlowDiagramDataService {
     fitToContents: owner => this.zoomService.fitToContents(owner),
     markViewDestroyed: () => this.flowCommand.markViewDestroyed(),
     markViewReady: owner => this.flowCommand.markViewReady(owner),
-    markLocalChanges: type => this.syncCoordinator.markLocalChanges(type),
-    schedulePersist: () => this.syncCoordinator.schedulePersist(),
+    persistViewportLocally: () => this.syncCoordinator.persistViewportLocally(),
     updateViewState: (projectId, viewState) => this.projectState.updateViewState(projectId, viewState),
   });
   private readonly sidecarExpansion = new FlowDiagramSidecarExpansionController();

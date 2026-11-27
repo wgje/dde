@@ -48,8 +48,7 @@ interface FlowDiagramViewportReadinessOptions {
   fitToContents: (owner: FlowViewportOwner) => void;
   markViewDestroyed: () => void;
   markViewReady: (owner: ActiveProjectOwner) => void;
-  markLocalChanges: (type: 'content' | 'structure' | 'position') => void;
-  schedulePersist: () => void;
+  persistViewportLocally: () => void;
   updateViewState: (projectId: string, viewState: ViewState) => void;
 }
 
@@ -182,6 +181,8 @@ export class FlowDiagramViewportReadinessController {
     this.options.markViewDestroyed();
   }
 
+  private readonly savedViewportByProject = new Map<string, { ownerGeneration: number; state: ViewState }>();
+
   saveViewState(project: Pick<Project, 'id'>): void {
     const token = this.captureSettledToken(project.id);
     if (!token) return;
@@ -195,9 +196,13 @@ export class FlowDiagramViewportReadinessController {
       if (this.viewStateSaveTimer !== timer) return;
       try {
         if (!this.isTokenCurrent(token) || this.viewportOwnerProjectId !== token.projectId) return;
+        const previous = this.savedViewportByProject.get(token.projectId);
+        if (previous?.ownerGeneration === token.owner.generation
+          && previous.state.scale === viewState.scale && previous.state.positionX === viewState.positionX
+          && previous.state.positionY === viewState.positionY) return;
         this.options.updateViewState(token.projectId, viewState);
-        this.options.markLocalChanges('position');
-        this.options.schedulePersist();
+        this.savedViewportByProject.set(token.projectId, { ownerGeneration: token.owner.generation, state: viewState });
+        this.options.persistViewportLocally();
       } finally {
         if (this.viewStateSaveTimer === timer) this.viewStateSaveTimer = null;
       }

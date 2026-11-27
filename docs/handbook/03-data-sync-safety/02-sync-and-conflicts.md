@@ -165,3 +165,8 @@ LWW 是 Last-Write-Wins，意思是“最后写入者获胜”。简单理解：
 ### 专注快照时间证据（候选修复）
 
 服务端更新时间不一定等于内容产生时间。读取专注状态时，使用有效快照保存时间判断新旧；时间缺失、损坏或结束状态与快照矛盾时，保留本地状态，不自动把旧内容当成新内容。保留并导出两边后再核对。此保护尚不等于跨设备结束状态已经全部收敛。
+
+
+### Flow 视口仅本地持久化（2026-11-27）
+
+生产 projects schema 与现有 RPC serializer 都没有 viewState/scale/position 云端字段。流程图平移、缩放及首次 fit 的 viewport 状态是本地项目元数据：只保存 owner-scoped 本地完整快照，不标记实体 dirty、不置 pendingSync、不调度远端全项目保存。真实节点拖动仍是 task position mutation，继续原有 durable outbox/重试同步，不与 viewport 混淆。已有实体 debounce 不取消、不清 dirty，项目/owner 代际变化后旧 viewport 回调拒绝写入。视口随离线快照保留，可导出和按原项目 ID 恢复；本变更不声称新增云端视口同步，也不修复真实实体写缺 operationId 的剩余谱系问题。

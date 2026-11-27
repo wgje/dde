@@ -86,8 +86,7 @@ function createHarness() {
     fitToContents,
     markViewDestroyed,
     markViewReady: owner => readyOwners.push(owner),
-    markLocalChanges: vi.fn(),
-    schedulePersist: vi.fn(),
+    persistViewportLocally: vi.fn(),
     updateViewState: vi.fn(),
   });
   const switchProject = (nextProjectId: string): void => {

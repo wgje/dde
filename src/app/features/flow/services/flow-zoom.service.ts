@@ -46,6 +46,7 @@ export class FlowZoomService {
   /** 视图状态保存定时器 */
   private viewStateSaveTimer: ReturnType<typeof setTimeout> | null = null;
   private viewStateSaveGeneration = 0;
+  private lastSavedViewport: { projectId: string; diagram: go.Diagram; state: ViewState } | null = null;
   private viewStatePersistenceGuard: (() => boolean) | null = null;
   
   /** 默认缩放范围 */
@@ -59,6 +60,7 @@ export class FlowZoomService {
    */
   setDiagram(diagram: go.Diagram | null): void {
     if (this.diagram !== diagram) this.cancelPendingViewStateSave();
+    if (this.diagram !== diagram) this.lastSavedViewport = null;
     this.diagram = diagram;
   }
 
@@ -290,9 +292,13 @@ export class FlowZoomService {
 
   private persistViewState(owner: FlowViewportOwner, viewState: ViewState): void {
     if (!this.isOwnerCurrent(owner) || !this.isViewStatePersistenceAllowed()) return;
+    const previous = this.lastSavedViewport;
+    if (previous?.projectId === owner.projectId && previous.diagram === owner.diagram
+      && previous.state.scale === viewState.scale && previous.state.positionX === viewState.positionX
+      && previous.state.positionY === viewState.positionY) return;
     this.projectState.updateViewState(owner.projectId, viewState);
-    this.syncCoordinator.markLocalChanges('position');
-    this.syncCoordinator.schedulePersist();
+    this.lastSavedViewport = { projectId: owner.projectId, diagram: owner.diagram, state: { ...viewState } };
+    this.syncCoordinator.persistViewportLocally();
     this.logger.debug('视图状态已保存', viewState);
   }
 

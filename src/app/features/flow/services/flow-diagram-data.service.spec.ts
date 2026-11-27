@@ -115,6 +115,7 @@ describe('FlowDiagramDataService', () => {
   let updateViewState: ReturnType<typeof vi.fn>;
   let markLocalChanges: ReturnType<typeof vi.fn>;
   let schedulePersist: ReturnType<typeof vi.fn>;
+  let persistViewportLocally: ReturnType<typeof vi.fn>;
   let fitToContents: ReturnType<typeof vi.fn>;
   let searchQuery: ReturnType<typeof signal<string>>;
 
@@ -153,6 +154,7 @@ describe('FlowDiagramDataService', () => {
     updateViewState = vi.fn();
     markLocalChanges = vi.fn();
     schedulePersist = vi.fn();
+    persistViewportLocally = vi.fn();
     fitToContents = vi.fn(applyFitToContents);
     searchQuery = signal('');
     buildDiagramData = vi.fn(() => ({
@@ -187,7 +189,7 @@ describe('FlowDiagramDataService', () => {
         },
         { provide: UiStateService, useValue: { searchQuery, activeView } },
         { provide: TaskOperationAdapterService, useValue: { getLastUpdateType } },
-        { provide: SyncCoordinatorService, useValue: { markLocalChanges, schedulePersist } },
+        { provide: SyncCoordinatorService, useValue: { markLocalChanges, schedulePersist, persistViewportLocally } },
         { provide: LoggerService, useValue: { category: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }) } },
         { provide: ToastService, useValue: { error: vi.fn(), info: vi.fn(), success: vi.fn(), warning: vi.fn() } },
         { provide: DockEngineService, useValue: { dockedTaskIds: vi.fn(() => new Set<string>()), focusingEntry: vi.fn(() => null) } },
@@ -347,6 +349,9 @@ describe('FlowDiagramDataService', () => {
     diagram.scale = 2.8; diagram.position = new go.Point(280, 560);
     vi.advanceTimersByTime(1000);
     expect(updateViewState).toHaveBeenLastCalledWith('project-1', { scale: 1.4, positionX: 14, positionY: 28 });
+    expect(persistViewportLocally).toHaveBeenCalledOnce();
+    expect(markLocalChanges).not.toHaveBeenCalled();
+    expect(schedulePersist).not.toHaveBeenCalled();
     updateViewState.mockClear();
     service.saveViewState();
     switchProject('project-b', undefined); service.updateDiagram([rootTask]);

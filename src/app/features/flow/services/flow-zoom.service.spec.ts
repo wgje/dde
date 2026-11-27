@@ -18,6 +18,7 @@ describe('FlowZoomService', () => {
 
   const mockSyncCoordinator = {
     markLocalChanges: vi.fn(),
+    persistViewportLocally: vi.fn(),
     schedulePersist: vi.fn(),
   };
 
@@ -41,6 +42,15 @@ describe('FlowZoomService', () => {
   afterEach(() => {
     vi.useRealTimers();
     TestBed.resetTestingModule();
+  });
+
+  it('pan/zoom persists only local viewport state, never task position intent or remote scheduling', () => {
+    attachDiagram(1.4, new go.Point(14, 28));
+    service.saveViewState();
+    service.saveViewState();
+    expect(mockSyncCoordinator.persistViewportLocally).toHaveBeenCalledOnce();
+    expect(mockSyncCoordinator.markLocalChanges).not.toHaveBeenCalled();
+    expect(mockSyncCoordinator.schedulePersist).not.toHaveBeenCalled();
   });
 
   function attachDiagram(initialScale = 1, initialPosition = new go.Point(0, 0)) {
