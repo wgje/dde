@@ -1,0 +1,85 @@
+@if (!opened() && showTrigger() && (activeView() !== 'flow' || focusActive())) {
+  <div class="dock-trigger" data-testid="dock-v3-mobile-candidate-rail">
+    <button type="button" class="trigger-main" aria-label="展开停泊坞任务抽屉" aria-controls="mobile-dock-dialog" aria-haspopup="dialog" aria-expanded="false" [disabled]="!interactive()" (click)="openDrawer($event.currentTarget)" data-testid="dock-v3-mobile-drawer-trigger">
+      <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 6h16v12H4zM4 14h16M8 14v4" /></svg>
+      <span><strong>停泊坞 <small>{{ activeEntries().length }}</small></strong><em>{{ candidates().length }} 个可行动 · {{ waitingEntries().length }} 个待命</em></span>
+      <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 15 6-6 6 6" /></svg>
+    </button>
+    @if (!focusActive()) {
+      <button type="button" class="primary trigger-focus" [disabled]="readOnly() || !interactive()" (click)="requestFocus()" data-testid="dock-v3-mobile-focus-entry">Focus</button>
+    }
+  </div>
+}
+@if (opened()) {
+  <button type="button" class="backdrop" aria-label="收起停泊坞抽屉" (click)="close()" data-testid="dock-v3-mobile-drawer-backdrop"></button>
+  <section id="mobile-dock-dialog" class="sheet" role="dialog" aria-modal="true" [attr.aria-labelledby]="previewEntry() ? 'mobile-dock-preview-title' : 'mobile-dock-title'" (keydown)="onKeydown($event)" data-testid="dock-v3-mobile-task-drawer">
+    <div class="handle" aria-hidden="true"></div>
+    @if (previewEntry(); as entry) {
+      <header>
+        <button type="button" class="icon-button" aria-label="返回任务列表" (click)="closePreview()" data-testid="dock-v3-mobile-preview-back"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m14 6-6 6 6 6" /></svg></button>
+        <span class="muted">{{ entry.taskId === currentEntry()?.taskId ? '当前主任务' : isPreviewWaiting(entry) ? '待命任务' : '可行动候选' }}</span>
+        <button type="button" class="icon-button" aria-label="关闭停泊坞" (click)="close()" data-testid="dock-v3-mobile-drawer-close"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18" /></svg></button>
+      </header>
+      <div class="sheet-body preview" data-testid="dock-v3-mobile-task-preview">
+        <span class="project">{{ projectName(entry) }}</span>
+        <h2 id="mobile-dock-preview-title">{{ entry.title }}</h2>
+        <p class="muted">{{ entry.load === 'high' ? '高负荷' : '低负荷' }} · {{ statusLabel(entry) }}</p>
+        <p class="detail">{{ entry.detail || '此任务还没有补充说明。' }}</p>
+        <p class="reason">{{ entry.taskId === currentEntry()?.taskId ? '这就是当前任务，返回后可以继续处理。' : '预览不会切换当前任务。确认后再开始下一步。' }}</p>
+        <dl><div><dt>预计投入</dt><dd>{{ entry.expectedMinutes ? formatTime(entry.expectedMinutes) : '未设置' }}</dd></div><div><dt>等待</dt><dd>{{ entry.waitMinutes ? formatTime(entry.waitMinutes) : '无' }}</dd></div></dl>
+      </div>
+      <footer>
+        <button type="button" class="secondary" (click)="closePreview()">返回列表</button>
+        @if (readOnly()) {
+          <span class="readonly-note">只读跟随中，由主控端更改任务。</span>
+        } @else {
+          <button type="button" class="primary" [disabled]="!interactive()" (click)="confirmPreview()" data-testid="dock-v3-mobile-preview-promote">{{ entry.taskId === currentEntry()?.taskId ? '继续当前任务' : '设为当前任务' }}</button>
+        }
+      </footer>
+    } @else {
+      <header>
+        <h2 id="mobile-dock-title">停泊坞 <small>{{ activeEntries().length }}</small></h2>
+        <span class="header-actions">
+          @if (!readOnly()) { <button type="button" class="text-action" (click)="createRequested.emit()" data-testid="dock-v3-mobile-create-toggle">新建</button> }
+          <button type="button" class="icon-button" aria-label="收起停泊坞任务抽屉" (click)="close()" data-testid="dock-v3-mobile-drawer-close"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18" /></svg></button>
+        </span>
+      </header>
+      <div class="sheet-body">
+        @if (currentEntry(); as entry) {
+          <section class="task-group" aria-label="当前主任务">
+            <h3>当前主任务 <small>{{ statusLabel(entry) }}</small></h3>
+            <button type="button" class="task-row current" (click)="preview(entry.taskId, $event.currentTarget)" [attr.data-task-id]="entry.taskId" data-testid="dock-v3-mobile-task-row">
+              <span class="dot" aria-hidden="true"></span><span class="task-copy"><strong>{{ entry.title }}</strong><small>{{ projectName(entry) }} · {{ entry.expectedMinutes ? formatTime(entry.expectedMinutes) : '未设预计' }}</small></span><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6" /></svg>
+            </button>
+          </section>
+        }
+        @if (candidates().length) {
+          <section class="task-group" aria-label="可行动候选">
+            <h3>可行动候选 <small>{{ candidates().length }}</small></h3>
+            @for (entry of candidates(); track entry.taskId) {
+              <button type="button" class="task-row" (click)="preview(entry.taskId, $event.currentTarget)" [attr.data-task-id]="entry.taskId" data-testid="dock-v3-mobile-task-row">
+                <span class="dot" aria-hidden="true"></span><span class="task-copy"><strong>{{ entry.title }}</strong><small>{{ statusLabel(entry) }} · {{ entry.expectedMinutes ? formatTime(entry.expectedMinutes) : '未设预计' }}</small></span><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6" /></svg>
+              </button>
+            }
+          </section>
+        }
+        @if (waitingEntries().length) {
+          <section class="task-group waiting" aria-label="等待中与待命任务">
+            <h3>等待中 / 待命 <small>{{ waitingEntries().length }}</small></h3>
+            @for (entry of waitingEntries(); track entry.taskId) {
+              <button type="button" class="task-row" (click)="preview(entry.taskId, $event.currentTarget)" [attr.data-task-id]="entry.taskId" data-testid="dock-v3-mobile-task-row">
+                <span class="dot" aria-hidden="true"></span><span class="task-copy"><strong>{{ entry.title }}</strong><small>{{ statusLabel(entry) }} · {{ entry.waitMinutes ? formatTime(entry.waitMinutes) : '待命' }}</small></span><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6" /></svg>
+              </button>
+            }
+          </section>
+        }
+        @if (!activeEntries().length) { <p class="empty">停泊坞还是空的。<br><span class="muted">从任务菜单添加，或新建一个停泊任务。</span></p> }
+        <ng-content></ng-content>
+      </div>
+      <footer>
+        @if (readOnly()) { <span class="readonly-note">只读跟随中，仍可查看所有任务。</span> }
+        <button type="button" class="primary" [disabled]="readOnly() || !interactive()" (click)="requestFocus()" data-testid="dock-v3-mobile-focus-entry">{{ focusActive() ? '退出 Focus' : '进入 Focus' }}</button>
+      </footer>
+    }
+  </section>
+}
