@@ -199,3 +199,6 @@ A future logical-clock server migration requires compatible clients first and an
 
 
 The dashboard dead-letter view consumes DeadLetterItem.action.id, failedAt and reason, not flat item IDs/timestamps/errors. Invalid dates render unknown. Retained remote Focus conflict entries have both view and method-layer retry/dismiss protection; their presence prevents clear-all, while ordinary entries retain individual actions. The complete-queue export uses downloadEscapeExport and never acknowledges or removes operations. Real-template tests cover these controls and the render-to-click race.
+
+
+Sidebar controls enforce the same retained-Focus restrictions as the dashboard, including method-layer checks of the current matching action and clear-all protection. Template-only retry guards are not sufficient; compact/full dismiss controls are also disabled. Durable pending settlement must recognize the exact structured reason with retryable/deferred flags; processor logging alone is not proof of queue retention.
