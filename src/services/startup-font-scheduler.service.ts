@@ -24,12 +24,12 @@ export class StartupFontSchedulerService {
   private readonly enhancedFontLoadedSignal = signal(false);
   private readonly fontStylesheetName = 'lxgw-wenkai-screen.css';
   /**
-   * 同源补充字体 CSS：只包含 14 个基础子集之外的 83 个子集，避免覆盖已有字体声明。
+   * CDN 补充字体 CSS：包含 97 个子集，覆盖自托管 14 个子集之外的所有 unicode 范围。
    * 浏览器根据 unicode-range 按需下载，不会加载未使用的子集。
-   * Service Worker 的 local-fonts lazy 组按需缓存；从未缓存的字形离线使用系统回退。
+   * ServiceWorker 已配置缓存此 CDN（365d, performance 策略），首次加载后离线可用。
    */
-  private readonly supplementFontStylesheetUrl =
-    '/fonts/lxgw-wenkai-screen-supplement.css';
+  private readonly cdnFontStylesheetUrl =
+    'https://cdn.jsdelivr.net/npm/lxgw-wenkai-screen-webfont@1.7.0/lxgwwenkaiscreen.css';
 
   private initialized = false;
   private loading = false;
@@ -64,8 +64,8 @@ export class StartupFontSchedulerService {
     if (this.isFontStylesheetPresent()) {
       this.initialized = true;
       this.enhancedFontLoadedSignal.set(true);
-      // 本地字体 CSS 已存在（SW 缓存命中等），仍需注入同源补充字体
-      this.injectSupplementStylesheet();
+      // 本地字体 CSS 已存在（SW 缓存命中等），仍需注入 CDN 补充字体
+      this.injectCdnFallbackStylesheet();
       return;
     }
 
@@ -204,8 +204,8 @@ export class StartupFontSchedulerService {
     const existingLink = this.getExistingStylesheetLink();
     if (existingLink) {
       this.enhancedFontLoadedSignal.set(true);
-      // 本地字体已通过其他路径加载，仍需补充 同源 子集
-      this.injectSupplementStylesheet();
+      // 本地字体已通过其他路径加载，仍需补充 CDN 子集
+      this.injectCdnFallbackStylesheet();
       return;
     }
 
@@ -312,8 +312,8 @@ export class StartupFontSchedulerService {
       this.loading = false;
       this.enhancedFontLoadedSignal.set(true);
       this.logger.debug('增强字体已加载', { trigger, href });
-      // 自托管字体加载成功后，注入同源补充字体覆盖剩余 83 个子集（168 个缺失字符）
-      this.injectSupplementStylesheet();
+      // 自托管字体加载成功后，注入 CDN 补充字体覆盖剩余 83 个子集（168 个缺失字符）
+      this.injectCdnFallbackStylesheet();
     };
 
     link.onerror = () => {
@@ -329,24 +329,24 @@ export class StartupFontSchedulerService {
   }
 
   /**
-   * 注入同源补充字体样式表（非渲染阻塞）。
-   * 基础 CSS 和内联首屏字形包含 14 个子集，补充 CSS 只包含其余 83 个子集。
+   * 注入 CDN 补充字体样式表（非渲染阻塞）。
+   * 自托管仅包含 14 个高频子集，CDN CSS 包含全部 97 个子集。
    * 浏览器根据 unicode-range 只下载页面实际用到的子集文件。
-   * 补充范围与基础子集互斥，不依赖同 family 的 @font-face 定义顺序。
+   * 插入顺序：CDN <link> 在本地 <link> 之后，确保本地子集优先匹配。
    * 使用 media="print" → "all" 技巧避免阻塞渲染，字体异步加载。
-   * 同源加载失败不影响核心体验，仅少数低频字符回退为系统字体。
+   * CDN 加载失败不影响核心体验，仅少数低频字符回退为系统字体。
    */
-  private injectSupplementStylesheet(): void {
+  private injectCdnFallbackStylesheet(): void {
     if (typeof document === 'undefined') return;
 
     // 避免重复注入
-    const existing = document.querySelector('link[data-nanoflow-supplement-font]');
+    const existing = document.querySelector('link[data-nanoflow-cdn-font]');
     if (existing) return;
 
     const link = document.createElement('link');
     link.rel = 'stylesheet';
-    link.href = this.supplementFontStylesheetUrl;
-    link.setAttribute('data-nanoflow-supplement-font', 'true');
+    link.href = this.cdnFontStylesheetUrl;
+    link.setAttribute('data-nanoflow-cdn-font', 'true');
     // 非阻塞加载：media="print" 让浏览器异步下载 CSS，加载完成后切换到 "all"
     link.media = 'print';
     this.pendingStylesheetLinks.add(link);
@@ -356,15 +356,14 @@ export class StartupFontSchedulerService {
       this.pendingStylesheetLinks.delete(link);
       this.clearStylesheetLinkCallbacks(link);
       link.media = 'all';
-      this.logger.debug('同源补充字体样式已加载（覆盖额外 83 个子集）');
+      this.logger.debug('CDN 补充字体样式已加载（覆盖额外 83 个子集）');
     };
 
     link.onerror = () => {
       if (this.destroyed) return;
       this.pendingStylesheetLinks.delete(link);
       this.clearStylesheetLinkCallbacks(link);
-      link.remove();
-      this.logger.warn('同源补充字体加载失败（不影响核心体验，未缓存的字形使用系统回退字体）');
+      this.logger.warn('CDN 补充字体加载失败（不影响核心体验，仅低频字符使用系统回退字体）');
     };
 
     document.head.appendChild(link);
