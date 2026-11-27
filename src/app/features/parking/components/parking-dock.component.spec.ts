@@ -3,6 +3,7 @@ import { computed, signal } from '@angular/core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ParkingDockComponent } from '../parking-dock.component';
 import { DockPlannerQuickEditComponent } from './dock-planner-quick-edit.component';
+import { DockMobileDrawerComponent } from './dock-mobile-drawer.component';
 import { DockConsoleStackComponent } from './dock-console-stack.component';
 import { DockEngineService } from '../../../../services/dock-engine.service';
 import { DynamicModalService } from '../../../../services/dynamic-modal.service';
@@ -290,8 +291,14 @@ describe('ParkingDockComponent v4', () => {
     mockToast.error.mockClear();
     mockToast.warning.mockClear();
 
+    // Vitest JIT does not extract signal input/output metadata; AOT does.
+    const drawerDef = (DockMobileDrawerComponent as unknown as { ɵcmp: { inputs: Record<string, unknown>; outputs: Record<string, string> } }).ɵcmp;
+    drawerDef.inputs = { ...drawerDef.inputs };
+    drawerDef.outputs = { ...drawerDef.outputs };
+    for (const name of ['entries', 'projects', 'focusActive', 'showTrigger', 'interactive', 'readOnly', 'activeView']) drawerDef.inputs[name] = [name, 1, null];
+    for (const name of ['taskConfirmed', 'focusRequested', 'createRequested', 'dismissed']) drawerDef.outputs[name] = name;
     await TestBed.configureTestingModule({
-      imports: [ParkingDockComponent, DockPlannerQuickEditComponent],
+      imports: [ParkingDockComponent, DockPlannerQuickEditComponent, DockMobileDrawerComponent],
       providers: [
         { provide: DockEngineService, useValue: mockEngine },
         { provide: TaskStore, useValue: mockTaskStore },
@@ -305,6 +312,9 @@ describe('ParkingDockComponent v4', () => {
         { provide: ToastService, useValue: mockToast },
       ],
     })
+      .overrideComponent(ParkingDockComponent, {
+        add: { imports: [DockMobileDrawerComponent] },
+      })
       .overrideComponent(DockConsoleStackComponent, {
         remove: { imports: [KnowledgeAnchorComponent] },
         add: { imports: [KnowledgeAnchorStubComponent] },
@@ -591,6 +601,38 @@ describe('ParkingDockComponent v4', () => {
 
     expect(component.planner.presentation()).toBe('sheet');
     expect(component.dockSemicircleBottomInset()).toBe(component.dockBottomInset);
+  });
+
+  it('mobile dock drawer previews a candidate without switching until confirmed', () => {
+    uiState.isMobile.set(true);
+    uiState.activeView.set('text');
+    dockExpanded.set(false);
+    dockedEntries.set([
+      { taskId: 'current', title: '当前任务', status: 'focusing', load: 'low', lane: 'combo-select', isMain: true },
+      { taskId: 'candidate', title: '候选任务', status: 'pending_start', load: 'low', lane: 'combo-select', isMain: false, expectedMinutes: 25 },
+      { taskId: 'waiting', title: '等待任务', status: 'suspended_waiting', load: 'low', lane: 'backup', isMain: false, waitMinutes: 10 },
+    ]);
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-mobile-drawer-trigger"]')).toBeTruthy();
+    expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-semicircle"]')).toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-panel"]')).toBeNull();
+    fixture.nativeElement.querySelector('[data-testid="dock-v3-mobile-drawer-trigger"]')?.click();
+    fixture.detectChanges();
+    expect(dockExpanded()).toBe(false);
+    expect(fixture.nativeElement.querySelector('[aria-label="当前主任务"] [data-task-id="current"]')).toBeTruthy();
+    expect(fixture.nativeElement.querySelector('[aria-label="可行动候选"] [data-task-id="candidate"]')).toBeTruthy();
+    expect(fixture.nativeElement.querySelector('[aria-label="等待中与待命任务"] [data-task-id="waiting"]')).toBeTruthy();
+
+    fixture.nativeElement.querySelector('[data-task-id="candidate"]')?.click();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-mobile-task-preview"]')?.textContent).toContain('候选任务');
+    expect(mockEngine.setMainTask).not.toHaveBeenCalled();
+
+    fixture.nativeElement.querySelector('[data-testid="dock-v3-mobile-preview-promote"]')?.click();
+    fixture.detectChanges();
+    expect(mockEngine.setMainTask).toHaveBeenCalledWith('candidate');
+    expect(component.mobileDockPreviewTaskId()).toBeNull();
   });
 
   it('gate active should block dock expansion and focus session toggle', async () => {

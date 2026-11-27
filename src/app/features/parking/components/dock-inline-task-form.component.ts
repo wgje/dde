@@ -19,6 +19,31 @@ import type { CognitiveLoad, DockLane } from '../../../../models/parking-dock';
       animation: slideDown var(--pk-panel-enter) var(--pk-ease-enter);
     }
 
+    @media (max-width: 640px) {
+      .dock-task-primary-row {
+        align-items: stretch;
+        flex-direction: column;
+      }
+
+      .dock-task-title-input {
+        min-height: 44px;
+        min-width: 0;
+        width: 100%;
+      }
+
+      .dock-task-select-row {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        width: 100%;
+      }
+
+      .dock-task-select-row select {
+        min-height: 44px;
+        min-width: 0;
+        width: 100%;
+      }
+    }
+
     @keyframes slideDown {
       0% { opacity: 0; transform: translateY(-6px) scale(0.995); }
       50% { opacity: 0.6; transform: translateY(-1px) scale(0.999); }
@@ -33,32 +58,34 @@ import type { CognitiveLoad, DockLane } from '../../../../models/parking-dock';
   `],
   template: `
     <div class="new-task-form flex flex-col gap-2.5 px-2" data-testid="dock-v3-new-task-form">
-      <div class="flex items-center gap-2">
+      <div class="dock-task-primary-row flex items-center gap-2">
         <input
           type="text"
           [ngModel]="taskTitle"
           (ngModelChange)="taskTitleChange.emit($event)"
           (keydown.enter)="createTask.emit()"
-          class="flex-1 text-xs py-2.5 px-3 rounded-lg bg-slate-800/80 border border-slate-600/40
+          class="dock-task-title-input min-w-0 flex-1 text-xs py-2.5 px-3 rounded-lg bg-slate-800/80 border border-slate-600/40
                  text-slate-200 placeholder:text-slate-500 focus:border-indigo-500/60 outline-none
                  transition-colors"
           placeholder="输入任务名称…" />
-        <select
-          [ngModel]="taskLane"
-          (ngModelChange)="taskLaneChange.emit($event)"
-          class="text-xs py-2.5 px-2 rounded-lg bg-slate-800/80 border border-slate-600/40
-                 text-slate-300 outline-none focus:border-indigo-500/60 transition-colors">
-          <option value="backup">备选区</option>
-          <option value="combo-select">组合选择区</option>
-        </select>
-        <select
-          [ngModel]="taskLoad"
-          (ngModelChange)="taskLoadChange.emit($event)"
-          class="text-xs py-2.5 px-2 rounded-lg bg-slate-800/80 border border-slate-600/40
-                 text-slate-300 outline-none focus:border-indigo-500/60 transition-colors">
-          <option value="low">低负荷</option>
-          <option value="high">高负荷</option>
-        </select>
+        <div class="dock-task-select-row flex items-center gap-2">
+          <select
+            [ngModel]="taskLane"
+            (ngModelChange)="taskLaneChange.emit($event)"
+            class="min-w-0 text-xs py-2.5 px-2 rounded-lg bg-slate-800/80 border border-slate-600/40
+                   text-slate-300 outline-none focus:border-indigo-500/60 transition-colors">
+            <option value="backup">备选区</option>
+            <option value="combo-select">组合选择区</option>
+          </select>
+          <select
+            [ngModel]="taskLoad"
+            (ngModelChange)="taskLoadChange.emit($event)"
+            class="min-w-0 text-xs py-2.5 px-2 rounded-lg bg-slate-800/80 border border-slate-600/40
+                   text-slate-300 outline-none focus:border-indigo-500/60 transition-colors">
+            <option value="low">低负荷</option>
+            <option value="high">高负荷</option>
+          </select>
+        </div>
       </div>
       <div class="grid grid-cols-4 gap-2">
         <input

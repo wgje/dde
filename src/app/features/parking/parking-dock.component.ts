@@ -38,8 +38,11 @@ import {
   type RecommendationGroupType,
 } from '../../../models/parking-dock';
 import { hasTaskDragTypes } from '../../../utils/task-drag-payload';
+import { DockPendingDecisionComponent } from './components/dock-pending-decision.component';
+import { DockFragmentCountdownComponent } from './components/dock-fragment-countdown.component';
 import { DockConsoleStackComponent } from './components/dock-console-stack.component';
 import { DockRadarZoneComponent } from './components/dock-radar-zone.component';
+import { DockMobileDrawerComponent } from './components/dock-mobile-drawer.component';
 import { DockStatusMachineComponent } from './components/dock-status-machine.component';
 import { DockDailySlotComponent } from './components/dock-daily-slot.component';
 import { DockZenModeComponent } from './components/dock-zen-mode.component';
@@ -81,7 +84,10 @@ type FocusExitConfirmAction =
     NgClass,
     NgStyle,
     DockConsoleStackComponent,
+    DockPendingDecisionComponent,
+    DockFragmentCountdownComponent,
     DockRadarZoneComponent,
+    DockMobileDrawerComponent,
     DockStatusMachineComponent,
     DockDailySlotComponent,
     DockZenModeComponent,
@@ -164,6 +170,9 @@ export class ParkingDockComponent implements OnDestroy {
   );
   readonly dockExpanded = this.engine.dockExpanded;
   readonly semicircleExpanded = computed(() => this.dockExpanded() || this.dragDrop.semicircleHoverExpanded());
+  readonly mobileDockProjects = this.projectStore.projects;
+  private readonly mobileDrawer = viewChild(DockMobileDrawerComponent);
+  readonly mobileDockPreviewTaskId = computed(() => this.mobileDrawer()?.previewTaskId() ?? null);
   private readonly mobileFlowDockCollapseEffect = effect(() => {
     if (!this.uiState.isMobile() || this.uiState.activeView() !== 'flow' || !this.dockExpanded()) return;
     untracked(() => {
@@ -305,6 +314,10 @@ export class ParkingDockComponent implements OnDestroy {
 
   @HostListener('document:keydown', ['$event'])
   onKeydown(event: KeyboardEvent): void {
+    if (this.isMobile() && (event.key === 'Escape' || event.key === 'Tab') && this.mobileDrawer()?.opened()) {
+      this.mobileDrawer()?.onKeydown(event);
+      return;
+    }
     if (event.key === 'Tab' && this.planner.backdropVisible()) {
       trapDialogFocus(event, '[data-testid="dock-v3-planner-panel"]');
       return;
@@ -446,6 +459,10 @@ export class ParkingDockComponent implements OnDestroy {
   }
 
   async toggleDockExpanded(): Promise<void> {
+    if (this.isMobile()) {
+      this.mobileDrawer()?.toggle();
+      return;
+    }
     if (this.gateActive()) return;
     const next = !this.engine.dockExpanded();
     const persisted = await this.engine.setDockExpanded(next, { persistPreference: true });
@@ -743,6 +760,20 @@ export class ParkingDockComponent implements OnDestroy {
       this.helpFeedback.showDockFeedback(`已切换到前台：${entry.title}`, 'success');
     }
   }
+
+  openMobileDockPreview(taskId: string): void {
+    this.mobileDrawer()?.openDrawer();
+    this.mobileDrawer()?.preview(taskId);
+  }
+
+  confirmMobileDockPreview(taskId: string): void {
+    if (!this.canMutateDock() || this.gateActive()) return;
+    this.onDockCardClick(taskId);
+  }
+
+  requestMobileDockFocus(): void { this.requestFocusSessionToggle(); }
+  requestMobileDockCreate(): void { this.toggleNewTaskForm(); }
+  onMobileDrawerDismissed(): void { this.closePlannerQuickEdit(false); }
 
   pendingDecisionActionsBlocked(): boolean {
     return this.isDockSelectionBlocked();

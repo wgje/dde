@@ -154,16 +154,11 @@
 
   @if (isMobile) {
     <section class="radar-mobile-rail" aria-label="候选任务轨道" data-testid="dock-v3-mobile-candidate-rail" data-mobile-rail-portal="true">
-      <header><strong>可行动候选 · {{ mobileVisibleTaskCount() }}</strong><button type="button" (click)="openMobileTaskDrawer($event)" data-testid="dock-v3-mobile-all-tasks">全部任务 <span>{{ orderedComboEntries().length + orderedBackupEntries().length }}</span></button></header>
-      <div class="radar-mobile-track" tabindex="0" aria-label="横向浏览候选任务">
-        @for (entry of mobileCandidateEntries(); track entry.taskId) {
-          <button type="button" class="radar-mobile-task" (click)="openTaskPreview(entry.taskId, 'mobile-rail', $event.currentTarget)">
-            <span class="radar-project-mark" [style.background-color]="resolveProjectColor(entry)" aria-hidden="true"></span>
-            <span class="radar-mobile-copy"><strong>{{ entry.title }}</strong><small>{{ resolveStatusLabel(entry.status) }} · {{ formatTime(entry.expectedMinutes ?? 0) }}</small></span>
-          </button>
-        }
-        @if (orderedComboEntries().length === 0) { <p>暂无可行动候选</p> }
-      </div>
+      <button type="button" class="radar-mobile-dock-trigger" (click)="openMobileTaskDrawer($event)" data-testid="dock-v3-mobile-all-tasks">
+        <span class="radar-mobile-dock-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 6h16v12H4zM4 14h16M8 14v4" /></svg></span>
+        <span class="radar-mobile-dock-copy"><strong>停泊坞</strong><small>{{ orderedComboEntries().length + orderedBackupEntries().length }} 个任务 · {{ mobileVisibleTaskCount() }} 个可行动</small></span>
+        <span class="radar-mobile-dock-chevron" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m9 6 6 6-6 6" /></svg></span>
+      </button>
     </section>
   }
 
@@ -190,7 +185,7 @@
     <div class="radar-mobile-backdrop open" (click)="closeMobileTaskDrawer()" data-testid="dock-v3-mobile-drawer-backdrop" data-mobile-drawer-portal="true"></div>
     <section class="radar-mobile-drawer" role="dialog" aria-modal="true" aria-labelledby="dock-radar-drawer-title" data-testid="dock-v3-mobile-task-drawer" data-mobile-drawer-portal="true" (keydown)="onMobileDrawerKeydown($event)">
       <div class="radar-drawer-handle" aria-hidden="true"></div>
-      <header><h2 id="dock-radar-drawer-title">全部停泊任务</h2><button type="button" aria-label="关闭全部任务" data-testid="dock-v3-mobile-task-drawer-close" (click)="closeMobileTaskDrawer()">×</button></header>
+      <header><div><span class="radar-mobile-drawer-kicker">任务切换</span><h2 id="dock-radar-drawer-title">停泊坞 <small>{{ orderedComboEntries().length + orderedBackupEntries().length }}</small></h2></div><button type="button" class="radar-icon-close" aria-label="关闭全部任务" data-testid="dock-v3-mobile-task-drawer-close" (click)="closeMobileTaskDrawer()"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" /></svg></button></header>
       @if (previewEntry(); as entry) {
         <section class="radar-drawer-preview" id="dock-radar-task-preview" aria-label="任务预览" data-testid="dock-v3-task-preview">
           <span>任务预览 · {{ resolveStatusLabel(entry.status) }}</span><h3>{{ entry.title }}</h3><p>{{ resolvePreviewReason(entry) }}</p>
@@ -207,13 +202,13 @@
             }
           </div>
         }
-        <h3>可行动候选</h3>
+        <h3 class="radar-drawer-section-title"><span>可行动候选</span><small>{{ orderedComboEntries().length }}</small></h3>
         @for (entry of orderedComboEntries(); track entry.taskId) {
           <button type="button" class="radar-drawer-task" [attr.aria-expanded]="previewTaskId() === entry.taskId" (click)="openTaskPreview(entry.taskId, 'task-drawer', $event.currentTarget)" [attr.data-task-id]="entry.taskId">
             <span class="radar-status-mark" [attr.data-status]="entry.status" aria-hidden="true"></span><span class="radar-task-copy"><strong>{{ entry.title }}</strong><small>{{ resolveStatusLabel(entry.status) }} · {{ resolveProjectName(entry) }}</small></span>
           </button>
         }
-        <h3>待命任务</h3>
+        <h3 class="radar-drawer-section-title"><span>等待中 / 待命</span><small>{{ orderedBackupEntries().length }}</small></h3>
         @for (entry of orderedBackupEntries(); track entry.taskId) {
           <button type="button" class="radar-drawer-task" [attr.aria-expanded]="previewTaskId() === entry.taskId" (click)="openTaskPreview(entry.taskId, 'task-drawer', $event.currentTarget)" [attr.data-task-id]="entry.taskId">
             <span class="radar-status-mark" [attr.data-status]="entry.status" aria-hidden="true"></span><span class="radar-task-copy"><strong>{{ entry.title }}</strong><small>{{ resolveStatusLabel(entry.status) }} · {{ resolveProjectName(entry) }}</small></span>
