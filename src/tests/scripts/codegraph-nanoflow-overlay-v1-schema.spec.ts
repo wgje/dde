@@ -10,7 +10,7 @@ const repoRoot = path.resolve(__dirname, '../../..');
 const libRoot = path.join(repoRoot, 'scripts', 'lib');
 const schemaPath = path.join(libRoot, 'codegraph-nanoflow-overlay-v1-schema.cjs');
 const contractPath = path.join(repoRoot, 'scripts', 'contracts', 'codegraph-nanoflow-overlay-v1.json');
-const currentOverlayPath = path.join(repoRoot, '.codegraph', 'nanoflow-overlay.json');
+const compatibilityFixtureHelperPath = path.join(repoRoot, 'src/tests/fixtures/codegraph-overlay-v1/prepare-fixture.cjs');
 const SOURCE_POLICY_DIGEST = 'ca78ea5e17d32399faac676bcab26fc1d7f48186a89792774d37a6b8549d0ca3';
 const SCHEMA_DIGEST = '0cf35177cabc7261e0d8aa7040d083acc4c5c5c03a3c966a19982d35192a9e22';
 const DESCRIPTOR_MANIFEST_DIGEST = 'bbec805a1d437a4ba896fb873f8d0080b5e1a2eb3a615a6cb7940fbf72ababb0';
@@ -882,7 +882,11 @@ describe('CodeGraph NanoFlow Overlay v1 schema authority predecessor', () => {
       ownerPaths: ['package.json', 'scripts/run-codegraph-adapter-gate.cjs'],
     });
   });
-  it('single-pass validates the exact 250,558,329-byte artifact with bounded heap and RSS', () => {
+  it('single-pass validates the exact historical 250,558,329-byte artifact with bounded heap and RSS', async () => {
+    const fixture = await requireCjs(compatibilityFixtureHelperPath).prepareCompatibilityFixture() as {
+      artifactPath: string; expectedProjectRoot: string; cleanup: () => Promise<void>;
+    };
+    try {
     const definition = contract() as {
       authority: { compatibilityArtifact: { bytes: number; sha256: string } };
       compatibilityProfile: Record<string, number>;
@@ -893,7 +897,7 @@ describe('CodeGraph NanoFlow Overlay v1 schema authority predecessor', () => {
       counts: definition.compatibilityProfile,
     };
     const childSource = `
-      const fs = require('node:fs'); const artifactPath = ${JSON.stringify(currentOverlayPath)};
+      const fs = require('node:fs'); const artifactPath = ${JSON.stringify(fixture.artifactPath)};
       const originalStream = fs.createReadStream.bind(fs); const originalRead = fs.readFileSync.bind(fs);
       let artifactOpenAttempts = 0, artifactOpens = 0, artifactStreamBytes = 0, secondReadRejected = false;
       fs.createReadStream = (target, options) => { if (require('node:path').resolve(target) === artifactPath) {
@@ -903,7 +907,7 @@ describe('CodeGraph NanoFlow Overlay v1 schema authority predecessor', () => {
         throw new Error('artifact readFileSync forbidden'); } return originalRead(target, ...args); };
       const schema = require(${JSON.stringify(schemaPath)});
       const validator = schema.createOverlayV1Validator(${JSON.stringify({
-        expectedProjectRoot: repoRoot.replace(/\\/g, '/'),
+        expectedProjectRoot: fixture.expectedProjectRoot,
         expectedSourcePolicyDigest: SOURCE_POLICY_DIGEST,
         expectedArtifact,
       })});
@@ -956,5 +960,8 @@ describe('CodeGraph NanoFlow Overlay v1 schema authority predecessor', () => {
     expect(rssDelta).toBeLessThan(384 * 1024 * 1024);
     expect(elapsedMs).toBeLessThan(60_000);
     expect('overlay' in result).toBe(false);
+    } finally {
+      await fixture.cleanup();
+    }
   }, 60_000);
 });

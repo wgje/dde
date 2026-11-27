@@ -6,6 +6,7 @@ import { pathToFileURL } from 'node:url';
 import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 const repoRoot = path.resolve(__dirname, '../../..');
+const releaseFixtureRoot = path.join(repoRoot, 'src/tests/fixtures/codegraph-callback-release-8362b0e0');
 const require = createRequire(__filename);
 const facadeSourcePath = 'scripts/query-codegraph-nanoflow-overlay.mjs';
 const currentReceiptSourcePath = 'scripts/lib/codegraph-overlay-current-receipt.cjs';
@@ -25,7 +26,7 @@ const releasedExecutionSourceShas = new Map([
   [sourcePaths[7], 'c77e44e5679ab8ed04ac48580c9abfe75fb284c998e02792f17c305c08ad8eed'],
 ]);
 const releasedNormalizedDigest = 'dd75d6377dcf78eb2b0590332b1d90f23ad04752c62931f17110cb54dd2e5248';
-const manifestPath = path.join(repoRoot, 'docs', 'codegraph-nanoflow-dedup-contract.json');
+const manifestPath = path.join(releaseFixtureRoot, 'docs', 'codegraph-nanoflow-dedup-contract.json');
 const ownerNames = ['queryOverlay', 'scoreCandidate', 'selectGraphResults', 'formatStrictNativeMarkdown',
   'toNativeJsonFormatterResponse', 'formatNativeMarkdown'] as const;
 type OwnerName = typeof ownerNames[number];
@@ -413,14 +414,36 @@ const descriptorMutations = [
   ['optional-target', sourcePaths[7], 'function toNativeJsonFormatterResponse(context) {',
     'function toNativeJsonFormatterResponse(context?) {'],
 ] as const;
-describe('CodeGraph callback reachability real manifest', { timeout: 30_000 }, () => {
+describe('CodeGraph callback reachability release-8362b0e0 known-answer', { timeout: 30_000 }, () => {
+  it('pins the historical fixture provenance and owner contract rather than reading current wiring', () => {
+    const fixture = JSON.parse(fs.readFileSync(path.join(releaseFixtureRoot, 'manifest.json'), 'utf8')) as {
+      commit: string; files: Array<{ sourcePath: string; file: string; bytes: number; sha256: string }>;
+      ownerContract: { sourcePath: string; file: string; bytes: number; sha256: string };
+    };
+    expect(fixture.commit).toBe('8362b0e0249f4ebf0029500051d96629c001173a');
+    expect(fixture.files.map(value => value.sourcePath).sort()).toEqual([...releasedExecutionSourceShas.keys()].sort());
+    for (const entry of fixture.files) {
+      expect(entry.file).toBe(entry.sourcePath);
+      const bytes = fs.readFileSync(path.join(releaseFixtureRoot, entry.file));
+      expect(bytes.length).toBe(entry.bytes);
+      expect(entry.sha256).toBe(releasedExecutionSourceShas.get(entry.sourcePath));
+      expect(crypto.createHash('sha256').update(bytes).digest('hex')).toBe(entry.sha256);
+    }
+    expect(fixture.ownerContract.sourcePath).toBe('docs/codegraph-nanoflow-dedup-contract.json');
+    expect(fixture.ownerContract.file).toBe(fixture.ownerContract.sourcePath);
+    const contractBytes = fs.readFileSync(manifestPath);
+    expect(contractBytes.length).toBe(41_591);
+    expect(fixture.ownerContract.bytes).toBe(41_591);
+    expect(fixture.ownerContract.sha256).toBe('e10529f18b6d73915c1df0af8e6bf60dc0dd3dc7cb7c75d7cfffcaca4ad24db1');
+    expect(crypto.createHash('sha256').update(contractBytes).digest('hex')).toBe(fixture.ownerContract.sha256);
+  });
   it('classifies the exact 68 real callsites and solves six owners through one isolated shared worklist', async () => {
     const sources = [...sourcePaths, currentReceiptSourcePath].map(sourcePath => ({
       sourcePath,
-      text: fs.readFileSync(path.join(repoRoot, sourcePath), 'utf8'),
+      text: fs.readFileSync(path.join(releaseFixtureRoot, sourcePath), 'utf8'),
     }));
     for (const [sourcePath, expectedSha] of releasedExecutionSourceShas) {
-      expect(crypto.createHash('sha256').update(fs.readFileSync(path.join(repoRoot, sourcePath))).digest('hex'),
+      expect(crypto.createHash('sha256').update(fs.readFileSync(path.join(releaseFixtureRoot, sourcePath))).digest('hex'),
         `${sourcePath} released execution source`).toBe(expectedSha);
     }
     const facadeSource = sources.find(source => source.sourcePath === facadeSourcePath)!.text;
@@ -438,7 +461,7 @@ describe('CodeGraph callback reachability real manifest', { timeout: 30_000 }, (
     const guard = '    const graphEdges = Array.isArray(graph.edges) ? graph.edges : [];\n';
     expect.soft(semanticSource.split('\n').filter(line => line.includes('graph.edges'))).toEqual([guard.trimEnd()]);
     expect.soft(semanticSource.indexOf(guard)).toBeLessThan(semanticSource.indexOf('const graphIndexes = buildGraphIndexes'));
-    const semantic = await import(`${pathToFileURL(path.join(repoRoot, sourcePaths[4])).href}?a-prime`);
+    const semantic = await import(`${pathToFileURL(path.join(releaseFixtureRoot, sourcePaths[4])).href}?a-prime`);
     const indexedEdges: unknown[] = [];
     const emptyIndexes = () => ({ nodesById: new Map(), nodesByName: new Map(), exportEdgesByName: new Map(),
       equivalentIdsByDisplayKey: new Map(), edgesByNodeId: new Map() });

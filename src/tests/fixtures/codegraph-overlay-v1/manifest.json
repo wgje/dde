@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "fixtureKind": "immutable-overlay-v1-compatibility-known-answer",
+  "source": {
+    "artifactPath": ".codegraph/nanoflow-overlay.json",
+    "generatedAt": "2026-07-28T03:42:41.894Z",
+    "projectRoot": "D:/Code/dde",
+    "bytes": 250558329,
+    "sha256": "2508259e81e9c55b0e0e1058be219c0678564ceac685a72faf42c76d19abf420"
+  },
+  "compressed": {
+    "file": "compatibility-20260728.json.gz",
+    "encoding": "gzip",
+    "bytes": 12195344,
+    "sha256": "e238994829178100e4236677156669ddc7181c0c9adcbb6a217ca234348e8b85"
+  },
+  "provenance": "Historical schema compatibility artifact, not a current CodeGraph index or generation.",
+  "securityAudit": {
+    "rawSecretRules": 0,
+    "decodedStringSecretRules": 0,
+    "sensitiveFilePaths": 0,
+    "content": "Repository structure, source symbol signatures, Angular template attributes, repository hard-rule excerpts, and graph relations only; no user records or credential material observed.",
+    "reviewedFalsePositives": [
+      "Test parameter default seed-access-token",
+      "Android query parameter name widgetDeviceSecret",
+      "Source symbols named documents/downloads"
+    ]
+  }
+}
