@@ -1,6 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import os from 'node:os';
+import { createRequire } from 'node:module';
+import { afterEach, describe, expect, it } from 'vitest';
 
 function readWorkspaceFile(filePath: string): string {
   return fs.readFileSync(path.join(process.cwd(), filePath), 'utf8');
@@ -133,5 +135,61 @@ describe('run-test-matrix Vitest cache isolation contract', () => {
     )?.[1] ?? '';
 
     expect(testbedServiceConfig).toContain("'src/app/core/services/sync/task-sync-operations.service.spec.ts'");
+  });
+});
+
+
+describe('run-test-matrix executable classification', () => {
+  const require = createRequire(import.meta.url);
+  const matrix = require(path.join(process.cwd(), 'scripts/run-test-matrix.cjs')) as {
+    classifyAllFiles(files: string[], overrides: Record<string, string>, root?: string): Map<string, string>;
+  };
+  it('traces indirect helper TestBed use instead of assigning the IndexedDB adapter to node', () => {
+    const file = 'src/services/data-safety-indexeddb-adapter.spec.ts';
+    expect(readWorkspaceFile(file)).not.toMatch(/\bTestBed\b/);
+    expect(matrix.classifyAllFiles([file], {}).get(file)).toBe('lane_testbed_service');
+  });
+});
+
+
+describe('run-test-matrix runtime helper import closure', () => {
+  const roots: string[] = [];
+  const require = createRequire(import.meta.url);
+  const matrix = require(path.join(process.cwd(), 'scripts/run-test-matrix.cjs')) as {
+    classifyAllFiles(files: string[], overrides: Record<string, string>, root: string): Map<string, string>;
+  };
+  afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
+  function fixture(files: Record<string, string>): string {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-matrix-helper-classification-'));
+    roots.push(root);
+    for (const [file, content] of Object.entries(files)) {
+      fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
+      fs.writeFileSync(path.join(root, file), content);
+    }
+    return root;
+  }
+  it('traces multi-hop runtime imports and re-exports with cycles', () => {
+    const root = fixture({
+      'entry.spec.ts': "import { register } from './bridge'; register();",
+      'bridge.ts': "export { register } from './helpers';",
+      'helpers.ts': "import './bridge'; import { TestBed as Bed } from '@angular/core/testing'; export function register() { Bed.configureTestingModule({}); }",
+    });
+    expect(matrix.classifyAllFiles(['entry.spec.ts'], {}, root).get('entry.spec.ts')).toBe('lane_testbed_service');
+  });
+  it.each(["import type { Fixture } from './helpers';", "import { type Fixture } from './helpers';", "export type { Fixture } from './helpers';", "export { type Fixture } from './helpers';"])(
+    'keeps type-only declarations and comment/string import decoys from adding dependencies: %s', declaration => {
+    const root = fixture({
+      'entry.spec.ts': declaration + " // import './helpers';\nconst text = \"import './helpers';\";",
+      'helpers.ts': "import { TestBed } from '@angular/core/testing'; export type Fixture = typeof TestBed;",
+    });
+    expect(matrix.classifyAllFiles(['entry.spec.ts'], {}, root).get('entry.spec.ts')).toBe('lane_node_minimal');
+  });
+  it('honors explicit existing lane overrides and propagates component helper evidence', () => {
+    const root = fixture({
+      'entry.spec.ts': "import('./helpers');",
+      'helpers.ts': "import { TestBed } from '@angular/core/testing'; TestBed.createComponent(View);",
+    });
+    expect(matrix.classifyAllFiles(['entry.spec.ts'], {}, root).get('entry.spec.ts')).toBe('lane_testbed_component');
+    expect(matrix.classifyAllFiles(['entry.spec.ts'], { 'entry.spec.ts': 'lane_browser_minimal' }, root).get('entry.spec.ts')).toBe('lane_browser_minimal');
   });
 });

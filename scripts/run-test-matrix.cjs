@@ -632,7 +632,7 @@ function loadQuarantine(quarantinePath) {
   return result;
 }
 
-function classifyFile(file, content, overrides) {
+function classifyFile(file, content, overrides, testBedEvidence = content) {
   if (overrides[file]) {
     return overrides[file];
   }
@@ -641,10 +641,10 @@ function classifyFile(file, content, overrides) {
     return LANE_NAMES.testbedService;
   }
 
-  if (testBedPattern.test(content)) {
+  if (testBedPattern.test(testBedEvidence)) {
     if (
       componentPathPattern.test(file)
-      || componentContentPattern.test(content)
+      || componentContentPattern.test(testBedEvidence)
       || file.endsWith('src/app.component.spec.ts')
       || file.endsWith('src/workspace-shell.component.spec.ts')
       || file.endsWith('src/app.routes.spec.ts')
@@ -665,12 +665,66 @@ function classifyFile(file, content, overrides) {
   return LANE_NAMES.nodeMinimal;
 }
 
-function classifyAllFiles(files, overrides) {
+/** Follow runtime local imports, including helper re-exports, without executing test modules. */
+function createClassificationReader(root) {
+  const ts = require('typescript');
+  const graph = new Map();
+  function readNode(file) {
+    if (graph.has(file)) return graph.get(file);
+    const content = fs.readFileSync(file, 'utf8');
+    const source = ts.createSourceFile(file, content, ts.ScriptTarget.Latest, true);
+    const imports = [];
+    const add = (specifier) => {
+      if (!specifier.startsWith('.')) return;
+      const base = path.resolve(path.dirname(file), specifier);
+      const withoutJs = base.replace(/\.[cm]?js$/, '');
+      const resolved = [base, withoutJs + '.ts', withoutJs + '.tsx', path.join(base, 'index.ts')]
+        .find(candidate => fs.existsSync(candidate) && fs.statSync(candidate).isFile());
+      if (!resolved) return;
+      const relative = path.relative(root, resolved);
+      if (!relative.startsWith('..') && !path.isAbsolute(relative)) imports.push(resolved);
+    };
+    function visit(node) {
+      const bindings = ts.isImportDeclaration(node) ? node.importClause?.namedBindings : node.exportClause;
+      const onlyNamedTypes = bindings && (ts.isNamedImports(bindings) || ts.isNamedExports(bindings))
+        && bindings.elements.length > 0 && bindings.elements.every(element => element.isTypeOnly);
+      if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node))
+        && !node.isTypeOnly && !node.importClause?.isTypeOnly && !onlyNamedTypes
+        && node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) add(node.moduleSpecifier.text);
+      if (ts.isCallExpression(node) && node.arguments.length === 1
+        && ts.isStringLiteral(node.arguments[0])
+        && (node.expression.kind === ts.SyntaxKind.ImportKeyword
+          || (ts.isIdentifier(node.expression) && node.expression.text === 'require'))) add(node.arguments[0].text);
+      ts.forEachChild(node, visit);
+    }
+    visit(source);
+    const entry = { content, imports };
+    graph.set(file, entry);
+    return entry;
+  }
+  return (file) => {
+    const visited = new Set();
+    const pending = [path.resolve(root, file)];
+    const evidence = [];
+    while (pending.length > 0) {
+      const current = pending.pop();
+      if (visited.has(current)) continue;
+      visited.add(current);
+      const entry = readNode(current);
+      if (testBedPattern.test(entry.content)) evidence.push(entry.content);
+      pending.push(...entry.imports);
+    }
+    return evidence.join('\n');
+  };
+}
+
+function classifyAllFiles(files, overrides, root = projectRoot) {
   const laneByFile = new Map();
+  const readEvidence = createClassificationReader(root);
   for (const relativeFile of files) {
-    const absoluteFile = path.join(projectRoot, relativeFile);
+    const absoluteFile = path.join(root, relativeFile);
     const content = fs.readFileSync(absoluteFile, 'utf8');
-    const lane = classifyFile(relativeFile, content, overrides);
+    const lane = classifyFile(relativeFile, content, overrides, readEvidence(relativeFile));
     laneByFile.set(relativeFile, lane);
   }
   return laneByFile;
@@ -1935,7 +1989,9 @@ async function main() {
   }
 }
 
-main().catch((error) => {
+module.exports = { classifyAllFiles };
+
+if (require.main === module) main().catch((error) => {
   const message = error instanceof Error ? error.message : String(error);
   console.error(`[test:run] failed: ${message}`);
   process.exit(1);
