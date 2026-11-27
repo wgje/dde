@@ -337,6 +337,14 @@ export class FocusConsoleSyncService implements OnDestroy {
       localTimestamp,
       updatedAtBaseline,
     });
+    // Unknown baseline: preserve the operation; never manufacture a fresh CAS.
+    if (result.status === 'reconciliation-pending') {
+      return failure(ErrorCodes.FOCUS_CONSOLE_SAVE_FAILED, '专注快照版本待核对，本地操作已保留', {
+        retryable: true, deferred: true,
+        reason: 'focus-snapshot-reconciliation-pending', operationId,
+      });
+    }
+
     if (result.stalePayload === true) {
       return this.buildStalePayloadFailure(
         ErrorCodes.FOCUS_CONSOLE_SAVE_FAILED,
@@ -350,9 +358,7 @@ export class FocusConsoleSyncService implements OnDestroy {
     }
 
     this.logWarn('saveFocusSession RPC 未应用', {
-      operationId,
-      status: result.status,
-      reason: result.reason,
+      operationId, status: result.status, reason: result.reason,
       stalePayload: result.stalePayload,
     });
     return failure(ErrorCodes.FOCUS_CONSOLE_SAVE_FAILED, '保存专注会话失败');

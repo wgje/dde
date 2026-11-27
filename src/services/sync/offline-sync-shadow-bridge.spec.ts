@@ -29,6 +29,10 @@ const rpcResult: SyncRpcResult = {
 };
 
 describe('offline-sync-shadow-bridge', () => {
+  it('preserves deferred reconciliation evidence without reporting an application', () => {
+    expect(toShadowOutcome({ raw: null, status: 'reconciliation-pending', reason: 'snapshot-clock-unknown' }))
+      .toMatchObject({ status: 'reconciliation-pending', reason: 'snapshot-clock-unknown' });
+  });
   it('maps the existing RPC result without dropping diagnostics', () => {
     expect(toShadowOutcome(rpcResult)).toEqual({
       status: 'applied',

@@ -654,6 +654,29 @@ describe('FocusConsoleSyncService', () => {
     expect(mockClient.from).not.toHaveBeenCalled();
   });
 
+  it.each([false, true])('preserves unknown Focus snapshot for deferred reconciliation (stale=%s)', async stalePayload => {
+    mockSyncRpc.upsertFocusSession.mockResolvedValueOnce({
+      status: 'reconciliation-pending', reason: 'snapshot-clock-unknown',
+      stalePayload, raw: { privatePayload: 'must-not-be-exposed' },
+    });
+    const record = { id: 'session-unknown', userId: 'user-1',
+      startedAt: '2026-03-03T00:00:00.000Z', endedAt: null,
+      updatedAt: '2026-03-03T01:00:00.000Z', snapshot: {
+        version: 6, savedAt: '2026-03-03T01:00:00.000Z', entries: [],
+      } } as never;
+    const original = JSON.stringify(record);
+    const result = await service.saveFocusSession(record, 'op-focus-unknown');
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.details).toMatchObject({ retryable: true, deferred: true,
+        reason: 'focus-snapshot-reconciliation-pending', operationId: 'op-focus-unknown' });
+      expect(JSON.stringify(result.error)).not.toContain('must-not-be-exposed');
+    }
+    expect(JSON.stringify(record)).toBe(original);
+    expect(mockSyncRpc.upsertFocusSession).toHaveBeenCalledOnce();
+    expect(mockClient.from).not.toHaveBeenCalled();
+  });
+
   it('saveFocusSession should fail when Sync RPC keeps remote state for stale payload', async () => {
     mockSyncRpc.upsertFocusSession.mockResolvedValueOnce({
       status: 'applied',

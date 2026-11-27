@@ -40,7 +40,8 @@ export type SyncRpcStatus =
   | 'quarantined'
   | 'accepted-shadow'
   | 'rejected'
-  | 'unauthorized';
+  | 'unauthorized'
+  | 'reconciliation-pending';
 
 export interface SyncRpcResult {
   status: SyncRpcStatus;
@@ -627,6 +628,7 @@ export class SyncRpcClientService {
       'accepted-shadow',
       'rejected',
       'unauthorized',
+      'reconciliation-pending',
     ];
     if (typeof raw === 'string' && (known as string[]).includes(raw)) {
       return raw as SyncRpcStatus;

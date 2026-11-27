@@ -19,6 +19,7 @@ export type ShadowOutcomeStatus =
   | 'accepted-shadow'
   | 'unauthorized'
   | 'unknown'
+  | 'reconciliation-pending'
   | 'rejected';
 
 export interface ShadowCommandIdentity {

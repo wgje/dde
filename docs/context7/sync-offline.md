@@ -187,3 +187,12 @@ Full and compact-expanded sync panels must provide the same retained-focus confl
 Queue recovery is a prerequisite for claiming cloud-save status, not a prerequisite for editing. Sync status subscribes to the current-owner ActionQueue storage load state and retains neutral/unknown status until loaded; an empty in-memory queue during hydration does not prove there are no dead letters. Unsubscribe on component teardown and re-evaluate when the auth owner changes.
 
 Focus pull freshness uses the snapshot's valid ISO savedAt business timestamp, not the trigger-managed row.updated_at server cursor. Missing/invalid business or supplied local baseline evidence rejects the remote candidate without clearing local state. A non-null ended_at also requires a coherent terminal snapshot (focusMode false, no active nested session, savedAt not before the end). A legacy ended-only mutation with an old active snapshot is unknown, not an empty or auto-reopened session. This safe-read guard does not provide a complete cross-device end-state reconciliation channel; preserve original bytes for inspection and export.
+
+
+## Focus snapshots: unknown version evidence
+
+Focus snapshot business time and database arrival/cursor time are distinct. Automatic pull uses explicit valid session_state.savedAt and consistent ended_at evidence; missing or contradictory evidence is not permission to replace local state. Do not manufacture savedAt from server updated_at.
+
+The RPC status reconciliation-pending represents insufficient/conflicting logical-version evidence, not applied, unauthorized or a confirmed newer remote business snapshot. FocusConsoleSyncService returns a retryable deferred failure with reason focus-snapshot-reconciliation-pending and the original operation ID. Keep the original payload and queue entry, audit the unknown decision, and retain export/replay capability. Never add a fresh timestamp or current server CAS to an old queued payload automatically.
+
+A future logical-clock server migration requires compatible clients first and an explicit owner-scoped reconciliation/CAS recovery flow. Parser support alone does not resolve historical conflicts or authorize a production migration. Sidebar/dashboard conflict controls must not clear retained snapshots merely to remove the failure indicator. See the production recovery ledger for candidate-versus-production evidence.

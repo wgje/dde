@@ -56,6 +56,24 @@ function createRpcConnection(): Connection {
 }
 
 export function registerSyncRpcClientMutationRpcSpecs(): void {
+  it('preserves reconciliation-pending as unknown rather than unauthorized or applied', async () => {
+    syncRpcEnv().syncRpcEnabled = true;
+    const rpc = vi.fn(async () => ({ data: {
+      status: 'reconciliation-pending', reason: 'snapshot-clock-unknown',
+      operation_id: TEST_OPERATION_ID,
+    }, error: null }));
+    const service = buildService(rpc as never);
+    const result = await service.upsertFocusSession({
+      operationId: TEST_OPERATION_ID,
+      record: { id: 'session-pending', userId: 'user-1',
+        startedAt: '2026-01-01T00:00:00.000Z', endedAt: null,
+        updatedAt: '2026-01-01T00:00:01.000Z', snapshot: {} } as FocusSessionRecord,
+    });
+    expect(result.status).toBe('reconciliation-pending');
+    expect(result.reason).toBe('snapshot-clock-unknown');
+    expect(result.operationId).toBe(TEST_OPERATION_ID);
+  });
+
   it('upsertUserPreferences: 通过 operationId 序列化用户偏好幂等写入', async () => {
     const env = syncRpcEnv();
     env.syncRpcEnabled = true;
