@@ -83,3 +83,23 @@ quiescence to avoid NG0600. Owner changes must immediately return an empty link
 view until the new owner's hydration is published. The regression in
 `external-source-link.service.spec.ts` verifies both computed getters, deferred
 cache loading, and publication of the new owner's links without NG0600 warnings.
+
+## Mobile Parking Dock drawer
+
+`DockMobileDrawerComponent` owns presentation-only drawer visibility, grouped task
+rows, preview selection, dialog focus and reduced-motion styling. Its inputs are
+fed by `ParkingDockComponent`; confirming a preview emits `taskConfirmed` and
+uses the existing parent task-selection path. Merely opening a preview must not
+change the current task. Read-only followers may inspect tasks, not promote them.
+
+At narrow widths, `DockInlineTaskFormComponent` places the title on its own row
+and lane/load controls in two columns. Drawer rows and action controls retain
+44px-or-larger touch targets. The sheet uses a rounded top edge, inset task rows,
+and a low-contrast footer separator; reduced-motion disables sheet animation
+and task-row transitions. No snapshot schema, API or sync ownership changes.
+
+Relevant source: `src/app/features/parking/components/dock-mobile-drawer.component.*`,
+`src/app/features/parking/components/dock-inline-task-form.component.ts`, and
+`src/app/features/parking/parking-dock.component.*`. Focused regression coverage is
+in `src/app/features/parking/components/parking-dock.component.spec.ts` and
+`dock-inline-task-form.component.spec.ts`; production verification remains separate.
