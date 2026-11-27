@@ -80,6 +80,70 @@ describe('createWorkspaceShellInteractionViewportResizeHost', () => {
     expect(removeEventListener).toHaveBeenCalledWith('resize', expect.any(Function));
   });
 
+  it('uses the browser window through the real lazy chain when no provider is supplied', async () => {
+    const previousWidth = Object.getOwnPropertyDescriptor(window, 'innerWidth');
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });
+    const callbacks: Array<() => void> = [];
+    const setIsMobile = vi.fn(); const setSidebarOpen = vi.fn(); const warn = vi.fn();
+    const host = createWorkspaceShellInteractionViewportResizeHost({
+      isMobile: () => false, setIsMobile, setSidebarOpen, warn,
+      setTimeout: callback => { callbacks.push(callback); return callbacks.length; }, clearTimeout: vi.fn(),
+    });
+    try {
+      await host.setup();
+      window.dispatchEvent(new Event('resize'));
+      await vi.waitFor(() => expect(callbacks).toHaveLength(1));
+      callbacks[0]();
+      expect(setIsMobile).toHaveBeenCalledWith(true);
+      expect(setSidebarOpen).toHaveBeenCalledWith(false);
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      await host.cleanup();
+      if (previousWidth) Object.defineProperty(window, 'innerWidth', previousWidth);
+    }
+  });
+
+  it('honors an explicit no-window provider for both listener and controller', async () => {
+    const add = vi.spyOn(window, 'addEventListener');
+    const warn = vi.fn(); const setTimeout = vi.fn();
+    const host = createWorkspaceShellInteractionViewportResizeHost(createOptions({
+      getWindow: () => undefined, setIsMobile: vi.fn(), setTimeout, warn,
+    }));
+    try {
+      await host.setup();
+      expect(add.mock.calls.filter(call => call[0] === 'resize')).toHaveLength(0);
+      await host.handleResize();
+      await flushMicrotasks();
+      expect(setTimeout).not.toHaveBeenCalled();
+      expect(warn).not.toHaveBeenCalled();
+    } finally { await host.cleanup(); add.mockRestore(); }
+  });
+
+  it('does not apply a scheduled default-chain resize after cleanup', async () => {
+    const callbacks: Array<() => void> = [];
+    const setIsMobile = vi.fn(); const warn = vi.fn();
+    const host = createWorkspaceShellInteractionViewportResizeHost({
+      isMobile: () => false, setIsMobile, setSidebarOpen: vi.fn(), warn,
+      setTimeout: callback => { callbacks.push(callback); return callbacks.length; }, clearTimeout: vi.fn(),
+    });
+    await host.setup();
+    await host.handleResize();
+    await vi.waitFor(() => expect(callbacks).toHaveLength(1));
+    await host.cleanup();
+    callbacks[0]();
+    expect(setIsMobile).not.toHaveBeenCalled();
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('retains the exact loader rejection warning rather than masking real failures', async () => {
+    const failure = new Error('chunk import failed'); const warn = vi.fn();
+    const host = createWorkspaceShellInteractionViewportResizeHost(createOptions({
+      createViewportResizeHost: vi.fn().mockRejectedValue(failure), warn,
+    }));
+    await host.setup();
+    expect(warn).toHaveBeenCalledWith('视口 resize lazy-load host 加载失败，已跳过本次操作', failure);
+  });
+
   it('delegates concrete viewport resize host loading to the loader boundary', () => {
     const source = readFileSync(
       join(__dirname, 'workspace-shell-interaction-viewport-resize-host.factory.ts'),

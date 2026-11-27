@@ -26,10 +26,14 @@ export type WorkspaceShellInteractionViewportResizeHostOptions =
 export function createWorkspaceShellInteractionViewportResizeHost(
   options: WorkspaceShellInteractionViewportResizeHostOptions,
 ): WorkspaceShellViewportResizeInteractionDelegate {
+  // Normalize once: listener registration and the lazy controller must observe
+  // the same window source, including an explicitly supplied no-window provider.
+  const getWindow = options.getWindow ?? (() => typeof window === 'undefined' ? undefined : window);
   const loadViewportResizeHost = createWorkspaceShellInteractionViewportResizeHostLoader({
     options: {
       ...options,
-      listenToWindow: createWindowListener(options),
+      getWindow,
+      listenToWindow: createWindowListener(getWindow),
     },
   });
 
@@ -43,11 +47,10 @@ export function createWorkspaceShellInteractionViewportResizeHost(
 }
 
 function createWindowListener(
-  options: WorkspaceShellInteractionViewportResizeHostOptions,
+  getWindow: NonNullable<WorkspaceShellInteractionViewportResizeHostOptions['getWindow']>,
 ): (eventName: string, listener: EventListener) => () => void {
   return (eventName, listener) => {
-    const targetWindow = (options.getWindow?.() as (WindowEventTarget | undefined))
-      ?? (typeof window === 'undefined' ? undefined : window);
+    const targetWindow: WindowEventTarget | undefined = getWindow();
     if (!targetWindow) {
       return () => undefined;
     }
