@@ -422,6 +422,8 @@ describe('持久化状态管理', () => {
     });
 
     it('连续调度持久化时应清理浏览器返回 0 的旧本地快照 timer handle', () => {
+      // Install timer spies on native functions, not an already installed fake clock.
+      vi.useRealTimers();
       const project = createTestProject({ id: 'proj-timer-zero' });
       mockProjectStateService.activeProject.set(project);
       mockProjectStateService.activeProjectId.set(project.id);
@@ -450,6 +452,8 @@ describe('持久化状态管理', () => {
     });
 
     it('被新 timer 替换后的旧本地快照 callback 不应继续写入快照', () => {
+      // Install timer spies on native functions, not an already installed fake clock.
+      vi.useRealTimers();
       const project = createTestProject({ id: 'proj-stale-local-snapshot' });
       const timerCallbacks: Array<() => void> = [];
       mockProjectStateService.activeProject.set(project);
@@ -484,6 +488,8 @@ describe('持久化状态管理', () => {
     });
 
     it('被新 timer 替换后的旧云端持久化 callback 不应继续触发保存', async () => {
+      // Install timer spies on native functions, not an already installed fake clock.
+      vi.useRealTimers();
       const project = createTestProject({ id: 'proj-stale-persist' });
       const timerCallbacks: Array<() => void> = [];
       mockProjectStateService.activeProject.set(project);
