@@ -11,11 +11,11 @@ const vitestCliPath = path.join(projectRoot, 'node_modules', 'vitest', 'vitest.m
 
 const testFilePattern = /\.(spec|test)\.ts$/;
 const perfTestDir = 'src/tests/perf/';
-const testBedPattern = /\bTestBed\b/;
+
 const moduleRegistryMutationPattern = /\bvi\.resetModules\s*\(/;
 const domPattern = /\b(window|document|navigator|HTMLElement|HTML[A-Za-z]+Element|matchMedia|requestAnimationFrame|cancelAnimationFrame|ResizeObserver|MutationObserver|IntersectionObserver|CustomEvent|EventTarget|MouseEvent|PointerEvent|KeyboardEvent|FocusEvent|DragEvent|TouchEvent|WheelEvent|InputEvent|ClipboardEvent)\b/;
 const componentPathPattern = /\/components\/|\.component\.(spec|test)\.ts$/;
-const componentContentPattern = /\b(createComponent\s*\(|ComponentFixture\s*<|TestBed\.createComponent\s*\()/;
+
 const explicitTestBedServiceFiles = new Set([
   'src/services/dock-cloud-sync.service.spec.ts',
   'src/services/simple-reminder.service.spec.ts',
@@ -632,7 +632,7 @@ function loadQuarantine(quarantinePath) {
   return result;
 }
 
-function classifyFile(file, content, overrides, testBedEvidence = content) {
+function classifyFile(file, content, overrides, testBedEvidence) {
   if (overrides[file]) {
     return overrides[file];
   }
@@ -641,10 +641,10 @@ function classifyFile(file, content, overrides, testBedEvidence = content) {
     return LANE_NAMES.testbedService;
   }
 
-  if (testBedPattern.test(testBedEvidence)) {
+  if (testBedEvidence.usesTestBed) {
     if (
       componentPathPattern.test(file)
-      || componentContentPattern.test(testBedEvidence)
+      || testBedEvidence.createsComponent
       || file.endsWith('src/app.component.spec.ts')
       || file.endsWith('src/workspace-shell.component.spec.ts')
       || file.endsWith('src/app.routes.spec.ts')
@@ -665,6 +665,35 @@ function classifyFile(file, content, overrides, testBedEvidence = content) {
   return LANE_NAMES.nodeMinimal;
 }
 
+/** Resolve Angular testing imports, never fixture source literals or comments. */
+function readRuntimeTestBedFlags(ts, source) {
+  const bindings = new Set();
+  const namespaces = new Set();
+  for (const node of source.statements) {
+    if (!ts.isImportDeclaration(node) || node.importClause?.isTypeOnly
+      || !ts.isStringLiteral(node.moduleSpecifier) || node.moduleSpecifier.text !== '@angular/core/testing') continue;
+    const named = node.importClause?.namedBindings;
+    if (named && ts.isNamespaceImport(named)) namespaces.add(named.name.text);
+    if (named && ts.isNamedImports(named)) for (const element of named.elements) {
+      if (!element.isTypeOnly && (element.propertyName ?? element.name).text === 'TestBed') bindings.add(element.name.text);
+    }
+  }
+  const flags = { usesTestBed: false, createsComponent: false };
+  const isTestBed = expression => (ts.isIdentifier(expression) && bindings.has(expression.text))
+    || (ts.isPropertyAccessExpression(expression) && ts.isIdentifier(expression.expression)
+      && namespaces.has(expression.expression.text) && expression.name.text === 'TestBed');
+  function visit(node) {
+    if (ts.isTypeNode(node) || ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) return;
+    if (isTestBed(node)) flags.usesTestBed = true;
+    if (ts.isPropertyAccessExpression(node) && isTestBed(node.expression)) {
+      flags.usesTestBed = true;
+      if (node.name.text === 'createComponent' && ts.isCallExpression(node.parent) && node.parent.expression === node) flags.createsComponent = true;
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(source);
+  return flags;
+}
 /** Follow runtime local imports, including helper re-exports, without executing test modules. */
 function createClassificationReader(root) {
   const ts = require('typescript');
@@ -698,23 +727,24 @@ function createClassificationReader(root) {
       ts.forEachChild(node, visit);
     }
     visit(source);
-    const entry = { content, imports };
+    const entry = { content, imports, ...readRuntimeTestBedFlags(ts, source) };
     graph.set(file, entry);
     return entry;
   }
   return (file) => {
     const visited = new Set();
     const pending = [path.resolve(root, file)];
-    const evidence = [];
+    const evidence = { usesTestBed: false, createsComponent: false };
     while (pending.length > 0) {
       const current = pending.pop();
       if (visited.has(current)) continue;
       visited.add(current);
       const entry = readNode(current);
-      if (testBedPattern.test(entry.content)) evidence.push(entry.content);
+      evidence.usesTestBed ||= entry.usesTestBed;
+      evidence.createsComponent ||= entry.createsComponent;
       pending.push(...entry.imports);
     }
-    return evidence.join('\n');
+    return evidence;
   };
 }
 

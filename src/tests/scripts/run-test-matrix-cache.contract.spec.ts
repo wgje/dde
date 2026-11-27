@@ -184,6 +184,35 @@ describe('run-test-matrix runtime helper import closure', () => {
     });
     expect(matrix.classifyAllFiles(['entry.spec.ts'], {}, root).get('entry.spec.ts')).toBe('lane_node_minimal');
   });
+  it.each([
+    `export function register() { return ["import { TestBed } from '@angular/core/testing';", "TestBed.createComponent(View);"].join('\n'); }`,
+    `// TestBed.createComponent(View)\nexport function register() { return 'TestBed'; }`,
+    `import type { TestBed } from '@angular/core/testing'; export function register() { const createComponent = () => 1; return createComponent(); }`,
+  ])('ignores fixture strings, comments and type-only TestBed in runtime helpers: %s', helper => {
+    const root = fixture({ 'entry.spec.ts': "import { register } from './helper'; register();", 'helper.ts': helper });
+    expect(matrix.classifyAllFiles(['entry.spec.ts'], {}, root).get('entry.spec.ts')).toBe('lane_node_minimal');
+  });
+  it.each([
+    "import { TestBed as Bed } from '@angular/core/testing'; Bed.createComponent(View);",
+    "import * as testing from '@angular/core/testing'; testing.TestBed.createComponent(View);",
+  ])('recognizes actual aliased and namespace TestBed runtime component calls: %s', helper => {
+    const root = fixture({ 'entry.spec.ts': "import './helper';", 'helper.ts': helper });
+    expect(matrix.classifyAllFiles(['entry.spec.ts'], {}, root).get('entry.spec.ts')).toBe('lane_testbed_component');
+  });
+  it('recognizes a runtime TestBed binding passed to an initializer without method access', () => {
+    const root = fixture({ 'entry.spec.ts': "import { TestBed as Bed } from '@angular/core/testing'; initialize(Bed);" });
+    expect(matrix.classifyAllFiles(['entry.spec.ts'], {}, root).get('entry.spec.ts')).toBe('lane_testbed_service');
+  });
+  it('does not promote real service setup due to unrelated createComponent names or type annotations', () => {
+    const root = fixture({ 'entry.spec.ts': "import { TestBed, type ComponentFixture } from '@angular/core/testing'; TestBed.configureTestingModule({}); const createComponent = () => 1; createComponent(); let value: ComponentFixture<View>;" });
+    expect(matrix.classifyAllFiles(['entry.spec.ts'], {}, root).get('entry.spec.ts')).toBe('lane_testbed_service');
+  });
+  it('keeps generated TestBed fixture source in the real overlay tooling suite outside initialized Angular lanes', () => {
+    const file = 'src/tests/scripts/codegraph-nanoflow-overlay.spec.ts';
+    expect(matrix.classifyAllFiles([file], {}, process.cwd()).get(file)).toBe('lane_node_minimal');
+    expect(matrix.classifyAllFiles(['src/services/data-safety-indexeddb-adapter.spec.ts'], {}, process.cwd()).get('src/services/data-safety-indexeddb-adapter.spec.ts')).toBe('lane_testbed_service');
+  });
+
   it('honors explicit existing lane overrides and propagates component helper evidence', () => {
     const root = fixture({
       'entry.spec.ts': "import('./helpers');",
