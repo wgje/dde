@@ -509,6 +509,10 @@ source_paths:
 
 ## 下一步
 
+小地图定位与缩放改动可在开发构建的 `/#/dev-preview/flow/overview-dense` 验证；
+运行 `npm run quality:guard:demo-preview` 检查真实组件和场景映射。生产包不开放开发预览路由，
+部署后应在普通流程图中点击任务验证柔光定位，并连续缩放验证任务树的比例尺变化。
+
 - 继续核对 Supabase 项目、RLS、bucket 和 secrets：读 [Supabase 运维](02-supabase-operations.md)。
 - 继续处理 PWA、离线、队列冻结和逃生导出：读 [应用安装、离线与错误恢复](../01-get-started/06-pwa-offline-and-error-recovery.md)。
 - 继续处理待同步、死信、冲突和重同步：读 [同步诊断与冲突中心](../03-data-sync-safety/05-sync-diagnostics-and-conflict-center.md)。

@@ -131,6 +131,8 @@ describe('flow-minimap-snapshot.helpers', () => {
       {
         key: 'explicit-link',
         x1: 40,
+        fromKey: 'from',
+        toKey: 'to',
         y1: 20,
         x2: 140,
         y2: 90,
@@ -140,6 +142,8 @@ describe('flow-minimap-snapshot.helpers', () => {
       {
         key: 'to->from',
         x1: 140,
+        fromKey: 'to',
+        toKey: 'from',
         y1: 90,
         x2: 40,
         y2: 20,

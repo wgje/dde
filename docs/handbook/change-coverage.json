@@ -62,7 +62,7 @@
     },
     {
       "id": "flow-workflow",
-      "description": "流程图视图、Constellation 小地图、临时图例筛选、连线、布局、导出和触控交互会改变用户理解任务关系的方式。",
+      "description": "流程图视图、Constellation 小地图的选中定位与多树缩放、临时图例筛选、连线、布局、导出和触控交互会改变用户理解任务关系的方式。",
       "triggers": [
         "src/app/features/flow/**"
       ],

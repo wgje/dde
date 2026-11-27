@@ -14,6 +14,8 @@ type ModelListener = (event: go.ChangedEvent) => void;
 class ConstellationDiagram {
   readonly diagramListeners = new Map<string, DiagramListener[]>();
   readonly modelListeners: ModelListener[] = [];
+  selectedKeys = new Set<string>();
+  readonly selection = { each: (callback: (node: { key: string }) => void) => this.selectedKeys.forEach(key => callback({ key })) };
   nodeEntries: Array<{ key: string; data: MinimapNodeData; actualBounds: go.Rect }> = [];
   viewportBounds = new go.Rect(0, 0, 100, 80);
   position = new go.Point(0, 0);
@@ -21,7 +23,8 @@ class ConstellationDiagram {
   minScale = 0.05;
   maxScale = 3;
   readonly nodes = { each: (callback: (node: (typeof this.nodeEntries)[number]) => void) => this.nodeEntries.forEach(callback) };
-  readonly links = { each: (_callback: (link: Record<string, unknown>) => void) => undefined };
+  linkEntries: Array<{ key: string; fromNode: { key: string; actualBounds: go.Rect }; toNode: { key: string; actualBounds: go.Rect }; data: { isCrossTree?: boolean } }> = [];
+  readonly links = { each: (callback: (link: (typeof this.linkEntries)[number]) => void) => this.linkEntries.forEach(callback) };
 
   addDiagramListener(name: string, listener: DiagramListener): void {
     this.diagramListeners.set(name, [...(this.diagramListeners.get(name) ?? []), listener]);
@@ -99,6 +102,80 @@ function contrastRatio(first: string, second: string): number {
 }
 
 describe('FlowMinimapComponent Constellation', () => {
+  it('selection remains visible without hover and moves between distant trees without rebuilding snapshots', () => {
+    const { fixture, component, diagram } = createFixture();
+    diagram.nodeEntries = Array.from({ length: 120 }, (_, index) => ({
+      key: `task-${index}`, data: {}, actualBounds: new go.Rect((index % 12) * 300, Math.floor(index / 12) * 200, 100, 50),
+    }));
+    diagram.linkEntries = [
+      { key: 'parent', fromNode: diagram.nodeEntries[0], toNode: diagram.nodeEntries[2], data: {} },
+      { key: 'cross-tree', fromNode: diagram.nodeEntries[2], toNode: diagram.nodeEntries[110], data: { isCrossTree: true } },
+    ];
+    (component as unknown as FlowMinimapConstellationInternals).attachTo(diagram as unknown as go.Diagram);
+    fixture.detectChanges();
+    const snapshot = component.nodeShapes();
+    const select = (keys: string[]) => {
+      diagram.selectedKeys = new Set(keys);
+      for (const listener of diagram.diagramListeners.get('ChangedSelection') ?? []) listener({} as go.DiagramEvent);
+      fixture.detectChanges();
+    };
+    select(['task-2']);
+    expect(fixture.nativeElement.querySelector('[data-minimap-selected="task-2"]')).not.toBeNull();
+    const glow = fixture.nativeElement.querySelector('[data-minimap-selection-glow]') as SVGCircleElement;
+    expect(glow.getAttribute('fill')).toBe(component.selectionGlowFill);
+    expect(Number(glow.getAttribute('r'))).toBeGreaterThan(component.selectionRadius());
+    expect(fixture.nativeElement.querySelector('.minimap-selection-layer').closest('[mask]')).toBeNull();
+    expect(fixture.nativeElement.querySelectorAll('[data-minimap-selection-link]')).toHaveLength(2);
+    expect(fixture.nativeElement.querySelector('[data-minimap-related="task-110"]')).not.toBeNull();
+    expect(component.attentionActive()).toBe(false);
+    select(['task-110']);
+    expect(fixture.nativeElement.querySelector('[data-minimap-selected="task-2"]')).toBeNull();
+    expect(fixture.nativeElement.querySelector('[data-minimap-selected="task-110"]')).not.toBeNull();
+    expect(component.nodeShapes()).toBe(snapshot);
+    select(['task-2', 'task-110']);
+    component.toggleLegendCategory('focused');
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelectorAll('[data-minimap-selection-glow]')).toHaveLength(2);
+    select([]);
+    expect(fixture.nativeElement.querySelector('[data-minimap-selected]')).toBeNull();
+    fixture.destroy();
+  });
+
+  it('dense graph zoom scales spacing and blocks together beyond the full-graph fit threshold', () => {
+    const { fixture, component, diagram } = createFixture();
+    diagram.nodeEntries = Array.from({ length: 120 }, (_, index) => ({
+      key: `task-${index}`, data: {}, actualBounds: new go.Rect((index % 12) * 300, Math.floor(index / 12) * 200, 100, 50),
+    }));
+    (component as unknown as FlowMinimapConstellationInternals).attachTo(diagram as unknown as go.Diagram);
+    fixture.detectChanges();
+    const viewAtOne = component.viewBox();
+    diagram.scale = 2;
+    diagram.viewportBounds = new go.Rect(0, 0, 50, 40);
+    for (const listener of diagram.diagramListeners.get('ViewportBoundsChanged') ?? []) listener({} as go.DiagramEvent);
+    fixture.detectChanges();
+    expect(component.viewBox().w).toBeCloseTo(viewAtOne.w / 2);
+    expect(component.viewBox().h).toBeCloseTo(viewAtOne.h / 2);
+    expect(component.renderedNodeShapes()[0].w).toBe(100);
+    diagram.scale = 2.5;
+    for (const listener of diagram.diagramListeners.get('ViewportBoundsChanged') ?? []) listener({} as go.DiagramEvent);
+    fixture.detectChanges();
+    expect(component.viewBox().w).toBeCloseTo(viewAtOne.w / 2.5);
+    fixture.destroy();
+  });
+
+  it('binding an already zoomed dense graph does not redefine its zoom as fit-to-all', () => {
+    const { fixture, component, diagram } = createFixture();
+    diagram.nodeEntries = [
+      { key: 'left', data: {}, actualBounds: new go.Rect(0, 0, 100, 50) },
+      { key: 'right', data: {}, actualBounds: new go.Rect(3000, 0, 100, 50) },
+    ];
+    diagram.scale = 2;
+    diagram.viewportBounds = new go.Rect(0, 0, 50, 40);
+    (component as unknown as FlowMinimapConstellationInternals).attachTo(diagram as unknown as go.Diagram);
+    expect(component.viewBox().w).toBeLessThan(3100 / 2);
+    fixture.destroy();
+  });
+
   afterEach(() => {
     vi.useRealTimers();
   });
@@ -152,6 +229,58 @@ describe('FlowMinimapComponent Constellation', () => {
     expect(fixture.nativeElement.querySelector('.minimap-node-orbit')).toBeNull();
     expect(fixture.nativeElement.querySelector('.minimap-star-halo')).toBeNull();
     expect(fixture.nativeElement.querySelector('.minimap-star-core')).toBeNull();
+  });
+
+  it('主图缩放时同步缩放小地图任务块，但不移动任务块中心', () => {
+    const { fixture, component, diagram } = createFixture();
+    diagram.nodeEntries = [{
+      key: 'task-zoom',
+      actualBounds: new go.Rect(20, 30, 100, 50),
+      data: { isDockFocused: true },
+    }];
+    (component as unknown as FlowMinimapConstellationInternals).attachTo(diagram as unknown as go.Diagram);
+    fixture.detectChanges();
+    const readBody = () => {
+      const body = fixture.nativeElement.querySelector('.minimap-node-body') as SVGRectElement;
+      const x = Number(body.getAttribute('x'));
+      const y = Number(body.getAttribute('y'));
+      const width = Number(body.getAttribute('width'));
+      const height = Number(body.getAttribute('height'));
+      const pixelsPerWorldUnit = component.width / component.viewBox().w;
+      return { width: width * pixelsPerWorldUnit, height: height * pixelsPerWorldUnit, cx: x + width / 2, cy: y + height / 2 };
+    };
+    const readFocusRing = () => {
+      const ring = fixture.nativeElement.querySelector('[data-minimap-marker="focused"]') as SVGEllipseElement;
+      const x = Number(ring.getAttribute('x'));
+      const y = Number(ring.getAttribute('y'));
+      const width = Number(ring.getAttribute('width'));
+      const height = Number(ring.getAttribute('height'));
+      return {
+        width: width * component.width / component.viewBox().w,
+        height: height * component.width / component.viewBox().w,
+        cx: x + width / 2,
+        cy: y + height / 2,
+      };
+    };
+    const atDefaultZoom = readBody();
+    const focusRingAtDefaultZoom = readFocusRing();
+    diagram.scale = 2;
+    diagram.viewportBounds = new go.Rect(0, 0, 50, 40);
+    for (const listener of diagram.diagramListeners.get('ViewportBoundsChanged') ?? []) {
+      listener({} as go.DiagramEvent);
+    }
+    fixture.detectChanges();
+    const atDoubleZoom = readBody();
+    const focusRingAtDoubleZoom = readFocusRing();
+    expect(atDoubleZoom.width).toBeCloseTo(atDefaultZoom.width * 2);
+    expect(atDoubleZoom.height).toBeCloseTo(atDefaultZoom.height * 2);
+    expect(atDoubleZoom.cx).toBeCloseTo(atDefaultZoom.cx);
+    expect(atDoubleZoom.cy).toBeCloseTo(atDefaultZoom.cy);
+    expect(focusRingAtDoubleZoom.width).toBeCloseTo(focusRingAtDefaultZoom.width * 2);
+    expect(focusRingAtDoubleZoom.height).toBeCloseTo(focusRingAtDefaultZoom.height * 2);
+    expect(focusRingAtDoubleZoom.cx).toBeCloseTo(focusRingAtDefaultZoom.cx);
+    expect(focusRingAtDoubleZoom.cy).toBeCloseTo(focusRingAtDefaultZoom.cy);
+    fixture.destroy();
   });
 
   it('注意力状态使用独立可见的径向光晕，alpha mask 只负责远淡近亮', () => {
@@ -221,7 +350,7 @@ describe('FlowMinimapComponent Constellation', () => {
     expect(fixture.nativeElement.querySelector('[data-minimap-marker="focused"]')?.tagName.toLowerCase()).toBe('rect');
     expect(fixture.nativeElement.querySelector('[data-minimap-marker="search"]')?.tagName.toLowerCase()).toBe('g');
     expect(searchCircle.getAttribute('vector-effect')).toBe('non-scaling-stroke');
-    expect(fixture.nativeElement.querySelectorAll('radialGradient')).toHaveLength(2);
+    expect(fixture.nativeElement.querySelectorAll('radialGradient')).toHaveLength(3);
     expect(fixture.nativeElement.querySelector('mask[data-minimap-attention-mask]')).not.toBeNull();
   });
 
