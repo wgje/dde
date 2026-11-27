@@ -1,6 +1,7 @@
 import { Component, inject, Output, EventEmitter, computed, signal, OnInit, ChangeDetectionStrategy, input } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ActionQueueService } from '../../../services/action-queue.service';
+import type { DeadLetterItem } from '../../../services/action-queue.types';
 import { SyncStateService } from '../../core/services/sync/sync-state.service';
 import { RetryQueueService } from '../../core/services/sync/retry-queue.service';
 import { AuthService } from '../../../services/auth.service';
@@ -102,6 +103,9 @@ export class DashboardModalComponent implements OnInit {
   readonly pendingCount = this.actionQueue.queueSize;
   readonly deadLetterCount = this.actionQueue.deadLetterSize;
   readonly deadLetters = this.actionQueue.deadLetterQueue;
+  readonly hasPreservedRemoteFocusConflict = computed(() =>
+    this.deadLetters().some(item => this.isPreservedRemoteFocusConflict(item))
+  );
 
   /**
    * 队列是否正在处理（原型方法）
@@ -161,10 +165,30 @@ export class DashboardModalComponent implements OnInit {
     }
   }
 
-  retryDeadLetter(itemId: string): void { this.actionQueue.retryDeadLetter(itemId); }
-  dismissDeadLetter(itemId: string): void { this.actionQueue.dismissDeadLetter(itemId); }
+  /** 与侧栏保留快照判定一致；这里也守卫方法，不能只依赖 disabled 按钮。 */
+  isPreservedRemoteFocusConflict(item: DeadLetterItem): boolean {
+    return item.action.entityType === 'focus-session'
+      && item.action.lastError?.includes('远端专注会话已更新，本地变更已保留等待处理') === true;
+  }
+
+  retryDeadLetter(itemId: string): void {
+    const item = this.deadLetters().find(candidate => candidate.action.id === itemId);
+    if (!item || this.isPreservedRemoteFocusConflict(item)) return;
+    this.actionQueue.retryDeadLetter(itemId);
+  }
+
+  dismissDeadLetter(itemId: string): void {
+    const item = this.deadLetters().find(candidate => candidate.action.id === itemId);
+    if (!item || this.isPreservedRemoteFocusConflict(item)) return;
+    this.actionQueue.dismissDeadLetter(itemId);
+  }
+
+  exportPendingData(): void {
+    this.actionQueue.downloadEscapeExport();
+  }
 
   clearAllDeadLetters(): void {
+    if (this.hasPreservedRemoteFocusConflict()) return;
     this.actionQueue.clearDeadLetterQueue();
     this.toastService.success('已清空', '所有失败记录已清空');
   }
@@ -195,7 +219,9 @@ export class DashboardModalComponent implements OnInit {
   }
 
   formatDate(isoString: string): string {
-    const diffMs = Date.now() - new Date(isoString).getTime();
+    const timestamp = typeof isoString === 'string' && isoString.trim() ? Date.parse(isoString) : Number.NaN;
+    if (!Number.isFinite(timestamp)) return '时间未知';
+    const diffMs = Date.now() - timestamp;
     const diffMins = Math.floor(diffMs / 60000);
     if (diffMins < 1) return '刚刚';
     if (diffMins < 60) return `${diffMins} 分钟前`;
