@@ -202,3 +202,6 @@ The dashboard dead-letter view consumes DeadLetterItem.action.id, failedAt and r
 
 
 Sidebar controls enforce the same retained-Focus restrictions as the dashboard, including method-layer checks of the current matching action and clear-all protection. Template-only retry guards are not sufficient; compact/full dismiss controls are also disabled. Durable pending settlement must recognize the exact structured reason with retryable/deferred flags; processor logging alone is not proof of queue retention.
+
+
+Durable settlement recognizes focus-snapshot-reconciliation-pending only with both boolean retryable and deferred true, after terminal business-reason precedence. It preserves the retry budget and uses the existing base deferral delay, with a distinct diagnostic reason. Real parser-to-IndexedDB restart/export tests verify retention. This does not implement long-term reconciliation backoff or legacy CAS recovery; do not activate the logical-clock SQL on this evidence alone.

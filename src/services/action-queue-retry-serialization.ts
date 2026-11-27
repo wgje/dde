@@ -22,7 +22,8 @@ export type DeferredRetryReason =
   | 'auth-pending'
   | 'rate-limit'
   | 'server-pressure'
-  | 'sync-rpc-unavailable';
+  | 'sync-rpc-unavailable'
+  | 'focus-snapshot-reconciliation-pending';
 
 const SERVER_PRESSURE_MESSAGE_FRAGMENTS = [
   'internal server error',
@@ -147,6 +148,13 @@ export function isSyncRpcCapabilityRetryError(error: QueueRetryError): boolean {
     && error.details?.['retryable'] === true;
 }
 
+/** A missing Focus clock is unknown, not permission failure or a terminal conflict. */
+export function isFocusSnapshotReconciliationRetryError(error: QueueRetryError): boolean {
+  return error.details?.['reason'] === 'focus-snapshot-reconciliation-pending'
+    && error.details?.['deferred'] === true
+    && error.details?.['retryable'] === true;
+}
+
 export function resolveBrowserSuspensionDelay(error?: QueueRetryError): number {
   const requestedDelay = error?.details?.['resumeDelayMs'];
   if (typeof requestedDelay === 'number' && Number.isFinite(requestedDelay)) {
@@ -192,7 +200,7 @@ export function resolveDeferredRetryDelay(error: QueueRetryError): number {
     return resolveRateLimitRetryDelay(error);
   }
 
-  if (isSyncRpcCapabilityRetryError(error)) {
+  if (isSyncRpcCapabilityRetryError(error) || isFocusSnapshotReconciliationRetryError(error)) {
     return QUEUE_CONFIG.RETRY_BASE_DELAY;
   }
 
@@ -226,6 +234,10 @@ export function describeDeferredRetryReason(
 
   if (isSyncRpcCapabilityRetryError(error)) {
     return 'sync-rpc-unavailable';
+  }
+
+  if (isFocusSnapshotReconciliationRetryError(error)) {
+    return 'focus-snapshot-reconciliation-pending';
   }
 
   if (isPartialRetryHandoffError(error)) {
