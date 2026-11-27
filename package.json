@@ -52,6 +52,7 @@
     "test:e2e:ui": "playwright test --ui",
     "test:e2e:headed": "playwright test --headed",
     "typecheck": "tsc --noEmit --pretty false --incremental false",
+    "quality:guard:demo-preview": "node scripts/contracts/check-demo-preview-coverage.cjs",
     "lint": "eslint src --no-warn-ignored",
     "lint:fix": "eslint src --fix --no-warn-ignored",
     "config": "node scripts/set-env.cjs",

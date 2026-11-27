@@ -1,6 +1,12 @@
 import { inject, Injector, runInInjectionContext } from '@angular/core';
 import { CanActivateFn, CanDeactivateFn, Routes } from '@angular/router';
 import { firstValueFrom, isObservable } from 'rxjs';
+import { environment } from './environments/environment';
+
+export function developmentPreviewRoutes(production: boolean): Routes {
+  return production ? [] : [{ path: 'dev-preview/:widget/:state', loadComponent: () =>
+    import('./app/dev-preview/demo-preview-page.component').then(module => module.DemoPreviewPageComponent) }];
+}
 
 const readBootFlag = (key: string, fallback: boolean): boolean => {
   if (typeof window === 'undefined') return fallback;
@@ -173,6 +179,7 @@ export const unsavedChangesGuardLazy: CanDeactivateFn<unknown> = async (
  * 3. 保障数据安全 - 防止未授权访问和垃圾数据注入
  */
 export const routes: Routes = [
+  ...developmentPreviewRoutes(environment.production),
   // 默认重定向到项目列表
   { path: '', redirectTo: '/projects', pathMatch: 'full' },
   

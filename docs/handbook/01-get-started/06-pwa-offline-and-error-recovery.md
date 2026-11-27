@@ -371,6 +371,9 @@ source_paths:
 
 ## 下一步
 
+开发环境的小地图预览入口为 `/#/dev-preview/flow/overview-dense`；正式生产包不注册这条路由。
+因此生产地址中打不开开发预览链接不代表项目丢失，也不需要清缓存。请回到项目页使用真实流程图。
+
 - 启动、登录和状态提示：读 [启动、登录与状态提示](05-startup-login-and-status.md)
 - 理解本地先写与待同步：读 [离线优先模型](../03-data-sync-safety/01-offline-first-model.md)
 - 处理多设备同步与冲突：读 [同步与冲突处理](../03-data-sync-safety/02-sync-and-conflicts.md)

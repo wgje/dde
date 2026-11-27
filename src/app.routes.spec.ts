@@ -21,6 +21,7 @@ vi.mock('./services/guards/project.guard', () => ({
 
 import {
   routes,
+  developmentPreviewRoutes,
   requireAuthGuardLazy,
   requireAuthThenRestoreFenceGuardLazy,
   projectExistsGuardLazy,
@@ -31,6 +32,10 @@ import { LocalBackupUiRestorePreActionQueueFenceService } from './services/local
 import { UnsavedChangesGuard } from './services/guards/unsaved-changes.guard';
 
 describe('app.routes lazy guard wrappers', () => {
+  it('registers isolated development previews only outside production', () => {
+    expect(developmentPreviewRoutes(true)).toEqual([]);
+    expect(developmentPreviewRoutes(false)[0]?.path).toBe('dev-preview/:widget/:state');
+  });
   let currentUserId: string | null;
   let authFence: string;
   const restoreFenceRun = vi.fn();
