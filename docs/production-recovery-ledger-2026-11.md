@@ -212,3 +212,11 @@ Window: `2026-11-25T13:20:00Z` to `2026-11-26T13:20:00Z` (24 hours). Only aggreg
 - Production version read: 02254645471c0d6a878f807a56df85f4e17ca856, target production. First entry reached handoff at 766ms, main present, boot ready, no loader timeout and no observed resource HTTP >=400. A second reload also reached ready/main. This is a bounded entry check, not all startup/owner/offline acceptance.
 - Post-entry console observation still reports ExternalSourceLink background failure warnings (62) and deferred FocusConsoleSync save warnings (117), with no uncaught JS exception in that observation. The NG0600 hotfix is not on production; focus sync remains deferred. Counts may include console events retained by the page session and are not global rates.
 - No main push or deployment was performed; overall productionProof=false. Continue fixing post-entry behavior and candidate gates rather than declaring completion based on this successful entry.
+
+
+## Focus replay protocol priming candidate (2026-11-27)
+
+- Read-only server inspection confirms sync_check_protocol exists, public protocol state is min version 1 / epoch 0, and focus upsert checks auth owner, operation identity, payload digest and LWW baseline. No production mutation or environment flag change was performed.
+- Client checkProtocol already auto-enables accepted capabilities; focus mutation paths instead checked the initially disabled flag without priming the probe. Prior attribution to the absent build variable alone was incomplete.
+- Added local protocol priming to focus-session, routine-task and routine-completion mutation paths, preserving existing operation-ID requirements and no legacy writes. Captured owner/session generation/replay lease are rechecked after the probe await.
+- RED: new focus startup-disabled and expired-lease probe cases failed. GREEN: 4 files / 121 tests passed, including protocol client and action-queue focus processors; typecheck, targeted ESLint and diff check passed. Added unavailable/rejected/owner-change no-write cases. Candidate not deployed; production replay/owner isolation and full release gates remain unproven.

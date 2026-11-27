@@ -151,3 +151,16 @@ Conflict-related services live in `src/services/`:
 - `conflict-storage.service.ts`
 
 Use the existing Result Pattern and error conversion. Supabase errors should go through `supabaseErrorToError()`.
+
+
+## Focus console protocol priming
+
+Focus-session, routine-task and routine-completion replay with a durable operation
+ID must prime the existing Sync RPC protocol check when the capability starts
+disabled. The protocol client remains responsible for accepted-version/epoch
+auto-enable; callers must not force the feature flag or use legacy table writes.
+After the await, recheck the captured owner, session runtime generation and
+replay lease before invoking a mutation RPC. A missing operation ID, unavailable
+probe or rejected protocol retains the operation locally without remote success.
+Protocol priming runs in background replay, never as a prerequisite for rendering
+the workspace or editing local text.

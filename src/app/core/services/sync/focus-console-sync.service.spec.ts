@@ -44,6 +44,7 @@ describe('FocusConsoleSyncService', () => {
   };
 
   const mockSyncRpc = {
+    checkProtocol: vi.fn().mockResolvedValue(null),
     isFeatureEnabled: vi.fn(() => true),
     isClientRejected: vi.fn(() => false),
     upsertFocusSession: vi.fn().mockResolvedValue({
@@ -105,6 +106,8 @@ describe('FocusConsoleSyncService', () => {
     mockAuthService.peekPersistedSessionIdentity.mockReturnValue({ userId: 'user-1' });
     mockSessionManager.isSessionExpiredError.mockClear();
     mockSessionManager.tryRefreshSessionWithSession.mockClear();
+    mockSyncRpc.checkProtocol.mockReset();
+    mockSyncRpc.checkProtocol.mockResolvedValue(null);
     mockSyncRpc.isFeatureEnabled.mockReturnValue(true);
     mockSyncRpc.isClientRejected.mockReturnValue(false);
     mockSyncRpc.upsertFocusSession.mockResolvedValue({
@@ -488,6 +491,76 @@ describe('FocusConsoleSyncService', () => {
     }
     expect(mockClient.from).not.toHaveBeenCalled();
   });
+
+  it('primes the protocol before replaying a focus session when the RPC flag starts disabled', async () => {
+    mockSyncRpc.isFeatureEnabled.mockReturnValue(false);
+    mockSyncRpc.checkProtocol.mockImplementation(async () => {
+      mockSyncRpc.isFeatureEnabled.mockReturnValue(true);
+      return { minProtocolVersion: 1, deploymentEpoch: 0 };
+    });
+    const record = { id: 'session-probe', userId: 'user-1', startedAt: '2026-03-03T00:00:00Z',
+      endedAt: null, updatedAt: '2026-03-03T01:00:00Z', snapshot: {} };
+    const result = await service.saveFocusSession(record as never, 'op-probe');
+    expect(result.ok).toBe(true);
+    expect(mockSyncRpc.checkProtocol).toHaveBeenCalledOnce();
+    expect(mockSyncRpc.upsertFocusSession).toHaveBeenCalledWith({ operationId: 'op-probe', record });
+    expect(mockClient.from).not.toHaveBeenCalled();
+  });
+
+  it('does not write a focus session if replay ownership expires during protocol probing', async () => {
+    let current = true;
+    mockSyncRpc.isFeatureEnabled.mockReturnValue(false);
+    mockSyncRpc.checkProtocol.mockImplementation(async () => {
+      current = false;
+      mockSyncRpc.isFeatureEnabled.mockReturnValue(true);
+      return { minProtocolVersion: 1, deploymentEpoch: 0 };
+    });
+    const controller = new AbortController();
+    const result = await service.saveFocusSession({ userId: 'user-1' } as never, 'op-stale',
+      { leaseSignal: controller.signal, isCurrent: () => current });
+    expect(result.ok).toBe(false);
+    expect(mockSyncRpc.checkProtocol).toHaveBeenCalledOnce();
+    expect(mockSyncRpc.upsertFocusSession).not.toHaveBeenCalled();
+    expect(mockClient.from).not.toHaveBeenCalled();
+  });
+
+  it.each(['unavailable', 'rejected', 'owner-change'] as const)(
+    'preserves a queued focus save without remote write after a %s protocol probe', async outcome => {
+      mockSyncRpc.isFeatureEnabled.mockReturnValue(false);
+      mockSyncRpc.checkProtocol.mockImplementation(async () => {
+        if (outcome === 'rejected') mockSyncRpc.isClientRejected.mockReturnValue(true);
+        if (outcome === 'owner-change') {
+          mockAuthService.currentUserId.mockReturnValue('user-2');
+          mockSyncRpc.isFeatureEnabled.mockReturnValue(true);
+        }
+        return null;
+      });
+      const result = await service.saveFocusSession({ userId: 'user-1' } as never, 'op-blocked');
+      expect(result.ok).toBe(false);
+      expect(mockSyncRpc.checkProtocol).toHaveBeenCalledOnce();
+      expect(mockSyncRpc.upsertFocusSession).not.toHaveBeenCalled();
+      expect(mockClient.from).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['routine-task', 'routine-completion'] as const)(
+    'primes the accepted protocol before replaying %s without legacy writes', async kind => {
+      mockSyncRpc.isFeatureEnabled.mockReturnValue(false);
+      mockSyncRpc.checkProtocol.mockImplementation(async () => {
+        mockSyncRpc.isFeatureEnabled.mockReturnValue(true);
+        return { minProtocolVersion: 1, deploymentEpoch: 0 };
+      });
+      const result = kind === 'routine-task'
+        ? await service.upsertRoutineTask('user-1', { id: 'routine-probe' } as never, 'op-routine')
+        : await service.incrementRoutineCompletion({ userId: 'user-1', routineId: 'routine-probe',
+          completionId: 'completion-probe', dateKey: '2026-11-27' } as never, 'op-completion');
+      expect(result.ok).toBe(true);
+      expect(mockSyncRpc.checkProtocol).toHaveBeenCalledOnce();
+      expect(kind === 'routine-task' ? mockSyncRpc.upsertRoutineTask : mockSyncRpc.incrementRoutineCompletion)
+        .toHaveBeenCalledOnce();
+      expect(mockClient.from).not.toHaveBeenCalled();
+    },
+  );
 
   it('saveFocusSession should use Sync RPC when operationId is provided', async () => {
     const record = {
