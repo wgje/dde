@@ -204,3 +204,11 @@ Window: `2026-11-25T13:20:00Z` to `2026-11-26T13:20:00Z` (24 hours). Only aggreg
 - The remaining nine-file tool batch was stopped after more than ten minutes without completion; it is incomplete, not green. The native graph sidecar suite had 32 passes; overlay schema had one observed failure.
 - The schema artifact case was independently reproduced: ENOENT opening .codegraph/nanoflow-overlay.json. Current setup publishes compatibility bytes under immutable CURRENT-selected generation directories, whereas this test requires an absent legacy path AND the historical 250558329-byte artifact digest. Earlier wording suggesting the failure was first a differing generated digest was inaccurate. Changing only the path or re-pinning a digest would not establish historical fixture equivalence. Keep the historical known-answer check distinct from current-generation integration.
 - No main push, production deployment, database write or unrelated user work cleanup occurred. Remaining red/incomplete gates include callback-manifest source identity, historical schema artifact provisioning, the stalled tool batch and full-suite acceptance.
+
+
+## Production entry revalidation (2026-11-27)
+
+- Previous Ego TaskSpace 49 no longer exists. Listed spaces first and preserved user GitHub and Parking QA tabs. Recreated this closed goal space as TaskSpace 52; no cache, cookies, Service Worker or persisted business data was cleared.
+- Production version read: 02254645471c0d6a878f807a56df85f4e17ca856, target production. First entry reached handoff at 766ms, main present, boot ready, no loader timeout and no observed resource HTTP >=400. A second reload also reached ready/main. This is a bounded entry check, not all startup/owner/offline acceptance.
+- Post-entry console observation still reports ExternalSourceLink background failure warnings (62) and deferred FocusConsoleSync save warnings (117), with no uncaught JS exception in that observation. The NG0600 hotfix is not on production; focus sync remains deferred. Counts may include console events retained by the page session and are not global rates.
+- No main push or deployment was performed; overall productionProof=false. Continue fixing post-entry behavior and candidate gates rather than declaring completion based on this successful entry.
