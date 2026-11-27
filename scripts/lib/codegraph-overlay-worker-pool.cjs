@@ -31,6 +31,8 @@ class OverlayQueryWorkerPool {
     this.workers = Array.from({ length: size }, (_, index) => this.makeWorker(index));
     this.queue = [];
     this.closed = false;
+    this.closingPromise = null;
+    this.childClosures = new Set();
     this.nextRequestId = 1;
     this.ready = false;
     this.prewarmPromise = null;
@@ -110,6 +112,12 @@ class OverlayQueryWorkerPool {
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
     });
+    // Track every process through its real close event, including failed workers
+    // detached from a slot before replacement. Stdio may close after exit.
+    let resolveClosed;
+    const closed = new Promise(resolve => { resolveClosed = resolve; });
+    this.childClosures.add(closed);
+    child.once('close', () => { this.childClosures.delete(closed); resolveClosed(); });
     worker.child = child;
     worker.stdoutBuffer = Buffer.alloc(0);
     worker.stderrTail = '';
@@ -256,8 +264,9 @@ class OverlayQueryWorkerPool {
   }
 
   close() {
-    if (this.closed) return;
+    if (this.closed) return this.closingPromise;
     this.closed = true;
+    this.closingPromise = Promise.all([...this.childClosures]).then(() => undefined);
     this.ready = false;
     this.prewarmPromise = null;
     for (const job of this.queue.splice(0)) {
@@ -284,6 +293,7 @@ class OverlayQueryWorkerPool {
       }, 1_000);
       worker.killTimer.unref?.();
     }
+    return this.closingPromise;
   }
 }
 

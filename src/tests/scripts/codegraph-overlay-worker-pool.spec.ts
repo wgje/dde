@@ -7,8 +7,10 @@ import { afterEach, describe, expect, it } from 'vitest';
 const requireCjs = createRequire(import.meta.url);
 const { OverlayQueryWorkerPool } = requireCjs('../../../scripts/lib/codegraph-overlay-worker-pool.cjs') as WorkerPoolApi;
 const roots: string[] = [];
+const pools: WorkerPool[] = [];
 
-afterEach(() => {
+afterEach(async () => {
+  await Promise.all(pools.splice(0).map(pool => pool.close()));
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
@@ -28,7 +30,7 @@ interface WorkerPool {
     metadata?: Record<string, unknown>,
     readinessTimeoutMs?: number,
   ): Promise<WorkerResult>;
-  close(): void;
+  close(): Promise<void>;
 }
 interface WorkerPoolApi {
   OverlayQueryWorkerPool: new (options: {
@@ -40,6 +42,12 @@ interface WorkerPoolApi {
     env?: NodeJS.ProcessEnv;
     onEvent?: (event: string, data: Record<string, unknown>) => void;
   }) => WorkerPool;
+}
+
+function createPool(options: ConstructorParameters<WorkerPoolApi['OverlayQueryWorkerPool']>[0]): WorkerPool {
+  const pool = new OverlayQueryWorkerPool(options);
+  pools.push(pool);
+  return pool;
 }
 
 function createFakeWorker(delayMs: number) {
@@ -109,21 +117,21 @@ async function waitForFileLines(filePath: string, expectedLines: number): Promis
 describe('persistent overlay worker pool', () => {
   it('waits for a successful prewarm before dispatching the first real query', async () => {
     const fixture = createFakeWorker(5);
-    const pool = new OverlayQueryWorkerPool({ ...fixture, size: 1, maxBufferBytes: 1024 * 1024 });
+    const pool = createPool({ ...fixture, size: 1, maxBufferBytes: 1024 * 1024 });
     try {
       const result = await pool.requestWhenReady(['--query', 'gated'], 1000, { queryId: 'gated' }, 1000);
       expect(result.ok).toBe(true);
       const requests = readFileSync(fixture.requestLog, 'utf8').trim().split(/\r?\n/);
       expect(requests).toEqual(['--prewarm', '--query gated']);
     } finally {
-      pool.close();
+      await pool.close();
     }
   });
 
   it('does not dispatch a query when readiness fails and retries readiness later', async () => {
     const fixture = createFakeWorker(5);
     fixture.env.OVERLAY_WORKER_FAIL_PREWARM_ONCE = '1';
-    const pool = new OverlayQueryWorkerPool({ ...fixture, size: 1, maxBufferBytes: 1024 * 1024 });
+    const pool = createPool({ ...fixture, size: 1, maxBufferBytes: 1024 * 1024 });
     try {
       await expect(pool.requestWhenReady(['--query', 'blocked'], 1000, { queryId: 'blocked' }, 1000))
         .rejects.toMatchObject({ failureClass: 'overlay-worker-query-failed' });
@@ -132,13 +140,13 @@ describe('persistent overlay worker pool', () => {
       const requests = readFileSync(fixture.requestLog, 'utf8').trim().split(/\r?\n/);
       expect(requests).toEqual(['--prewarm', '--prewarm', '--query recovered']);
     } finally {
-      pool.close();
+      await pool.close();
     }
   });
 
   it('reuses a warm worker for subsequent requests and correlates result IDs', async () => {
     const fixture = createFakeWorker(5);
-    const pool = new OverlayQueryWorkerPool({ ...fixture, size: 1, maxBufferBytes: 1024 * 1024 });
+    const pool = createPool({ ...fixture, size: 1, maxBufferBytes: 1024 * 1024 });
     try {
       const first = await pool.request(['--query', 'first'], 1000, { queryId: 'pair-1' });
       const second = await pool.request(['--query', 'second'], 1000, { queryId: 'pair-2' });
@@ -149,13 +157,13 @@ describe('persistent overlay worker pool', () => {
       expect(second.pid).toBe(first.pid);
       expect(readFileSync(fixture.startLog, 'utf8').trim().split(/\r?\n/)).toHaveLength(1);
     } finally {
-      pool.close();
+      await pool.close();
     }
   });
 
   it('recycles a timed-out worker and serves the next queued request on a fresh worker', async () => {
     const fixture = createFakeWorker(1);
-    const pool = new OverlayQueryWorkerPool({ ...fixture, size: 1, maxBufferBytes: 1024 * 1024 });
+    const pool = createPool({ ...fixture, size: 1, maxBufferBytes: 1024 * 1024 });
     try {
       await pool.request(['--query', 'warm-up'], 1000);
       await expect(pool.request(['--slow'], 40, { queryId: 'timeout' })).rejects.toMatchObject({
@@ -167,13 +175,13 @@ describe('persistent overlay worker pool', () => {
       expect(JSON.parse(recovered.outputText ?? '').query).toContain('recovered');
       expect(readFileSync(fixture.startLog, 'utf8').trim().split(/\r?\n/)).toHaveLength(2);
     } finally {
-      pool.close();
+      await pool.close();
     }
   });
 
   it('uses a bounded worker pool to avoid serializing independent overlay queries', async () => {
     const fixture = createFakeWorker(80);
-    const pool = new OverlayQueryWorkerPool({ ...fixture, size: 2, maxBufferBytes: 1024 * 1024 });
+    const pool = createPool({ ...fixture, size: 2, maxBufferBytes: 1024 * 1024 });
     try {
       const [left, right] = await Promise.all([
         pool.request(['--query', 'left'], 1500),
@@ -184,14 +192,14 @@ describe('persistent overlay worker pool', () => {
       expect(left.pid).not.toBe(right.pid);
       expect(readFileSync(fixture.startLog, 'utf8').trim().split(/\r?\n/)).toHaveLength(2);
     } finally {
-      pool.close();
+      await pool.close();
     }
   });
 
   it('bounds the pending queue and rejects overload with a backpressure diagnostic', async () => {
     const fixture = createFakeWorker(120);
     const events: Array<{ event: string; data: Record<string, unknown> }> = [];
-    const pool = new OverlayQueryWorkerPool({
+    const pool = createPool({
       ...fixture, size: 1, maxBufferBytes: 1024 * 1024, maxQueueSize: 1,
       onEvent: (event, data) => events.push({ event, data }),
     });
@@ -208,14 +216,14 @@ describe('persistent overlay worker pool', () => {
       await expect(queued).resolves.toMatchObject({ ok: true });
       expect(events.some(item => item.event === 'overlay-worker.backpressure')).toBe(true);
     } finally {
-      pool.close();
+      await pool.close();
     }
   });
 
   it('reports malformed worker output and restarts a crashed worker for later jobs', async () => {
     const fixture = createFakeWorker(5);
     const events: Array<{ event: string; data: Record<string, unknown> }> = [];
-    const pool = new OverlayQueryWorkerPool({
+    const pool = createPool({
       ...fixture, size: 1, maxBufferBytes: 1024 * 1024,
       onEvent: (event, data) => events.push({ event, data }),
     });
@@ -235,24 +243,31 @@ describe('persistent overlay worker pool', () => {
       expect(events.some(item => item.event === 'overlay-worker.response' && item.data.ok === false)).toBe(true);
       expect(readFileSync(fixture.startLog, 'utf8').trim().split(/\r?\n/)).toHaveLength(3);
     } finally {
-      pool.close();
+      await pool.close();
     }
   });
 
   it('rejects active and queued work on close and refuses new requests', async () => {
     const fixture = createFakeWorker(5);
-    const pool = new OverlayQueryWorkerPool({ ...fixture, size: 1, maxBufferBytes: 1024 * 1024 });
+    let pid: number | null = null;
+    const pool = createPool({ ...fixture, size: 1, maxBufferBytes: 1024 * 1024,
+      onEvent: (event, data) => { if (event === 'overlay-worker.spawn') pid = data.pid as number; } });
     const active = pool.request(['--hold'], 5000);
     await waitForFileLines(fixture.startLog, 1);
     const queued = pool.request(['--query', 'queued'], 1500);
     const activeRejected = expect(active).rejects.toMatchObject({ message: 'overlay-worker-pool-closed' });
     const queuedRejected = expect(queued).rejects.toMatchObject({ message: 'overlay-worker-pool-closed' });
-    pool.close();
+    const closing = pool.close();
+    expect(closing).toBeInstanceOf(Promise);
+    expect(pool.close()).toBe(closing);
     await activeRejected;
     await queuedRejected;
     await expect(pool.request(['--query', 'after-close'], 1000)).rejects.toMatchObject({
       message: 'overlay-worker-pool-closed',
     });
+    await closing;
+    expect(pid).not.toBeNull();
+    expect(() => process.kill(pid!, 0)).toThrow();
   });
 
 
