@@ -18,7 +18,7 @@ import {
   retryQueueItemToOfflineCommand,
   type LegacyOfflineCommandAdapterContext,
 } from './legacy-offline-command-adapter';
-import { createOfflineSyncCommandEnvelopeDispatchers } from './offline-sync-command-replay-adapter';
+import { createOfflineSyncCommandEnvelopeDispatchers, reconcileOfflineSyncCommandReceipt } from './offline-sync-command-replay-adapter';
 import { OfflineSyncCommandReplayProcessor } from './offline-sync-command-replay-processor';
 import type { AppResumeReason } from '../../../../services/app-lifecycle-orchestrator.types';
 import {
@@ -78,21 +78,11 @@ export class OfflineSyncOwnerCaptureCoordinatorService {
           handler,
           replayOptions: {
             commands: createOfflineSyncCommandEnvelopeDispatchers(this.syncRpc),
-            // sync_apply_offline_command is keyed by operationId; resubmitting the
-            // same envelope settles an unknown outcome through the server's unique-key fence.
-            reconcileUnknownOutcome: async command => {
-              const status = await this.syncRpc.getOfflineCommandStatus({ operationId: command.operationId });
-              if (status.appliedToDomainTables === true
-                && (status.domainApplyStatus === 'applied' || status.domainApplyStatus === 'idempotent-replay')) {
-                return 'settled';
-              }
-              if (status.reason === 'offline-command-not-found') return 'replay';
-              // A known terminal non-success is only re-submitted with the same
-              // operationId so the server idempotency fence returns its result;
-              // pending/missing audit or network errors remain unknown.
-              if (status.domainApplyStatus && status.domainApplyStatus !== 'missing') return 'replay';
-              return 'unknown';
-            },
+            // Readback must bind the exact durable command before settling an unknown result.
+            reconcileUnknownOutcome: async command => reconcileOfflineSyncCommandReceipt(
+              command,
+              await this.syncRpc.getOfflineCommandStatus({ operationId: command.operationId }),
+            ),
           },
         });
         await processor.drain();

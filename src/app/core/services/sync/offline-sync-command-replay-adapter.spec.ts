@@ -33,6 +33,27 @@ function command(
   });
 }
 
+function receiptIdentity(value: OfflineSyncCommandEnvelope): Record<string, unknown> {
+  return {
+    identityVersion: 1,
+    schemaVersion: value.schemaVersion,
+    operationId: value.operationId,
+    ownerUserId: value.ownerUserId,
+    installationId: value.installationId,
+    deviceId: value.deviceId,
+    logicalClock: value.logicalClock,
+    entityType: value.entityType,
+    entityId: value.entityId,
+    projectId: value.projectId ?? null,
+    command: value.command,
+    intent: value.intent,
+    baseVersion: value.baseVersion ?? null,
+    baseUpdatedAt: value.baseUpdatedAt ?? null,
+    normalizedResultPatch: value.normalizedResultPatch,
+    dependencyOperationIds: value.dependencyOperationIds,
+    fieldVersions: (value as unknown as Record<string, unknown>)['fieldVersions'] ?? {},
+  };
+}
 function entityForCommand(kind: KnownOfflineSyncCommandKind): OfflineSyncEntityType {
   return kind.slice(0, kind.indexOf('.')) as OfflineSyncEntityType;
 }
@@ -178,7 +199,9 @@ describe('offline-sync-command-replay-adapter', () => {
     });
     const getOfflineCommandStatus = vi.fn().mockResolvedValue({
       status: 'applied', domainApplyStatus: 'applied', appliedToDomainTables: true,
-      raw: { status: 'applied', domainApplyStatus: 'applied', appliedToDomainTables: true },
+      raw: { status: 'applied', domainApplyStatus: 'applied', appliedToDomainTables: true,
+        operationId: command().operationId, commandDigest: 'c9a6ea7db738d8cb5fc354f55fd74805f0b1308183ce1b7cdaffb05d5502c619',
+        commandIdentity: receiptIdentity(command()) },
     });
     const dispatchers = createOfflineSyncCommandEnvelopeDispatchers({ applyOfflineCommand, getOfflineCommandStatus });
     const candidate = command('pending', 'task.update');
@@ -193,6 +216,75 @@ describe('offline-sync-command-replay-adapter', () => {
     expect(getOfflineCommandStatus).toHaveBeenCalledWith({ operationId: candidate.operationId });
   });
 
+  it('accepts the same command after transport metadata and object-key order change', async () => {
+    const candidate = command('pending', 'task.update');
+    const identity = receiptIdentity(candidate);
+    const transportChanged = {
+      ...candidate,
+      status: 'unknown', createdAtIso: '2030-01-01T00:00:00Z',
+      remoteResult: { decision: 'unknown' }, deployment_epoch: 42, client_git_sha: 'another-build',
+    } as OfflineSyncCommandEnvelope;
+    const dispatchers = createOfflineSyncCommandEnvelopeDispatchers({
+      applyOfflineCommand: vi.fn().mockResolvedValue({ status: 'idempotent-replay', raw: {} }),
+      getOfflineCommandStatus: vi.fn().mockResolvedValue({
+        status: 'applied', domainApplyStatus: 'applied', appliedToDomainTables: true,
+        raw: {
+          operationId: candidate.operationId,
+          commandDigest: 'c9a6ea7db738d8cb5fc354f55fd74805f0b1308183ce1b7cdaffb05d5502c619',
+          commandIdentity: Object.fromEntries(Object.entries(identity).reverse()),
+        },
+      }),
+    });
+
+    await expect(dispatchers['task.update']!(transportChanged)).resolves.toMatchObject({ success: true });
+  });
+
+  it('retains pending commands as unknown when an old receipt cannot prove their identity', async () => {
+    const dispatchers = createOfflineSyncCommandEnvelopeDispatchers({
+      applyOfflineCommand: vi.fn().mockResolvedValue({ status: 'reconciliation-pending', raw: { reason: 'command-receipt-identity-unverified' } }),
+    });
+
+    await expect(replayOfflineSyncCommand(command(), handler(), {
+      commands: dispatchers, captureRemoteEvidence: true,
+    })).resolves.toMatchObject({ status: 'unknown', decision: 'reconciliation-pending' });
+  });
+  it('keeps historical receipts without a bound command identity unconfirmed', async () => {
+    const dispatchers = createOfflineSyncCommandEnvelopeDispatchers({
+      applyOfflineCommand: vi.fn().mockResolvedValue({ status: 'idempotent-replay', raw: {} }),
+      getOfflineCommandStatus: vi.fn().mockResolvedValue({
+        status: 'applied', domainApplyStatus: 'applied', appliedToDomainTables: true, raw: {},
+      }),
+    });
+
+    await expect(dispatchers['task.update']!(command())).resolves.toMatchObject({
+      success: false, decision: 'command-receipt-identity-unverified',
+    });
+  });
+  it.each([
+    { entityId: 'another-entity' },
+    { normalizedResultPatch: { id: 'entity-1', content: 'different command' } },
+    { ownerUserId: 'another-owner' },
+  ])('does not acknowledge another command sharing the operation ID: %j', async change => {
+    const candidate = command('pending', 'task.update');
+    const stored = { ...candidate, ...change };
+    const dispatchers = createOfflineSyncCommandEnvelopeDispatchers({
+      applyOfflineCommand: vi.fn().mockResolvedValue({ status: 'idempotent-replay', raw: {} }),
+      getOfflineCommandStatus: vi.fn().mockResolvedValue({
+        status: 'applied', domainApplyStatus: 'applied', appliedToDomainTables: true,
+        raw: {
+          operationId: candidate.operationId,
+          commandDigest: 'c9a6ea7db738d8cb5fc354f55fd74805f0b1308183ce1b7cdaffb05d5502c619',
+          commandIdentity: receiptIdentity(stored),
+        },
+      }),
+    });
+
+    const result = await replayOfflineSyncCommand(candidate, handler(), {
+      commands: dispatchers, captureRemoteEvidence: true,
+    });
+
+    expect(result).toMatchObject({ status: 'replayed', success: false, decision: 'command-receipt-identity-mismatch' });
+  });
   it('does not acknowledge accepted-shadow when domain application failed', async () => {
     const dispatchers = createOfflineSyncCommandEnvelopeDispatchers({
       applyOfflineCommand: vi.fn().mockResolvedValue({ status: 'accepted-shadow', raw: { status: 'accepted-shadow' } }),

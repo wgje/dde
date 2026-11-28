@@ -157,3 +157,14 @@ Before merging sync changes:
 4. Verify soft-delete/tombstone behavior.
 5. Verify local-first UX path.
 6. Update [../sync-offline.md](../sync-offline.md) and this contract when semantics change.
+
+## Additional replay and owner-isolation invariants (2026-11-28)
+
+| ID | Invariant | Verification evidence |
+| --- | --- | --- |
+| SYNC-011 | A durable offline operation ID cannot acknowledge a different business command. | `offline-sync-command-replay-adapter.spec.ts`, `offline-sync-owner-capture-coordinator.service.spec.ts`, receipt-identity migration contract |
+| SYNC-012 | Historical receipts without a verifiable command identity remain unknown/reconciliation-pending. | replay adapter/coordinator unknown-outcome tests and `20261128100000_offline_command_receipt_identity.sql` |
+| SYNC-013 | IndexedDB command identity check and command/projection/audit writes are one transaction. | `offline-command-store.spec.ts` concurrent collision and fault-injection tests |
+| SYNC-014 | Focus-session and routine-task conflict updates include an atomic owner predicate and reject zero-row updates. | `20261128090000_atomic_focus_routine_owner_upsert.sql`, migration contract, synthetic two-owner barrier harness |
+
+A green local contract or synthetic database harness is candidate evidence only. Production proof requires target-bound migration application, readback of function/schema hashes, owner-isolation smoke, and rollback evidence.

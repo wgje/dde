@@ -444,7 +444,7 @@ describe('AttachmentService', () => {
       expect(removePendingUpload).toHaveBeenCalled();
     });
 
-    it('后台上传生成签名 URL 失败时应清理已上传对象并返回失败', async () => {
+    it('后台上传生成签名 URL 失败时保留 durable 上传意图，避免删除后续重试对象', async () => {
       const { FileTypeValidatorService } = await import('./file-type-validator.service');
       const { VirusScanService } = await import('./virus-scan.service');
       const upload = vi.fn().mockResolvedValue({ data: { path: 'uploaded' }, error: null });
@@ -453,6 +453,7 @@ describe('AttachmentService', () => {
         error: new Error('signed url failed'),
       });
       const remove = vi.fn().mockResolvedValue({ data: [], error: null });
+      const enqueueCleanup = vi.fn().mockResolvedValue([]);
       const bucket = { upload, createSignedUrl, remove };
       const storage = {
         from: vi.fn(() => bucket),
@@ -467,7 +468,7 @@ describe('AttachmentService', () => {
           { provide: VirusScanService, useValue: mockVirusScan },
           { provide: ActionQueueService, useValue: { enqueueDurably: vi.fn().mockResolvedValue('queued') } },
           { provide: AttachmentUploadOutboxService, useValue: { savePendingUpload: vi.fn().mockResolvedValue(undefined) } },
-          { provide: AttachmentCleanupOutboxService, useValue: { enqueuePaths: vi.fn().mockResolvedValue([]), removePendingCleanups: vi.fn() } },
+          { provide: AttachmentCleanupOutboxService, useValue: { enqueuePaths: enqueueCleanup, removePendingCleanups: vi.fn() } },
           { provide: DestroyRef, useValue: { onDestroy: vi.fn() } },
         ],
       });
@@ -489,9 +490,8 @@ describe('AttachmentService', () => {
         userId: 'user1',
         sourceUserId: 'user1',
       }, new Blob(['test'], { type: 'text/plain' }))).rejects.toBeTruthy();
-      expect(remove).toHaveBeenCalledWith([
-        'user1/proj1/task1/attachment-1.txt',
-      ]);
+      expect(remove).not.toHaveBeenCalled();
+      expect(enqueueCleanup).not.toHaveBeenCalled();
     });
 
     it('后台重放遇到同一路径对象已存在时应继续生成签名 URL 并返回已上传附件', async () => {

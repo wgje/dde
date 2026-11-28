@@ -223,6 +223,69 @@ describe('offline command stores', () => {
     await expect(store.commitLocalChange(write)).resolves.toBeUndefined();
     await expect(store.commitLocalChange({ ...write, command: { ...write.command, command: { type: 'different' } } })).rejects.toThrow('operationId collision');
   });
+  it('rejects concurrent operation collisions across connections without overwriting committed evidence', async () => {
+    const dbName = 'concurrent-command-collision';
+    const first = new IndexedDbOfflineCommandStore({ indexedDb, dbName });
+    const second = new IndexedDbOfflineCommandStore({ indexedDb, dbName });
+    await Promise.all([first.init(), second.init()]);
+    const conflictingWrite: OfflineCommandStoreWrite<{ type: string }, { name: string }> = {
+      ...write,
+      projection: { ...write.projection, value: { name: 'overwritten' }, version: 2 },
+      command: { ...write.command, command: { type: 'different' } },
+      audit: { ...write.audit, operation: 'different', localTimestamp: '2026-11-14T00:00:00.000Z' },
+      conflictEvidence: [{
+        ownerUserId: 'user-1', conflictId: 'rejected-conflict', entityType: 'task', entityId: 'task-1',
+        losingOperationId: 'op-1', winningOperationId: 'op-other', evidence: { rejected: true },
+        capturedAt: '2026-11-14T00:00:00.000Z',
+      }],
+    };
+
+    const outcomes = await Promise.allSettled([
+      first.commitLocalChange(write),
+      second.commitLocalChange(conflictingWrite),
+    ]);
+
+    expect(outcomes[0]).toEqual({ status: 'fulfilled', value: undefined });
+    expect(outcomes[1]).toEqual({ status: 'rejected', reason: expect.objectContaining({ message: 'Offline command operationId collision' }) });
+    const exported = await second.exportOwner('user-1');
+    expect(exported.projections).toEqual([expect.objectContaining({ value: { name: 'offline' }, version: 1 })]);
+    expect(exported.commands).toEqual([expect.objectContaining({ command: write.command.command })]);
+    expect(exported.audits).toEqual([expect.objectContaining({ operation: 'updateTask', localTimestamp: write.audit.localTimestamp })]);
+    expect(exported.conflictEvidence).toEqual([]);
+  });
+
+  it('rolls back every record if a later write fails after the identity check', async () => {
+    const store = new IndexedDbOfflineCommandStore({ indexedDb, dbName: 'atomic-command-write-failure' });
+    await store.commitLocalChange(write);
+    const before = await store.exportOwner('user-1');
+
+    await expect(store.commitLocalChange({
+      ...write,
+      projection: { ...write.projection, value: { name: 'must roll back' }, version: 2 },
+      command: { ...write.command, operationId: 'op-2', command: { type: 'updateTask', uncloneable: () => undefined } },
+      audit: { ...write.audit, operationId: 'op-2' },
+    })).rejects.toThrow();
+
+    await expect(store.exportOwner('user-1')).resolves.toEqual(before);
+  });
+
+  it('accepts concurrent identical commands across connections as idempotent writes', async () => {
+    const dbName = 'concurrent-idempotent-command';
+    const first = new IndexedDbOfflineCommandStore({ indexedDb, dbName });
+    const second = new IndexedDbOfflineCommandStore({ indexedDb, dbName });
+    await Promise.all([first.init(), second.init()]);
+
+    await expect(Promise.all([
+      first.commitLocalChange(write),
+      second.commitLocalChange(write),
+    ])).resolves.toEqual([undefined, undefined]);
+
+    const exported = await first.exportOwner('user-1');
+    expect(exported.projections).toHaveLength(1);
+    expect(exported.commands).toHaveLength(1);
+    expect(exported.audits).toHaveLength(1);
+  });
+
   it('supports localStorage fallback with a versioned envelope', async () => {
     const values = new Map<string, string>();
     const storage = { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => { values.set(key, value); }, removeItem: () => undefined, clear: () => undefined, key: () => null, length: 0 } as unknown as Storage;

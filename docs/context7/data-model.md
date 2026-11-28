@@ -206,3 +206,15 @@ Task cloud queries must include:
 - planning fields: `expected_minutes`, `cognitive_load`, `wait_minutes`
 
 Dropping `content` from task sync fields is a known data-loss class.
+
+## Offline command receipt identity (2026-11-28)
+
+`public.sync_command_log.command_digest` is a nullable SHA-256 digest of a versioned business-command identity. It is nullable by design so historical receipts are not silently reinterpreted: a NULL digest produces `reconciliation-pending` rather than an acknowledgement. The identity is reconstructed from the retained envelope and owner and excludes deployment/transport metadata, allowing a legitimate retry after a deployment change while rejecting entity, command, intent, patch, clock, or owner drift.
+
+The owner-scoped `sync_apply_offline_command(jsonb)` and `sync_get_offline_command_status(jsonb)` RPCs return the identity/digest when available. `sync_command_log` remains forced-RLS and capability-gated; the command transport is not enabled merely by adding this column.
+
+The focus/routine upsert forward migration adds no entity columns. It changes only the conflict-update owner predicate and zero-row rejection in `sync_upsert_focus_session(jsonb)` and `sync_upsert_routine_task(jsonb)`.
+
+## Attachment upload retry safety (2026-11-28)
+
+A signed-URL generation failure after Storage upload does not issue an immediate hard delete. The durable attachment-upload intent retains the owner/project/task/attachment path for retry; this prevents a stale cleanup request from deleting an object reused by a later successful retry. Hard deletion remains an explicit cleanup/outbox path and still requires owner-scoped path validation.

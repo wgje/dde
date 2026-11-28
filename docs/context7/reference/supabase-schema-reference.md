@@ -146,3 +146,9 @@ Incremental sync uses `updated_at > last_sync_time` with a safety lookback where
 ## Fresh-init execution order
 
 Create `public.projects` before SQL-language owner/access helpers that reference it. The initial `active_tasks` view must use an explicit stable column prefix compatible with its final replacement; a changing `SELECT t.*` prefix can make PostgreSQL reject the later view. Validate a fresh database with function-body checks enabled. Local replay and rollback receipts do not establish production parity.
+
+## Sync safety additions (2026-11-28)
+
+The sync schema includes owner-scoped `sync_command_log` receipts and domain-apply records. `sync_command_log.command_digest` is nullable for historical compatibility and must be treated as an identity-verification state, not as an optional acknowledgement field. The `sync_apply_offline_command` and `sync_get_offline_command_status` RPCs expose `commandDigest`/`commandIdentity` only when the receipt is bound; otherwise callers must keep the outcome unknown.
+
+`sync_upsert_focus_session` and `sync_upsert_routine_task` retain their existing columns. Their forward repair adds owner predicates to conflict updates to close the missing-row/RLS race. The repair is drift-gated and fail-closed.

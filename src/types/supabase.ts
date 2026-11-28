@@ -1,3 +1,6 @@
+// Schema note (2026-11-28): linked production types are intentionally retained until the
+// target-bound receipt-identity migration is deployed; the forward migration adds
+// nullable public.sync_command_log.command_digest without changing current client rows.
 export type Json =
   | string
   | number
@@ -613,6 +616,72 @@ export type Database = {
           max_times_per_day?: number
           title?: string
           updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
+      sync_command_log: {
+        Row: {
+          base_updated_at: string | null
+          base_version: number | null
+          command: string
+          command_digest: string | null
+          dependency_operation_ids: Json
+          device_id: string
+          entity_id: string
+          entity_type: string
+          envelope: Json
+          field_versions: Json
+          installation_id: string
+          intent: Json
+          logical_clock_logical: number
+          logical_clock_physical_ms: number
+          normalized_result_patch: Json
+          operation_id: string
+          received_at: string
+          status: string
+          user_id: string
+        }
+        Insert: {
+          base_updated_at?: string | null
+          base_version?: number | null
+          command: string
+          command_digest?: string | null
+          dependency_operation_ids?: Json
+          device_id: string
+          entity_id: string
+          entity_type: string
+          envelope: Json
+          field_versions?: Json
+          installation_id: string
+          intent?: Json
+          logical_clock_logical: number
+          logical_clock_physical_ms: number
+          normalized_result_patch?: Json
+          operation_id: string
+          received_at?: string
+          status?: string
+          user_id: string
+        }
+        Update: {
+          base_updated_at?: string | null
+          base_version?: number | null
+          command?: string
+          command_digest?: string | null
+          dependency_operation_ids?: Json
+          device_id?: string
+          entity_id?: string
+          entity_type?: string
+          envelope?: Json
+          field_versions?: Json
+          installation_id?: string
+          intent?: Json
+          logical_clock_logical?: number
+          logical_clock_physical_ms?: number
+          normalized_result_patch?: Json
+          operation_id?: string
+          received_at?: string
+          status?: string
           user_id?: string
         }
         Relationships: []

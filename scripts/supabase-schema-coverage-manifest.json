@@ -15,7 +15,6 @@
     "project_members": "The current local compatibility target retains and reconverges this table; linked types must be regenerated after Preview replay.",
     "quarantined_files": "The service-role virus quarantine table is present in migration replay and fresh-init; linked types predate the local target.",
     "sync_command_domain_apply_log": "Offline command internal storage table is present in fresh-init/replay but intentionally absent from linked generated public types until regenerated against a deployed compatible schema.",
-    "sync_command_log": "Offline command internal storage table is present in fresh-init/replay but intentionally absent from linked generated public types until regenerated against a deployed compatible schema.",
     "sync_command_projection": "Offline command internal storage table is present in fresh-init/replay but intentionally absent from linked generated public types until regenerated against a deployed compatible schema."
   },
   "generatedTypeColumnsAheadOfFreshInit": {},

@@ -483,11 +483,17 @@ export class AttachmentService {
 
     const url = urlData?.signedUrl;
     if (signedUrlError || !url) {
-      await this.removeUploadedFileAfterMetadataFailure(ownerUserId, filePath);
+      // The upload already has a durable queue intent. Do not issue a best-effort
+      // Storage delete here: a later retry may successfully reuse this exact path,
+      // and an in-flight delete cannot be withdrawn across tabs or workers.
+      this.logger.warn('签名 URL 生成失败，保留 durable 上传意图等待重试', {
+        ownerUserId,
+        filePath,
+        error: signedUrlError ?? 'signed URL missing',
+      });
       if (signedUrlError) throw supabaseErrorToError(signedUrlError);
       throw new Error('签名 URL 生成失败');
     }
-
     return url;
   }
 
@@ -528,30 +534,6 @@ export class AttachmentService {
     return { success: false, error: err?.message ?? '上传失败' };
   }
 
-  private async removeUploadedFileAfterMetadataFailure(
-    ownerUserId: string,
-    filePath: string,
-  ): Promise<void> {
-    let pendingRecords: PendingAttachmentCleanupRecord[] = [];
-    try {
-      pendingRecords = await this.cleanupOutbox.enqueuePaths([filePath], { ownerUserId });
-    } catch (error) {
-      this.logger.warn('签名 URL 生成失败后清理队列持久化失败，继续尝试即时清理', { filePath, error });
-    }
-
-    try {
-      const { error } = await this.supabase.client().storage
-        .from(ATTACHMENT_CONFIG.BUCKET_NAME)
-        .remove([filePath]);
-      if (error) {
-        this.logger.warn('签名 URL 生成失败后清理已上传文件失败', { filePath, error });
-        return;
-      }
-      await this.cleanupOutbox.removePendingCleanups(pendingRecords);
-    } catch (cleanupError) {
-      this.logger.warn('签名 URL 生成失败后清理已上传文件异常', { filePath, error: cleanupError });
-    }
-  }
 
   /**
    * 取消指定文件的上传

@@ -230,3 +230,11 @@ Viewport fit, pan and zoom are local owner-scoped metadata only. They do not dir
 ### Save ingress safety follow-up
 
 Local-only projects and the local-mode user return before queue resolution. Missing queue capability never falls back to a first RPC. The command snapshot is deeply cloned before the asynchronous durable enqueue boundary. Existing leaf operations only cover the same owner, project, entity payload and write intent; an older pending action cannot suppress a newer edit. Missing update-field evidence blocks metadata acknowledgement instead of guessing a full task upsert. On network suspension, task retry handoff uses the frozen write-plan intent even after the live ChangeTracker has been cleared.
+
+## Durable command identity and replay fencing (2026-11-28)
+
+Offline command replay is bound to the complete business command identity, not to an operation ID alone. The identity includes the owner, operation/entity identity, command, intent, normalized result patch, logical clock, dependency IDs, field versions, and version baseline; transport/deployment metadata is intentionally excluded. `sync_apply_offline_command` returns `rejected` for a same-owner operation-ID collision with a different identity and `reconciliation-pending` for historical receipts whose identity cannot be proven. The client replay adapter and unknown-outcome owner coordinator must require the same identity before acknowledging a receipt.
+
+`IndexedDbOfflineCommandStore.commitLocalChange` checks an existing operation ID and writes the command, projection, audit, and conflict evidence in one readwrite transaction. Concurrent different-content submissions therefore reject without replacing the prior projection or audit; identical submissions remain idempotent. This preserves Exportable, Restorable, Replayable, and Explainable guarantees.
+
+The forward migrations are `20261128100000_offline_command_receipt_identity.sql` and `20261128090000_atomic_focus_routine_owner_upsert.sql`. Both remain capability/deployment gated; local and remote focused tests are not production deployment proof.

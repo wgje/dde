@@ -281,18 +281,12 @@ export class IndexedDbOfflineCommandStore implements OfflineCommandStore {
     await this.open();
   }
 
-  async commitLocalChange<TCommand, TProjection>(
-    input: OfflineCommandStoreWrite<TCommand, TProjection>,
-  ): Promise<void> {
+  async commitLocalChange<TCommand, TProjection>(input: OfflineCommandStoreWrite<TCommand, TProjection>): Promise<void> {
     const db = await this.open();
     assertOwnerConsistency(input);
     const projection = withSchemaVersion({
       ...input.projection,
-      key: input.projection.key ?? projectionKey(
-        input.ownerUserId,
-        input.projection.entityType,
-        input.projection.entityId,
-      ),
+      key: input.projection.key ?? projectionKey(input.ownerUserId, input.projection.entityType, input.projection.entityId),
     });
     const command = withSchemaVersion({
       ...input.command,
@@ -307,10 +301,6 @@ export class IndexedDbOfflineCommandStore implements OfflineCommandStore {
       key: item.key ?? conflictEvidenceKey(input.ownerUserId, item.conflictId),
     }));
 
-    const commandCheck = db.transaction(OFFLINE_COMMAND_STORE_NAMES.commands, 'readonly').objectStore(OFFLINE_COMMAND_STORE_NAMES.commands);
-    const existingCommand = await requestToPromise<OfflineCommandRecord<TCommand> | undefined>(commandCheck.get(command.key));
-    if (existingCommand) assertOperationIdempotent(existingCommand, command);
-
     const transaction = db.transaction(
       [
         OFFLINE_COMMAND_STORE_NAMES.projections,
@@ -320,12 +310,28 @@ export class IndexedDbOfflineCommandStore implements OfflineCommandStore {
       ],
       'readwrite',
     );
-    transaction.objectStore(OFFLINE_COMMAND_STORE_NAMES.projections).put(projection);
-    transaction.objectStore(OFFLINE_COMMAND_STORE_NAMES.commands).put(command);
-    transaction.objectStore(OFFLINE_COMMAND_STORE_NAMES.audits).put(audit);
-    const evidenceStore = transaction.objectStore(OFFLINE_COMMAND_STORE_NAMES.conflictEvidence);
-    conflictEvidence.forEach(item => evidenceStore.put(item));
-    await transactionToPromise(transaction);
+    const commandStore = transaction.objectStore(OFFLINE_COMMAND_STORE_NAMES.commands);
+    const commandCheck = commandStore.get(command.key);
+    let writeError: unknown;
+    // IndexedDB serializes overlapping readwrite transactions across connections.
+    // Check the identity under that same transaction before replacing any records.
+    commandCheck.onsuccess = () => {
+      try {
+        const existingCommand = commandCheck.result as OfflineCommandRecord<TCommand> | undefined;
+        if (existingCommand) assertOperationIdempotent(existingCommand, command);
+        transaction.objectStore(OFFLINE_COMMAND_STORE_NAMES.projections).put(projection);
+        commandStore.put(command);
+        transaction.objectStore(OFFLINE_COMMAND_STORE_NAMES.audits).put(audit);
+        const evidenceStore = transaction.objectStore(OFFLINE_COMMAND_STORE_NAMES.conflictEvidence);
+        conflictEvidence.forEach(item => evidenceStore.put(item));
+      } catch (error) {
+        writeError = error;
+        transaction.abort();
+      }
+    };
+    await transactionToPromise(transaction).catch(error => {
+      throw writeError ?? error;
+    });
   }
 
   async getProjection<TProjection>(ownerUserId: string, key: string): Promise<OfflineProjectionRecord<TProjection> | null> {

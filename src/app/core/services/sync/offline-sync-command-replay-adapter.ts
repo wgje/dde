@@ -24,7 +24,7 @@ export interface OfflineSyncCommandReplayDispatchOutcome {
 export type OfflineSyncCommandReplayResult =
   | { readonly status: 'acked' }
   | { readonly status: 'replayed'; readonly success: boolean; readonly decision?: string; readonly rawResponse?: unknown; readonly serverUpdatedAt?: string }
-  | { readonly status: 'unknown' }
+  | { readonly status: 'unknown'; readonly decision?: string; readonly rawResponse?: unknown }
   | { readonly status: 'skipped'; readonly reason: 'terminal' | 'unsupported' };
 
 export type OfflineSyncCommandFor<TEntity extends OfflineSyncEntityType> =
@@ -146,17 +146,83 @@ export function createOfflineSyncCommandEnvelopeDispatcher(
     }
     const confirmation = await client.getOfflineCommandStatus({ operationId: command.operationId });
     const domainStatus = confirmation.domainApplyStatus ?? 'missing';
-    const success = confirmation.appliedToDomainTables === true
+    const binding = offlineSyncCommandReceiptBinding(command, confirmation);
+    const domainApplied = confirmation.appliedToDomainTables === true
       && (domainStatus === 'applied' || domainStatus === 'idempotent-replay');
+    const success = domainApplied && binding === 'matched';
     return {
       success,
-      decision: domainStatus,
+      decision: domainStatus === 'missing' ? 'domain-apply-status-unavailable'
+        : domainApplied && binding !== 'matched' ? binding : domainStatus,
       rawResponse: { ingest: ingest.raw, confirmation: confirmation.raw },
       ...(confirmation.serverUpdatedAt === undefined ? {} : { serverUpdatedAt: confirmation.serverUpdatedAt }),
     };
   };
 }
 
+/** A readback must prove the exact command, not merely that the operation ID exists. */
+export function reconcileOfflineSyncCommandReceipt(
+  command: OfflineSyncCommandEnvelope,
+  status: SyncRpcResult,
+): RetryQueueUnknownOutcomeReconcileResult {
+  if (status.reason === 'offline-command-not-found') return 'replay';
+  if (offlineSyncCommandReceiptBinding(command, status) !== 'matched') return 'unknown';
+  if (status.appliedToDomainTables === true
+    && (status.domainApplyStatus === 'applied' || status.domainApplyStatus === 'idempotent-replay')) return 'settled';
+  return status.domainApplyStatus && status.domainApplyStatus !== 'missing' ? 'replay' : 'unknown';
+}
+
+function offlineSyncCommandReceiptBinding(
+  command: OfflineSyncCommandEnvelope,
+  receipt: SyncRpcResult,
+): 'matched' | 'command-receipt-identity-unverified' | 'command-receipt-identity-mismatch' {
+  const raw = asRecord(receipt.raw);
+  if (typeof raw['commandDigest'] !== 'string' || !/^[a-f0-9]{64}$/.test(raw['commandDigest'])
+    || typeof raw['commandIdentity'] !== 'object' || raw['commandIdentity'] === null) {
+    return 'command-receipt-identity-unverified';
+  }
+  const identity = {
+    identityVersion: 1,
+    schemaVersion: command.schemaVersion,
+    operationId: command.operationId,
+    ownerUserId: command.ownerUserId,
+    installationId: command.installationId,
+    deviceId: command.deviceId,
+    logicalClock: command.logicalClock,
+    entityType: command.entityType,
+    entityId: command.entityId,
+    projectId: command.projectId ?? null,
+    command: command.command,
+    intent: command.intent,
+    baseVersion: command.baseVersion ?? null,
+    baseUpdatedAt: command.baseUpdatedAt ?? null,
+    normalizedResultPatch: command.normalizedResultPatch,
+    dependencyOperationIds: command.dependencyOperationIds,
+    fieldVersions: (command as unknown as Record<string, unknown>)['fieldVersions'] ?? {},
+  };
+  return raw['operationId'] === command.operationId && jsonIdentityEquals(identity, raw['commandIdentity'])
+    ? 'matched'
+    : 'command-receipt-identity-mismatch';
+}
+
+function jsonIdentityEquals(expected: unknown, actual: unknown): boolean {
+  const pending: Array<readonly [unknown, unknown]> = [[expected, actual]];
+  while (pending.length > 0) {
+    const [left, right] = pending.pop()!;
+    if (left === right) continue;
+    if (left === null || right === null || typeof left !== 'object' || typeof right !== 'object') return false;
+    if (Array.isArray(left) !== Array.isArray(right)) return false;
+    const expectedRecord = left as Record<string, unknown>;
+    const actualRecord = right as Record<string, unknown>;
+    const keys = Object.keys(expectedRecord);
+    if (keys.length !== Object.keys(actualRecord).length) return false;
+    for (const key of keys) {
+      if (!Object.prototype.hasOwnProperty.call(actualRecord, key)) return false;
+      pending.push([expectedRecord[key], actualRecord[key]]);
+    }
+  }
+  return true;
+}
 /**
  * Only commands with a verified server domain-apply translation are routed to
  * the envelope endpoint. Registered intent alone does not imply server support.
@@ -436,13 +502,27 @@ export async function replayOfflineSyncCommand(
     await quarantineUnsupportedCommand(command, 'no-replay-handler', options);
     return { status: 'skipped', reason: 'unsupported' };
   }
-  if (typeof success === 'boolean' || !options.captureRemoteEvidence) {
-    return { status: 'replayed', success: typeof success === 'boolean' ? success : success.success };
+  return toOfflineSyncCommandReplayResult(success, options.captureRemoteEvidence === true);
+}
+
+function toOfflineSyncCommandReplayResult(
+  outcome: boolean | OfflineSyncCommandReplayDispatchOutcome,
+  captureEvidence: boolean,
+): OfflineSyncCommandReplayResult {
+  if (typeof outcome !== 'boolean' && !outcome.success && [
+    'reconciliation-pending', 'command-receipt-identity-unverified', 'domain-apply-status-unavailable',
+  ].includes(outcome.decision ?? '')) {
+    return { status: 'unknown', decision: outcome.decision,
+      ...(captureEvidence && outcome.rawResponse !== undefined ? { rawResponse: outcome.rawResponse } : {}),
+    };
   }
-  return { status: 'replayed', success: success.success,
-    ...(success.decision === undefined ? {} : { decision: success.decision }),
-    ...(success.rawResponse === undefined ? {} : { rawResponse: success.rawResponse }),
-    ...(success.serverUpdatedAt === undefined ? {} : { serverUpdatedAt: success.serverUpdatedAt }),
+  if (typeof outcome === 'boolean' || !captureEvidence) {
+    return { status: 'replayed', success: typeof outcome === 'boolean' ? outcome : outcome.success };
+  }
+  return { status: 'replayed', success: outcome.success,
+    ...(outcome.decision === undefined ? {} : { decision: outcome.decision }),
+    ...(outcome.rawResponse === undefined ? {} : { rawResponse: outcome.rawResponse }),
+    ...(outcome.serverUpdatedAt === undefined ? {} : { serverUpdatedAt: outcome.serverUpdatedAt }),
   };
 }
 
