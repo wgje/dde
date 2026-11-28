@@ -20,7 +20,8 @@
     "recovery",
     "dashboard",
     "controls",
-    "feedback"
+    "feedback",
+    "task-archive"
   ],
   "exceptions": {
     "app-project-shell": "ordinary Demo structural shell",
@@ -219,17 +220,17 @@
       }
     },
     "app-text-unassigned": {
-      "test": "src/app/dev-preview/demo-text-lists-preview.component.spec.ts",
+      "test": "src/app/dev-preview/demo-task-archive-preview.component.spec.ts",
       "scenario": {
-        "widget": "text-lists",
+        "widget": "task-archive",
         "state": "unassigned"
       }
     },
     "app-text-unfinished": {
-      "test": "src/app/dev-preview/demo-text-lists-preview.component.spec.ts",
+      "test": "src/app/dev-preview/demo-task-archive-preview.component.spec.ts",
       "scenario": {
-        "widget": "text-lists",
-        "state": "unfinished"
+        "widget": "task-archive",
+        "state": "assigned"
       }
     },
     "app-pwa-install-prompt-banner": {
@@ -440,6 +441,13 @@
       "scenario": {
         "widget": "dock",
         "state": "create"
+      }
+    },
+    "app-text-stages": {
+      "test": "src/app/dev-preview/demo-task-archive-preview.component.spec.ts",
+      "scenario": {
+        "widget": "task-archive",
+        "state": "assigned"
       }
     }
   }

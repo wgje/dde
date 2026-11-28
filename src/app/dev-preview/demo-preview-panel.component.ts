@@ -1,3 +1,4 @@
+import { DemoTaskArchivePreviewComponent } from './demo-task-archive-preview.component';
 import { ChangeDetectionStrategy, Component, signal } from '@angular/core';
 import { DemoDesktopDockPreviewComponent } from './demo-desktop-dock-preview.component';
 import { DemoTaskTreePreviewComponent } from './demo-task-tree-preview.component';
@@ -20,7 +21,7 @@ import { DEMO_PREVIEW_SCENARIOS, demoPreviewHref } from './demo-preview-registry
 
 @Component({
   selector: 'app-demo-preview-panel', standalone: true,
-  imports: [DemoDockEntryPreviewComponent, DemoFlowPanelsPreviewComponent, DemoFeedbackPreviewComponent, DemoFocusShellPreviewComponent, DemoFlowControlsPreviewComponent, DemoTextListsPreviewComponent, DemoControlsPreviewComponent, DemoKnowledgePreviewComponent, DemoDesktopDockPreviewComponent, DemoTaskTreePreviewComponent, DemoPreviewSurfacesComponent, DemoDashboardPreviewComponent, DemoBlackBoxPreviewComponent, DemoTaskPreviewComponent, DemoDockPreviewComponent, DemoFlowPreviewComponent, DemoFocusDecisionPreviewComponent], changeDetection: ChangeDetectionStrategy.OnPush,
+  imports: [DemoTaskArchivePreviewComponent, DemoDockEntryPreviewComponent, DemoFlowPanelsPreviewComponent, DemoFeedbackPreviewComponent, DemoFocusShellPreviewComponent, DemoFlowControlsPreviewComponent, DemoTextListsPreviewComponent, DemoControlsPreviewComponent, DemoKnowledgePreviewComponent, DemoDesktopDockPreviewComponent, DemoTaskTreePreviewComponent, DemoPreviewSurfacesComponent, DemoDashboardPreviewComponent, DemoBlackBoxPreviewComponent, DemoTaskPreviewComponent, DemoDockPreviewComponent, DemoFlowPreviewComponent, DemoFocusDecisionPreviewComponent], changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <section class="panel" data-testid="demo-preview-panel">
       <button type="button" (click)="expanded.update(toggle)" [attr.aria-expanded]="expanded()">开发预览区 · {{ expanded() ? '收起' : '展开' }}</button>
@@ -34,6 +35,7 @@ import { DEMO_PREVIEW_SCENARIOS, demoPreviewHref } from './demo-preview-registry
             <article><h3>{{ example.title }}</h3><a [href]="href(example.widget, example.state)" target="_blank" rel="noopener">单独打开此例</a>
               @defer (on viewport) {
                 @switch (example.widget) {
+          @case ('task-archive') { <app-demo-task-archive-preview [previewState]="example.state" /> }
                   @case ('desktop-dock') { <app-demo-desktop-dock-preview [state]="example.state" /> }
                   @case ('task-tree') { <app-demo-task-tree-preview [state]="example.state" /> }
                   @case ('task') { <app-demo-task-preview [state]="example.state" /> }

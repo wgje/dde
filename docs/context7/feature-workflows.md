@@ -189,3 +189,7 @@ keyboard shortcuts and local-first persistence are unchanged.
 ## Mobile Dock transparent entry
 
 The collapsed mobile Dock uses a transparent label/count and upward chevron with a 44px touch target. Focus is a secondary text action; the existing drawer and confirmation logic are unchanged. Isolated development previews: `/#/dev-preview/dock/mobile-entry` (tap to open), `/#/dev-preview/dock/mobile-open` (expanded result). Fixture data stays in page memory only.
+
+## Archived task visibility boundary
+
+`ProjectStateService.visibleTasks` is the shared main-view projection for stage tasks, unassigned tasks, root options, unfinished items and todo counts. It excludes soft-deleted and `status === 'archived'` entities while `tasks()` and validated whole-project snapshots retain the complete entities so unarchive and export can restore the original ID/content. Do not apply this view projection to synchronization serializers, metadata shells, or backup payloads.

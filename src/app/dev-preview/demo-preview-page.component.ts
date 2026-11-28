@@ -1,3 +1,4 @@
+import { DemoTaskArchivePreviewComponent } from './demo-task-archive-preview.component';
 import { ChangeDetectionStrategy, Component, afterNextRender, computed, input } from '@angular/core';
 import { DemoDesktopDockPreviewComponent } from './demo-desktop-dock-preview.component';
 import { DemoTaskTreePreviewComponent } from './demo-task-tree-preview.component';
@@ -21,7 +22,7 @@ import { resolveDemoPreviewScenario } from './demo-preview-registry';
 /** Deliberately does not inject workspace/auth/sync/persistence services. */
 @Component({
   selector: 'app-demo-preview-page', standalone: true,
-  imports: [DemoDockEntryPreviewComponent, DemoFlowPanelsPreviewComponent, DemoFeedbackPreviewComponent, DemoFocusShellPreviewComponent, DemoFlowControlsPreviewComponent, DemoTextListsPreviewComponent, DemoControlsPreviewComponent, DemoKnowledgePreviewComponent, DemoDesktopDockPreviewComponent, DemoTaskTreePreviewComponent, DemoBlackBoxPreviewComponent, DemoFlowPreviewComponent, DemoFocusDecisionPreviewComponent, DemoDashboardPreviewComponent, DemoDockPreviewComponent, DemoTaskPreviewComponent, DemoPreviewSurfacesComponent],
+  imports: [DemoTaskArchivePreviewComponent, DemoDockEntryPreviewComponent, DemoFlowPanelsPreviewComponent, DemoFeedbackPreviewComponent, DemoFocusShellPreviewComponent, DemoFlowControlsPreviewComponent, DemoTextListsPreviewComponent, DemoControlsPreviewComponent, DemoKnowledgePreviewComponent, DemoDesktopDockPreviewComponent, DemoTaskTreePreviewComponent, DemoBlackBoxPreviewComponent, DemoFlowPreviewComponent, DemoFocusDecisionPreviewComponent, DemoDashboardPreviewComponent, DemoDockPreviewComponent, DemoTaskPreviewComponent, DemoPreviewSurfacesComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <main data-testid="dev-preview-page">
@@ -31,6 +32,7 @@ import { resolveDemoPreviewScenario } from './demo-preview-registry';
         <p>这里的操作只保存在本页内存中。刷新后恢复样例，不影响你保存的演示数据。</p>
         @for (key of [example.widget + "/" + example.state]; track key) {
         @switch (widget()) {
+          @case ('task-archive') { <app-demo-task-archive-preview [previewState]="state()" /> }
           @case ('desktop-dock') { <app-demo-desktop-dock-preview [state]="state()" /> }
           @case ('task-tree') { <app-demo-task-tree-preview [state]="state()" /> }
           @case ('flow-controls') { <app-demo-flow-controls-preview [state]="state()" /> }

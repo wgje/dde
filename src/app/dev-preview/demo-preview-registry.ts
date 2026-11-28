@@ -9,6 +9,10 @@ export interface DemoPreviewScenario {
 
 /** Stable URLs describe fixtures, never persisted entity IDs or user data. */
 export const DEMO_PREVIEW_SCENARIOS: readonly DemoPreviewScenario[] = [
+  { widget: 'task-archive', state: 'assigned', title: '流程图归档 · 阶段任务', steps: '点击“在流程图归档任务”；阶段卡片、根任务选项和未完成事项同时消失。取消归档后恢复。' },
+  { widget: 'task-archive', state: 'assigned-archived', title: '流程图归档 · 阶段隐藏结果', steps: '静态归档结果；打开链接不会执行归档。点击取消归档可恢复同一任务。' },
+  { widget: 'task-archive', state: 'unassigned', title: '流程图归档 · 待分配任务', steps: '点击“在流程图归档任务”；待分配列表与未完成事项同时隐藏该任务。' },
+  { widget: 'task-archive', state: 'unassigned-archived', title: '流程图归档 · 待分配隐藏结果', steps: '静态归档结果；任务数据仍在本次预览中，点击取消归档可恢复。' },
   { widget: 'flow', state: 'overview-dense', title: '小地图 · 124 个任务的多树定位', steps: '点击主图任务或选择树 1 的任务 13；小地图持续标出该节点、直接邻居和跨树关系。放大主图观察地图比例尺持续变化。' },
   { widget: 'flow', state: 'overview-selected', title: '小地图 · 多树选中结果', steps: '静态选中样例；切换到树 3 的任务 19，或清除选择，验证地图反馈同步。' },
   { widget: 'flow', state: 'overview-zoomed', title: '小地图 · 多树放大结果', steps: '预置放大状态；点击放大主图继续放大，不应停在全图适配比例。' },

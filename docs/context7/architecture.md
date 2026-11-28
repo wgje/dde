@@ -49,6 +49,14 @@ Store rules:
 - Services inject concrete stores directly.
 - Revision equality is based on `updatedAt` plus `deletedAt`.
 
+## Main-view Task Visibility
+
+`ProjectStateService.tasks` retains every task entity in the current project, including archived and deleted tasks, so canonical project reconstruction and exports keep the original IDs and content. Main-view lists derive from `visibleTasks`, which excludes tasks with `deletedAt` or `status === 'archived'`.
+
+Stages, unassigned tasks, root-task options, unfinished Markdown items, and task-todo counts share this projection. A Flow archive action therefore hides the same entity from Text immediately after the status update; cancelling archive restores the original entity to these lists. Archiving a parent does not hide its still-active descendants. The trash selector continues to read the complete task collection.
+
+Regression coverage lives in `project-state-task-visibility.spec.ts` and the isolated real-component `demo-task-archive-preview.component.spec.ts`.
+
 ## Core Service Areas
 
 | Area | Key paths | Responsibility |
