@@ -131,7 +131,7 @@ export class ProjectSaveTaskBatchService {
         userId: context.userId,
         operationId: context.operationId,
         positionOnlyUpdate: this.isPositionOnlyTaskUpdate(changedFields),
-        writeIntent: this.getTaskWriteIntent(changedFields),
+        writeIntent: context.writePlan?.taskWriteIntents[task.id] ?? this.getTaskWriteIntent(changedFields),
         failedTaskIds: context.state.failedTaskIds,
       });
       if (!context.isSessionCurrent()) {

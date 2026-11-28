@@ -1,9 +1,446 @@
 {
-  "minimumScenarioCount": 4,
-  "requiredWidgets": ["flow"],
-  "exceptions": {},
+  "minimumScenarioCount": 141,
+  "requiredWidgets": [
+    "task",
+    "task-tree",
+    "desktop-dock",
+    "dock",
+    "flow",
+    "flow-controls",
+    "flow-panels",
+    "text-lists",
+    "knowledge",
+    "inbox",
+    "settings",
+    "focus",
+    "focus-decision",
+    "focus-shell",
+    "status",
+    "black-box",
+    "recovery",
+    "dashboard",
+    "controls",
+    "feedback"
+  ],
+  "exceptions": {
+    "app-project-shell": "ordinary Demo structural shell",
+    "app-workspace-sidebar-panel": "ordinary workspace shell composition; its real SyncStatus child is covered by the feedback fixture and the shell panel requires the live workspace template surface",
+    "app-demo-banner": "ordinary Demo structural shell",
+    "app-parking-dock": "ordinary Demo structural shell",
+    "app-login-modal": "out-of-scope authentication",
+    "app-error-recovery-modal": "out-of-scope exceptional recovery",
+    "app-workspace-login-required-overlay": "out-of-scope authentication",
+    "app-workspace-bootstrap-failure": "out-of-scope bootstrap failure",
+    "app-migration-modal": "out-of-scope migration",
+    "app-storage-escape-modal": "out-of-scope storage recovery",
+    "app-conflict-modal": "out-of-scope conflict recovery",
+    "app-settings-modal": "Workspace settings orchestrator: isolated settings/* fixtures mount its real sections; modal owner/auth integration remains tested by settings-modal.component.spec.ts.",
+    "app-dock-status-machine-pip": "Native document-picture-in-picture host requires user gesture/browser capability; status/* covers in-page HUD, not native PiP.",
+    "app-settings-modal-focus": "not present at release HEAD; no runtime selector exists to preview",
+    "app-settings-modal-routines": "not present at release HEAD; no runtime selector exists to preview",
+    "app-settings-modal-transfer": "not present at release HEAD; no runtime selector exists to preview",
+    "app-settings-modal-backup": "not present at release HEAD; no runtime selector exists to preview",
+    "app-settings-modal-siyuan": "not present at release HEAD; no runtime selector exists to preview"
+  },
   "selectorFixtureHints": {
-    "app-flow-minimap": {"test":"src/app/dev-preview/demo-flow-preview.component.spec.ts","scenario":{"widget":"flow","state":"overview-dense"}},
-    "app-flow-minimap-legend": {"test":"src/app/dev-preview/demo-flow-preview.component.spec.ts","scenario":{"widget":"flow","state":"legend"}}
+    "app-text-task-card": {
+      "test": "src/app/dev-preview/demo-task-preview.component.spec.ts",
+      "scenario": {
+        "widget": "task",
+        "state": "active"
+      }
+    },
+    "app-flow-task-detail": {
+      "test": "src/app/dev-preview/demo-flow-detail-preview.component.spec.ts",
+      "scenario": {
+        "widget": "flow",
+        "state": "detail"
+      }
+    },
+    "app-flow-palette": {
+      "test": "src/app/dev-preview/demo-flow-panels-preview.component.spec.ts",
+      "scenario": {
+        "widget": "flow-panels",
+        "state": "palette"
+      }
+    },
+    "app-flow-right-panel": {
+      "test": "src/app/dev-preview/demo-flow-panels-preview.component.spec.ts",
+      "scenario": {
+        "widget": "flow-panels",
+        "state": "right-panel"
+      }
+    },
+    "app-flow-overview-panel": {
+      "test": "src/app/dev-preview/demo-flow-preview.component.spec.ts",
+      "scenario": {
+        "widget": "flow",
+        "state": "overview"
+      }
+    },
+    "app-dock-console-stack": {
+      "test": "src/app/dev-preview/demo-desktop-dock-preview.component.spec.ts",
+      "scenario": {
+        "widget": "desktop-dock",
+        "state": "console"
+      }
+    },
+    "app-dock-radar-zone": {
+      "test": "src/app/dev-preview/demo-desktop-dock-preview.component.spec.ts",
+      "scenario": {
+        "widget": "desktop-dock",
+        "state": "radar-preview"
+      }
+    },
+    "app-dock-planner-quick-edit-panel": {
+      "test": "src/app/dev-preview/demo-desktop-dock-preview.component.spec.ts",
+      "scenario": {
+        "widget": "desktop-dock",
+        "state": "planner"
+      }
+    },
+    "app-knowledge-anchor": {
+      "test": "src/app/dev-preview/demo-knowledge-preview.component.spec.ts",
+      "scenario": {
+        "widget": "knowledge",
+        "state": "bound"
+      }
+    },
+    "app-knowledge-anchor-popover": {
+      "test": "src/app/dev-preview/demo-knowledge-preview.component.spec.ts",
+      "scenario": {
+        "widget": "knowledge",
+        "state": "preview"
+      }
+    },
+    "app-dashboard-modal": {
+      "test": "src/app/dev-preview/demo-dashboard-preview.component.spec.ts",
+      "scenario": {
+        "widget": "dashboard",
+        "state": "status"
+      }
+    },
+    "app-flow-batch-delete-dialog": {
+      "test": "src/app/dev-preview/demo-flow-controls-preview.component.spec.ts",
+      "scenario": {
+        "widget": "flow-controls",
+        "state": "batch-delete"
+      }
+    },
+    "app-flow-batch-toolbar": {
+      "test": "src/app/dev-preview/demo-flow-controls-preview.component.spec.ts",
+      "scenario": {
+        "widget": "flow-controls",
+        "state": "batch-toolbar"
+      }
+    },
+    "app-flow-cascade-assign-dialog": {
+      "test": "src/app/dev-preview/demo-flow-controls-preview.component.spec.ts",
+      "scenario": {
+        "widget": "flow-controls",
+        "state": "cascade-assign"
+      }
+    },
+    "app-flow-connection-editor": {
+      "test": "src/app/dev-preview/demo-flow-controls-preview.component.spec.ts",
+      "scenario": {
+        "widget": "flow-controls",
+        "state": "connection-edit"
+      }
+    },
+    "app-flow-delete-confirm": {
+      "test": "src/app/dev-preview/demo-flow-controls-preview.component.spec.ts",
+      "scenario": {
+        "widget": "flow-controls",
+        "state": "delete-confirm"
+      }
+    },
+    "app-flow-link-action-menu": {
+      "test": "src/app/dev-preview/demo-flow-controls-preview.component.spec.ts",
+      "scenario": {
+        "widget": "flow-controls",
+        "state": "link-action"
+      }
+    },
+    "app-flow-link-delete-hint": {
+      "test": "src/app/dev-preview/demo-flow-controls-preview.component.spec.ts",
+      "scenario": {
+        "widget": "flow-controls",
+        "state": "link-delete-hint"
+      }
+    },
+    "app-flow-link-type-dialog": {
+      "test": "src/app/dev-preview/demo-flow-controls-preview.component.spec.ts",
+      "scenario": {
+        "widget": "flow-controls",
+        "state": "link-type"
+      }
+    },
+    "app-flow-toolbar": {
+      "test": "src/app/dev-preview/demo-flow-controls-preview.component.spec.ts",
+      "scenario": {
+        "widget": "flow-controls",
+        "state": "toolbar"
+      }
+    },
+    "app-mobile-todo-drawer": {
+      "test": "src/app/dev-preview/demo-text-lists-preview.component.spec.ts",
+      "scenario": {
+        "widget": "text-lists",
+        "state": "mobile-todo"
+      }
+    },
+    "app-focus-session-trigger": {
+      "test": "src/app/dev-preview/demo-focus-shell-preview.component.spec.ts",
+      "scenario": {
+        "widget": "focus-shell",
+        "state": "trigger"
+      }
+    },
+    "app-gate-overlay": {
+      "test": "src/app/dev-preview/demo-focus-shell-preview.component.spec.ts",
+      "scenario": {
+        "widget": "focus-shell",
+        "state": "gate-overlay"
+      }
+    },
+    "app-parking-notice": {
+      "test": "src/app/dev-preview/demo-feedback-preview.component.spec.ts",
+      "scenario": {
+        "widget": "feedback",
+        "state": "parking-reminder"
+      }
+    },
+    "app-text-delete-dialog": {
+      "test": "src/app/dev-preview/demo-text-lists-preview.component.spec.ts",
+      "scenario": {
+        "widget": "text-lists",
+        "state": "delete-single"
+      }
+    },
+    "app-text-unassigned": {
+      "test": "src/app/dev-preview/demo-text-lists-preview.component.spec.ts",
+      "scenario": {
+        "widget": "text-lists",
+        "state": "unassigned"
+      }
+    },
+    "app-text-unfinished": {
+      "test": "src/app/dev-preview/demo-text-lists-preview.component.spec.ts",
+      "scenario": {
+        "widget": "text-lists",
+        "state": "unfinished"
+      }
+    },
+    "app-pwa-install-prompt-banner": {
+      "test": "src/app/dev-preview/demo-feedback-preview.component.spec.ts",
+      "scenario": {
+        "widget": "feedback",
+        "state": "pwa"
+      }
+    },
+    "app-sync-status": {
+      "test": "src/app/dev-preview/demo-feedback-preview.component.spec.ts",
+      "scenario": {
+        "widget": "feedback",
+        "state": "sync"
+      }
+    },
+    "app-toast-container": {
+      "test": "src/app/dev-preview/demo-feedback-preview.component.spec.ts",
+      "scenario": {
+        "widget": "feedback",
+        "state": "toast-success"
+      }
+    },
+    "app-trash-modal": {
+      "test": "src/app/dev-preview/demo-preview-surfaces.component.spec.ts",
+      "scenario": {
+        "widget": "recovery",
+        "state": "before"
+      }
+    },
+    "app-black-box-panel": {
+      "test": "src/app/dev-preview/demo-black-box-preview.component.spec.ts",
+      "scenario": {
+        "widget": "inbox",
+        "state": "panel"
+      }
+    },
+    "app-black-box-recorder": {
+      "test": "src/app/dev-preview/demo-black-box-preview.component.spec.ts",
+      "scenario": {
+        "widget": "inbox",
+        "state": "recorder"
+      }
+    },
+    "app-strata-view": {
+      "test": "src/app/dev-preview/demo-black-box-preview.component.spec.ts",
+      "scenario": {
+        "widget": "inbox",
+        "state": "strata"
+      }
+    },
+    "app-flow-minimap": {
+      "test": "src/app/dev-preview/demo-flow-preview.component.spec.ts",
+      "scenario": {
+        "widget": "flow",
+        "state": "overview-dense"
+      }
+    },
+    "app-flow-minimap-legend": {
+      "test": "src/app/dev-preview/demo-dock-preview.component.spec.ts",
+      "scenario": {
+        "widget": "flow",
+        "state": "legend"
+      }
+    },
+    "app-dock-mobile-drawer": {
+      "test": "src/app/dev-preview/demo-dock-preview.component.spec.ts",
+      "scenario": {
+        "widget": "dock",
+        "state": "created"
+      }
+    },
+    "app-mobile-black-box-drawer": {
+      "test": "src/app/dev-preview/demo-black-box-preview.component.spec.ts",
+      "scenario": {
+        "widget": "inbox",
+        "state": "mobile"
+      }
+    },
+    "app-black-box-date-group": {
+      "test": "src/app/dev-preview/demo-black-box-preview.component.spec.ts",
+      "scenario": {
+        "widget": "inbox",
+        "state": "panel"
+      }
+    },
+    "app-black-box-entry": {
+      "test": "src/app/dev-preview/demo-black-box-preview.component.spec.ts",
+      "scenario": {
+        "widget": "inbox",
+        "state": "panel"
+      }
+    },
+    "app-black-box-text-input": {
+      "test": "src/app/dev-preview/demo-black-box-preview.component.spec.ts",
+      "scenario": {
+        "widget": "inbox",
+        "state": "panel"
+      }
+    },
+    "app-strata-layer": {
+      "test": "src/app/dev-preview/demo-black-box-preview.component.spec.ts",
+      "scenario": {
+        "widget": "inbox",
+        "state": "strata"
+      }
+    },
+    "app-text-stage-card": {
+      "test": "src/app/dev-preview/demo-task-tree-preview.component.spec.ts",
+      "scenario": {
+        "widget": "task-tree",
+        "state": "expanded"
+      }
+    },
+    "app-text-task-connections": {
+      "test": "src/app/dev-preview/demo-task-tree-preview.component.spec.ts",
+      "scenario": {
+        "widget": "task-tree",
+        "state": "connections"
+      }
+    },
+    "app-text-task-editor": {
+      "test": "src/app/dev-preview/demo-task-preview.component.spec.ts",
+      "scenario": {
+        "widget": "task",
+        "state": "sidecar-expanded"
+      }
+    },
+    "app-gate-actions": {
+      "test": "src/app/dev-preview/demo-controls-preview.component.spec.ts",
+      "scenario": {
+        "widget": "controls",
+        "state": "gate-actions"
+      }
+    },
+    "app-gate-card": {
+      "test": "src/app/dev-preview/demo-focus-shell-preview.component.spec.ts",
+      "scenario": {
+        "widget": "focus-shell",
+        "state": "gate-overlay"
+      }
+    },
+    "app-dock-fragment-countdown": {
+      "test": "src/app/dev-preview/demo-focus-decision-preview.component.spec.ts",
+      "scenario": {
+        "widget": "focus-decision",
+        "state": "countdown"
+      }
+    },
+    "app-dock-pending-decision": {
+      "test": "src/app/dev-preview/demo-focus-decision-preview.component.spec.ts",
+      "scenario": {
+        "widget": "focus-decision",
+        "state": "decision"
+      }
+    },
+    "app-dock-daily-slot": {
+      "test": "src/app/dev-preview/demo-preview-surfaces.component.spec.ts",
+      "scenario": {
+        "widget": "focus",
+        "state": "daily"
+      }
+    },
+    "app-dock-focus-scene": {
+      "test": "src/app/dev-preview/demo-preview-surfaces.component.spec.ts",
+      "scenario": {
+        "widget": "focus",
+        "state": "scene"
+      }
+    },
+    "app-dock-status-machine": {
+      "test": "src/app/dev-preview/demo-preview-surfaces.component.spec.ts",
+      "scenario": {
+        "widget": "status",
+        "state": "normal"
+      }
+    },
+    "app-settings-modal-appearance": {
+      "test": "src/app/dev-preview/demo-preview-surfaces.component.spec.ts",
+      "scenario": {
+        "widget": "settings",
+        "state": "appearance"
+      }
+    },
+    "app-new-project-modal": {
+      "test": "src/app/dev-preview/demo-controls-preview.component.spec.ts",
+      "scenario": {
+        "widget": "controls",
+        "state": "project-create"
+      }
+    },
+    "app-delete-confirm-modal": {
+      "test": "src/app/dev-preview/demo-controls-preview.component.spec.ts",
+      "scenario": {
+        "widget": "controls",
+        "state": "delete-confirm"
+      }
+    },
+    "app-config-help-modal": {
+      "test": "src/app/dev-preview/demo-controls-preview.component.spec.ts",
+      "scenario": {
+        "widget": "controls",
+        "state": "config-help"
+      }
+    },
+    "app-dock-inline-task-form": {
+      "test": "src/app/dev-preview/demo-dock-preview.component.spec.ts",
+      "scenario": {
+        "widget": "dock",
+        "state": "create"
+      }
+    }
   }
 }

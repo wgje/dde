@@ -26,6 +26,19 @@ describe('project save planning helpers', () => {
     };
   }
 
+  it('does not promote unchanged snapshot task B or connection into writes when only A has edit evidence', () => {
+    const task = { id: 'A', title: 'A edited', content: 'changed text', stage: 0, parentId: null,
+      order: 0, rank: 0, status: 'active' as const, x: 0, y: 0, displayId: '1', createdDate: '2026-11-27T00:00:00.000Z' };
+    const project = createProject({ tasks: [task, { ...task, id: 'B', content: 'unchanged' }],
+      connections: [{ id: 'C', source: 'A', target: 'B' }] });
+    const preparation = buildProjectSavePreparation({ project, pendingTaskIdsToDelete: [], changes: {
+      tasksToCreate: [], tasksToUpdate: [{ id: 'A' }], taskIdsToDelete: [],
+      connectionsToCreate: [], connectionsToUpdate: [], connectionsToDelete: [],
+    }, writePlan: { taskUpsertIds: ['A'], taskDeleteIds: [], connectionUpsertIds: [], connectionDeleteIds: [], taskWriteIntents: { A: 'task_text_update' } } });
+    expect(preparation.savePlan.taskUpsertIds).toEqual(['A']);
+    expect(preparation.savePlan.connectionUpsertIds).toEqual([]);
+  });
+
   it('creates an isolated project save snapshot for mutable task and connection arrays', () => {
     const project = createProject({
       tasks: [{

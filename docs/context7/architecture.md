@@ -114,3 +114,9 @@ Cloud data access should use typed mappers and centralized error conversion thro
 - Do not introduce reverse imports from `services/` into forbidden app layers.
 - Keep sync, persistence, UI rendering, and feature workflow responsibilities separate.
 - Reuse existing config constants instead of duplicating timing, quota, or threshold values.
+
+## Preview isolation and Focus/Flow lifecycle boundaries (2026-11-28)
+
+Development previews mount real Flow, Focus, Gate and capture leaves with component-scoped memory providers. Preview-only Focus triggers can suppress the global workspace event, and an embedded Gate can opt out of body-scroll locking while preserving the parent overflow value. These seams do not alter the ordinary workspace event path.
+
+Flow palette previews may receive an explicit local Black Box projection. The production palette still reads the normal focus store when no projection is supplied; the optional projection prevents a preview from reading account-wide state.

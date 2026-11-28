@@ -16,6 +16,7 @@ import {
   effect,
   inject,
   output,
+  Input,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { GateService } from '../../../../../services/gate.service';
@@ -310,6 +311,8 @@ import { GateActionsComponent } from './gate-actions.component';
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class GateOverlayComponent implements OnDestroy {
+  @Input() lockBodyScroll = true;
+  private previousBodyOverflow: string | null = null;
   readonly gateService = inject(GateService);
   private readonly strataService = inject(StrataService);
 
@@ -335,11 +338,17 @@ export class GateOverlayComponent implements OnDestroy {
     try {
       effect(() => {
         if (this.gateService.isActive()) {
-          document.body.style.overflow = 'hidden';
+          if (this.lockBodyScroll) {
+            if (this.previousBodyOverflow === null) this.previousBodyOverflow = document.body.style.overflow;
+            document.body.style.overflow = 'hidden';
+          }
           return;
         }
 
-        document.body.style.overflow = '';
+        if (this.previousBodyOverflow !== null) {
+          document.body.style.overflow = this.previousBodyOverflow;
+          this.previousBodyOverflow = null;
+        }
         this.closed.emit();
       });
     } catch {
@@ -384,6 +393,9 @@ export class GateOverlayComponent implements OnDestroy {
   }
 
   ngOnDestroy(): void {
-    document.body.style.overflow = '';
+    if (this.previousBodyOverflow !== null) {
+      document.body.style.overflow = this.previousBodyOverflow;
+      this.previousBodyOverflow = null;
+    }
   }
 }

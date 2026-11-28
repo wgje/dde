@@ -218,3 +218,11 @@ Quarantine preserves the first envelope and adds later same-ID operation/payload
 ### Flow 视口仅本地持久化（2026-11-27）
 
 生产 projects schema 与现有 RPC serializer 都没有 viewState/scale/position 云端字段。流程图平移、缩放及首次 fit 的 viewport 状态是本地项目元数据：只保存 owner-scoped 本地完整快照，不标记实体 dirty、不置 pendingSync、不调度远端全项目保存。真实节点拖动仍是 task position mutation，继续原有 durable outbox/重试同步，不与 viewport 混淆。已有实体 debounce 不取消、不清 dirty，项目/owner 代际变化后旧 viewport 回调拒绝写入。视口随离线快照保留，可导出和按原项目 ID 恢复；本变更不声称新增云端视口同步，也不修复真实实体写缺 operationId 的剩余谱系问题。
+
+## Durable project-save write plans (2026-11-28)
+
+A project save without an existing operation ID first creates a durable owner-scoped ActionQueue project mutation. The payload includes the frozen project snapshot, the task/connection write set, delete set, and explicit task write intent. The first cloud RPC is not dispatched before that durable enqueue succeeds; an enqueue failure is reported as unsynchronized rather than remote success.
+
+The write plan is derived from ChangeTracker evidence. Unchanged snapshot entities are excluded, while existing durable leaf operations with an owner and operation ID are not duplicated by the project plan. Replay keeps the original parent operation and derives child operations through the existing batch path. Historical project actions without a write plan remain frozen and continue fail-closed legacy review. Backup validation checks the plan shape and accepted intent values; it does not invent intent for old payloads.
+
+Viewport fit, pan and zoom are local owner-scoped metadata only. They do not dirty tasks or schedule a project cloud save. A real task position edit remains a task mutation with its own durable identity.

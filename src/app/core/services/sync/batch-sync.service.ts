@@ -24,6 +24,7 @@ import {
   type TaskDeleteBaseUpdatedAtMap,
 } from './batch-sync.types';
 import { buildProjectSavePreparation } from './project-save-plan';
+import type { ProjectSaveWritePlan } from '../../../../services/action-queue.types';
 import { ProjectSaveBatchExecutorService } from './project-save-batch-executor.service';
 import { ProjectSaveEntityStateService } from './project-save-entity-state.service';
 import { ProjectSaveRuntimeService } from './project-save-runtime.service';
@@ -70,6 +71,7 @@ export class BatchSyncService {
     taskIdsToDelete?: string[],
     taskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap,
     operationId?: string,
+    writePlan?: ProjectSaveWritePlan,
   ): Promise<BatchSyncResult> {
     const sessionGeneration = this.sessionGeneration;
     const state = this.createProjectSaveState();
@@ -86,6 +88,7 @@ export class BatchSyncService {
       taskIdsToDelete,
       taskDeleteBaseUpdatedAtMap,
       operationId,
+      writePlan,
       () => sessionGeneration === this.sessionGeneration,
     );
     const preflight = await this.runtime.runProjectSavePreflight(runtimeContext);
@@ -97,6 +100,7 @@ export class BatchSyncService {
       project,
       changes: runtimeContext.changes,
       pendingTaskIdsToDelete: runtimeContext.pendingTaskIdsToDelete,
+      writePlan: runtimeContext.writePlan,
     });
 
     return this.batchExecutor.runProjectSaveBatch({
@@ -116,6 +120,7 @@ export class BatchSyncService {
     taskIdsToDelete?: string[],
     taskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap,
     operationId?: string,
+    writePlan?: ProjectSaveWritePlan,
     isSessionCurrent: () => boolean = () => true,
   ): ProjectSaveRuntimeContext {
     const changes = this.normalizeProjectChanges(this.changeTracker.getProjectChanges(project.id));
@@ -137,6 +142,7 @@ export class BatchSyncService {
       project,
       userId,
       operationId,
+      writePlan,
       changes,
       pendingTaskIdsToDelete,
       taskDeleteBaseUpdatedAtMap: effectiveTaskDeleteBaseUpdatedAtMap,

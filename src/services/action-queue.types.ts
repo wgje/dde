@@ -11,6 +11,14 @@ import {
 } from '../models/parking-dock';
 import type { TaskWriteIntent } from './sync-rpc-client.service';
 
+export interface ProjectSaveWritePlan {
+  taskUpsertIds: string[];
+  taskDeleteIds: string[];
+  connectionUpsertIds: string[];
+  connectionDeleteIds: string[];
+  taskWriteIntents: Record<string, TaskWriteIntent>;
+}
+
 export type TaskDeleteBaseUpdatedAtMap = Record<string, string | null | undefined>;
 
 /**
@@ -100,6 +108,8 @@ export interface ProjectPayload {
   sourceUserId?: string;
   taskIdsToDelete?: string[];
   taskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap;
+  /** Durable entity write set and intent; absent only for frozen historical project actions. */
+  writePlan?: ProjectSaveWritePlan;
   conflictHandoff?: {
     conflictRecord: import('./conflict-storage.helpers').ConflictRecord;
   };

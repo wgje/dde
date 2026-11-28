@@ -1,0 +1,13 @@
+import { TestBed } from '@angular/core/testing';
+import { By } from '@angular/platform-browser';
+import { afterEach,describe,expect,it,vi } from 'vitest';
+import { DemoFocusShellPreviewComponent } from './demo-focus-shell-preview.component';
+import { GateOverlayComponent } from '../features/focus/components/gate/gate-overlay.component';
+import { FocusSessionTriggerComponent } from '../features/focus/components/focus-session-trigger.component';
+describe('safe actual Focus shell previews',()=>{
+ afterEach(()=>{TestBed.resetTestingModule();vi.restoreAllMocks();});
+ async function render(state:string){await TestBed.configureTestingModule({imports:[DemoFocusShellPreviewComponent]}).compileComponents();const view=TestBed.createComponent(DemoFocusShellPreviewComponent);view.componentRef.setInput('state',state);view.detectChanges();await view.whenStable();view.detectChanges();return view;}
+ it('real trigger uses local output without sending global Dock event',async()=>{const dispatch=vi.spyOn(window,'dispatchEvent');const view=await render('trigger');try{expect(view.debugElement.query(By.directive(FocusSessionTriggerComponent))).not.toBeNull();view.nativeElement.querySelector('[data-testid="focus-session-trigger"]').click();view.detectChanges();expect(view.nativeElement.textContent).toContain('已进入虚拟专注模式');expect(dispatch.mock.calls.some(([event])=>event.type==='dock-focus-session-toggle')).toBe(false);}finally{view.destroy();}});
+ it('real gate overlay keeps parent page scroll and handles local actions without storage',async()=>{document.body.style.overflow='auto';const write=vi.spyOn(Storage.prototype,'setItem');const view=await render('gate-overlay');try{expect(view.nativeElement.querySelector('[data-testid="gate-overlay"]')).not.toBeNull();expect(view.nativeElement.textContent).toContain('沉积之门');expect(document.body.style.overflow).toBe('auto');view.nativeElement.querySelector('[data-testid="gate-read-button"]').click();view.detectChanges();expect(view.nativeElement.textContent).toContain('虚拟想法已标记已读');view.nativeElement.querySelector('[data-testid="gate-complete-button"]').click();view.detectChanges();expect(view.nativeElement.textContent).toContain('沉积完成');expect(write).not.toHaveBeenCalled();}finally{view.destroy();expect(document.body.style.overflow).toBe('auto');document.body.style.overflow='';}});
+ it('completion result directly renders existing gate completion view',async()=>{const view=await render('gate-complete');try{expect(view.nativeElement.textContent).toContain('沉积完成');expect(view.nativeElement.querySelector('[data-testid="gate-overlay"]')).toBeNull();}finally{view.destroy();}});
+});

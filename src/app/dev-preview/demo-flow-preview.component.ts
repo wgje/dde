@@ -5,9 +5,9 @@ import { getFlowStyles } from '../../config/flow-styles';
 import type { Task } from '../../models';
 import { buildTaskSidecarSummary } from '../../utils/task-sidecar';
 import { LoggerService } from '../../services/logger.service';
+import { DemoFlowDetailPreviewComponent } from './demo-flow-detail-preview.component';
 import { FlowOverviewPanelComponent } from '../features/flow/components/flow-overview-panel.component';
 import { FlowMinimapComponent } from '../features/flow/components/flow-minimap.component';
-import { FlowMinimapLegendComponent } from '../features/flow/components/flow-minimap-legend.component';
 import { FlowDiagramService } from '../features/flow/services/flow-diagram.service';
 import { FlowDiagramConfigService } from '../features/flow/services/flow-diagram-config.service';
 import { createFlowDiagram, initializeFlowDiagramModel } from '../features/flow/services/flow-diagram-setup.helpers';
@@ -80,7 +80,7 @@ export class DemoFlowMemoryService {
 
 @Component({
   selector: 'app-demo-flow-preview', standalone: true, changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [FlowOverviewPanelComponent, FlowMinimapComponent, FlowMinimapLegendComponent],
+  imports: [FlowOverviewPanelComponent, FlowMinimapComponent, DemoFlowDetailPreviewComponent],
   providers: [DemoFlowMemoryService,
     { provide: FlowDiagramService, useExisting: DemoFlowMemoryService },
     { provide: FlowDiagramConfigService, useExisting: DemoFlowMemoryService },
@@ -101,8 +101,8 @@ export class DemoFlowMemoryService {
       @if (state().startsWith('overview')) {
         <app-flow-overview-panel [collapsed]="overviewCollapsed()" [mobile]="state() === 'overview-mobile' || state() === 'overview-dense-mobile'" (collapseToggle)="overviewCollapsed.update(toggle)" />
       } @else { <div class="minimap"><app-flow-minimap [width]="216" [height]="140" /></div> }
+      @if (state() === 'detail' || state() === 'detail-completed') { <app-demo-flow-detail-preview [state]="state()" /> }
       <p>拖动节点、点选任务；点击僚机徽章切换展开。所有变化只留在本页。</p>
-      @if (state() === 'legend') { <app-flow-minimap-legend [visible]="true" /> }
     </section>
   `,
   styles: [`:host{display:block;min-width:0}.flow-preview{position:relative;background:#fafaf4;border:1px solid #d6d3d1;border-radius:12px;overflow:hidden}.preview-canvas{height:420px;width:100%;position:relative}.minimap{position:absolute;bottom:42px;right:12px}p{padding:8px 12px;font-size:12px;color:#57534e}.preview-actions{display:flex;flex-wrap:wrap;gap:6px;padding:10px;border-bottom:1px solid #e7e5e4}.preview-actions button{min-height:28px;padding:4px 9px;border:1px solid #d6d3d1;border-radius:6px;background:#fff;font-size:12px}.preview-actions button:focus-visible{outline:2px solid #6366f1;outline-offset:2px}`],

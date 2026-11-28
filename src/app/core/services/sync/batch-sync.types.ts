@@ -4,6 +4,7 @@ import type { ProjectChangeSummary } from '../../../../services/change-tracker.t
 import type { TaskWriteIntent } from '../../../../services/sync-rpc-client.service';
 import type { ProjectSavePreparation } from './project-save-plan';
 import type { RetryQueueLastFailure, TaskDeleteBaseUpdatedAtMap } from './retry-queue.types';
+import type { ProjectSaveWritePlan } from '../../../../services/action-queue.types';
 
 export type { TaskDeleteBaseUpdatedAtMap } from './retry-queue.types';
 
@@ -71,6 +72,7 @@ export interface ProjectSaveRuntimeContext {
   project: Project;
   userId: string;
   operationId?: string;
+  writePlan?: ProjectSaveWritePlan;
   changes: ProjectChangeSummary;
   pendingTaskIdsToDelete: string[];
   taskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap;

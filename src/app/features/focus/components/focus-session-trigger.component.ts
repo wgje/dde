@@ -9,6 +9,9 @@ import {
   ChangeDetectionStrategy,
   ElementRef,
   ViewChild,
+  Input,
+  Output,
+  EventEmitter,
 } from '@angular/core';
 
 @Component({
@@ -39,6 +42,9 @@ import {
   changeDetection: ChangeDetectionStrategy.OnPush
 })
 export class FocusSessionTriggerComponent {
+  @Input() dispatchGlobalEvent = true;
+  @Output() readonly toggleRequested = new EventEmitter<void>();
+
   @ViewChild('primaryAction', { static: true })
   private primaryAction!: ElementRef<HTMLButtonElement>;
 
@@ -52,6 +58,10 @@ export class FocusSessionTriggerComponent {
    * 切换专注模式：派发全局自定义事件，由 DockEngineService 监听并处理
    */
   toggleDockFocusSession(): void {
+    if (!this.dispatchGlobalEvent) {
+      this.toggleRequested.emit();
+      return;
+    }
     if (typeof window === 'undefined') return;
     window.dispatchEvent(new CustomEvent('dock-focus-session-toggle'));
   }

@@ -115,6 +115,9 @@ function validateDataSafetyActionQueue(value: unknown, errors: string[]): void {
       && (item['type'] === 'create' || item['type'] === 'update')) {
       validateTaskWritePayload(payload['task'], `${prefix}.payload.task`, errors);
     }
+    if (item['entityType'] === 'project' && isRecord(payload) && payload['writePlan'] !== undefined) {
+      validateProjectSaveWritePlan(payload['writePlan'], `${prefix}.payload.writePlan`, errors);
+    }
     if (readNumber(item['timestamp']) === undefined) {
       errors.push(`${prefix}.timestamp must be a finite number`);
     }
@@ -122,6 +125,19 @@ function validateDataSafetyActionQueue(value: unknown, errors: string[]): void {
       errors.push(`${prefix}.retryCount must be a non-negative integer`);
     }
   });
+}
+
+function validateProjectSaveWritePlan(value: unknown, prefix: string, errors: string[]): void {
+  if (!isRecord(value)) { errors.push(prefix + ' must be an object'); return; }
+  const arrays = ['taskUpsertIds','taskDeleteIds','connectionUpsertIds','connectionDeleteIds'] as const;
+  for (const key of arrays) {
+    const entries = value[key];
+    if (!Array.isArray(entries) || entries.some(item => typeof item !== 'string' || item.length === 0 || entries.indexOf(item) !== entries.lastIndexOf(item))) errors.push(prefix + '.' + key + ' must be a unique non-empty string array');
+  }
+  const intents = value['taskWriteIntents'];
+  const allowed = new Set(['task_text_update','task_attachment_update','task_structure_update','task_soft_delete','task_full_upsert']);
+  if (!isRecord(intents)) errors.push(prefix + '.taskWriteIntents must be an object');
+  else for (const [id, intent] of Object.entries(intents)) if (!Array.isArray(value['taskUpsertIds']) || !value['taskUpsertIds'].includes(id) || typeof intent !== 'string' || !allowed.has(intent)) errors.push(prefix + '.taskWriteIntents contains an invalid task intent');
 }
 
 function validateDataSafetyRetryQueue(

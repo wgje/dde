@@ -6,7 +6,7 @@ import { BlackBoxService } from '../../../../services/black-box.service';
 import { FocusPreferenceService } from '../../../../services/focus-preference.service';
 import { TaskOperationAdapterService } from '../../../../services/task-operation-adapter.service';
 import { ToastService } from '../../../../services/toast.service';
-import { Task } from '../../../../models';
+import { Task, type BlackBoxEntry } from '../../../../models';
 import { blackBoxEntriesMap } from '../../../../state/focus-stores';
 import { BlackBoxPanelComponent } from '../../focus/components/black-box/black-box-panel.component';
 import { StrataViewComponent } from '../../focus/components/strata/strata-view.component';
@@ -45,6 +45,7 @@ export class FlowPaletteComponent implements OnDestroy {
   }
 
   // 输入
+  readonly blackBoxEntriesOverride = input<BlackBoxEntry[] | null>(null);
   readonly height = input<number>(200);
   readonly isDropTargetActive = input<boolean>(false);
 
@@ -122,7 +123,8 @@ export class FlowPaletteComponent implements OnDestroy {
    * 用户要求完成率基数 = 所有录音内容，分子 = 已完成的录音内容（项目历史回顾中的）
    */
   readonly allBlackBoxEntries = computed(() => {
-    return filterActiveFlowPaletteBlackBoxEntries(blackBoxEntriesMap().values());
+    const entries = this.blackBoxEntriesOverride() ?? blackBoxEntriesMap().values();
+    return filterActiveFlowPaletteBlackBoxEntries(entries);
   });
 
   /**

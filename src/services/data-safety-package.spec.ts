@@ -579,4 +579,20 @@ describe('data safety export package', () => {
       advanced: false,
     });
   });
+  it('round-trips a durable project write plan and rejects malformed plan evidence', () => {
+    const base = makePackage();
+    const action = { id: 'project-action', operationId: 'project-op', entityType: 'project', entityId: 'project-1', type: 'update', payload: {
+      project: { id: 'project-1', name: 'P1' }, sourceUserId: 'user-1',
+      writePlan: { taskUpsertIds: ['task-1'], taskDeleteIds: [], connectionUpsertIds: [], connectionDeleteIds: [], taskWriteIntents: { 'task-1': 'task_text_update' as const } },
+    }, retryCount: 0, timestamp: 1781539200000 };
+    const pkg = buildDataSafetyExportPackage({ ...base, localState: { ...base.localState, actionQueue: [action] } });
+    expect(validateDataSafetyExportPackage(pkg).errors).toEqual([]);
+    const malformed = structuredClone(pkg);
+    (malformed.localState.actionQueue[0].payload as Record<string, unknown>).writePlan = { taskUpsertIds: ['task-1','task-1'], taskDeleteIds: [], connectionUpsertIds: [], connectionDeleteIds: [], taskWriteIntents: { 'task-1': 'not-an-intent' } };
+    expect(validateDataSafetyExportPackage(malformed).errors).toEqual(expect.arrayContaining([
+      'localState.actionQueue[0].payload.writePlan.taskUpsertIds must be a unique non-empty string array',
+      'localState.actionQueue[0].payload.writePlan.taskWriteIntents contains an invalid task intent',
+    ]));
+  });
+
 });

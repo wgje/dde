@@ -296,6 +296,17 @@ describe('ActionQueueEnqueueMutationService', () => {
       }),
     ]);
   });
+  it('does not merge a new durable project write plan into a different frozen operation', () => {
+    const projectPayload = { project: { id: 'project-1', name: 'P1' }, writePlan: { taskUpsertIds: ['task-1'], taskDeleteIds: [], connectionUpsertIds: [], connectionDeleteIds: [], taskWriteIntents: { 'task-1': 'task_text_update' as const } } };
+    const existing = createPreferenceQueuedAction({ id: 'project-existing', operationId: 'project-op-a', entityType: 'project', entityId: 'project-1', payload: projectPayload as never });
+    const incoming = { ...existing, id: 'project-next', operationId: 'project-op-b', payload: projectPayload as never };
+    const mutation = service.buildCurrentOwnerEnqueueMutation([existing], { type: 'update', entityType: 'project', entityId: 'project-1', payload: projectPayload as never }, incoming);
+    expect(mutation.resolvedActionId).toBe('project-next');
+    expect(mutation.nextQueue).toHaveLength(2);
+  });
+
+
+
 });
 
 function createSupersessionReservation(token: string): RetryQueueSupersessionReservation {

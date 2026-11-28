@@ -227,6 +227,7 @@ export class ActionQueueEnqueueMutationService {
       };
     }
 
+
     const existingIndex = queuedAction.syncState === 'held'
       ? -1
       : this.findMergeableActionIndex(nextQueue, action);
@@ -278,14 +279,8 @@ export class ActionQueueEnqueueMutationService {
     const existingOperationIndex = this.findExistingOperationIndex(nextQueue, queuedAction);
     if (existingOperationIndex !== -1) {
       const existing = nextQueue[existingOperationIndex];
-      return {
-        nextQueue,
-        resolvedActionId: existing.id,
-        wasEnqueued: false,
-        wasMergeShrunk: false,
-      };
+      return { nextQueue, resolvedActionId: existing.id, wasEnqueued: false, wasMergeShrunk: false };
     }
-
     const existingIndex = queuedAction.syncState === 'held'
       ? -1
       : this.findMergeableActionIndex(nextQueue, action);
@@ -341,6 +336,12 @@ export class ActionQueueEnqueueMutationService {
     }
 
     if (existing.retryQueueSupersessions?.length && this.hasAttemptedOutboxAction(existing)) {
+      return null;
+    }
+
+    if (existing.entityType === 'project' && action.entityType === 'project'
+      && (action.payload as ProjectPayload).writePlan !== undefined
+      && existing.operationId !== queuedAction.operationId) {
       return null;
     }
 

@@ -529,7 +529,8 @@ export class ActionQueueProjectProcessorsService implements OnDestroy {
 
     try {
       const result = await this.saveProjectMutation(payload, userId, action.operationId);
-      const failureTransferred = this.wasProjectFailureTransferredToRetryQueue(result, payload);
+      const failureTransferred = payload.writePlan === undefined
+        && this.wasProjectFailureTransferredToRetryQueue(result, payload);
       return await this.resolveProjectMutationResult(action, payload, result, mutationContext, failureTransferred);
     } catch (error) {
       return this.handleProjectMutationError(action.id, actionType, payload, mutationContext, error);
@@ -562,6 +563,11 @@ export class ActionQueueProjectProcessorsService implements OnDestroy {
     userId: string,
     operationId?: string,
   ): Promise<ProjectSyncResult> {
+    if (operationId !== undefined && payload.writePlan !== undefined) {
+      return this.projectSaveCoordinator.save(
+        payload.project, userId, payload.taskIdsToDelete, payload.taskDeleteBaseUpdatedAtMap, operationId, payload.writePlan,
+      );
+    }
     if (operationId !== undefined) {
       return this.projectSaveCoordinator.save(
         payload.project, userId, payload.taskIdsToDelete, payload.taskDeleteBaseUpdatedAtMap, operationId,

@@ -1,4 +1,6 @@
 import type { Connection, Project, Task } from '../../../../models';
+import type { ProjectSaveWritePlan } from '../../../../services/action-queue.types';
+import type { TaskWriteIntent } from '../../../../services/sync-rpc-client.service';
 
 export interface ProjectSavePlanInput {
   taskIds: string[];
@@ -41,12 +43,14 @@ export interface ProjectSaveChangeSummary {
   connectionsToCreate: Pick<Connection, 'id'>[];
   connectionsToUpdate: Pick<Connection, 'id'>[];
   connectionsToDelete: Pick<Connection, 'id'>[];
+  taskUpdateFieldsById?: Record<string, string[] | undefined>;
 }
 
 export interface ProjectSavePreparationInput {
   project: Project;
   changes: ProjectSaveChangeSummary;
   pendingTaskIdsToDelete: string[];
+  writePlan?: ProjectSaveWritePlan;
 }
 
 export interface ProjectSavePreparation {
@@ -56,6 +60,7 @@ export interface ProjectSavePreparation {
   changedConnectionIds: Set<string>;
   taskSnapshotById: Map<string, Task>;
   connectionSnapshotById: Map<string, Connection>;
+  writePlan?: ProjectSaveWritePlan;
 }
 
 export interface RemoteExistingTaskIdsQueryFailureInput {
@@ -108,6 +113,27 @@ export function createProjectSaveSnapshot(project: Project): Project {
   };
 }
 
+export function buildProjectSaveWritePlan(changes: ProjectSaveChangeSummary, pendingTaskIdsToDelete: string[], coveredTaskIds: ReadonlySet<string> = new Set(), coveredConnectionIds: ReadonlySet<string> = new Set()): ProjectSaveWritePlan {
+  const taskWriteIntents: Record<string, TaskWriteIntent> = {};
+  const changed = new Set<string>();
+  const tasksToCreate = changes.tasksToCreate ?? [];
+  const tasksToUpdate = changes.tasksToUpdate ?? [];
+  const connectionsToCreate = changes.connectionsToCreate ?? [];
+  const connectionsToUpdate = changes.connectionsToUpdate ?? [];
+  const connectionsToDelete = changes.connectionsToDelete ?? [];
+  const taskIdsToDelete = changes.taskIdsToDelete ?? [];
+  for (const task of tasksToCreate) { if (!coveredTaskIds.has(task.id)) { changed.add(task.id); taskWriteIntents[task.id] = 'task_full_upsert'; } }
+  for (const task of tasksToUpdate) {
+    if (coveredTaskIds.has(task.id)) continue;
+    changed.add(task.id);
+    const fields = changes.taskUpdateFieldsById?.[task.id] ?? [];
+    const known = new Set(['title','content','attachments','stage','parentId','parent_id','order','rank','x','y','deletedAt','deleted_at','status','priority','dueDate','due_date','expectedMinutes','expected_minutes','cognitiveLoad','cognitive_load','tags','completedAt','completed_at','shortId','short_id','waitMinutes','wait_minutes','parkingMeta','parking_meta','attentionMeta','attention_meta']);
+    const intent = fields.length === 0 || fields.some(field => !known.has(field)) ? undefined : fields.every(field => ['title','content'].includes(field)) ? 'task_text_update' : fields.every(field => field === 'attachments') ? 'task_attachment_update' : fields.every(field => ['stage','parentId','parent_id','order','rank','x','y'].includes(field)) ? 'task_structure_update' : fields.some(field => ['deletedAt','deleted_at'].includes(field)) ? 'task_soft_delete' : 'task_full_upsert';
+    if (intent) taskWriteIntents[task.id] = intent;
+  }
+  return { taskUpsertIds: [...changed].filter(id => taskWriteIntents[id]), taskDeleteIds: [...new Set([...pendingTaskIdsToDelete, ...taskIdsToDelete])], connectionUpsertIds: [...new Set([...connectionsToCreate, ...connectionsToUpdate].map(item => item.id).filter(id => !coveredConnectionIds.has(id)))], connectionDeleteIds: connectionsToDelete.map(item => item.id), taskWriteIntents };
+}
+
 export function buildProjectSavePlan(input: ProjectSavePlanInput): ProjectSavePlan {
   const taskDeleteIds = unique(input.taskIdsToDelete);
   const connectionDeleteIds = unique(input.connectionIdsToDelete);
@@ -124,14 +150,14 @@ export function buildProjectSavePlan(input: ProjectSavePlanInput): ProjectSavePl
 
 export function buildProjectSavePreparation(input: ProjectSavePreparationInput): ProjectSavePreparation {
   const snapshot = createProjectSaveSnapshot(input.project);
-  const savePlan = buildProjectSavePlan({
-    taskIds: snapshot.tasks.map(task => task.id),
-    connectionIds: snapshot.connections.map(connection => connection.id),
-    taskIdsToDelete: input.pendingTaskIdsToDelete,
-    connectionIdsToDelete: snapshot.connections
-      .filter(connection => !!connection.deletedAt)
-      .map(connection => connection.id),
-  });
+  const savePlan = input.writePlan
+    ? { taskUpsertIds: [...input.writePlan.taskUpsertIds], taskDeleteIds: [...input.writePlan.taskDeleteIds], connectionUpsertIds: [...input.writePlan.connectionUpsertIds], connectionDeleteIds: [...input.writePlan.connectionDeleteIds] }
+    : buildProjectSavePlan({
+      taskIds: snapshot.tasks.map(task => task.id),
+      connectionIds: snapshot.connections.map(connection => connection.id),
+      taskIdsToDelete: input.pendingTaskIdsToDelete,
+      connectionIdsToDelete: snapshot.connections.filter(connection => !!connection.deletedAt).map(connection => connection.id),
+    });
 
   return {
     snapshot,
@@ -148,6 +174,7 @@ export function buildProjectSavePreparation(input: ProjectSavePreparationInput):
     ]),
     taskSnapshotById: new Map(snapshot.tasks.map(task => [task.id, task])),
     connectionSnapshotById: new Map(snapshot.connections.map(connection => [connection.id, connection])),
+    writePlan: input.writePlan,
   };
 }
 
