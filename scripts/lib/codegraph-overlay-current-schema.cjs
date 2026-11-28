@@ -31,9 +31,26 @@ const profile = (contract, schema) => Object.freeze({ contract, schema,
 const predecessorProfile = profile(predecessorGeneration, predecessor);
 Object.freeze(currentGeneration);
 const currentProfile = profile(currentGeneration, current);
+const metadataV1Contract = require('../contracts/codegraph-overlay-metadata-v1-schema.json');
+const metadataV1Generation = require('../contracts/codegraph-overlay-metadata-v1-generation.json');
+const metadataV1Graph = require('./codegraph-nanoflow-overlay-metadata-v1-graph.cjs');
+if (metadataV1Contract.extensionId !== metadataV1Graph.EXTENSION_ID
+  || metadataV1Contract.predecessorSchemaDigest !== predecessor.OVERLAY_V1_SCHEMA_DIGEST
+  || metadataV1Generation.overlaySchemaDigest !== metadataV1Contract.schemaDigest) throw new Error('metadata-v1-schema-identity-mismatch');
+const metadataV1Module = { exports: {} };
+vm.runInNewContext(fs.readFileSync(schemaPath, 'utf8'), {
+  Buffer, Intl, Map, Object, Set, Symbol, TextDecoder, Uint8Array, process,
+  module: metadataV1Module, exports: metadataV1Module.exports,
+  require: request => request === '../contracts/codegraph-nanoflow-overlay-v1.json' ? metadataV1Contract
+    : request === './codegraph-nanoflow-overlay-v1-schema-graph.cjs' ? metadataV1Graph.descriptor : baseRequire(request),
+}, { filename: schemaPath });
+if (metadataV1Module.exports.OVERLAY_V1_SCHEMA_DIGEST !== metadataV1Contract.schemaDigest) throw new Error('metadata-v1-schema-runtime-digest-mismatch');
+const metadataV1Profile = profile(metadataV1Generation, metadataV1Module.exports);
+
 function selectOverlaySchemaProfile(digest) {
   if (digest === predecessorGeneration.overlaySchemaDigest) return predecessorProfile;
   if (digest === currentGeneration.overlaySchemaDigest) return currentProfile;
+  if (digest === metadataV1Generation.overlaySchemaDigest) return metadataV1Profile;
   throw new Error('unregistered-overlay-schema-digest');
 }
 module.exports = Object.freeze({ CURRENT_SCHEMA_DIGEST: currentContract.schemaDigest,

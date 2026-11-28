@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "protocol": "codegraph-overlay-generation-v1",
   "sourcePolicyDigest": "ca78ea5e17d32399faac676bcab26fc1d7f48186a89792774d37a6b8549d0ca3",
-  "overlaySchemaDigest": "3d75354f72feb599c53bb3a0b01ba3684d0556028e811f5f4746b60ded15aeb6",
+  "overlaySchemaDigest": "0dae4d7baf14efa400f35bcfca3e23f3fa9da97f520611b9de29dc67df40e26b",
   "patterns": {
     "generationId": "^g-[a-f0-9]{64}$",
     "sequence": "^[1-9][0-9]{0,19}$",

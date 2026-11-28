@@ -296,10 +296,10 @@
       }
     },
     "app-dock-mobile-drawer": {
-      "test": "src/app/dev-preview/demo-dock-preview.component.spec.ts",
+      "test": "src/app/dev-preview/demo-dock-entry-preview.component.spec.ts",
       "scenario": {
         "widget": "dock",
-        "state": "created"
+        "state": "mobile-entry"
       }
     },
     "app-mobile-black-box-drawer": {

@@ -21,13 +21,14 @@ button { font: inherit; color: inherit; min-height: 44px; border: 0; cursor: poi
 button:focus-visible { outline: 2px solid var(--drawer-action); outline-offset: 3px; }
 button:disabled { opacity: .5; cursor: not-allowed; }
 svg { width: 20px; height: 20px; flex-shrink: 0; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
-.dock-trigger { position: absolute; left: 12px; right: 12px; bottom: calc(12px + env(safe-area-inset-bottom, 0px)); display: flex; align-items: center; gap: 10px; padding: 5px 8px; background: var(--drawer-bg); border: 1px solid var(--drawer-line); border-radius: 16px; box-shadow: 0 8px 24px #0002; pointer-events: auto; }
-.trigger-main { flex: 1; min-width: 0; display: flex; gap: 10px; align-items: center; background: transparent; text-align: left; padding: 5px 4px; }
-.trigger-main > span { flex: 1; min-width: 0; }
-.trigger-main strong { display: block; font-size: 13px; font-weight: 600; }
-.trigger-main em { display: block; color: var(--drawer-muted); font-size: 11px; font-style: normal; }
+.dock-trigger { position: absolute; left: 50%; bottom: calc(8px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); display: flex; align-items: center; gap: 2px; max-width: calc(100% - 24px); background: transparent; border: 0; box-shadow: none; pointer-events: none; }
+.trigger-main { min-width: 108px; display: flex; gap: 8px; justify-content: center; align-items: center; background: transparent; color: var(--drawer-muted); border-radius: 14px; padding: 0 12px; pointer-events: auto; }
+.trigger-label { white-space: nowrap; font-size: 12px; font-weight: 500; letter-spacing: .03em; }
+.trigger-label small { margin-left: 3px; font-size: 10px; font-variant-numeric: tabular-nums; }
+.trigger-main > svg { width: 14px; height: 14px; stroke-width: 1.5; }
+.trigger-main:hover, .trigger-focus:hover, .trigger-main:active, .trigger-focus:active, .trigger-main:focus-visible, .trigger-focus:focus-visible { background: color-mix(in srgb, var(--drawer-ink) 6%, transparent); color: var(--drawer-ink); }
 small { font-size: 11px; color: var(--drawer-muted); font-weight: 400; }
-.trigger-focus { padding: 0 14px; }
+.trigger-focus { min-width: 52px; padding: 0 10px; border-radius: 14px; font-size: 11px; background: transparent; color: var(--drawer-muted); pointer-events: auto; }
 .backdrop { position: absolute; inset: 0; width: 100%; background: #10191066; pointer-events: auto; animation: drawerFade 150ms ease-out both; }
 .sheet { position: absolute; left: 0; right: 0; bottom: 0; display: flex; flex-direction: column; max-height: min(78dvh, calc(100dvh - env(safe-area-inset-top, 0px) - 16px)); background: var(--drawer-bg); border: 1px solid color-mix(in srgb, var(--drawer-line) 68%, transparent); border-bottom: 0; border-radius: 30px 30px 0 0; padding: 10px 20px 0; box-shadow: 0 -18px 48px #0003, 0 1px 0 color-mix(in srgb, #fff 4%, transparent) inset; pointer-events: auto; animation: drawerRise 200ms var(--pk-ease-enter, ease-out) both; }
 .handle { width: 44px; height: 5px; background: color-mix(in srgb, var(--drawer-action) 34%, var(--drawer-line)); border-radius: 999px; margin: 0 auto 10px; flex-shrink: 0; }
@@ -72,4 +73,4 @@ dd { margin: 5px 0 0; font-size: 14px; font-variant-numeric: tabular-nums; }
 footer { position: relative; border-top: 0; }
 footer::before { content: ''; position: absolute; top: 0; left: 8px; right: 8px; height: 1px; background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--drawer-line) 86%, transparent) 18%, color-mix(in srgb, var(--drawer-line) 86%, transparent) 82%, transparent); }
 @media (prefers-reduced-motion: reduce) { .sheet, .backdrop { animation: none; } .task-row { transition: none; } }
-@media (max-width: 359px) { .sheet { padding-inline: 16px; } .dock-trigger { left: 8px; right: 8px; gap: 5px; } }
+@media (max-width: 359px) { .sheet { padding-inline: 16px; } }

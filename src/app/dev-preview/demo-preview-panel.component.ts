@@ -11,6 +11,7 @@ import { DemoKnowledgePreviewComponent } from './demo-knowledge-preview.componen
 import { DemoBlackBoxPreviewComponent } from './demo-black-box-preview.component';
 import { DemoTaskPreviewComponent } from './demo-task-preview.component';
 import { DemoDockPreviewComponent } from './demo-dock-preview.component';
+import { DemoDockEntryPreviewComponent } from './demo-dock-entry-preview.component';
 import { DemoFlowPreviewComponent } from './demo-flow-preview.component';
 import { DemoFocusDecisionPreviewComponent } from './demo-focus-decision-preview.component';
 import { DemoDashboardPreviewComponent } from './demo-dashboard-preview.component';
@@ -19,7 +20,7 @@ import { DEMO_PREVIEW_SCENARIOS, demoPreviewHref } from './demo-preview-registry
 
 @Component({
   selector: 'app-demo-preview-panel', standalone: true,
-  imports: [DemoFlowPanelsPreviewComponent, DemoFeedbackPreviewComponent, DemoFocusShellPreviewComponent, DemoFlowControlsPreviewComponent, DemoTextListsPreviewComponent, DemoControlsPreviewComponent, DemoKnowledgePreviewComponent, DemoDesktopDockPreviewComponent, DemoTaskTreePreviewComponent, DemoPreviewSurfacesComponent, DemoDashboardPreviewComponent, DemoBlackBoxPreviewComponent, DemoTaskPreviewComponent, DemoDockPreviewComponent, DemoFlowPreviewComponent, DemoFocusDecisionPreviewComponent], changeDetection: ChangeDetectionStrategy.OnPush,
+  imports: [DemoDockEntryPreviewComponent, DemoFlowPanelsPreviewComponent, DemoFeedbackPreviewComponent, DemoFocusShellPreviewComponent, DemoFlowControlsPreviewComponent, DemoTextListsPreviewComponent, DemoControlsPreviewComponent, DemoKnowledgePreviewComponent, DemoDesktopDockPreviewComponent, DemoTaskTreePreviewComponent, DemoPreviewSurfacesComponent, DemoDashboardPreviewComponent, DemoBlackBoxPreviewComponent, DemoTaskPreviewComponent, DemoDockPreviewComponent, DemoFlowPreviewComponent, DemoFocusDecisionPreviewComponent], changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <section class="panel" data-testid="demo-preview-panel">
       <button type="button" (click)="expanded.update(toggle)" [attr.aria-expanded]="expanded()">开发预览区 · {{ expanded() ? '收起' : '展开' }}</button>
@@ -36,7 +37,7 @@ import { DEMO_PREVIEW_SCENARIOS, demoPreviewHref } from './demo-preview-registry
                   @case ('desktop-dock') { <app-demo-desktop-dock-preview [state]="example.state" /> }
                   @case ('task-tree') { <app-demo-task-tree-preview [state]="example.state" /> }
                   @case ('task') { <app-demo-task-preview [state]="example.state" /> }
-                  @case ('dock') { <app-demo-dock-preview widget="dock" [state]="example.state" /> }
+                  @case ('dock') { @if (example.state === 'mobile-entry' || example.state === 'mobile-open') { <app-demo-dock-entry-preview [state]="example.state" /> } @else { <app-demo-dock-preview widget="dock" [state]="example.state" /> } }
                   @case ('flow-controls') { <app-demo-flow-controls-preview [state]="example.state" /> }
                   @case ('text-lists') { <app-demo-text-lists-preview [state]="example.state" /> }
                   @case ('feedback') { <app-demo-feedback-preview [state]="example.state" /> }

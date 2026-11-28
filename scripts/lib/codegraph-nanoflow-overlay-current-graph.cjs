@@ -1,8 +1,9 @@
 'use strict';
 const crypto = require('node:crypto');
 const predecessor = require('./codegraph-nanoflow-overlay-v1-schema-graph.cjs');
-const EXTENSION_ID = 'nanoflow-current-metadata/1';
+const EXTENSION_ID = 'nanoflow-current-metadata/2';
 const NODE_METADATA_ORDERS = Object.freeze([
+  ['route-target', [['relation', 'framework', 'path']]],
   ['migration-constraint-validation', [['relation', 'table']]],
   ['migration-index', [['relation', 'table', 'columns', 'method', 'unique', 'concurrently', 'predicate']]],
 ]);

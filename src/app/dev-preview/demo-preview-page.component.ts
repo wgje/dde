@@ -13,6 +13,7 @@ import { DemoFocusDecisionPreviewComponent } from './demo-focus-decision-preview
 import { DemoDashboardPreviewComponent } from './demo-dashboard-preview.component';
 import { DemoFlowPreviewComponent } from './demo-flow-preview.component';
 import { DemoDockPreviewComponent } from './demo-dock-preview.component';
+import { DemoDockEntryPreviewComponent } from './demo-dock-entry-preview.component';
 import { DemoTaskPreviewComponent } from './demo-task-preview.component';
 import { DemoPreviewSurfacesComponent } from './demo-preview-surfaces.component';
 import { resolveDemoPreviewScenario } from './demo-preview-registry';
@@ -20,7 +21,7 @@ import { resolveDemoPreviewScenario } from './demo-preview-registry';
 /** Deliberately does not inject workspace/auth/sync/persistence services. */
 @Component({
   selector: 'app-demo-preview-page', standalone: true,
-  imports: [DemoFlowPanelsPreviewComponent, DemoFeedbackPreviewComponent, DemoFocusShellPreviewComponent, DemoFlowControlsPreviewComponent, DemoTextListsPreviewComponent, DemoControlsPreviewComponent, DemoKnowledgePreviewComponent, DemoDesktopDockPreviewComponent, DemoTaskTreePreviewComponent, DemoBlackBoxPreviewComponent, DemoFlowPreviewComponent, DemoFocusDecisionPreviewComponent, DemoDashboardPreviewComponent, DemoDockPreviewComponent, DemoTaskPreviewComponent, DemoPreviewSurfacesComponent],
+  imports: [DemoDockEntryPreviewComponent, DemoFlowPanelsPreviewComponent, DemoFeedbackPreviewComponent, DemoFocusShellPreviewComponent, DemoFlowControlsPreviewComponent, DemoTextListsPreviewComponent, DemoControlsPreviewComponent, DemoKnowledgePreviewComponent, DemoDesktopDockPreviewComponent, DemoTaskTreePreviewComponent, DemoBlackBoxPreviewComponent, DemoFlowPreviewComponent, DemoFocusDecisionPreviewComponent, DemoDashboardPreviewComponent, DemoDockPreviewComponent, DemoTaskPreviewComponent, DemoPreviewSurfacesComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <main data-testid="dev-preview-page">
@@ -48,7 +49,7 @@ import { resolveDemoPreviewScenario } from './demo-preview-registry';
           @case ('black-box') { <app-demo-preview-surfaces [widget]="widget()" [state]="state()" /> }
           @case ('recovery') { <app-demo-preview-surfaces [widget]="widget()" [state]="state()" /> }
           @case ('task') { <app-demo-task-preview [state]="state()" /> }
-          @case ('dock') { <app-demo-dock-preview [widget]="widget()" [state]="state()" /> }
+          @case ('dock') { @if (state() === 'mobile-entry' || state() === 'mobile-open') { <app-demo-dock-entry-preview [state]="state()" /> } @else { <app-demo-dock-preview [widget]="widget()" [state]="state()" /> } }
           @case ('flow') { @if (state() === 'legend') { <app-demo-dock-preview widget="flow" state="legend" /> } @else { @defer (when widget() === 'flow') { <app-demo-flow-preview [state]="state()" /> } } }
 
         }

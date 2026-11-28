@@ -90,6 +90,11 @@ describe('registered current metadata extension and frozen predecessor', () => {
       expect(() => validateGenerated(candidate), mutation).toThrow();
     }
   });
+  it('keeps prior metadata-v1 generations registered at their immutable digest', () => {
+    const prior = current.selectOverlaySchemaProfile('3d75354f72feb599c53bb3a0b01ba3684d0556028e811f5f4746b60ded15aeb6');
+    expect(prior.schema.OVERLAY_V1_SCHEMA_DIGEST).toBe('3d75354f72feb599c53bb3a0b01ba3684d0556028e811f5f4746b60ded15aeb6');
+    expect(current.CURRENT_EXTENSION_ID).toBe('nanoflow-current-metadata/2');
+  });
   it('rejects unregistered schema digest and preserves predecessor identity', () => {
     expect(() => current.selectOverlaySchemaProfile('f'.repeat(64))).toThrow('unregistered');
     expect(predecessor.OVERLAY_V1_SCHEMA_DIGEST).toBe('0cf35177cabc7261e0d8aa7040d083acc4c5c5c03a3c966a19982d35192a9e22');

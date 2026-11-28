@@ -176,3 +176,16 @@ High-risk changes must preserve recoverability and avoid irreversible deletion.
 ## Mobile sidebar viewport resize safety
 
 The shell normalizes its window provider once at the viewport-resize host boundary and passes the same provider to listener registration and the lazy resize controller. A browser default uses window; an explicit no-window provider remains a no-op. Cleanup and generation fencing discard late callbacks. Import failures remain visible as warnings, while a missing provider cannot be misreported as a chunk failure. This boundary is independent of Flow viewport persistence: Flow pan/zoom is local owner-scoped snapshot state and does not initiate task cloud writes.
+
+## Black Box SVG action semantics
+
+Entry, panel, mobile drawer and Strata restore icons use inline 24-unit SVGs with
+`currentColor`, rounded strokes and hidden decorative semantics. Visible labels
+remain the primary meaning: read, complete, delete, pending sync and restore.
+Actions are visible without hover; rows wrap rather than overflow on narrow screens.
+This changes presentation only: durable methods, sync decisions, confirmation,
+keyboard shortcuts and local-first persistence are unchanged.
+
+## Mobile Dock transparent entry
+
+The collapsed mobile Dock uses a transparent label/count and upward chevron with a 44px touch target. Focus is a secondary text action; the existing drawer and confirmation logic are unchanged. Isolated development previews: `/#/dev-preview/dock/mobile-entry` (tap to open), `/#/dev-preview/dock/mobile-open` (expanded result). Fixture data stays in page memory only.

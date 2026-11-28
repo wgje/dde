@@ -146,9 +146,9 @@
     "typescript": "cd2538e77f1abbe5aabe750e0a4ecda1807e006cecc2fc6acc03296dd7f2eabf",
     "angular-support": "a68c9feed371bb4d107b7e458559431df0197a013e0434350f63285b38027bbc",
     "supabase-android": "7deba66271dd9253c05ff74b2000a3a6124a793da35c2c490d0e7bb03ae16e9d",
-    "graph": "6083705468fc521e22a8f7c580c7c5ed01b35dd852f33723827ac04c3b411e4b"
+    "graph": "a09e4aaec475f6f9b62f62fd34151f016d69be0e186c25611d97e52f94b219b5"
   },
-  "descriptorManifestDigest": "ecf311d86937afd4a1829ddbc4227c22e28e0dce0488d84e5d5f2c99aa56ce63",
+  "descriptorManifestDigest": "1d9079aae2ceb0829d202d5d747b9ee00df326a1c2938a5daec6a2d9f6ac75d0",
   "authority": {
     "generator": {
       "sourcePath": "scripts/generate-codegraph-nanoflow-overlay.mjs",
@@ -182,7 +182,7 @@
     "nodeKinds": 17,
     "edgeKinds": 12,
     "relations": 160,
-    "nodeMetadataShapes": 124,
+    "nodeMetadataShapes": 125,
     "edgeMetadataShapes": 147,
     "nodeTieGroups": 8695,
     "nodeTieExtraItems": 20488,
@@ -398,7 +398,7 @@
       ]
     }
   },
-  "extensionId": "nanoflow-current-metadata/1",
+  "extensionId": "nanoflow-current-metadata/2",
   "predecessorSchemaDigest": "0cf35177cabc7261e0d8aa7040d083acc4c5c5c03a3c966a19982d35192a9e22",
-  "schemaDigest": "3d75354f72feb599c53bb3a0b01ba3684d0556028e811f5f4746b60ded15aeb6"
+  "schemaDigest": "0dae4d7baf14efa400f35bcfca3e23f3fa9da97f520611b9de29dc67df40e26b"
 }

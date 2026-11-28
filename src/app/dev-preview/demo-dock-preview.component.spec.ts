@@ -52,8 +52,8 @@ describe('DemoDockPreviewComponent ready initial states', () => {
     expect(drawer.opened()).toBe(false);
     const trigger = fixture.nativeElement.querySelector('[data-testid="dock-v3-mobile-drawer-trigger"]') as HTMLButtonElement;
     expect(trigger.textContent).toContain('停泊坞');
-    expect(trigger.textContent).toContain('10 个可行动');
-    expect(fixture.nativeElement.querySelector('.primary.trigger-focus')).not.toBeNull();
+    expect(trigger.querySelector('small')?.textContent).toBe(String(drawer.activeEntries().length));
+    expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-mobile-focus-entry"]')).not.toBeNull();
     trigger.click();
     fixture.detectChanges();
     expect(drawer.opened()).toBe(true);
