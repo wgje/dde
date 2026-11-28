@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
+import os from 'node:os';
 import vm from 'node:vm';
 import { describe, expect, it } from 'vitest';
 const requireCjs = createRequire(import.meta.url);
@@ -10,16 +11,29 @@ const repoRoot = path.resolve(__dirname, '../../..');
 const libRoot = path.join(repoRoot, 'scripts', 'lib');
 const schemaPath = path.join(libRoot, 'codegraph-nanoflow-overlay-v1-schema.cjs');
 const contractPath = path.join(repoRoot, 'scripts', 'contracts', 'codegraph-nanoflow-overlay-v1.json');
-const currentOverlayPath = path.join(repoRoot, '.codegraph', 'nanoflow-overlay.json');
+const stressFixturePath = path.join(repoRoot, 'src/tests/fixtures/codegraph-overlay-schema-stress.cjs');
 const SOURCE_POLICY_DIGEST = 'ca78ea5e17d32399faac676bcab26fc1d7f48186a89792774d37a6b8549d0ca3';
-const SCHEMA_DIGEST = '0cf35177cabc7261e0d8aa7040d083acc4c5c5c03a3c966a19982d35192a9e22';
-const DESCRIPTOR_MANIFEST_DIGEST = 'bbec805a1d437a4ba896fb873f8d0080b5e1a2eb3a615a6cb7940fbf72ababb0';
+const SCHEMA_DIGEST = 'd851121face8ca1c1ff86eb5f0fe4bca9cd93130a1c1a034ba0eeaf2c547cc4a';
+const DESCRIPTOR_MANIFEST_DIGEST = 'bfee147895f75b40324ed0c56119416d62a50ea83c48b1c9ff063314c679cf4a';
 const GENERATED_AT = '2026-08-03T00:00:00.000Z';
+const STRESS_EXPECTED_COUNTS = Object.freeze({
+  objectPaths: 240, arrayPaths: 636, scalarPaths: 1897,
+  nodeKinds: 17, edgeKinds: 12, relations: 160,
+  nodeMetadataShapes: 125, edgeMetadataShapes: 147,
+  valueTokens: 5932521, stringValues: 3848255, keyTokens: 5448381,
+  stringTokens: 9296636, decodedStringBytes: 196799648,
+  stringScanCodeUnits: 206096284, maxStringBytes: 59769,
+  maxBufferedTokenBytes: 59771, maxInputWindowBytes: 65536,
+  maxDepth: 13, graphNodes: 160000, graphEdges: 320000,
+  endpointIdBytes: 14720320, pathWitnessBytes: 224995, pathWitnesses: 4093,
+  nodeTieGroups: 79921, nodeTieExtraItems: 80079, nodeMaxTieGroup: 160,
+  edgeTieGroups: 159937, edgeTieExtraItems: 160063, edgeMaxTieGroup: 128,
+});
 const EXPECTED_DESCRIPTOR_DIGESTS = Object.freeze({
   typescript: 'cd2538e77f1abbe5aabe750e0a4ecda1807e006cecc2fc6acc03296dd7f2eabf',
   'angular-support': 'a68c9feed371bb4d107b7e458559431df0197a013e0434350f63285b38027bbc',
   'supabase-android': '7deba66271dd9253c05ff74b2000a3a6124a793da35c2c490d0e7bb03ae16e9d',
-  graph: 'b9d90bc3c0a329c67f85f552849db34bef4b264f98c631f37e2e5cf659392ffc',
+  graph: '1bb8e56f7568695465b6b2f61f24149a2fe0733f83f6b33c334cf68d47e87962',
 });
 const EXPECTED_PRODUCER_NODE_ORDERS = Object.freeze([
   Object.freeze({
@@ -360,7 +374,7 @@ describe('CodeGraph NanoFlow Overlay v1 schema authority predecessor', () => {
       'instantiates', 'overrides', 'references', 'returns', 'type_of',
     ]);
     expect(relationValues.size).toBe(160);
-    expect(nodeMetadataShapes.size).toBe(124);
+    expect(nodeMetadataShapes.size).toBe(125);
     expect(edgeMetadataShapes.size).toBe(147);
     const globalOrders = (schemaPath: string) => new Set(graph.objectRules.find(([path]) => path === schemaPath)?.[2]
       .map(order => stableJson(order)) ?? []);
@@ -882,79 +896,105 @@ describe('CodeGraph NanoFlow Overlay v1 schema authority predecessor', () => {
       ownerPaths: ['package.json', 'scripts/run-codegraph-adapter-gate.cjs'],
     });
   });
-  it('single-pass validates the exact 250,558,329-byte artifact with bounded heap and RSS', () => {
+  it('retains the historical real-artifact known-answer envelope independently of the local index', () => {
     const definition = contract() as {
       authority: { compatibilityArtifact: { bytes: number; sha256: string } };
       compatibilityProfile: Record<string, number>;
     };
-    expect(definition.compatibilityProfile.stringScanCodeUnits).toBe(154_120_993);
-    const expectedArtifact = {
-      ...definition.authority.compatibilityArtifact,
-      counts: definition.compatibilityProfile,
-    };
-    const childSource = `
-      const fs = require('node:fs'); const artifactPath = ${JSON.stringify(currentOverlayPath)};
-      const originalStream = fs.createReadStream.bind(fs); const originalRead = fs.readFileSync.bind(fs);
-      let artifactOpenAttempts = 0, artifactOpens = 0, artifactStreamBytes = 0, secondReadRejected = false;
-      fs.createReadStream = (target, options) => { if (require('node:path').resolve(target) === artifactPath) {
-        artifactOpenAttempts += 1; if (artifactOpenAttempts > 1) throw new Error('second artifact read'); artifactOpens += 1;
-      } const stream = originalStream(target, options); stream.on('data', chunk => { artifactStreamBytes += chunk.length; }); return stream; };
-      fs.readFileSync = (target, ...args) => { if (typeof target === 'string' && require('node:path').resolve(target) === artifactPath) {
-        throw new Error('artifact readFileSync forbidden'); } return originalRead(target, ...args); };
-      const schema = require(${JSON.stringify(schemaPath)});
-      const validator = schema.createOverlayV1Validator(${JSON.stringify({
-        expectedProjectRoot: repoRoot.replace(/\\/g, '/'),
-        expectedSourcePolicyDigest: SOURCE_POLICY_DIGEST,
-        expectedArtifact,
-      })});
-      const before = process.memoryUsage(); let peakHeap = before.heapUsed; let peakRss = before.rss;
-      const started = Date.now();
-      (async () => { for await (const chunk of fs.createReadStream(artifactPath, { highWaterMark: 1048576 })) {
-        validator.write(chunk); const usage = process.memoryUsage();
-        peakHeap = Math.max(peakHeap, usage.heapUsed); peakRss = Math.max(peakRss, usage.rss);
-      } const result = validator.finish(); try { fs.createReadStream(artifactPath); } catch { secondReadRejected = true; }
-        process.stdout.write(JSON.stringify({ artifactOpenAttempts, artifactOpens, artifactStreamBytes, secondReadRejected, result,
-        heapDelta: peakHeap - before.heapUsed, rssDelta: peakRss - before.rss, elapsedMs: Date.now() - started }));
-      })().catch(error => { console.error(error); process.exitCode = 1; });`;
-    const child = spawnSync(process.execPath, ['-e', childSource], {
-      cwd: repoRoot, encoding: 'utf8', maxBuffer: 1024 * 1024, timeout: 55_000,
-    });
-    expect(child.status, child.stderr).toBe(0);
-    const { artifactOpenAttempts, artifactOpens, artifactStreamBytes, secondReadRejected, result, heapDelta, rssDelta, elapsedMs } = JSON.parse(child.stdout) as {
-      artifactOpenAttempts: number; artifactOpens: number; artifactStreamBytes: number; secondReadRejected: boolean;
-      result: ValidationResult; heapDelta: number; rssDelta: number; elapsedMs: number;
-    };
-
-    expect({ artifactOpenAttempts, artifactOpens, artifactStreamBytes, secondReadRejected }).toEqual({
-      artifactOpenAttempts: 2, artifactOpens: 1,
-      artifactStreamBytes: 250_558_329, secondReadRejected: true,
-    });
-    expect(result.artifact).toEqual({
+    expect(definition.authority.compatibilityArtifact).toEqual({
       bytes: 250_558_329,
       sha256: '2508259e81e9c55b0e0e1058be219c0678564ceac685a72faf42c76d19abf420',
+      generatedAt: '2026-07-28T03:42:41.894Z',
+      sourcePath: '.codegraph/nanoflow-overlay.json',
     });
-    expect(result.counts).toEqual(expect.objectContaining({
-      objectPaths: 240, arrayPaths: 636, scalarPaths: 1_897, relations: 160,
-      nodeMetadataShapes: 124, edgeMetadataShapes: 147,
-      valueTokens: 5_648_158,
-      stringValues: 2_598_502,
-      keyTokens: 4_982_808,
-      stringTokens: 7_581_310,
-      decodedStringBytes: 146_989_907,
-      stringScanCodeUnits: 154_120_993,
-      maxDepth: 13,
-      maxStringBytes: 59_769,
-      graphNodes: 124_072,
-      graphEdges: 232_845,
-      nodeTieGroups: 8_695,
-      edgeTieGroups: 4_861,
-      endpointIdBytes: 13_706_255,
-      pathWitnessBytes: 207_662,
-      pathWitnesses: 3_560,
+    expect(definition.compatibilityProfile).toEqual(expect.objectContaining({
+      valueTokens: 5_648_158, stringValues: 2_598_502, keyTokens: 4_982_808,
+      stringTokens: 7_581_310, decodedStringBytes: 146_989_907, stringScanCodeUnits: 154_120_993,
+      maxDepth: 13, maxStringBytes: 59_769, graphNodes: 124_072, graphEdges: 232_845,
+      nodeTieGroups: 8_695, edgeTieGroups: 4_861, endpointIdBytes: 13_706_255,
+      pathWitnessBytes: 207_662, pathWitnesses: 3_560,
     }));
-    expect(heapDelta).toBeLessThan(192 * 1024 * 1024);
-    expect(rssDelta).toBeLessThan(384 * 1024 * 1024);
-    expect(elapsedMs).toBeLessThan(60_000);
-    expect('overlay' in result).toBe(false);
-  }, 60_000);
+  });
+  it('single-pass validates an independently produced portable 299MB artifact with bounded heap and RSS', () => {
+    const fixtureDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoflow-schema-stress-'));
+    const artifactPath = path.join(fixtureDirectory, 'overlay.json');
+    const producer = requireCjs(stressFixturePath) as {
+      STRESS_PROJECT_ROOT: string;
+      writeLargeOverlayFixture(target: string, base: Record<string, unknown>): {
+        bytes: number; sha256: string; nodes: number; edges: number; files: number;
+      };
+    };
+    try {
+      // The producer does not import the validator/descriptor/generator under test.
+      // Its fixed root, timestamp, order and streaming serializer pin the same bytes
+      // in clean checkouts and worktrees, without opening or copying .codegraph.
+      const produced = producer.writeLargeOverlayFixture(artifactPath, emptyOverlay());
+      expect(produced).toEqual({
+        bytes: 299_880_467,
+        sha256: '0528193de360c2f6bb9508ece08c0468b0122588dc83340ea6bd8444ce99d20a',
+        nodes: 160_000, edges: 320_000, files: 4_096,
+      });
+      const expectedArtifact = {
+        bytes: produced.bytes,
+        sha256: produced.sha256,
+        counts: STRESS_EXPECTED_COUNTS,
+      };
+      const childSource = `
+        const fs = require('node:fs'); const artifactPath = ${JSON.stringify(artifactPath)};
+        const originalStream = fs.createReadStream.bind(fs); const originalRead = fs.readFileSync.bind(fs);
+        let artifactOpenAttempts = 0, artifactOpens = 0, artifactStreamBytes = 0, secondReadRejected = false;
+        fs.createReadStream = (target, options) => { if (require('node:path').resolve(target) === artifactPath) {
+          artifactOpenAttempts += 1; if (artifactOpenAttempts > 1) throw new Error('second artifact read'); artifactOpens += 1;
+        } const stream = originalStream(target, options); stream.on('data', chunk => { artifactStreamBytes += chunk.length; }); return stream; };
+        fs.readFileSync = (target, ...args) => { if (typeof target === 'string' && require('node:path').resolve(target) === artifactPath) {
+          throw new Error('artifact readFileSync forbidden'); } return originalRead(target, ...args); };
+        const schema = require(${JSON.stringify(schemaPath)});
+        const validator = schema.createOverlayV1Validator(${JSON.stringify({
+          expectedProjectRoot: producer.STRESS_PROJECT_ROOT,
+          expectedSourcePolicyDigest: SOURCE_POLICY_DIGEST,
+          expectedArtifact,
+        })});
+        const before = process.memoryUsage(); let peakHeap = before.heapUsed; let peakRss = before.rss;
+        const sample = () => { const usage = process.memoryUsage();
+          peakHeap = Math.max(peakHeap, usage.heapUsed); peakRss = Math.max(peakRss, usage.rss); };
+        const started = Date.now();
+        (async () => { for await (const chunk of fs.createReadStream(artifactPath, { highWaterMark: 1048576 })) {
+          validator.write(chunk); sample();
+        } const result = validator.finish(); sample();
+          try { fs.createReadStream(artifactPath); } catch { secondReadRejected = true; }
+          process.stdout.write(JSON.stringify({ artifactOpenAttempts, artifactOpens, artifactStreamBytes, secondReadRejected, result,
+          heapDelta: peakHeap - before.heapUsed, rssDelta: peakRss - before.rss, elapsedMs: Date.now() - started }));
+        })().catch(error => { console.error(error); process.exitCode = 1; });`;
+      const child = spawnSync(process.execPath, ['-e', childSource], {
+        cwd: repoRoot, encoding: 'utf8', maxBuffer: 1024 * 1024, timeout: 55_000,
+      });
+      expect(child.status, child.stderr).toBe(0);
+      const { artifactOpenAttempts, artifactOpens, artifactStreamBytes, secondReadRejected, result, heapDelta, rssDelta, elapsedMs } = JSON.parse(child.stdout) as {
+        artifactOpenAttempts: number; artifactOpens: number; artifactStreamBytes: number; secondReadRejected: boolean;
+        result: ValidationResult; heapDelta: number; rssDelta: number; elapsedMs: number;
+      };
+      expect({ artifactOpenAttempts, artifactOpens, artifactStreamBytes, secondReadRejected }).toEqual({
+        artifactOpenAttempts: 2, artifactOpens: 1, artifactStreamBytes: produced.bytes, secondReadRejected: true,
+      });
+      expect(result.artifact).toEqual({ bytes: produced.bytes, sha256: produced.sha256 });
+      expect(result.counts).toEqual(expect.objectContaining(STRESS_EXPECTED_COUNTS));
+      // Keep every original stress budget and exceed its data-volume denominators.
+      expect(produced.bytes).toBeGreaterThan(250_558_329);
+      for (const [key, historical] of Object.entries({
+        valueTokens: 5_648_158, stringTokens: 7_581_310, graphNodes: 124_072,
+        graphEdges: 232_845, nodeTieGroups: 8_695, edgeTieGroups: 4_861,
+        endpointIdBytes: 13_706_255, pathWitnesses: 3_560, pathWitnessBytes: 207_662,
+        maxDepth: 13, nodeMaxTieGroup: 128, edgeMaxTieGroup: 102,
+      })) expect(result.counts[key], key).toBeGreaterThanOrEqual(historical);
+      expect(heapDelta).toBeLessThan(192 * 1024 * 1024);
+      expect(rssDelta).toBeLessThan(384 * 1024 * 1024);
+      expect(elapsedMs).toBeLessThan(60_000);
+      expect('overlay' in result).toBe(false);
+    } finally {
+      // Only the exact new task-owned temporary directory may be recursively removed.
+      expect(path.dirname(fixtureDirectory)).toBe(os.tmpdir());
+      expect(path.basename(fixtureDirectory)).toMatch(/^nanoflow-schema-stress-/);
+      fs.rmSync(fixtureDirectory, { recursive: true, force: true });
+    }
+  }, 65_000);
 });

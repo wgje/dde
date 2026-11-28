@@ -123,6 +123,132 @@ function mutatedSolver(arcKey: string, field: string, value: unknown, boundary: 
 }
 
 describe('CodeGraph callback reachability solver contract', { timeout: 30_000 }, () => {
+  it('recognizes exact profile value frames in the worker query executor without widening other callers', () => {
+    const sourcePath = 'query.mjs', selectionPath = 'selection.mjs';
+    const source = [
+      "import { installSelection, selectGraphResultsImpl } from './selection.mjs';",
+      'const runtime = {}; installSelection(runtime);',
+      'function selectGraphResults(...values) { return selectGraphResultsImpl(...values); }',
+      'function profilePhase(phase, callback) { return callback(); }',
+      'function executeOverlayQuery(args, root) {',
+      "  const graphSelection = profilePhase('selectGraphResults', () => selectGraphResults({graph:{nodes:[1],edges:[]}}, '', [], 1));",
+      '  return graphSelection;',
+      '}',
+      "const args = {}; const root = 'fixture'; executeOverlayQuery(args, root);",
+      'function unrelatedOwner() { return []; }',
+    ].join('\n');
+    const selection = [
+      'let selectionDelegate;',
+      'export function selectGraphResultsImpl(...values) { return selectionDelegate(...values); }',
+      'export function installSelection(runtime) {',
+      '  const call = name => (...values) => runtime[name](...values);',
+      '  function selectGraphResults(overlay, query, matches, limit) {',
+      '    return overlay.graph.nodes.map(pick);',
+      '  }',
+      '  function pick(node) { return node; }',
+      '  selectionDelegate = selectGraphResults;',
+      '  Object.assign(runtime, {selectGraphResults});',
+      '}',
+    ].join('\n');
+    const analyze = (text = source, installed = selection) => analyzeCallbackReachabilityBatch({
+      sources: [{sourcePath, text}, {sourcePath: selectionPath, text: installed}], entrySourcePath: sourcePath,
+      ownerRequests: [
+        {ownerId: 'selection', rootCallables: [{sourcePath: selectionPath, name: 'selectGraphResults'}]},
+        {ownerId: 'executor', rootCallables: [{sourcePath, name: 'executeOverlayQuery'}]},
+        {ownerId: 'unrelated', rootCallables: [{sourcePath, name: 'unrelatedOwner'}]},
+      ],
+    }).ownerResults;
+    const baseline = analyze();
+    expect(baseline.flatMap(row => row.diagnostics)).toEqual([]);
+    for (const owner of baseline.slice(0, 2)) {
+      const pick = owner.reachableCallables.find(row => row.sourcePath === selectionPath && row.name === 'pick');
+      expect(pick, `${owner} exact selected callback`).toBeDefined();
+      expect(owner.terminalProvenance.find(row => row.identity === pick!.identity)?.predecessors)
+        .toEqual(expect.arrayContaining([expect.objectContaining({kind: 'array-callback', sourcePath: selectionPath,
+          line: 6, column: 12, endLine: 6, endColumn: 41})]));
+    }
+    expect(baseline[2].reachableCallableNames).not.toContain('pick');
+    const mutations = [
+      ['wrong phase', source.replace("profilePhase('selectGraphResults'", "profilePhase('otherPhase'")],
+      ['unapproved execution owner', source.replaceAll('executeOverlayQuery', 'otherExecutor')],
+      ['shadowed profile binding', source.replace('function executeOverlayQuery(args, root) {',
+        'function executeOverlayQuery(args, root) { function profilePhase(phase, callback) { return callback(); }')],
+      ['shadowed wrapper binding', source.replace('function executeOverlayQuery(args, root) {',
+        'function executeOverlayQuery(args, root) { function selectGraphResults(overlay, query, matches, limit) { return []; }')],
+      ['wrong executor arguments', source.replace('executeOverlayQuery(args, root);', 'executeOverlayQuery(root, args);')],
+      ['spread executor entry', source.replace('executeOverlayQuery(args, root);', 'executeOverlayQuery(...[args, root]);')],
+      ['wrong installer runtime', source.replace('installSelection(runtime);', 'installSelection({...runtime});')],
+    ];
+    for (const [name, mutated] of mutations) {
+      const result = analyze(mutated)[0];
+      expect(result.diagnostics, name).toEqual([]);
+      expect(result.reachableCallableNames, `${name} cannot establish the installed callback frame`).not.toContain('pick');
+    }
+  });
+
+  it('requires the exact native JSON executor branch before publishing serializer callbacks', () => {
+    const sourcePath = 'query.mjs', projectionPath = 'projection.mjs';
+    const source = [
+      "import { installProjection, toNativeJsonFormatterResponseImpl } from './projection.mjs';",
+      'const runtime = {}; installProjection(runtime);',
+      'function toNativeJsonFormatterResponse(...values) { return toNativeJsonFormatterResponseImpl(...values); }',
+      'function executeOverlayQuery(args, root) {',
+      '  const response = {nodes:[1],edges:[2]};',
+      '  const outputResponse = args.nativeJson ? toNativeJsonFormatterResponse(response) : response;',
+      '  return outputResponse;',
+      '}',
+      "const args = {}; const root = 'fixture'; executeOverlayQuery(args, root);",
+      'function unrelatedOwner() { return []; }',
+    ].join('\n');
+    const projection = [
+      'let projectionDelegate;',
+      'export function toNativeJsonFormatterResponseImpl(...values) { return projectionDelegate(...values); }',
+      'export function installProjection(runtime) {',
+      '  const call = name => (...values) => runtime[name](...values);',
+      '  function toNativeJsonFormatterResponse(context) {',
+      '    return {nodes:context.nodes.map(serializeNativeJsonNode),edges:context.edges.map(serializeNativeJsonEdge)};',
+      '  }',
+      '  function serializeNativeJsonNode(node) { return node; }',
+      '  function serializeNativeJsonEdge(edge) { return edge; }',
+      '  projectionDelegate = toNativeJsonFormatterResponse;',
+      '  Object.assign(runtime, {toNativeJsonFormatterResponse});',
+      '}',
+    ].join('\n');
+    const analyze = (text = source, installed = projection) => analyzeCallbackReachabilityBatch({
+      sources: [{sourcePath, text}, {sourcePath: projectionPath, text: installed}], entrySourcePath: sourcePath,
+      ownerRequests: [
+        {ownerId: 'formatter', rootCallables: [{sourcePath: projectionPath, name: 'toNativeJsonFormatterResponse'}]},
+        {ownerId: 'unrelated', rootCallables: [{sourcePath, name: 'unrelatedOwner'}]},
+      ],
+    }).ownerResults;
+    const baseline = analyze();
+    expect(baseline.flatMap(row => row.diagnostics)).toEqual([]);
+    expect(baseline[0].reachableCallableNames).toEqual(expect.arrayContaining([
+      'serializeNativeJsonNode', 'serializeNativeJsonEdge',
+    ]));
+    expect(baseline[1].reachableCallableNames).not.toContain('serializeNativeJsonEdge');
+    const mutations = [
+      ['wrong branch', source.replace('args.nativeJson ? toNativeJsonFormatterResponse(response) : response',
+        'args.nativeJson ? response : toNativeJsonFormatterResponse(response)')],
+      ['wrong argument', source.replace('toNativeJsonFormatterResponse(response)', 'toNativeJsonFormatterResponse(other)')],
+      ['aliased call', source.replace('toNativeJsonFormatterResponse(response)', '((f) => f(response))(toNativeJsonFormatterResponse)')],
+      ['spread call', source.replace('toNativeJsonFormatterResponse(response)', 'toNativeJsonFormatterResponse(...[response])')],
+      ['wrong arity', source.replace('toNativeJsonFormatterResponse(response)', 'toNativeJsonFormatterResponse(response, root)')],
+      ['wrong runtime registration', source.replace('installProjection(runtime);', 'installProjection({...runtime});')],
+      ['shadowed formatter binding', source.replace('function executeOverlayQuery(args, root) {',
+        'function executeOverlayQuery(args, root) { function toNativeJsonFormatterResponse(context) { return context; }')],
+      ['unapproved execution scope', source.replaceAll('executeOverlayQuery', 'otherExecutor')],
+    ];
+    for (const [name, mutated] of mutations) {
+      const result = analyze(mutated)[0];
+      expect(result.diagnostics, name).toEqual([]);
+      expect(result.reachableCallableNames, `${name} rejects the complete serializer callback group`)
+        .not.toContain('serializeNativeJsonNode');
+      expect(result.reachableCallableNames, `${name} rejects the complete edge callback group`)
+        .not.toContain('serializeNativeJsonEdge');
+    }
+  });
+
   it('settles only cyclic lanes and keeps duplicate-owner diagnostics in the facade', () => {
     const cycle = solve(['A'], [
       candidate('A', 'p1', 'p2', 'cycle-1'), candidate('A', 'p2', 'p1', 'cycle-2'),

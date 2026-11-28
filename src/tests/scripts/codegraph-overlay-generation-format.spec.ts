@@ -59,9 +59,9 @@ describe('CodeGraph Overlay generation format', () => {
     )) as { schemaDigest: string };
     expect(generationContract.overlaySchemaDigest).toBe(schemaContract.schemaDigest);
     expect(generationContract.overlaySchemaDigest)
-      .toBe('0cf35177cabc7261e0d8aa7040d083acc4c5c5c03a3c966a19982d35192a9e22');
+      .toBe('d851121face8ca1c1ff86eb5f0fe4bca9cd93130a1c1a034ba0eeaf2c547cc4a');
     expect(format.CONTRACT_DIGEST).toBe(
-      '04ff94768c3cc59c2c0196e79053cd5d1630ddcf0f37ab9dfe6d7acc9aa9aca0',
+      '3ddb108c79f0e69d6d35b07dbf5a47e157505ae9c7caa9d1a2abfbef2266f3d8',
     );
   });
 

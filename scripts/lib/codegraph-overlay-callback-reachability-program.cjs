@@ -268,17 +268,40 @@ function buildCallbackReachabilityProgram(input) {
     const ref = binding.sources[0].ref;
     return ref.kind === 'callable' ? ref.scope : ref.kind === 'expression' ? scopeByNode.get(ref.node) ?? null : null;
   };
+  // Worker requests share the exact query body with the CLI. Recognize only the
+  // uniquely bound top-level executor reached through the ordinary two-argument
+  // CLI call; unrelated/nested functions do not acquire entry descriptor authority.
+  const executorMatches = (callablesByName.get('executeOverlayQuery') ?? [])
+    .filter(scope => scope.parent === entryModule && ts.isFunctionDeclaration(scope.node)
+      && scope.node.parameters.length === 2
+      && scope.node.parameters.every((parameter, index) => ts.isIdentifier(parameter.name)
+        && parameter.name.text === ['args', 'root'][index]
+        && !parameter.dotDotDotToken && !parameter.questionToken && !parameter.initializer));
+  const executor = executorMatches.length === 1 ? executorMatches[0] : null;
+  let executorEntry = false;
+  if (executor && directCallableTarget(resolveBinding('executeOverlayQuery', entryModule)) === executor) {
+    walkScope(entryModule, node => {
+      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)
+        && node.expression.text === 'executeOverlayQuery' && node.arguments.length === 2
+        && node.arguments.every((argument, index) => ts.isIdentifier(argument)
+          && argument.text === ['args', 'root'][index])) executorEntry = true;
+    });
+  }
+  const entryScopes = new Set([...(entryModule ? [entryModule] : []),
+    ...(executorEntry ? [executor] : [])]);
   const entryValueCandidates = [];
   const profileSites = new WeakMap();
   const profileValueCandidates = [];
-  let nativeJsonCandidate = null;
-  if (entryModule) walkScope(entryModule, node => {
+  const nativeJsonCandidates = [];
+  for (const entryScope of entryScopes) walkScope(entryScope, node => {
     if (!ts.isCallExpression(node)) return;
     const declaration = node.parent;
     if (ts.isVariableDeclaration(declaration) && declaration.initializer === node
       && ts.isIdentifier(declaration.name) && ts.isIdentifier(node.expression)
-      && ENTRY_VALUE_CALLEES.get(declaration.name.text) === node.expression.text) {
-      entryValueCandidates.push({ call: node, name: node.expression.text });
+      && ENTRY_VALUE_CALLEES.get(declaration.name.text) === node.expression.text
+      && (entryScope === entryModule || (resolveBinding(node.expression.text, entryModule)
+        && resolveBinding(node.expression.text, entryScope) === resolveBinding(node.expression.text, entryModule)))) {
+      entryValueCandidates.push({ call: node, name: node.expression.text, caller: entryScope });
     }
     if (ts.isIdentifier(node.expression) && node.expression.text === 'profilePhase'
       && node.arguments.length === 2 && ts.isStringLiteral(node.arguments[0])) {
@@ -291,23 +314,32 @@ function buildCallbackReachabilityProgram(input) {
         && ts.isIdentifier(inner.expression.expression) && inner.expression.expression.text === 'graphEdges'
         && inner.expression.name.text === 'map' && ts.isIdentifier(inner.arguments[0])
         && inner.arguments[0].text === expected;
-      if (expected && callback?.parent === entryModule && (direct || mapped)) {
+      if (expected && callback?.parent === entryScope && (direct || mapped)
+        && resolveBinding(expected, entryModule)
+        && resolveBinding(expected, callback) === resolveBinding(expected, entryModule)
+        && directCallableTarget(resolveBinding('profilePhase', entryScope))
+          === directCallableTarget(resolveBinding('profilePhase', entryModule))
+        && directCallableTarget(resolveBinding('profilePhase', entryModule))?.name === 'profilePhase') {
         profileSites.set(node, Object.freeze({ phase, callback, root: PROFILE_ROOT_CALLEES.has(phase) }));
         if (PROFILE_VALUE_CALLEES.has(phase) && direct) profileValueCandidates.push({ call: inner, name: expected,
           caller: callback, });
       }
     }
     if (ts.isIdentifier(node.expression) && node.expression.text === 'toNativeJsonFormatterResponse'
+      && resolveBinding(node.expression.text, entryModule)
+      && resolveBinding(node.expression.text, entryScope) === resolveBinding(node.expression.text, entryModule)
       && node.arguments.length === 1 && ts.isIdentifier(node.arguments[0]) && node.arguments[0].text === 'response'
       && ts.isConditionalExpression(node.parent) && node.parent.whenTrue === node
       && ts.isPropertyAccessExpression(node.parent.condition)
       && node.parent.condition.getText() === 'args.nativeJson'
       && ts.isIdentifier(node.parent.whenFalse) && node.parent.whenFalse.text === 'response'
       && ts.isVariableDeclaration(node.parent.parent) && ts.isIdentifier(node.parent.parent.name)
-      && node.parent.parent.name.text === 'outputResponse') nativeJsonCandidate = node;
+      && node.parent.parent.name.text === 'outputResponse') nativeJsonCandidates.push({call: node, caller: entryScope});
   });
   function approvedProfileCallback(call, scope) {
-    if (scope !== entryModule || !ts.isIdentifier(call.expression) || call.expression.text !== 'profilePhase'
+    if (!entryScopes.has(scope) || !ts.isIdentifier(call.expression) || call.expression.text !== 'profilePhase'
+      || directCallableTarget(resolveBinding('profilePhase', scope))
+        !== directCallableTarget(resolveBinding('profilePhase', entryModule))
       || directCallableTarget(resolveBinding('profilePhase', entryModule))?.name !== 'profilePhase') return null;
     return profileSites.get(call)?.callback ?? null;
   }
@@ -338,9 +370,9 @@ function buildCallbackReachabilityProgram(input) {
       runtimeTargets.set(property.name.text, callable);
     }
   });
-  function entryInstalledTarget(call) {
+  function entryInstalledTarget(call, caller) {
     if (!ts.isIdentifier(call.expression)) return null;
-    const binding = resolveBinding(call.expression.text, entryModule);
+    const binding = resolveBinding(call.expression.text, caller);
     if (!binding || binding.sources.length !== 1) return null;
     const source = binding.sources[0];
     if (source.sourceScope !== entryModule || source.path.length !== 1
@@ -364,9 +396,9 @@ function buildCallbackReachabilityProgram(input) {
       key: Object.freeze([identityOf(call), caller.id, target.id]), });
   }
   for (const candidate of entryValueCandidates) {
-    const target = entryInstalledTarget(candidate.call)
-      ?? directCallableTarget(resolveBinding(candidate.name, entryModule));
-    const value = descriptor(candidate.call, entryModule, target, 'producer', true);
+    const target = entryInstalledTarget(candidate.call, candidate.caller)
+      ?? directCallableTarget(resolveBinding(candidate.name, candidate.caller));
+    const value = descriptor(candidate.call, candidate.caller, target, 'producer', true);
     if (value) descriptors.set(candidate.call, value);
   }
   function exactEntryDependency(node, name) {
@@ -381,31 +413,33 @@ function buildCallbackReachabilityProgram(input) {
       && ts.isIdentifier(declaration.name) ? declaration.name.text : null;
     const prerequisite = name === 'graphNodes' ? 'prioritizedGraphNodes'
       : name === 'closedGraphEdges' || name === 'entryPoints' ? 'graphNodes' : null;
-    const prerequisiteProven = !prerequisite || (provenArrayBindings.has(resolveBinding(prerequisite, entryModule))
+    const prerequisiteProven = !prerequisite || (provenArrayBindings.has(resolveBinding(prerequisite, candidate.caller))
       && candidate.call.arguments.some(argument => exactEntryDependency(argument, prerequisite)));
-    if (name && descriptors.has(candidate.call) && prerequisiteProven) provenArrayBindings.add(resolveBinding(name, entryModule));
+    if (name && descriptors.has(candidate.call) && prerequisiteProven) provenArrayBindings.add(resolveBinding(name, candidate.caller));
   }
-  const graphEdgesBinding = entryModule?.bindings.get('graphEdges');
-  const graphEdgesSource = graphEdgesBinding?.sources.find(source => source.ref.kind === 'expression'
-    && ts.isConditionalExpression(source.ref.node));
-  const graphSelectionBinding = entryModule?.bindings.get('graphSelection');
-  const graphSelectionSource = graphSelectionBinding?.sources.find(source => source.ref.kind === 'expression'
-    && ts.isCallExpression(source.ref.node) && approvedProfileCallback(source.ref.node, entryModule));
-  const closedGraphEdgesBinding = entryModule?.bindings.get('closedGraphEdges');
-  if (graphEdgesBinding && graphEdgesSource && graphSelectionSource
-    && provenArrayBindings.has(closedGraphEdgesBinding)
-    && graphEdgesSource.ref.node.whenTrue.getText().includes('graphSelection.edges')
-    && graphEdgesSource.ref.node.whenFalse.getText().includes('closedGraphEdges.slice')) {
-    provenArrayBindings.add(graphEdgesBinding);
+  for (const entryScope of entryScopes) {
+    const graphEdgesBinding = entryScope.bindings.get('graphEdges');
+    const graphEdgesSource = graphEdgesBinding?.sources.find(source => source.ref.kind === 'expression'
+      && ts.isConditionalExpression(source.ref.node));
+    const graphSelectionBinding = entryScope.bindings.get('graphSelection');
+    const graphSelectionSource = graphSelectionBinding?.sources.find(source => source.ref.kind === 'expression'
+      && ts.isCallExpression(source.ref.node) && approvedProfileCallback(source.ref.node, entryScope));
+    const closedGraphEdgesBinding = entryScope.bindings.get('closedGraphEdges');
+    if (graphEdgesBinding && graphEdgesSource && graphSelectionSource
+      && provenArrayBindings.has(closedGraphEdgesBinding)
+      && graphEdgesSource.ref.node.whenTrue.getText().includes('graphSelection.edges')
+      && graphEdgesSource.ref.node.whenFalse.getText().includes('closedGraphEdges.slice')) {
+      provenArrayBindings.add(graphEdgesBinding);
+    }
   }
   for (const candidate of profileValueCandidates) {
     const value = descriptor(candidate.call, candidate.caller, installedRuntimeTarget(candidate.name), 'profile', true);
     if (value) descriptors.set(candidate.call, value);
   }
-  if (nativeJsonCandidate) {
-    const value = descriptor(nativeJsonCandidate, entryModule, installedRuntimeTarget('toNativeJsonFormatterResponse'),
+  for (const candidate of nativeJsonCandidates) {
+    const value = descriptor(candidate.call, candidate.caller, installedRuntimeTarget('toNativeJsonFormatterResponse'),
       'native-json', true, );
-    if (value) descriptors.set(nativeJsonCandidate, value);
+    if (value) descriptors.set(candidate.call, value);
   }
   function valueCallDescriptor(call, caller, originalTarget = null) {
     const exact = descriptors.get(call);
@@ -496,12 +530,12 @@ function buildCallbackReachabilityProgram(input) {
     .filter(site => ts.isPropertyAccessExpression(site.node.expression)
       && site.node.expression.name.text === 'set' && site.node.arguments.length >= 2)
     .map(site => Object.freeze({ call: site.node, scope }))));
-  const rootSeedSites = Object.freeze(entryModule ? (sitesByScope.get(entryModule)?.calls ?? []).flatMap(site => [
-    Object.freeze({ caller: entryModule, site }),
+  const rootSeedSites = Object.freeze([...entryScopes].flatMap(entryScope => (sitesByScope.get(entryScope)?.calls ?? []).flatMap(site => [
+    Object.freeze({ caller: entryScope, site }),
     ...(site.profileCallback ? (sitesByScope.get(site.profileCallback)?.calls ?? []).map(callbackSite => (
       Object.freeze({ caller: site.profileCallback, site: callbackSite })
     )) : []),
-  ]) : []);
+  ])));
   const delegateTargets = new Map();
   for (const scope of scopes.filter(candidate => candidate.installerRuntime)) {
     for (const assignment of sitesByScope.get(scope)?.delegates ?? []) {
@@ -612,7 +646,7 @@ function buildCallbackReachabilityProgram(input) {
       const binding = resolveBinding(node.text, scope);
       if (requestedPath.length === 0 && provenArrayBindings.has(binding)) return true;
       const local = latestLocalSource(binding, node, scope);
-      if (scope === entryModule && requestedPath.length === 0 && local?.ref.kind === 'expression'
+      if (entryScopes.has(scope) && requestedPath.length === 0 && local?.ref.kind === 'expression'
         && ENTRY_VALUE_CALLEES.has(binding?.name)) return false;
       return Boolean(binding) && (local ? local.ref.kind === 'expression'
         && expressionAtPath(local.ref.node, local.ref.scope, [...local.path, ...requestedPath], next)
