@@ -133,9 +133,13 @@ export class ProjectStateService {
     return this.taskStore.getTasksByProject(projectId);
   });
 
+  /** 主视图共用的任务投影；完整实体保留在 tasks 中用于归档恢复和数据导出。 */
+  readonly visibleTasks = computed(() => {
+    return this.tasks().filter(task => !task.deletedAt && task.status !== 'archived');
+  });
+
   readonly stages = computed(() => {
-    const tasks = this.tasks();
-    const assigned = tasks.filter(t => t.stage !== null && !t.deletedAt);
+    const assigned = this.visibleTasks().filter(task => task.stage !== null);
     
     const stagesMap = new Map<number, Task[]>();
     assigned.forEach(t => {
@@ -155,7 +159,7 @@ export class ProjectStateService {
   });
 
   readonly unassignedTasks = computed(() => {
-    return this.tasks().filter(t => t.stage === null && !t.deletedAt);
+    return this.visibleTasks().filter(task => task.stage === null);
   });
 
   /** 已删除（回收站）中的任务 */
@@ -180,14 +184,12 @@ export class ProjectStateService {
   });
 
   private collectTaskTodoSnapshot(rootDisplayId: string = ''): TaskTodoSnapshot {
-    const tasks = this.tasks();
+    const tasks = this.visibleTasks();
     const unfinishedItems: UnfinishedItem[] = [];
     let total = 0;
     let completed = 0;
 
     tasks.forEach(task => {
-      if (task.deletedAt) return;
-
       if (rootDisplayId) {
         const isDescendant = task.displayId === rootDisplayId || task.displayId.startsWith(rootDisplayId + ',');
         if (!isDescendant) return;
@@ -229,21 +231,20 @@ export class ProjectStateService {
   });
 
   readonly rootTasks = computed(() => {
-    const tasks = this.tasks();
+    const tasks = this.visibleTasks();
     const tasksWithUnfinished = tasks.filter(task => {
-      if (task.deletedAt) return false;
       return this.extractTaskTodoStats(task.content || '').pending > 0;
     });
     
-    return tasks.filter(t => t.stage === 1 && !t.deletedAt).filter(root => {
+    return tasks.filter(task => task.stage === 1).filter(root => {
       if (tasksWithUnfinished.some(u => u.id === root.id)) return true;
       return tasksWithUnfinished.some(u => u.displayId.startsWith(root.displayId + ','));
     });
   });
 
   readonly allStage1Tasks = computed(() => {
-    return this.tasks()
-      .filter(t => t.stage === 1 && !t.deletedAt)
+    return this.visibleTasks()
+      .filter(task => task.stage === 1)
       .sort((a, b) => a.rank - b.rank);
   });
 

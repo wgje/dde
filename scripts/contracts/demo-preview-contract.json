@@ -3,13 +3,17 @@
   "requiredWidgets": [
     "flow",
     "inbox",
-    "dock"
+    "dock",
+    "task-archive"
   ],
   "exceptions": {},
   "selectorFixtureHints": {
     "app-dock-mobile-drawer": {
       "test": "src/app/dev-preview/demo-dock-entry-preview.component.spec.ts",
-      "scenario": { "widget": "dock", "state": "mobile-entry" }
+      "scenario": {
+        "widget": "dock",
+        "state": "mobile-entry"
+      }
     },
     "app-flow-minimap": {
       "test": "src/app/dev-preview/demo-flow-preview.component.spec.ts",
@@ -51,6 +55,27 @@
       "scenario": {
         "widget": "inbox",
         "state": "strata"
+      }
+    },
+    "app-text-stages": {
+      "test": "src/app/dev-preview/demo-task-archive-preview.component.spec.ts",
+      "scenario": {
+        "widget": "task-archive",
+        "state": "assigned"
+      }
+    },
+    "app-text-unassigned": {
+      "test": "src/app/dev-preview/demo-task-archive-preview.component.spec.ts",
+      "scenario": {
+        "widget": "task-archive",
+        "state": "unassigned"
+      }
+    },
+    "app-text-unfinished": {
+      "test": "src/app/dev-preview/demo-task-archive-preview.component.spec.ts",
+      "scenario": {
+        "widget": "task-archive",
+        "state": "assigned"
       }
     }
   }
