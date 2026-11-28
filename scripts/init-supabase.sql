@@ -8468,6 +8468,24 @@ BEGIN
     FALSE
   );
 
+  IF v_is_stale THEN
+    v_result := jsonb_build_object(
+      'status', 'remote-newer',
+      'operation_id', v_op_id,
+      'connection_id', v_conn_id,
+      'remote_updated_at', v_existing_updated,
+      'reason', 'stale_connection_payload',
+      'stale_payload', true
+    );
+    INSERT INTO public.sync_operation_log (
+      operation_id, user_id, entity_type, entity_id, status, reject_reason,
+      protocol_version, deployment_epoch, deployment_target, client_git_sha, client_origin, result_payload
+    ) VALUES (
+      v_op_id, v_user, 'connection', v_conn_id, 'remote-newer', 'stale_connection_payload',
+      v_protocol, v_client_epoch, v_deployment_target, v_client_git, v_client_origin, v_result
+    );
+    RETURN v_result;
+  END IF;
   INSERT INTO public.connections AS c (id, project_id, source_id, target_id, title, description, deleted_at, updated_at)
   VALUES (
     v_conn_id,

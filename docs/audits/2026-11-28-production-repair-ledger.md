@@ -32,7 +32,7 @@
 - 前端新提交已部署到生产，线上 SHA 为 `be277cb4...`。GitHub Actions API 未返回对应 run，推测为 Pages 外部部署路径；GitHub CLI 未登录，不能把 workflow dispatch 说成已执行。
 - 生产 `sync_upsert_focus_session` / `sync_upsert_routine_task` 已应用 `20261128153245`；读回分别为 body MD5 `8aa84012131ac841c57f6f1af308b5c7` / `c0907bd763a35c1d04827baf26c2a0f8`，owner predicate 与 zero-row guard 均为 true。
 - 生产 `sync_apply_offline_command` 已应用 `20261128154611`；读回 body MD5 `aba5dc9e20471a2892592123c9ef9852`，`sync_get_offline_command_status` 为 `858902a0c4e78f2168ef8e586dea0103`，identity helper 为 `5535b3866ef2fc75b15cbf978c9a7777`。`sync_command_log` 当前 0 行，NULL digest 0 行；没有回填或改写历史收据。
-- 生产 `sync_upsert_connection` stale payload 仍是独立待修链路；本提交没有覆盖，须另做 forward migration 和生产 clone 证据。
+- 生产 `sync_upsert_connection` 已应用 `20261128170000`；读回 body MD5 `d900a39d071de0e2f454dab0b2fe09e3`，stale guard/reason 均为 true；陈旧 payload 会在连接写入前返回 `remote-newer`。
 - Auth/GoTrue、Service Worker 冷启动/旧 chunk、双账号线上读回、Storage/Edge 清理调度仍未达到生产证据门槛。
 - 纯 PostgreSQL fresh-init 执行因缺少 Supabase 平台基线（`auth.users`、`storage`、`supabase_realtime` 等）中止；静态 fresh-init contract 通过，不能把裸 Postgres 执行失败描述成迁移 SQL 生产失败。
 
