@@ -517,3 +517,23 @@ deleted 排除和 anon 无 EXECUTE；生产 DDL 之后仍需回读版本和 boun
 ## 空库初始化验证
 
 初始化脚本需先创建 `projects` 再创建引用它的 SQL owner/access helper；`active_tasks` 的初始列顺序需与后续替换兼容。应在任务专用的本地空库执行脚本并保持函数体校验开启，再演练候选迁移及回滚。只读 Storage schema 前置依赖、fresh-init、升级迁移和线上读回属于不同证据，不可互相替代。
+
+## 附件清理函数与调度（2026-11-29）
+
+生产 `cleanup-attachments` Edge Function 使用 `verify_jwt=false`，但不会接受普通用户 JWT 或 `service_role` 作为调用凭据；它要求专用 maintenance secret：
+
+- Edge Function secret：`CLEANUP_ATTACHMENTS_SECRET`；
+- Vault secret：同一值，仅供 `pg_cron`/`pg_net` 调用；
+- 两处 secret 都必须由部署者在官方 Supabase Dashboard 或受控 secret 管理流程中设置，不能写入 Git、前端环境变量、SQL migration 或聊天记录。
+
+建议启用前先完成以下只读/低风险核对：
+
+1. 确认函数版本、`verify_jwt=false`、函数入口和 `cleanup_logs`/`attachment_cleanup_jobs` schema 已存在。
+2. 在 Vault 中确认 secret **名称存在**，不要读取或输出 secret 值。
+3. 通过 Supabase Cron 以 Vault 解密值调用 `/functions/v1/cleanup-attachments`，周期建议每日一次；请求必须是 `POST`，`Authorization: Bearer <maintenance-secret>`。
+4. 首次运行只观察 HTTP 状态与 `cleanup_logs` 统计，不清理历史对象或修改保留期。
+5. 只在 checkpoint 写入成功、CAS claim、Storage 删除和 completion receipt 均可读回后，才将调度视为有效。
+
+函数的安全边界：无 secret 返回 `503`；checkpoint 写入失败返回 `503` 且不会伪报成功或推进游标；每次最多扫描 500 个任务、处理 100 个 outbox jobs。未配置 Vault/cron 时，附件清理调度状态必须标记为 `UNVERIFIED`，不能描述为已自动回收。
+
+回滚时先停用 cron，再保留 `attachment_cleanup_jobs` 和 `cleanup_logs`，不要删除 outbox 或 Storage 对象；恢复 cron 前重新核对函数版本、secret 名称和最近一次 checkpoint。
