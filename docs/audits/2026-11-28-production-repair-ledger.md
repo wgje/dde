@@ -6,7 +6,7 @@
 - 基线：`origin/main` at `1614794fd0311a271f8968712c53acf0ec937448`
 - 修复提交：`03a6222c` (`fix(sync): fence offline receipts and owner upserts`)
 - 已推送：`origin/main` 已读回为 `03a6222c`
-- 前端生产版本已读回 `version.json.gitSha=be277cb4f7a58c731044f0b6bb45794637cbdf6b`。数据库有一条前向 migration 已应用；收据 migration 尚未应用，因此完整 `productionProof=false`，收据相关 `NO_RELEASE` 保持。
+- 前端生产版本已读回 `version.json.gitSha=be277cb4f7a58c731044f0b6bb45794637cbdf6b`。生产数据库已应用 owner-race DDL migration `20261128153245`；业务行、Auth 用户、Storage 对象和队列均未写入/删除（`productionBusinessWrites=0`）。收据 migration 尚未应用，因此完整 `productionProof=false`，收据相关 `NO_RELEASE` 保持。
 
 ## 已闭合的本地缺口
 
@@ -39,7 +39,7 @@
 ## 回滚/恢复
 
 - 本地恢复快照：`%TEMP%\dde-workspace-recovery-20261128-171810`。
-- 生产未写入；没有执行 Auth 用户修改、Storage 删除、队列清除或生产 DDL。
+- 已执行一条目标绑定生产 DDL migration；没有执行 Auth 用户修改、业务行写入、Storage 删除、队列清除。生产 DDL receipt 与函数 readback 已记录在 Supabase migration ledger。
 - 合成 PostgreSQL 容器：`nanoflow-db-chain-20261128`，精确 ID 记录在 `%TEMP%\nanoflow-db-chain-20261128\lifecycle.json`；结束时按生命周期合同停止并保留容器/卷（当前仍运行，尚未清理）。
 
 ## 下一步顺序
