@@ -2,51 +2,175 @@
 title: Feature Workflows
 status: canonical
 audience: ai-agent, maintainer
-last_verified: 2026-11-28
+last_verified: 2026-06-09
 source_paths:
   - src/app/features/text/
   - src/app/features/flow/
   - src/app/features/focus/
   - src/app/features/parking/
-  - src/app/dev-preview/demo-dock-entry-preview.component.ts
   - src/services/dock-*.ts
   - src/services/black-box*.ts
 ---
 
 # Feature Workflows
 
+This page summarizes the major user-facing workflows and the architecture boundaries that protect them.
+
 ## Text View
 
-Text is the default mobile surface. Task operations use task services and stores; edits persist locally first, and cloud sync must not block immediate UI feedback.
+Text view is the default daily workflow and the default mobile surface.
+
+Use it for:
+
+- fast task creation and editing
+- hierarchical organization
+- filtering and search
+- Markdown content editing
+- mobile-first task management
+
+Architectural expectations:
+
+- Text operations go through task services and stores.
+- Edits persist locally first.
+- UI should not wait for cloud sync before reflecting user input.
 
 ## Flow View
 
-Flow uses GoJS to inspect task structure and relationships. It is not the mobile default and remains lazy-loaded. Do not preserve diagram instances under `visibility:hidden`; destroy and recreate them when required by the view lifecycle.
+Flow view uses GoJS to visualize task structure and relationships.
+
+Use it for:
+
+- graph inspection
+- spatial task organization
+- relationship lines and labels
+- PNG, SVG, or Markdown context export
+
+Rules:
+
+- Flow view is not the mobile default.
+- Flow should be lazy-loaded.
+- Do not keep GoJS diagram instances alive under `visibility:hidden`.
+- Destroy and recreate diagrams when view lifecycle requires it.
+- Flow events are decoupled through `FlowTemplateService -> flow-template-events.ts -> FlowEventService`.
 
 ## Parking Dock
 
-Parking Dock holds tasks that should pause without being deleted or archived. Entries may be project tasks or Dock-created tasks; wait timers, reminders, main-task state, and Focus transitions remain owned by existing Dock services.
+Parking Dock is for tasks that should be paused without being lost.
 
-On mobile, the collapsed entry is a low-emphasis transparent affordance at the bottom edge: no card fill, border or shadow, only a small Dock label/count and chevron. Touch/hover and keyboard focus reveal a faint surface without reducing the 44px touch target. Focus remains a quiet text action. Tapping the Dock entry opens the existing current/candidate/standby drawer. Preview does not switch tasks; explicit confirmation follows the existing parent task-selection path. The development-only real-component examples are `/#/dev-preview/dock/mobile-entry` and `/#/dev-preview/dock/mobile-open`, with in-memory entries only.
+Key concepts:
 
-This presentation change does not alter desktop Dock layout, task persistence, snapshot format or sync ownership.
+- parked tasks are still tasks
+- parking metadata lives on tasks through `parkingMeta`
+- dock entries can point to project tasks or dock-created inline tasks
+- wait timers, reminders, main-task state, and focus transitions are part of dock state
+
+Important status values:
+
+- `pending_start`
+- `focusing`
+- `suspended_waiting`
+- `wait_finished`
+- `stalled`
+- `completed`
+
+User-facing dock behavior:
+
+1. Park a task from Text or Flow.
+2. Optionally set reminder, wait, load, or expected time.
+3. Let Dock or Focus Console promote work when appropriate.
+4. Complete, suspend, resume, or return task context.
 
 ## Focus Mode
 
-Focus includes Gate review, Strata, Focus Console and fragment interludes. Daily Gate snooze remains limited to three; speech transcription quota remains 50/day; Strata shows up to 30 days. Focus snapshots remain versioned and contain command-center, combo-select, backup, routine, high-load and burnout fields.
+Focus Mode is a higher-level execution workflow. It includes:
+
+- Gate: review pending Black Box entries
+- Strata: resurface completed or historical items
+- Focus Console: execute docked or selected tasks
+- fragment phase: small interlude tasks and breaks
+
+Core limits:
+
+- `FOCUS_CONFIG.GATE.MAX_SNOOZE_PER_DAY = 3`
+- speech transcription quota is 50 per day
+- Strata displays up to 30 days
+
+Focus session state uses versioned snapshots. `FocusSessionStateV2` includes command center tasks, combo-select tasks, backup tasks, routine slots, high-load counters, and burnout state.
 
 ## Black Box
 
-Black Box provides offline text capture and later Gate/Focus processing. Speech retention and remote transcription remain controlled by the existing capture and Supabase workflow.
+Black Box is for quick capture before organization.
 
-## Task Sidecar
+Text capture:
 
-Sidecar data is attention metadata; it must not create Flow graph topology.
+- offline capable
+- creates `BlackBoxEntry`
+- processed later through Gate or Focus flows
+
+Speech capture:
+
+- records audio locally
+- caches offline audio when needed
+- sends audio to Supabase Edge Function `transcribe`
+- uses Groq `whisper-large-v3`
+- deletes or stops retaining audio after transcription workflow as implemented by capture services
+
+## Task Sidecar / Attention Metadata
+
+Task sidecar information is stored in `attentionMeta`.
+
+It is an attention summary layer, not a graph topology layer. It should not create new Flow nodes or links.
+
+Use it for:
+
+- risks
+- blockers
+- waiting notes
+- user-written attention items
+- compact badges in Text and Flow surfaces
 
 ## Android Widget
 
-Android TWA uses existing registration, summary, notification and action functions with FCM/WorkManager fallbacks.
+The Android widget path uses:
 
-## Recovery
+- Android TWA host package `app.nanoflow.twa`
+- Supabase Edge Functions for registration, summary, notifications, and actions
+- optional FCM dirty push
+- fallback refresh paths when FCM is unavailable
 
-Project JSON, attachment ZIP, trash restoration, desktop backups and disaster recovery are core product paths. High-risk changes must preserve recoverability.
+Widget-related Edge Functions:
+
+- `widget-register`
+- `widget-summary`
+- `widget-notify`
+- `widget-black-box-action`
+- `widget-focus-action`
+
+If `android/app/google-services.json` or FCM secrets are missing, the widget path should degrade to manual refresh, unlock-triggered refresh, or WorkManager periodic refresh.
+
+## Import, Export, Trash, and Recovery
+
+Recovery tools are part of the core product, not auxiliary features.
+
+Supported paths:
+
+- JSON export/import for structured project data
+- attachment ZIP export/import for files
+- trash restoration for deleted and archived tasks
+- local desktop auto-backup where supported
+- disaster backup and rejected-data isolation paths
+
+High-risk changes must preserve recoverability and avoid irreversible deletion.
+
+## Black Box SVG action semantics
+
+Entry, panel, mobile drawer and Strata restore icons use inline 24-unit SVGs with
+`currentColor`, rounded strokes and hidden decorative semantics. Visible labels
+remain the primary meaning: read, complete, delete, pending sync and restore.
+Actions are visible without hover; rows wrap rather than overflow on narrow screens.
+This changes presentation only: durable methods, sync decisions, confirmation,
+keyboard shortcuts and local-first persistence are unchanged.
+
+## Mobile Dock transparent entry
+
+The collapsed mobile Dock uses a transparent label/count and upward chevron with a 44px touch target. Focus is a secondary text action; the existing drawer and confirmation logic are unchanged. Isolated development previews: `/#/dev-preview/dock/mobile-entry` (tap to open), `/#/dev-preview/dock/mobile-open` (expanded result). Fixture data stays in page memory only.

@@ -21,15 +21,12 @@ button { font: inherit; color: inherit; min-height: 44px; border: 0; cursor: poi
 button:focus-visible { outline: 2px solid var(--drawer-action); outline-offset: 3px; }
 button:disabled { opacity: .5; cursor: not-allowed; }
 svg { width: 20px; height: 20px; flex-shrink: 0; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
-.dock-trigger { position: absolute; left: 50%; bottom: calc(8px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); display: flex; align-items: center; gap: 2px; max-width: calc(100% - 24px); background: transparent; border: 0; box-shadow: none; pointer-events: none; opacity: .48; transition: opacity 180ms ease; }
+.dock-trigger { position: absolute; left: 50%; bottom: calc(8px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); display: flex; align-items: center; gap: 2px; max-width: calc(100% - 24px); background: transparent; border: 0; box-shadow: none; pointer-events: none; }
 .trigger-main { min-width: 108px; display: flex; gap: 8px; justify-content: center; align-items: center; background: transparent; color: var(--drawer-muted); border-radius: 14px; padding: 0 12px; pointer-events: auto; }
 .trigger-label { white-space: nowrap; font-size: 12px; font-weight: 500; letter-spacing: .03em; }
 .trigger-label small { margin-left: 3px; font-size: 10px; font-variant-numeric: tabular-nums; }
 .trigger-main > svg { width: 14px; height: 14px; stroke-width: 1.5; }
 .trigger-main:hover, .trigger-focus:hover, .trigger-main:active, .trigger-focus:active, .trigger-main:focus-visible, .trigger-focus:focus-visible { background: color-mix(in srgb, var(--drawer-ink) 6%, transparent); color: var(--drawer-ink); }
-.dock-trigger:focus-within { opacity: 1; }
-:host(.focus-active) .dock-trigger { opacity: .62; }
-@media (hover: hover) { .dock-trigger:hover { opacity: 1; } }
 small { font-size: 11px; color: var(--drawer-muted); font-weight: 400; }
 .trigger-focus { min-width: 52px; padding: 0 10px; border-radius: 14px; font-size: 11px; background: transparent; color: var(--drawer-muted); pointer-events: auto; }
 .backdrop { position: absolute; inset: 0; width: 100%; background: #10191066; pointer-events: auto; animation: drawerFade 150ms ease-out both; }

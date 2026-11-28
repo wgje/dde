@@ -31,13 +31,13 @@ import { DockMobileDrawerComponent } from '../features/parking/components/dock-m
 export class DemoDockEntryPreviewComponent {
   readonly state = input('mobile-entry');
   readonly taskIds = { current: crypto.randomUUID(), candidate: crypto.randomUUID(), waiting: crypto.randomUUID() };
-  readonly currentTaskId = signal(this.taskIds.current);
+  readonly currentTaskId = signal<string>(this.taskIds.current);
   readonly openState = computed(() => this.state() === 'mobile-open');
   readonly entries = computed<DockEntry[]>(() => [
     this.entry(this.taskIds.current, '今天最重要的一步', 'focusing', 'combo-select'),
     this.entry(this.taskIds.candidate, '核对待回复的内容', 'pending_start', 'combo-select'),
     this.entry(this.taskIds.waiting, '等对方确认时间', 'suspended_waiting', 'backup', 20),
-  ].map(entry => ({ ...entry, status: entry.taskId === this.currentTaskId() ? 'focusing' : entry.status, isMain: entry.taskId === this.currentTaskId() })));
+  ].map(entry => ({ ...entry, status: entry.taskId === this.currentTaskId() ? 'focusing' : entry.status === 'focusing' ? 'pending_start' : entry.status, isMain: entry.taskId === this.currentTaskId() })));
 
   @ViewChild(DockMobileDrawerComponent)
   set drawer(drawer: DockMobileDrawerComponent | undefined) {

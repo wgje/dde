@@ -36,9 +36,11 @@ describe('mobile dock transparent preview', () => {
     expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-mobile-task-drawer"]')).not.toBeNull();
     const rows=fixture.nativeElement.querySelectorAll('[data-testid="dock-v3-mobile-task-row"]');expect(rows.length).toBe(3);
     rows[1].click();fixture.detectChanges();expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-mobile-task-preview"]')?.textContent).toContain('预览不会切换当前任务');
-    const before=fixture.nativeElement.querySelector('[aria-label="当前主任务"]')?.textContent;
+    const before=fixture.componentInstance.taskIds.current;
+    expect(fixture.componentInstance.currentTaskId()).toBe(before);
     fixture.nativeElement.querySelector('[data-testid="dock-v3-mobile-preview-promote"]').click();fixture.detectChanges();
-    expect(fixture.nativeElement.querySelector('[aria-label="当前主任务"]')?.textContent).toBe(before);
+    expect(fixture.componentInstance.currentTaskId()).toBe(fixture.componentInstance.taskIds.candidate);
+    expect(fixture.componentInstance.entries().filter(entry=>entry.status==='focusing')).toHaveLength(1);
     expect(fixture.nativeElement.querySelector('[data-testid="dock-v3-mobile-task-drawer"]')).toBeNull();fixture.destroy();
   });
 });
