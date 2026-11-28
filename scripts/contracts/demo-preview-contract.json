@@ -2,10 +2,15 @@
   "minimumScenarioCount": 7,
   "requiredWidgets": [
     "flow",
-    "inbox"
+    "inbox",
+    "dock"
   ],
   "exceptions": {},
   "selectorFixtureHints": {
+    "app-dock-mobile-drawer": {
+      "test": "src/app/dev-preview/demo-dock-entry-preview.component.spec.ts",
+      "scenario": { "widget": "dock", "state": "mobile-entry" }
+    },
     "app-flow-minimap": {
       "test": "src/app/dev-preview/demo-flow-preview.component.spec.ts",
       "scenario": {

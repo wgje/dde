@@ -170,3 +170,7 @@ remain the primary meaning: read, complete, delete, pending sync and restore.
 Actions are visible without hover; rows wrap rather than overflow on narrow screens.
 This changes presentation only: durable methods, sync decisions, confirmation,
 keyboard shortcuts and local-first persistence are unchanged.
+
+## Mobile Dock transparent entry
+
+The collapsed mobile Dock uses a transparent label/count and upward chevron with a 44px touch target. Focus is a secondary text action; the existing drawer and confirmation logic are unchanged. Isolated development previews: `/#/dev-preview/dock/mobile-entry` (tap to open), `/#/dev-preview/dock/mobile-open` (expanded result). Fixture data stays in page memory only.
