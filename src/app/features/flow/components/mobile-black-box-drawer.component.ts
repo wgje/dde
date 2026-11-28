@@ -43,7 +43,11 @@ import {
         <!-- 标题区域 -->
         <div class="shrink-0 px-4 pt-2 pb-2 flex items-center justify-between">
           <h2 class="text-base font-bold text-stone-700 dark:text-stone-200 flex items-center gap-2">
-            📦 黑匣子
+            <svg class="h-4 w-4 shrink-0 text-amber-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+              <path d="M3 4h18v4H3zM5 8v12h14V8M10 12h4" />
+            </svg>
+            黑匣子
             @if (pendingCount() > 0) {
               <span class="bg-amber-500 text-white text-[9px] px-1.5 py-0.5 rounded-full font-mono">
                 {{ pendingCount() }}
@@ -74,7 +78,10 @@ import {
             <div class="px-2 py-1.5 bg-amber-100 dark:bg-amber-900/30
                         rounded-lg text-xs text-amber-700 dark:text-amber-300
                         flex items-center gap-2">
-              <span class="animate-pulse">📡</span>
+              <svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"
+                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                  <path d="m3 3 18 18M8.5 16.5a5 5 0 0 1 7 0M12 20h.01M5 12a10 10 0 0 1 5-2.7M16 10.7a10 10 0 0 1 3 1.3M2 7a16 16 0 0 1 3.5-2M9 3.3A16 16 0 0 1 22 7" />
+                </svg>
               <span>{{ speechService.offlinePendingCount() }} 条录音待联网后转写</span>
             </div>
           }

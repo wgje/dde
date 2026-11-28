@@ -384,7 +384,7 @@ const NODE_METADATA_ORDERS = [
   ["re-export-file",[["relation"]]],
   ["return-type",[["relation"]]],
   ["risk-tag",[["relation","riskTag","riskSource"]]],
-  ["route-target",[["relation","framework","path","exportName"]]],
+  ["route-target",[["relation","framework","path","exportName"],["relation","framework","path"]]],
   ["source-file",[["platform","relation"],["relation"]]],
   ["sql-function",[["relation","returnType","language","security"],["relation","returnType","language"],["relation","returnType","security"],["relation","returnType"]]],
   ["style-url",[["framework","relation","angularProperty","legacyRelation"]]],
@@ -798,7 +798,7 @@ function createGraphRuntime({ contract, canonicalJson, canonicalRepositoryPath, 
     validateEdge,
   });
 }
-const DESCRIPTOR_DIGEST = "b9d90bc3c0a329c67f85f552849db34bef4b264f98c631f37e2e5cf659392ffc";
+const DESCRIPTOR_DIGEST = "1bb8e56f7568695465b6b2f61f24149a2fe0733f83f6b33c334cf68d47e87962";
 const DESCRIPTOR = {
   name: "graph",
   descriptorDigest: DESCRIPTOR_DIGEST,

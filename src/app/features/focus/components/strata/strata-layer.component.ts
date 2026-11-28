@@ -77,14 +77,18 @@ export interface StrataRestoreEvent {
               </span>
               <!-- 恢复按钮：所有条目都可恢复 -->
               <button
-                class="strata-restore-btn shrink-0 text-[9px] px-1.5 py-0.5 rounded
+                class="strata-restore-btn inline-flex items-center gap-1 shrink-0 text-[9px] px-1.5 py-0.5 rounded
                        bg-amber-800/40 hover:bg-amber-700/60 active:bg-amber-600/70
                        text-amber-300/90 hover:text-amber-200
                        transition-all duration-150 whitespace-nowrap
                        border border-amber-600/30 hover:border-amber-500/60"
                 (click)="onRestore($event, item)"
                 [title]="item.type === 'task' ? '恢复为进行中任务' : '恢复为待处理条目'">
-                ↑ 恢复
+                <svg class="h-3 w-3 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"
+                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                  <path d="M9 10H4V5M4 10a8 8 0 1 1 2.3 8" />
+                </svg>
+                恢复
               </button>
             </div>
           }
