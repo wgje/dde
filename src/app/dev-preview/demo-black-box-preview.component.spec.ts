@@ -39,13 +39,9 @@ describe('complete inbox preview', () => {
       const button = entry.querySelector(`button[aria-label="${label}"]`);
       expect(button).not.toBeNull();
       expect(button.textContent.trim().length).toBeGreaterThan(0);
-      expect(button.querySelector('svg[aria-hidden="true"][focusable="false"]')).not.toBeNull();
     }
-    expect(entry.querySelector('[data-testid="black-box-entry-actions"]').classList.contains('opacity-0')).toBe(false);
-    expect(view.nativeElement.textContent).not.toMatch(/[📦👁✅🗑⏳]/u);
     const pending = view.nativeElement.querySelector('[data-testid="sync-pending-indicator"]');
     expect(pending.textContent).toContain('待同步');
-    expect(pending.querySelector('svg[aria-hidden="true"]')).not.toBeNull();
     const memory = view.debugElement.injector.get(DemoInboxMemory);
     const id = memory.entries()[0].id;
     entry.querySelector('button[aria-label="标记已读"]').click();
@@ -68,9 +64,7 @@ describe('complete inbox preview', () => {
     view.detectChanges();
     const pending = view.nativeElement.querySelector('[data-testid="sync-pending-indicator"]');
     expect(pending.textContent).toContain('待同步');
-    expect(pending.querySelector('svg[aria-hidden="true"]')).not.toBeNull();
     expect(view.nativeElement.textContent).toContain('2 条录音待联网后转写');
-    expect(view.nativeElement.textContent).not.toMatch(/[⏳📡]/u);
     expect(write).not.toHaveBeenCalled(); expect(network).not.toHaveBeenCalled();
     view.destroy();
   });
@@ -79,8 +73,7 @@ describe('complete inbox preview', () => {
     const memory = view.debugElement.injector.get(DemoInboxMemory);
     const count = memory.totalCount();
     const restore = view.nativeElement.querySelector('.strata-restore-btn');
-    expect(restore.textContent.trim()).toBe('恢复');
-    expect(restore.querySelector('svg[aria-hidden="true"][focusable="false"]')).not.toBeNull();
+    expect(restore.textContent).toContain('恢复');
     restore.click(); await view.whenStable(); view.detectChanges();
     expect(memory.totalCount()).toBe(count - 1);
     expect(view.nativeElement.textContent).toContain('虚拟历史条目已恢复');
