@@ -121,6 +121,14 @@ describe('attachment cleanup cloud outbox contract', () => {
     }
   });
 
+  it('fails closed when cleanup_logs checkpoint persistence fails', () => {
+    const source = readWorkspaceFile(cleanupFunctionPath);
+    expect(source).toContain('const checkpoint = await logCleanup');
+    expect(source).toContain('if (!checkpoint.ok)');
+    expect(source).toContain('checkpointPersisted: false');
+    expect(source).toContain('status: 503');
+    expect(source).toContain('insertError');
+  });
   it('routes the Edge function through the transactional claim and durable worker', () => {
     const source = readWorkspaceFile(cleanupFunctionPath);
     const claimIndex = source.indexOf('await claimTaskAttachmentCleanup(');

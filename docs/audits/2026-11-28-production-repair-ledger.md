@@ -33,7 +33,7 @@
 - 生产 `sync_upsert_focus_session` / `sync_upsert_routine_task` 已应用 `20261128153245`；读回分别为 body MD5 `8aa84012131ac841c57f6f1af308b5c7` / `c0907bd763a35c1d04827baf26c2a0f8`，owner predicate 与 zero-row guard 均为 true。
 - 生产 `sync_apply_offline_command` 已应用 `20261128154611`；读回 body MD5 `aba5dc9e20471a2892592123c9ef9852`，`sync_get_offline_command_status` 为 `858902a0c4e78f2168ef8e586dea0103`，identity helper 为 `5535b3866ef2fc75b15cbf978c9a7777`。`sync_command_log` 当前 0 行，NULL digest 0 行；没有回填或改写历史收据。
 - 生产 `sync_upsert_connection` 已应用 `20261128170000`；读回 body MD5 `d900a39d071de0e2f454dab0b2fe09e3`，stale guard/reason 均为 true；陈旧 payload 会在连接写入前返回 `remote-newer`。
-- 过去 24 小时 bounded Auth/PostgREST/Function logs 未观察到 5xx 或 `confirmation_token` 错误；这是当前窗口的无观察结果，不是历史根因证明。Contracts 当前 115 文件 / 1120 项通过。Service Worker 冷启动/旧 chunk、双账号线上读回、Storage/Edge 清理调度仍未达到生产证据门槛；生产 Edge Function 列表与 cron 中均未发现 `cleanup-attachments`，调度状态保持 `UNVERIFIED`。
+- 过去 24 小时 bounded Auth/PostgREST/Function logs 未观察到 5xx 或 `confirmation_token` 错误；这是当前窗口的无观察结果，不是历史根因证明。Contracts 当前 115 文件 / 1120 项通过。Service Worker 冷启动/旧 chunk、双账号线上读回、Storage/Edge 清理调度仍未达到生产证据门槛；生产 Edge Function 列表与 cron 中均未发现 `cleanup-attachments`，调度状态保持 `UNVERIFIED`。本地 worker 已补 checkpoint insert fail-closed（503，不推进游标）contract，但尚未部署。
 - 纯 PostgreSQL fresh-init 执行因缺少 Supabase 平台基线（`auth.users`、`storage`、`supabase_realtime` 等）中止；静态 fresh-init contract 通过，不能把裸 Postgres 执行失败描述成迁移 SQL 生产失败。
 
 ## 回滚/恢复

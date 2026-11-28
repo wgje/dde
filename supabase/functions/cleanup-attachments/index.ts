@@ -71,7 +71,7 @@ interface CleanupLogClient {
     select(columns: string): {
       limit(count: number): Promise<{ error: unknown }>;
     };
-    insert(values: Record<string, unknown>): Promise<unknown>;
+    insert(values: Record<string, unknown>): Promise<{ error?: { message?: string } | null }>;
   };
 }
 
@@ -287,25 +287,24 @@ async function logCleanup(
   supabase: CleanupLogClient,
   type: string,
   details: Record<string, unknown>
-): Promise<void> {
+): Promise<{ ok: true } | { ok: false; error: string }> {
   try {
-    // 先检查表是否存在
     const { error: checkError } = await supabase
       .from("cleanup_logs")
       .select("id")
       .limit(1);
-    
-    // 如果表存在，插入日志
-    if (!checkError) {
-      await supabase.from("cleanup_logs").insert({
-        type,
-        details,
-        created_at: new Date().toISOString(),
-      });
-    }
-  } catch {
-    // 静默失败，日志记录不应影响主要清理流程
-    console.warn("Failed to log cleanup, cleanup_logs table may not exist");
+    if (checkError) return { ok: false, error: checkError.message ?? "cleanup_logs checkpoint table unavailable" };
+    const { error: insertError } = await supabase.from("cleanup_logs").insert({
+      type,
+      details,
+      created_at: new Date().toISOString(),
+    });
+    if (insertError) return { ok: false, error: insertError.message ?? "cleanup_logs checkpoint insert failed" };
+    return { ok: true };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn("Failed to persist cleanup checkpoint", message);
+    return { ok: false, error: message };
   }
 }
 
@@ -473,7 +472,7 @@ Deno.serve(async (req: Request) => {
     const storageErrors = outboxResult.errors;
 
     // 记录清理日志
-    await logCleanup(supabase as unknown as CleanupLogClient, "attachment_cleanup", {
+    const checkpoint = await logCleanup(supabase as unknown as CleanupLogClient, "attachment_cleanup", {
       cutoffDate: cutoffISOString,
       attachmentsToDelete: attachmentsToDelete.length,
       claimedAttachmentsToDelete: claimedAttachmentsToDelete.length,
@@ -488,7 +487,12 @@ Deno.serve(async (req: Request) => {
       tasksProcessed: tasks?.length ?? 0,
       nextCursor,
       scanWrapped,
-    });
+    });    if (!checkpoint.ok) {
+      return new Response(JSON.stringify({ success: false, error: checkpoint.error, checkpointPersisted: false }), {
+        status: 503,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
 
     if (
       attachmentsToDelete.length === 0

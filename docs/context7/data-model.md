@@ -218,3 +218,8 @@ The focus/routine upsert forward migration adds no entity columns. It changes on
 ## Attachment upload retry safety (2026-11-28)
 
 A signed-URL generation failure after Storage upload does not issue an immediate hard delete. The durable attachment-upload intent retains the owner/project/task/attachment path for retry; this prevents a stale cleanup request from deleting an object reused by a later successful retry. Hard deletion remains an explicit cleanup/outbox path and still requires owner-scoped path validation.
+
+
+## Attachment cleanup checkpoint semantics (2026-11-29)
+
+The cleanup Edge Function treats cleanup_logs checkpoint persistence as required maintenance state. If the checkpoint insert fails, the function returns 503 and does not report a successful scan/cursor advance; this prevents a silent cursor stall after the first page. Storage deletion remains claim-token guarded and retryable.
