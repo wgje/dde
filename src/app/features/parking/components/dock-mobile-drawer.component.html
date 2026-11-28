@@ -1,12 +1,11 @@
 @if (!opened() && showTrigger() && (activeView() !== 'flow' || focusActive())) {
   <div class="dock-trigger" data-testid="dock-v3-mobile-candidate-rail">
     <button type="button" class="trigger-main" aria-label="展开停泊坞任务抽屉" aria-controls="mobile-dock-dialog" aria-haspopup="dialog" aria-expanded="false" [disabled]="!interactive()" (click)="openDrawer($event.currentTarget)" data-testid="dock-v3-mobile-drawer-trigger">
-      <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 6h16v12H4zM4 14h16M8 14v4" /></svg>
-      <span><strong>停泊坞 <small>{{ activeEntries().length }}</small></strong><em>{{ candidates().length }} 个可行动 · {{ waitingEntries().length }} 个待命</em></span>
-      <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 15 6-6 6 6" /></svg>
+      <span class="trigger-label">停泊坞 <small>{{ activeEntries().length }}</small></span>
+      <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 10 6 6 6-6" /></svg>
     </button>
     @if (!focusActive()) {
-      <button type="button" class="primary trigger-focus" [disabled]="readOnly() || !interactive()" (click)="requestFocus()" data-testid="dock-v3-mobile-focus-entry">Focus</button>
+      <button type="button" class="trigger-focus" aria-label="进入 Focus" [disabled]="readOnly() || !interactive()" (click)="requestFocus()" data-testid="dock-v3-mobile-focus-entry">Focus</button>
     }
   </div>
 }
