@@ -174,6 +174,7 @@ function isRemoteProjectCommand(args) {
     if (['push', 'pull', 'dump'].includes(subcommand)) {
       return true;
     }
+    if (subcommand === 'query') return usesLinkedDatabase;
     return ['reset', 'diff'].includes(subcommand) && usesLinkedDatabase;
   }
 

@@ -85,6 +85,7 @@ describe('Supabase CLI project safety', () => {
     for (const args of [
       ['db', 'push', '--dry-run'],
       ['db', 'pull'],
+      ['db', 'query', '--linked', '--file', 'secret.sql'],
       ['db', 'dump', '--dry-run'],
       ['db', 'reset', '--linked'],
       ['gen', 'types', 'typescript', '--linked'],
@@ -106,6 +107,28 @@ describe('Supabase CLI project safety', () => {
     }
   });
 
+  it('treats an explicitly linked db query as remote and leaves local query local', () => {
+    const safety = loadSafetyModule();
+    if (!safety) return;
+    expect(safety.isRemoteProjectCommand(['db', 'query', '--linked', '--file', 'secret.sql'])).toBe(true);
+    expect(safety.isRemoteProjectCommand(['db', 'query', '--local', '--file', 'secret.sql'])).toBe(false);
+    expect(safety.isRemoteProjectCommand(['db', 'query', '--file', 'secret.sql'])).toBe(false);
+  });
+
+  it('does not spawn a linked db query when the configured project ref mismatches', () => {
+    const safety = loadSafetyModule();
+    if (!safety) return;
+    let spawnCalls = 0;
+    const result = safety.executeCli(['db', 'query', '--linked', '--file', 'secret.sql'], {
+      env: { SUPABASE_PROJECT_REF: 'preview-ref' },
+      root: process.cwd(),
+      readLinkedProjectRef: () => 'production-ref',
+      invokeCliCommand: () => { spawnCalls += 1; return { status: 0 }; },
+      logError: () => undefined,
+    });
+    expect(result).toEqual({ exitCode: 2, spawned: false });
+    expect(spawnCalls).toBe(0);
+  });
   it('blocks remote access unless configured and linked project refs match', () => {
     const safety = loadSafetyModule();
     if (!safety) return;
