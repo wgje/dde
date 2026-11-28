@@ -6,7 +6,7 @@
 - 基线：`origin/main` at `1614794fd0311a271f8968712c53acf0ec937448`
 - 修复提交：`03a6222c` (`fix(sync): fence offline receipts and owner upserts`)
 - 已推送：`origin/main` 已读回为 `03a6222c`
-- 前端生产版本已读回 `version.json.gitSha=72006b7e0126eac927c9369f396ca1ce0064452d`。生产数据库已应用 owner-race DDL migration `20261128153245`；业务行、Auth 用户、Storage 对象和队列均未写入/删除（`productionBusinessWrites=0`）。收据 migration 已应用，migration ledger 版本为 `20261128154611`；完整 `productionProof=false` 仍保持，因为 Auth、清理调度、双账号 smoke 和 rollback 读回尚未闭合。
+- 前端生产版本已读回 `version.json.gitSha=0e6d3db4ca838e1ae56cfdc5a4c87cdcca01f24b`。生产数据库已应用 owner-race DDL migration `20261128153245`；业务行、Auth 用户、Storage 对象和队列均未写入/删除（`productionBusinessWrites=0`）。收据 migration 已应用，migration ledger 版本为 `20261128154611`；完整 `productionProof=false` 仍保持，因为 Auth、清理调度、双账号 smoke 和 rollback 读回尚未闭合。
 
 ## 已闭合的本地缺口
 
