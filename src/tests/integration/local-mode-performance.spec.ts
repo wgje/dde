@@ -13,6 +13,7 @@ import { AUTH_CONFIG } from '../../config';
 import type { ActivatedRouteSnapshot, RouterStateSnapshot } from '@angular/router';
 import { AuthService } from '../../services/auth.service';
 import { ModalService } from '../../services/modal.service';
+import { ActionQueueService } from '../../services/action-queue.service';
 
 describe('本地模式性能优化 (2026-01-26)', () => {
   describe('SimpleSyncService - 本地模式快速退出', () => {
@@ -20,7 +21,9 @@ describe('本地模式性能优化 (2026-01-26)', () => {
 
     beforeEach(() => {
       TestBed.configureTestingModule({
-        providers: [SimpleSyncService]
+        providers: [SimpleSyncService, { provide: ActionQueueService, useValue: {
+          getActionsForEntity: vi.fn(() => []), enqueueDurablyForOwner: vi.fn().mockResolvedValue('durable-project-action'),
+        } }]
       });
       service = TestBed.inject(SimpleSyncService);
     });
@@ -49,7 +52,7 @@ describe('本地模式性能优化 (2026-01-26)', () => {
       
     });
 
-    it('应该在真实用户模式下正常执行会话检查', async () => {
+    it('真实用户保存应先耐久入队，不能提前调用批同步或声称云端成功', async () => {
       const project = {
         id: 'test-project',
         name: 'Test Project',
@@ -65,10 +68,16 @@ describe('本地模式性能优化 (2026-01-26)', () => {
       const batchSyncService = (service as any).batchSyncService;
       const saveProjectToCloudSpy = vi.spyOn(batchSyncService, 'saveProjectToCloud').mockResolvedValue({ success: true, newVersion: 1 });
 
-      await service.saveProjectToCloud(project, 'real-user-id');
-
-      // 断言：应该委托给 BatchSyncService
-      expect(saveProjectToCloudSpy).toHaveBeenCalledWith(project, 'real-user-id', undefined);
+      const queue = TestBed.inject(ActionQueueService);
+      const result = await service.saveProjectToCloud(project, 'real-user-id');
+      expect(queue.enqueueDurablyForOwner).toHaveBeenCalledWith('real-user-id', expect.objectContaining({
+        entityType: 'project', entityId: project.id, payload: expect.objectContaining({
+          sourceUserId: 'real-user-id', writePlan: expect.objectContaining({ taskUpsertIds: [] }),
+        }),
+      }));
+      expect(saveProjectToCloudSpy).not.toHaveBeenCalled();
+      expect(result.success).toBe(false);
+      expect(result.retryEnqueued).toEqual(['project:test-project']);
     });
   });
 

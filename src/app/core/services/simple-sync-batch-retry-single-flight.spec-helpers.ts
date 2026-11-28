@@ -1,3 +1,4 @@
+import { projectReplayOperationId } from './simple-sync.test-harness';
 import { beforeEach, expect, it, vi } from 'vitest';
 
 import type { SimpleSyncService } from './simple-sync.service';
@@ -27,9 +28,9 @@ export function registerSimpleSyncBatchRetrySingleFlightSpecs(
       const project = createMockProject({ id: 'project-1', tasks: [], connections: [] });
       mockBatchSync.saveProjectToCloud = vi.fn().mockResolvedValue({ success: true, newVersion: 1 });
 
-      const result = await service.saveProjectToCloud(project, 'test-user-id');
+      const result = await service.saveProjectToCloud(project, 'test-user-id', undefined, undefined, projectReplayOperationId(project));
 
-      expect(mockBatchSync.saveProjectToCloud).toHaveBeenCalledWith(project, 'test-user-id', undefined);
+      expect(mockBatchSync.saveProjectToCloud).toHaveBeenCalledWith(project, 'test-user-id', undefined, undefined, projectReplayOperationId(project));
       expect(result.success).toBe(true);
     });
 
@@ -62,7 +63,7 @@ export function registerSimpleSyncBatchRetrySingleFlightSpecs(
         conflict: true
       });
 
-      const result = await service.saveProjectToCloud(project, 'test-user-id');
+      const result = await service.saveProjectToCloud(project, 'test-user-id', undefined, undefined, projectReplayOperationId(project));
 
       expect(result.success).toBe(false);
       expect(result.conflict).toBe(true);
@@ -80,8 +81,8 @@ export function registerSimpleSyncBatchRetrySingleFlightSpecs(
         resolveSave = resolve;
       }));
 
-      const firstPromise = service.saveProjectToCloud(project, 'test-user-id');
-      const secondPromise = service.saveProjectToCloud({ ...project }, 'test-user-id');
+      const firstPromise = service.saveProjectToCloud(project, 'test-user-id', undefined, undefined, projectReplayOperationId(project));
+      const secondPromise = service.saveProjectToCloud({ ...project }, 'test-user-id', undefined, undefined, projectReplayOperationId({ ...project }));
 
       expect(mockBatchSync.saveProjectToCloud).toHaveBeenCalledTimes(1);
 
@@ -121,9 +122,9 @@ export function registerSimpleSyncBatchRetrySingleFlightSpecs(
           resolveSecondSave = resolve;
         }));
 
-      const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id');
-      const secondPromise = service.saveProjectToCloud(secondProject, 'test-user-id');
-      const latestPromise = service.saveProjectToCloud(latestProject, 'test-user-id');
+      const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id', undefined, undefined, projectReplayOperationId(firstProject));
+      const secondPromise = service.saveProjectToCloud(secondProject, 'test-user-id', undefined, undefined, projectReplayOperationId(secondProject));
+      const latestPromise = service.saveProjectToCloud(latestProject, 'test-user-id', undefined, undefined, projectReplayOperationId(latestProject));
 
       expect(mockBatchSync.saveProjectToCloud).toHaveBeenCalledTimes(1);
 
@@ -132,7 +133,7 @@ export function registerSimpleSyncBatchRetrySingleFlightSpecs(
       await vi.waitFor(() => {
         expect(mockBatchSync.saveProjectToCloud).toHaveBeenCalledTimes(2);
       });
-      expect(mockBatchSync.saveProjectToCloud).toHaveBeenNthCalledWith(2, latestProject, 'test-user-id', undefined);
+      expect(mockBatchSync.saveProjectToCloud).toHaveBeenNthCalledWith(2, latestProject, 'test-user-id', undefined, undefined, projectReplayOperationId(latestProject));
 
       expectDeferredCallback(resolveSecondSave, 'resolveSecondSave')({ success: true, newVersion: 2 });
 
@@ -261,16 +262,16 @@ export function registerSimpleSyncBatchRetrySingleFlightSpecs(
           resolveSecondSave = resolve;
         }));
 
-      const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id');
-      const queuedPromise = service.saveProjectToCloud(queuedProject, 'test-user-id');
-      const replayedActivePromise = service.saveProjectToCloud({ ...firstProject }, 'test-user-id');
+      const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id', undefined, undefined, projectReplayOperationId(firstProject));
+      const queuedPromise = service.saveProjectToCloud(queuedProject, 'test-user-id', undefined, undefined, projectReplayOperationId(queuedProject));
+      const replayedActivePromise = service.saveProjectToCloud({ ...firstProject }, 'test-user-id', undefined, undefined, projectReplayOperationId({ ...firstProject }));
 
       expectDeferredCallback(resolveFirstSave, 'resolveFirstSave')({ success: true, newVersion: 1 });
 
       await vi.waitFor(() => {
         expect(mockBatchSync.saveProjectToCloud).toHaveBeenCalledTimes(2);
       });
-      expect(mockBatchSync.saveProjectToCloud).toHaveBeenNthCalledWith(2, queuedProject, 'test-user-id', undefined);
+      expect(mockBatchSync.saveProjectToCloud).toHaveBeenNthCalledWith(2, queuedProject, 'test-user-id', undefined, undefined, projectReplayOperationId(queuedProject));
 
       expectDeferredCallback(resolveSecondSave, 'resolveSecondSave')({ success: true, newVersion: 2 });
 
@@ -317,16 +318,16 @@ export function registerSimpleSyncBatchRetrySingleFlightSpecs(
           resolveSecondSave = resolve;
         }));
 
-      const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id');
-      const newerPromise = service.saveProjectToCloud(newerProject, 'test-user-id');
-      const olderLatePromise = service.saveProjectToCloud(olderLateProject, 'test-user-id');
+      const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id', undefined, undefined, projectReplayOperationId(firstProject));
+      const newerPromise = service.saveProjectToCloud(newerProject, 'test-user-id', undefined, undefined, projectReplayOperationId(newerProject));
+      const olderLatePromise = service.saveProjectToCloud(olderLateProject, 'test-user-id', undefined, undefined, projectReplayOperationId(olderLateProject));
 
       expectDeferredCallback(resolveFirstSave, 'resolveFirstSave')({ success: true, newVersion: 1 });
 
       await vi.waitFor(() => {
         expect(mockBatchSync.saveProjectToCloud).toHaveBeenCalledTimes(2);
       });
-      expect(mockBatchSync.saveProjectToCloud).toHaveBeenNthCalledWith(2, newerProject, 'test-user-id', undefined);
+      expect(mockBatchSync.saveProjectToCloud).toHaveBeenNthCalledWith(2, newerProject, 'test-user-id', undefined, undefined, projectReplayOperationId(newerProject));
 
       expectDeferredCallback(resolveSecondSave, 'resolveSecondSave')({ success: true, newVersion: 2 });
 
@@ -373,25 +374,16 @@ export function registerSimpleSyncBatchRetrySingleFlightSpecs(
           resolveSecondSave = resolve;
         }));
 
-      const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id');
-      const newerPromise = service.saveProjectToCloud(newerProject, 'test-user-id');
-      const olderLatePromise = service.saveProjectToCloud(
-        olderLateProject,
-        'test-user-id',
-        ['task-delete-late'],
-      );
+      const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id', undefined, undefined, projectReplayOperationId(firstProject));
+      const newerPromise = service.saveProjectToCloud(newerProject, 'test-user-id', undefined, undefined, projectReplayOperationId(newerProject));
+      const olderLatePromise = service.saveProjectToCloud(olderLateProject, 'test-user-id', ['task-delete-late'], undefined, projectReplayOperationId(olderLateProject));
 
       expectDeferredCallback(resolveFirstSave, 'resolveFirstSave')({ success: true, newVersion: 1 });
 
       await vi.waitFor(() => {
         expect(mockBatchSync.saveProjectToCloud).toHaveBeenCalledTimes(2);
       });
-      expect(mockBatchSync.saveProjectToCloud).toHaveBeenNthCalledWith(
-        2,
-        newerProject,
-        'test-user-id',
-        ['task-delete-late'],
-      );
+      expect(mockBatchSync.saveProjectToCloud).toHaveBeenNthCalledWith(2, newerProject, 'test-user-id', ['task-delete-late'], undefined, projectReplayOperationId(newerProject));
 
       expectDeferredCallback(resolveSecondSave, 'resolveSecondSave')({ success: true, newVersion: 2 });
 
@@ -438,16 +430,16 @@ export function registerSimpleSyncBatchRetrySingleFlightSpecs(
           resolveSecondSave = resolve;
         }));
 
-      const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id');
-      const newerPromise = service.saveProjectToCloud(newerNestedProject, 'test-user-id');
-      const olderPromise = service.saveProjectToCloud(olderNestedProject, 'test-user-id');
+      const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id', undefined, undefined, projectReplayOperationId(firstProject));
+      const newerPromise = service.saveProjectToCloud(newerNestedProject, 'test-user-id', undefined, undefined, projectReplayOperationId(newerNestedProject));
+      const olderPromise = service.saveProjectToCloud(olderNestedProject, 'test-user-id', undefined, undefined, projectReplayOperationId(olderNestedProject));
 
       expectDeferredCallback(resolveFirstSave, 'resolveFirstSave')({ success: true, newVersion: 1 });
 
       await vi.waitFor(() => {
         expect(mockBatchSync.saveProjectToCloud).toHaveBeenCalledTimes(2);
       });
-      expect(mockBatchSync.saveProjectToCloud).toHaveBeenNthCalledWith(2, newerNestedProject, 'test-user-id', undefined);
+      expect(mockBatchSync.saveProjectToCloud).toHaveBeenNthCalledWith(2, newerNestedProject, 'test-user-id', undefined, undefined, projectReplayOperationId(newerNestedProject));
 
       expectDeferredCallback(resolveSecondSave, 'resolveSecondSave')({ success: true, newVersion: 2 });
 
@@ -487,8 +479,8 @@ export function registerSimpleSyncBatchRetrySingleFlightSpecs(
           resolveSecondSave = resolve;
         }));
 
-      const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id');
-      const renamedPromise = service.saveProjectToCloud(renamedProject, 'test-user-id');
+      const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id', undefined, undefined, projectReplayOperationId(firstProject));
+      const renamedPromise = service.saveProjectToCloud(renamedProject, 'test-user-id', undefined, undefined, projectReplayOperationId(renamedProject));
 
       expect(mockBatchSync.saveProjectToCloud).toHaveBeenCalledTimes(1);
 
@@ -497,7 +489,7 @@ export function registerSimpleSyncBatchRetrySingleFlightSpecs(
       await vi.waitFor(() => {
         expect(mockBatchSync.saveProjectToCloud).toHaveBeenCalledTimes(2);
       });
-      expect(mockBatchSync.saveProjectToCloud).toHaveBeenNthCalledWith(2, renamedProject, 'test-user-id', undefined);
+      expect(mockBatchSync.saveProjectToCloud).toHaveBeenNthCalledWith(2, renamedProject, 'test-user-id', undefined, undefined, projectReplayOperationId(renamedProject));
 
       expectDeferredCallback(resolveSecondSave, 'resolveSecondSave')({ success: true, newVersion: 2 });
 
@@ -541,16 +533,16 @@ export function registerSimpleSyncBatchRetrySingleFlightSpecs(
           resolveSecondSave = resolve;
         }));
 
-      const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id');
-      const queuedPromise = service.saveProjectToCloud(queuedProject, 'test-user-id');
-      const latestPromise = service.saveProjectToCloud(latestEqualFreshnessProject, 'test-user-id');
+      const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id', undefined, undefined, projectReplayOperationId(firstProject));
+      const queuedPromise = service.saveProjectToCloud(queuedProject, 'test-user-id', undefined, undefined, projectReplayOperationId(queuedProject));
+      const latestPromise = service.saveProjectToCloud(latestEqualFreshnessProject, 'test-user-id', undefined, undefined, projectReplayOperationId(latestEqualFreshnessProject));
 
       expectDeferredCallback(resolveFirstSave, 'resolveFirstSave')({ success: true, newVersion: 1 });
 
       await vi.waitFor(() => {
         expect(mockBatchSync.saveProjectToCloud).toHaveBeenCalledTimes(2);
       });
-      expect(mockBatchSync.saveProjectToCloud).toHaveBeenNthCalledWith(2, latestEqualFreshnessProject, 'test-user-id', undefined);
+      expect(mockBatchSync.saveProjectToCloud).toHaveBeenNthCalledWith(2, latestEqualFreshnessProject, 'test-user-id', undefined, undefined, projectReplayOperationId(latestEqualFreshnessProject));
 
       expectDeferredCallback(resolveSecondSave, 'resolveSecondSave')({ success: true, newVersion: 2 });
 
@@ -566,6 +558,10 @@ export function registerSimpleSyncBatchRetrySingleFlightSpecs(
     });
 
     it('saveProjectSmart 应透传并发折叠后的真实云端版本号', async () => {
+      // These are acknowledged synthetic replays; fresh saves are covered by durable-ingress tests.
+      const replay = service.saveProjectToCloud.bind(service);
+      vi.spyOn(service, 'saveProjectToCloud').mockImplementation((project, userId, ids, baseline) =>
+        replay(project, userId, ids, baseline, projectReplayOperationId(project)));
       const project = createMockProject({
         id: 'project-smart-version',
         version: 3,

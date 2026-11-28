@@ -226,3 +226,7 @@ A project save without an existing operation ID first creates a durable owner-sc
 The write plan is derived from ChangeTracker evidence. Unchanged snapshot entities are excluded, while existing durable leaf operations with an owner and operation ID are not duplicated by the project plan. Replay keeps the original parent operation and derives child operations through the existing batch path. Historical project actions without a write plan remain frozen and continue fail-closed legacy review. Backup validation checks the plan shape and accepted intent values; it does not invent intent for old payloads.
 
 Viewport fit, pan and zoom are local owner-scoped metadata only. They do not dirty tasks or schedule a project cloud save. A real task position edit remains a task mutation with its own durable identity.
+
+### Save ingress safety follow-up
+
+Local-only projects and the local-mode user return before queue resolution. Missing queue capability never falls back to a first RPC. The command snapshot is deeply cloned before the asynchronous durable enqueue boundary. Existing leaf operations only cover the same owner, project, entity payload and write intent; an older pending action cannot suppress a newer edit. Missing update-field evidence blocks metadata acknowledgement instead of guessing a full task upsert. On network suspension, task retry handoff uses the frozen write-plan intent even after the live ChangeTracker has been cleared.

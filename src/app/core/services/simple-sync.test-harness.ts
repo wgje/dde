@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { Connection, Project, Task } from '../../../models';
 import type { RetryQueueItem } from './sync';
 import { vi } from 'vitest';
@@ -90,3 +91,8 @@ export const setVisibilityState = (state: DocumentVisibilityState): void => {
 };
 
 export type { RetryQueueItem };
+
+/** Synthetic, frozen project-action identity for replay/flight contract tests only. */
+export function projectReplayOperationId(project: Project): string {
+  return createHash('sha256').update(JSON.stringify(project)).digest('hex').slice(0, 32);
+}

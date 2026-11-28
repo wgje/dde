@@ -106,7 +106,7 @@ export class ProjectSaveTaskBatchService {
     for (const task of remaining) {
       context.state.failedTaskIds.push(task.id);
       const changedFields = context.changes.taskUpdateFieldsById[task.id];
-      const writeIntent = this.getTaskWriteIntent(changedFields);
+      const writeIntent = context.writePlan?.taskWriteIntents[task.id] ?? this.getTaskWriteIntent(changedFields);
       if (await this.addTaskRetryWithOptionalOperationId(context, task, writeIntent)) {
         context.state.retryEnqueued.push(`task:${task.id}`);
       }

@@ -1,3 +1,4 @@
+import { projectReplayOperationId } from './simple-sync.test-harness';
 import { describe, expect, it, vi } from 'vitest';
 import type { Connection, Project, Task } from '../../../models';
 import type { TaskWriteIntent } from '../../../services/sync-rpc-client.service';
@@ -165,15 +166,15 @@ export function registerSimpleSyncBatchRetrySpecs(context: SimpleSyncBatchRetryS
           resolveSecondSave = resolve;
         }));
 
-      const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id');
-      const queuedPromise = service.saveProjectToCloud(queuedProject, 'test-user-id');
+      const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id', undefined, undefined, projectReplayOperationId(firstProject));
+      const queuedPromise = service.saveProjectToCloud(queuedProject, 'test-user-id', undefined, undefined, projectReplayOperationId(queuedProject));
 
       expectDeferredCallback(resolveFirstSave, 'resolveFirstSave')(partialFailureResult);
 
       await vi.waitFor(() => {
         expect(mockBatchSync.saveProjectToCloud).toHaveBeenCalledTimes(2);
       });
-      expect(mockBatchSync.saveProjectToCloud).toHaveBeenNthCalledWith(2, queuedProject, 'test-user-id', undefined);
+      expect(mockBatchSync.saveProjectToCloud).toHaveBeenNthCalledWith(2, queuedProject, 'test-user-id', undefined, undefined, projectReplayOperationId(queuedProject));
 
       expectDeferredCallback(resolveSecondSave, 'resolveSecondSave')({ success: true, newVersion: 2 });
 
@@ -207,8 +208,8 @@ export function registerSimpleSyncBatchRetrySpecs(context: SimpleSyncBatchRetryS
         resolveFirstSave = resolve;
       }));
 
-      const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id');
-      const queuedPromise = service.saveProjectToCloud(queuedProject, 'test-user-id');
+      const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id', undefined, undefined, projectReplayOperationId(firstProject));
+      const queuedPromise = service.saveProjectToCloud(queuedProject, 'test-user-id', undefined, undefined, projectReplayOperationId(queuedProject));
 
       expectDeferredCallback(resolveFirstSave, 'resolveFirstSave')(conflictResult);
 
@@ -242,8 +243,8 @@ export function registerSimpleSyncBatchRetrySpecs(context: SimpleSyncBatchRetryS
         resolveFirstSave = resolve;
       }));
 
-      const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id');
-      const queuedPromise = service.saveProjectToCloud(queuedProject, 'test-user-id');
+      const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id', undefined, undefined, projectReplayOperationId(firstProject));
+      const queuedPromise = service.saveProjectToCloud(queuedProject, 'test-user-id', undefined, undefined, projectReplayOperationId(queuedProject));
 
       expectDeferredCallback(resolveFirstSave, 'resolveFirstSave')(terminalResult);
 
@@ -272,7 +273,7 @@ export function registerSimpleSyncBatchRetrySpecs(context: SimpleSyncBatchRetryS
       mockRetryQueueService.add('task', 'upsert', createMockTask({ id: 'task-other-owner' }), project.id, 'other-user-id');
       mockBatchSync.saveProjectToCloud = vi.fn().mockResolvedValueOnce(terminalResult);
 
-      const result = await service.saveProjectToCloud(project, 'test-user-id');
+      const result = await service.saveProjectToCloud(project, 'test-user-id', undefined, undefined, projectReplayOperationId(project));
 
       expect(result).toEqual(terminalResult);
       const remainingOwnerRetries = mockRetryQueueService.getItems().filter((item: RetryQueueItem) =>
@@ -311,8 +312,8 @@ export function registerSimpleSyncBatchRetrySpecs(context: SimpleSyncBatchRetryS
         rejectFirstSave = reject;
       }));
 
-      const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id');
-      const queuedPromise = service.saveProjectToCloud(queuedProject, 'test-user-id');
+      const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id', undefined, undefined, projectReplayOperationId(firstProject));
+      const queuedPromise = service.saveProjectToCloud(queuedProject, 'test-user-id', undefined, undefined, projectReplayOperationId(queuedProject));
 
       expectDeferredCallback(rejectFirstSave, 'rejectFirstSave')(expectedError);
 
@@ -325,7 +326,7 @@ export function registerSimpleSyncBatchRetrySpecs(context: SimpleSyncBatchRetryS
       const project = createMockProject({ id: 'project-1', tasks: [], connections: [] });
       mockBatchSync.saveProjectToCloud = vi.fn().mockResolvedValue({ success: false });
 
-      const result = await service.saveProjectToCloud(project, 'test-user-id');
+      const result = await service.saveProjectToCloud(project, 'test-user-id', undefined, undefined, projectReplayOperationId(project));
 
       expect(result.success).toBe(false);
     });

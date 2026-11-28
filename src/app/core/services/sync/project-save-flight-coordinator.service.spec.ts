@@ -134,11 +134,8 @@ describe('ProjectSaveFlightCoordinatorService', () => {
       .mockReturnValueOnce(queuedReplay.promise);
     service.durableRetryHandler = vi.fn().mockRejectedValue(new Error('retry store unavailable'));
 
-    const activePromise = service.save(createProject(), 'user-1');
-    const queuedPromise = service.save(
-      createProject({ name: 'Project 1 updated', updatedAt: '2026-06-01T00:01:00.000Z' }),
-      'user-1',
-    );
+    const activePromise = service.save(createProject(), 'user-1', undefined, undefined, OPERATION_A);
+    const queuedPromise = service.save(createProject({ name: 'Project 1 updated', updatedAt: '2026-06-01T00:01:00.000Z' }), 'user-1', undefined, undefined, OPERATION_A);
 
     activeSave.resolve(activeFailure);
     await expect(activePromise).resolves.toEqual(activeFailure);
@@ -159,10 +156,10 @@ describe('ProjectSaveFlightCoordinatorService', () => {
     const currentSave = createDeferred<ProjectSaveResult>();
     saveProjectToCloud.mockReturnValueOnce(staleSave.promise).mockReturnValueOnce(currentSave.promise);
 
-    const stalePromise = service.save(createProject(), 'user-1');
+    const stalePromise = service.save(createProject(), 'user-1', undefined, undefined, OPERATION_A);
     expect(resetRuntime).toBeTypeOf('function');
     resetRuntime?.();
-    const currentPromise = service.save(createProject(), 'user-1');
+    const currentPromise = service.save(createProject(), 'user-1', undefined, undefined, OPERATION_A);
 
     expect(saveProjectToCloud).toHaveBeenCalledTimes(2);
     currentSave.resolve({ success: true });
@@ -177,11 +174,8 @@ describe('ProjectSaveFlightCoordinatorService', () => {
     saveProjectToCloud.mockReturnValueOnce(activeSave.promise);
     service.durableRetryHandler = vi.fn().mockRejectedValue(new Error('retry store unavailable'));
 
-    const activePromise = service.save(createProject(), 'user-1');
-    const queuedPromise = service.save(
-      createProject({ name: 'Queued stale snapshot', updatedAt: '2026-06-01T00:01:00.000Z' }),
-      'user-1',
-    );
+    const activePromise = service.save(createProject(), 'user-1', undefined, undefined, OPERATION_A);
+    const queuedPromise = service.save(createProject({ name: 'Queued stale snapshot', updatedAt: '2026-06-01T00:01:00.000Z' }), 'user-1', undefined, undefined, OPERATION_A);
     resetRuntime?.();
     const sessionChanged = { success: false, failureReason: 'project sync session changed' };
     activeSave.resolve(sessionChanged);

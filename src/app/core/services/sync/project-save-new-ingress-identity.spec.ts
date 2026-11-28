@@ -111,7 +111,7 @@ describe('new project save durable ingress boundary', () => {
 
   it('leaves same-owner durable leaf actions as the sole owner of their explicit task writes', async () => {
     const task = { id: 'task-owned-by-leaf', title: 'T', content: 'edit', stage: 0, parentId: null, order: 0, rank: 0, status: 'active' as const, x: 0, y: 0, displayId: '1', createdDate: '2026-11-27T00:00:00.000Z', updatedAt: '2026-11-27T00:01:00.000Z' };
-    const ownedLeaf = { id: 'leaf', operationId: 'leaf-op', entityType: 'task', entityId: task.id, payload: { sourceUserId: owner, writeIntent: 'task_text_update' } };
+    const ownedLeaf = { id: 'leaf', operationId: 'leaf-op', type: 'update', entityType: 'task', entityId: task.id, payload: { sourceUserId: owner, projectId: project.id, task: structuredClone(task), writeIntent: 'task_text_update' } };
     const h = harness([ownedLeaf], { tasksToCreate: [], tasksToUpdate: [{ id: task.id }], taskIdsToDelete: [], taskDeleteBaseUpdatedAtMap: {}, connectionsToCreate: [], connectionsToUpdate: [], connectionsToDelete: [], taskUpdateFieldsById: { [task.id]: ['content'] }, hasChanges: true, totalChanges: 1 });
     const result = h.service.save({ ...project, tasks: [task] }, owner);
     await Promise.resolve(); await Promise.resolve();

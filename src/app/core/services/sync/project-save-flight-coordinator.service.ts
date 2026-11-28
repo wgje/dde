@@ -1,6 +1,7 @@
 /** 同一 owner/project 的云端保存单飞、折叠与 durable retry 协调器。 */
 import { Injectable, inject, Injector } from '@angular/core';
 import { Task, Project, Connection } from '../../../../models';
+import { AUTH_CONFIG } from '../../../../config';
 import { LoggerService } from '../../../../services/logger.service';
 import { ActionQueueService } from '../../../../services/action-queue.service';
 import type { ConnectionPayload, ProjectPayload, ProjectSaveWritePlan, TaskPayload } from '../../../../services/action-queue.types';
@@ -125,6 +126,9 @@ export class ProjectSaveFlightCoordinatorService {
     operationId?: string,
     writePlan?: ProjectSaveWritePlan,
   ): Promise<ProjectSaveResult> {
+    if (!userId || userId === AUTH_CONFIG.LOCAL_MODE_USER_ID || project.syncSource === 'local-only') {
+      return Promise.resolve({ success: false, failureReason: 'local-only project does not cloud sync' });
+    }
     if (operationId === undefined) return this.enqueueNewProjectSaveCoalesced(project, userId, taskIdsToDelete, taskDeleteBaseUpdatedAtMap);
     return this.saveProjectToCloudSingleFlight(project, userId, taskIdsToDelete, taskDeleteBaseUpdatedAtMap, operationId, writePlan);
   }
@@ -143,9 +147,9 @@ export class ProjectSaveFlightCoordinatorService {
   private async enqueueNewProjectSave(project: Project, userId: string, taskIdsToDelete?: string[], taskDeleteBaseUpdatedAtMap?: TaskDeleteBaseUpdatedAtMap): Promise<ProjectSaveResult> {
     const generation = this.sessionGeneration;
     const queue = this.injector.get(ActionQueueService, null);
-    // The production injector supplies ActionQueueService; a missing provider is a test/boot fallback.
-    // Retain the pre-existing flight path in that unsupported environment.
-    if (!queue) return this.saveProjectToCloudSingleFlight(project, userId, taskIdsToDelete, taskDeleteBaseUpdatedAtMap, undefined, undefined);
+    if (!queue) return { success: false, failureReason: 'project save durable queue unavailable' };
+    // Freeze the command before any asynchronous storage boundary.
+    project = structuredClone(project);
     const pendingProjectActions = queue.getActionsForEntity('project', project.id);
     const changes = this.changeTracker.getProjectChanges(project.id);
     const effectiveDeleteBaseMap = taskDeleteBaseUpdatedAtMap ?? changes.taskDeleteBaseUpdatedAtMap;
@@ -155,24 +159,42 @@ export class ProjectSaveFlightCoordinatorService {
     for (const action of pendingLeafActions) {
       if (action.entityType === 'task') {
         const payload = action.payload as TaskPayload;
-        if (payload.sourceUserId === userId && action.operationId && payload.writeIntent) coveredTaskIds.add(action.entityId);
+        if (action.type !== 'delete' && payload.sourceUserId === userId && action.operationId
+          && payload.writeIntent && payload.projectId === project.id
+          && JSON.stringify(payload.task) === JSON.stringify(project.tasks.find(task => task.id === action.entityId))) {
+          coveredTaskIds.add(action.entityId);
+        }
       }
       if (action.entityType === 'connection') {
         const payload = action.payload as ConnectionPayload;
-        if (payload.sourceUserId === userId && action.operationId) coveredConnectionIds.add(action.entityId);
+        if (action.type !== 'delete' && payload.sourceUserId === userId && action.operationId
+          && payload.projectId === project.id
+          && JSON.stringify(payload.connection) === JSON.stringify(project.connections.find(connection => connection.id === action.entityId))) {
+          coveredConnectionIds.add(action.entityId);
+        }
       }
     }
     const writePlan = buildProjectSaveWritePlan(changes, taskIdsToDelete ?? changes.taskIdsToDelete, coveredTaskIds, coveredConnectionIds);
-    const signature = buildProjectSaveRequestSignature(project, taskIdsToDelete ?? changes.taskIdsToDelete, taskDeleteBaseUpdatedAtMap, writePlan);
+    const knownTaskIds = new Set([...writePlan.taskUpsertIds, ...writePlan.taskDeleteIds, ...coveredTaskIds]);
+    if ((changes.tasksToUpdate ?? []).some(task => !knownTaskIds.has(task.id))) {
+      return { success: false, failureReason: 'project save requires explicit task write intent' };
+    }
+    const signature = buildProjectSaveRequestSignature(project, writePlan.taskDeleteIds, effectiveDeleteBaseMap, writePlan);
     const duplicatePending = pendingProjectActions.find(action => {
-      if (action.entityType !== 'project') return false;
+      if (action.entityType !== 'project' || action.type === 'delete') return false;
       const payload = action.payload as ProjectPayload;
       return payload.sourceUserId === userId && !!action.operationId && !!payload.writePlan
         && buildProjectSaveRequestSignature(payload.project, payload.taskIdsToDelete, payload.taskDeleteBaseUpdatedAtMap, payload.writePlan) === signature;
     });
     if (duplicatePending) return { success: false, retryEnqueued: ['project:' + project.id], failureReason: 'project save already durably queued' };
     const durableDeleteIds = [...writePlan.taskDeleteIds];
-    const actionId = await queue.enqueueDurablyForOwner(userId, { type: 'update', entityType: 'project', entityId: project.id, priority: 'critical', payload: { project, sourceUserId: userId, taskIdsToDelete: durableDeleteIds, taskDeleteBaseUpdatedAtMap: effectiveDeleteBaseMap, writePlan } });
+    let actionId: string;
+    try {
+      actionId = await queue.enqueueDurablyForOwner(userId, { type: 'update', entityType: 'project', entityId: project.id, priority: 'critical', payload: { project, sourceUserId: userId, taskIdsToDelete: durableDeleteIds, taskDeleteBaseUpdatedAtMap: effectiveDeleteBaseMap ? { ...effectiveDeleteBaseMap } : undefined, writePlan } });
+    } catch (error) {
+      this.logger.warn('项目保存操作未完成本地耐久入队，保留本地变更', { projectId: project.id, error });
+      return { success: false, failureReason: 'project save durable enqueue failed' };
+    }
     if (!actionId) return { success: false, failureReason: 'project save durable enqueue failed' };
     if (generation !== this.sessionGeneration) return { success: false, retryEnqueued: ['project:' + project.id], failureReason: 'project save durably queued for original owner after session change' };
     return { success: false, retryEnqueued: ['project:' + project.id], failureReason: 'project save queued for durable replay' };

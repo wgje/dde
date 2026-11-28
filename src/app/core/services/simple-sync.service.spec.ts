@@ -239,6 +239,7 @@ describe('SimpleSyncService', () => {
       enqueue: vi.fn().mockReturnValue('action-1'),
       enqueueDurably: vi.fn().mockResolvedValue('action-1'),
       enqueueDurablyForOwner: vi.fn().mockResolvedValue('action-1'),
+      getActionsForEntity: vi.fn(() => []),
     };
     
     // Mock RequestThrottleService - 直接执行传入的函数

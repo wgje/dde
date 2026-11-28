@@ -1,3 +1,4 @@
+import { projectReplayOperationId } from './simple-sync.test-harness';
 import { beforeEach, expect, it, vi } from 'vitest';
 
 import type { SimpleSyncService } from './simple-sync.service';
@@ -67,25 +68,15 @@ export function registerSimpleSyncBatchRetryHandoffSpecs(
         taskUpdateFieldsById: {},
       });
 
-      const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id');
-      const queuedPromise = service.saveProjectToCloud(queuedProject, 'test-user-id');
+      const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id', undefined, undefined, projectReplayOperationId(firstProject));
+      const queuedPromise = service.saveProjectToCloud(queuedProject, 'test-user-id', undefined, undefined, projectReplayOperationId(queuedProject));
 
       expectDeferredCallback(resolveFirstSave, 'resolveFirstSave')(failedResult);
 
       const [firstResult, queuedResult] = await Promise.all([firstPromise, queuedPromise]);
 
       expect(mockBatchSync.saveProjectToCloud).toHaveBeenCalledTimes(1);
-      expect(mockRetryQueueService.add).toHaveBeenCalledWith(
-        'project',
-        'upsert',
-        queuedProject,
-        undefined,
-        'test-user-id',
-        ['task-delete-newest'],
-        undefined,
-        undefined,
-        undefined,
-      );
+      expect(mockRetryQueueService.add).toHaveBeenCalledWith('project', 'upsert', queuedProject, undefined, 'test-user-id', ['task-delete-newest'], undefined, undefined, projectReplayOperationId(queuedProject));
       expect(firstResult).toEqual(failedResult);
       expect(queuedResult).toEqual(failedResult);
     });
@@ -136,24 +127,14 @@ export function registerSimpleSyncBatchRetryHandoffSpecs(
         taskUpdateFieldsById: {},
       });
 
-      const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id');
-      const queuedPromise = service.saveProjectToCloud(queuedProject, 'test-user-id');
+      const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id', undefined, undefined, projectReplayOperationId(firstProject));
+      const queuedPromise = service.saveProjectToCloud(queuedProject, 'test-user-id', undefined, undefined, projectReplayOperationId(queuedProject));
 
       expectDeferredCallback(resolveFirstSave, 'resolveFirstSave')(failedResult);
 
       const [firstResult, queuedResult] = await Promise.all([firstPromise, queuedPromise]);
 
-      expect(mockRetryQueueService.add).toHaveBeenCalledWith(
-        'project',
-        'upsert',
-        queuedProject,
-        undefined,
-        'test-user-id',
-        ['task-delete-newest'],
-        undefined,
-        undefined,
-        undefined,
-      );
+      expect(mockRetryQueueService.add).toHaveBeenCalledWith('project', 'upsert', queuedProject, undefined, 'test-user-id', ['task-delete-newest'], undefined, undefined, projectReplayOperationId(queuedProject));
       expect(mockRetryQueueService.persistNow).toHaveBeenCalled();
       expect(mockBatchSync.saveProjectToCloud).toHaveBeenCalledTimes(2);
       expect(firstResult).toEqual(failedResult);
@@ -198,24 +179,14 @@ export function registerSimpleSyncBatchRetryHandoffSpecs(
         taskUpdateFieldsById: {},
       });
 
-      const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id', ['task-delete-original']);
-      const queuedPromise = service.saveProjectToCloud(queuedProject, 'test-user-id', ['task-delete-explicit']);
+      const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id', ['task-delete-original'], undefined, projectReplayOperationId(firstProject));
+      const queuedPromise = service.saveProjectToCloud(queuedProject, 'test-user-id', ['task-delete-explicit'], undefined, projectReplayOperationId(queuedProject));
 
       expectDeferredCallback(resolveFirstSave, 'resolveFirstSave')(failedResult);
 
       const [firstResult, queuedResult] = await Promise.all([firstPromise, queuedPromise]);
 
-      expect(mockRetryQueueService.add).toHaveBeenCalledWith(
-        'project',
-        'upsert',
-        queuedProject,
-        undefined,
-        'test-user-id',
-        ['task-delete-explicit'],
-        undefined,
-        undefined,
-        undefined,
-      );
+      expect(mockRetryQueueService.add).toHaveBeenCalledWith('project', 'upsert', queuedProject, undefined, 'test-user-id', ['task-delete-explicit'], undefined, undefined, projectReplayOperationId(queuedProject));
       expect(firstResult).toEqual(failedResult);
       expect(queuedResult).toEqual(failedResult);
     });
@@ -271,24 +242,14 @@ export function registerSimpleSyncBatchRetryHandoffSpecs(
           taskUpdateFieldsById: {},
         });
 
-      const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id');
-      const queuedPromise = service.saveProjectToCloud(queuedProject, 'test-user-id');
+      const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id', undefined, undefined, projectReplayOperationId(firstProject));
+      const queuedPromise = service.saveProjectToCloud(queuedProject, 'test-user-id', undefined, undefined, projectReplayOperationId(queuedProject));
 
       expectDeferredCallback(resolveFirstSave, 'resolveFirstSave')(failedResult);
 
       const [firstResult, queuedResult] = await Promise.all([firstPromise, queuedPromise]);
 
-      expect(mockRetryQueueService.add).toHaveBeenCalledWith(
-        'project',
-        'upsert',
-        queuedProject,
-        undefined,
-        'test-user-id',
-        ['task-delete-captured'],
-        undefined,
-        undefined,
-        undefined,
-      );
+      expect(mockRetryQueueService.add).toHaveBeenCalledWith('project', 'upsert', queuedProject, undefined, 'test-user-id', ['task-delete-captured'], undefined, undefined, projectReplayOperationId(queuedProject));
       expect(firstResult).toEqual(failedResult);
       expect(queuedResult).toEqual(failedResult);
     });
@@ -325,25 +286,15 @@ export function registerSimpleSyncBatchRetryHandoffSpecs(
         resolveFirstSave = resolve;
       }));
 
-      const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id', ['task-delete-a']);
-      const secondPromise = service.saveProjectToCloud(secondProject, 'test-user-id', ['task-delete-b']);
-      const thirdPromise = service.saveProjectToCloud(thirdProject, 'test-user-id', ['task-delete-c']);
+      const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id', ['task-delete-a'], undefined, projectReplayOperationId(firstProject));
+      const secondPromise = service.saveProjectToCloud(secondProject, 'test-user-id', ['task-delete-b'], undefined, projectReplayOperationId(secondProject));
+      const thirdPromise = service.saveProjectToCloud(thirdProject, 'test-user-id', ['task-delete-c'], undefined, projectReplayOperationId(thirdProject));
 
       expectDeferredCallback(resolveFirstSave, 'resolveFirstSave')(failedResult);
 
       const [firstResult, secondResult, thirdResult] = await Promise.all([firstPromise, secondPromise, thirdPromise]);
 
-      expect(mockRetryQueueService.addDurably).toHaveBeenCalledWith(
-        'project',
-        'upsert',
-        thirdProject,
-        undefined,
-        'test-user-id',
-        ['task-delete-c'],
-        undefined,
-        undefined,
-        undefined,
-      );
+      expect(mockRetryQueueService.addDurably).toHaveBeenCalledWith('project', 'upsert', thirdProject, undefined, 'test-user-id', ['task-delete-c'], undefined, undefined, projectReplayOperationId(thirdProject));
       expect(firstResult).toEqual(failedResult);
       expect(secondResult).toEqual(failedResult);
       expect(thirdResult).toEqual(failedResult);
@@ -389,8 +340,8 @@ export function registerSimpleSyncBatchRetryHandoffSpecs(
         taskUpdateFieldsById: {},
       });
 
-      const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id');
-      const queuedPromise = service.saveProjectToCloud(queuedProject, 'test-user-id');
+      const firstPromise = service.saveProjectToCloud(firstProject, 'test-user-id', undefined, undefined, projectReplayOperationId(firstProject));
+      const queuedPromise = service.saveProjectToCloud(queuedProject, 'test-user-id', undefined, undefined, projectReplayOperationId(queuedProject));
 
       expectDeferredCallback(resolveFirstSave, 'resolveFirstSave')(failedResult);
 

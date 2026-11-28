@@ -1,3 +1,4 @@
+import { projectReplayOperationId } from './simple-sync.test-harness';
 import {
   beforeEach,
   describe,
@@ -434,10 +435,10 @@ export function registerSimpleSyncRuntimeSessionSpecs(context: SimpleSyncRuntime
         mockBatchSync.saveProjectToCloud = vi.fn().mockResolvedValue({ success: true, newVersion: 1 });
 
         // 调用 saveProjectToCloud
-        await service.saveProjectToCloud(project, 'test-user-id');
+        await service.saveProjectToCloud(project, 'test-user-id', undefined, undefined, projectReplayOperationId(project));
 
         // 验证 BatchSyncService 被调用
-        expect(mockBatchSync.saveProjectToCloud).toHaveBeenCalledWith(project, 'test-user-id', undefined);
+        expect(mockBatchSync.saveProjectToCloud).toHaveBeenCalledWith(project, 'test-user-id', undefined, undefined, projectReplayOperationId(project));
       });
 
       // 【技术债务重构】以下测试应迁移至 task-sync-operations.service.spec.ts
