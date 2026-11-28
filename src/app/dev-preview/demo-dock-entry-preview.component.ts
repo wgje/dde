@@ -8,7 +8,7 @@ import { DockMobileDrawerComponent } from '../features/parking/components/dock-m
   imports: [DockMobileDrawerComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
-    <section class="dock-preview" [class.open-preview]="openState()">
+    <section class="dock-preview">
       <div class="workspace" aria-hidden="true">
         <span class="workspace-label">正在处理</span>
         <strong>整理今天最重要的一步</strong>
@@ -17,9 +17,6 @@ import { DockMobileDrawerComponent } from '../features/parking/components/dock-m
       <app-dock-mobile-drawer [entries]="entries()" [projects]="[]" [showTrigger]="true"
         [activeView]="'text'" [focusActive]="false" [interactive]="true" [readOnly]="false"
         (taskConfirmed)="selectTask($event)" />
-      @if (selectedTitle(); as title) {
-        <p class="selection" role="status">当前示例任务：{{ title }}</p>
-      }
     </section>
   `,
   styles: [`
@@ -29,19 +26,17 @@ import { DockMobileDrawerComponent } from '../features/parking/components/dock-m
     .workspace-label { color: #758071; font-size: 11px; }
     .workspace strong { max-width: 18em; font-size: 20px; font-weight: 500; }
     .workspace-note { color: #797970; font-size: 12px; }
-    .selection { position: absolute; top: 12px; left: 14px; margin: 0; padding: 8px 12px; border-radius: 8px; background: #fff; font-size: 12px; }
   `],
 })
 export class DemoDockEntryPreviewComponent {
   readonly state = input('mobile-entry');
   readonly taskIds = { current: crypto.randomUUID(), candidate: crypto.randomUUID(), waiting: crypto.randomUUID() };
   readonly currentTaskId = signal(this.taskIds.current);
-  readonly selectedTitle = signal('');
   readonly openState = computed(() => this.state() === 'mobile-open');
   readonly entries = computed<DockEntry[]>(() => [
-    this.entry({taskId: this.taskIds.current, title: '今天最重要的一步', initialStatus: 'focusing', lane: 'combo-select'}),
-    this.entry({taskId: this.taskIds.candidate, title: '核对待回复的内容', initialStatus: 'pending_start', lane: 'combo-select'}),
-    this.entry({taskId: this.taskIds.waiting, title: '等对方确认时间', initialStatus: 'suspended_waiting', lane: 'backup', waitMinutes: 20}),
+    this.entry(this.taskIds.current, '今天最重要的一步', 'focusing', 'combo-select'),
+    this.entry(this.taskIds.candidate, '核对待回复的内容', 'pending_start', 'combo-select'),
+    this.entry(this.taskIds.waiting, '等对方确认时间', 'suspended_waiting', 'backup', 20),
   ].map(entry => ({ ...entry, status: entry.taskId === this.currentTaskId() ? 'focusing' : entry.status, isMain: entry.taskId === this.currentTaskId() })));
 
   @ViewChild(DockMobileDrawerComponent)
@@ -50,16 +45,12 @@ export class DemoDockEntryPreviewComponent {
   }
 
   selectTask(taskId: string): void {
-    const selected = this.entries().find(entry => entry.taskId === taskId);
-    if (!selected) return;
-    this.selectedTitle.set(selected.title);
-    this.currentTaskId.set(taskId);
+    if (this.entries().some(entry => entry.taskId === taskId)) this.currentTaskId.set(taskId);
   }
 
-  private entry(values: {taskId: string; title: string; initialStatus: DockEntry['status']; lane: DockEntry['lane']; waitMinutes?: number}): DockEntry {
-    const {initialStatus, ...entry} = values;
-    return { ...entry, sourceProjectId: null, status: initialStatus, isMain: false, load: 'low', expectedMinutes: 15,
-      waitMinutes: values.waitMinutes ?? null, waitStartedAt: null, zoneSource: 'manual', dockedOrder: 0, detail: '这是完全隔离的虚拟任务，只用于展示手机停泊坞。',
-      sourceKind: 'dock-created', systemSelected: false, recommendedScore: null };
+  private entry(taskId: string, title: string, status: DockEntry['status'], lane: DockEntry['lane'], waitMinutes: number | null = null): DockEntry {
+    return { taskId, title, sourceProjectId: null, status, load: 'low', expectedMinutes: 15, waitMinutes,
+      waitStartedAt: null, lane, zoneSource: 'manual', isMain: false, dockedOrder: 0,
+      detail: '这是完全隔离的虚拟任务，只用于展示手机停泊坞。', sourceKind: 'dock-created', systemSelected: false, recommendedScore: null };
   }
 }

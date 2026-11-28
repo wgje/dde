@@ -1,6 +1,6 @@
 {
   "minimumScenarioCount": 7,
-  "requiredWidgets": ["flow","inbox","dock"],
+  "requiredWidgets": ["flow", "inbox", "dock"],
   "exceptions": {},
   "selectorFixtureHints": {
     "app-flow-minimap": {"test":"src/app/dev-preview/demo-flow-preview.component.spec.ts","scenario":{"widget":"flow","state":"overview-dense"}},
@@ -9,6 +9,6 @@
     "app-black-box-panel": {"test":"src/app/dev-preview/demo-black-box-preview.component.spec.ts","scenario":{"widget":"inbox","state":"panel"}},
     "app-mobile-black-box-drawer": {"test":"src/app/dev-preview/demo-black-box-preview.component.spec.ts","scenario":{"widget":"inbox","state":"mobile"}},
     "app-strata-layer": {"test":"src/app/dev-preview/demo-black-box-preview.component.spec.ts","scenario":{"widget":"inbox","state":"strata"}},
-    "app-dock-mobile-drawer": {"test":"src/app/dev-preview/demo-preview-page.component.spec.ts","scenario":{"widget":"dock","state":"mobile-entry"}}
+    "app-dock-mobile-drawer": {"test":"src/app/dev-preview/demo-dock-entry-preview.component.spec.ts","scenario":{"widget":"dock","state":"mobile-entry"}}
   }
 }

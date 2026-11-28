@@ -17,7 +17,7 @@
       <header>
         <button type="button" class="icon-button" aria-label="返回任务列表" (click)="closePreview()" data-testid="dock-v3-mobile-preview-back"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m14 6-6 6 6 6" /></svg></button>
         <span class="muted">{{ entry.taskId === currentEntry()?.taskId ? '当前主任务' : isPreviewWaiting(entry) ? '待命任务' : '可行动候选' }}</span>
-        <button type="button" class="icon-button" aria-label="关闭停泊坞" (click)="close()" data-testid="dock-v3-mobile-drawer-close"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18' /></svg></button>
+        <button type="button" class="icon-button" aria-label="关闭停泊坞" (click)="close()" data-testid="dock-v3-mobile-drawer-close"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18" /></svg></button>
       </header>
       <div class="sheet-body preview" data-testid="dock-v3-mobile-task-preview">
         <span class="project">{{ projectName(entry) }}</span>
@@ -40,7 +40,7 @@
         <h2 id="mobile-dock-title">停泊坞 <small>{{ activeEntries().length }}</small></h2>
         <span class="header-actions">
           @if (!readOnly()) { <button type="button" class="text-action" (click)="createRequested.emit()" data-testid="dock-v3-mobile-create-toggle">新建</button> }
-          <button type="button" class="icon-button" aria-label="收起停泊坞任务抽屉" (click)="close()" data-testid="dock-v3-mobile-drawer-close"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18' /></svg></button>
+          <button type="button" class="icon-button" aria-label="收起停泊坞任务抽屉" (click)="close()" data-testid="dock-v3-mobile-drawer-close"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18" /></svg></button>
         </span>
       </header>
       <div class="sheet-body">

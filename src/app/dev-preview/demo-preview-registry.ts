@@ -9,9 +9,5 @@ export const DEMO_PREVIEW_SCENARIOS: readonly DemoPreviewScenario[] = [
   { widget: 'dock', state: 'mobile-entry', title: '手机停泊坞 · 透明入口', steps: '底部入口保持透明；需要时点按打开停泊任务。' },
   { widget: 'dock', state: 'mobile-open', title: '手机停泊坞 · 展开结果', steps: '直接查看当前、候选与待命分组；预览后可选择是否确认。' },
 ];
-export function resolveDemoPreviewScenario(widget: string, state: string): DemoPreviewScenario | undefined {
-  return DEMO_PREVIEW_SCENARIOS.find(scenario => scenario.widget === widget && scenario.state === state);
-}
-export function demoPreviewHref(widget: string, state: string): string {
-  return `/#/dev-preview/${encodeURIComponent(widget)}/${encodeURIComponent(state)}`;
-}
+export function resolveDemoPreviewScenario(widget: string, state: string): DemoPreviewScenario | undefined { return DEMO_PREVIEW_SCENARIOS.find(scenario => scenario.widget === widget && scenario.state === state); }
+export function demoPreviewHref(widget: string, state: string): string { return `/#/dev-preview/${encodeURIComponent(widget)}/${encodeURIComponent(state)}`; }

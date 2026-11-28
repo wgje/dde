@@ -15,46 +15,38 @@ source_paths:
 
 # Feature Workflows
 
-This page summarizes the major user-facing workflows and the architecture boundaries that protect them.
-
 ## Text View
 
-Text view is the default daily workflow and the default mobile surface.
-
-Use it for fast task creation and editing, hierarchical organization, filtering, search, Markdown content editing, and mobile-first task management. Text operations go through task services and stores; edits persist locally first, and UI must not wait for cloud sync before reflecting input.
+Text is the default mobile surface. Task operations use task services and stores; edits persist locally first, and cloud sync must not block immediate UI feedback.
 
 ## Flow View
 
-Flow uses GoJS to inspect structure, arrange tasks spatially, edit relationships and export context. It is not the mobile default and must remain lazy-loaded; never keep instances under `visibility:hidden`. Flow events remain decoupled through `FlowTemplateService -> flow-template-events.ts -> FlowEventService`.
+Flow uses GoJS to inspect task structure and relationships. It is not the mobile default and remains lazy-loaded. Do not preserve diagram instances under `visibility:hidden`; destroy and recreate them when required by the view lifecycle.
 
 ## Parking Dock
 
-Parking Dock temporarily holds work without deleting or archiving it. Entries remain project tasks or dock-created inline tasks. Wait timers, reminders, current-task state and Focus transitions belong to the existing Dock state machine.
+Parking Dock holds tasks that should pause without being deleted or archived. Entries may be project tasks or Dock-created tasks; wait timers, reminders, main-task state, and Focus transitions remain owned by existing Dock services.
 
-The mobile Text view presents a low-emphasis transparent Dock trigger at the bottom edge so the workspace remains the visual focus. It shows only Dock name/count and a chevron; its background, border and shadow remain transparent. Hover, touch feedback and keyboard focus reveal a subtle surface, while the target remains at least 44px high. Focus remains a quiet secondary action. Opening the trigger presents the normal current/candidate/standby drawer. Previewing an entry never switches the current task; only explicit confirmation follows the parent Dock task-selection path. The real component is directly previewable at `/#/dev-preview/dock/mobile-entry` and `/#/dev-preview/dock/mobile-open` using isolated in-memory entries.
+On mobile, the collapsed entry is a low-emphasis transparent affordance at the bottom edge: no card fill, border or shadow, only a small Dock label/count and chevron. Touch/hover and keyboard focus reveal a faint surface without reducing the 44px touch target. Focus remains a quiet text action. Tapping the Dock entry opens the existing current/candidate/standby drawer. Preview does not switch tasks; explicit confirmation follows the existing parent task-selection path. The development-only real-component examples are `/#/dev-preview/dock/mobile-entry` and `/#/dev-preview/dock/mobile-open`, with in-memory entries only.
 
-Desktop Dock layout, entry classification, task persistence and sync remain unchanged by this collapsed-trigger treatment.
+This presentation change does not alter desktop Dock layout, task persistence, snapshot format or sync ownership.
 
 ## Focus Mode
 
-Focus includes Gate, Strata, Focus Console, and fragment interludes. Gate snooze remains limited to three per day; speech transcription quota remains 50 per day; Strata shows up to 30 days. Focus snapshots remain versioned; V2 covers command center, combo-select, backup, routine, high-load and burnout fields.
+Focus includes Gate review, Strata, Focus Console and fragment interludes. Daily Gate snooze remains limited to three; speech transcription quota remains 50/day; Strata shows up to 30 days. Focus snapshots remain versioned and contain command-center, combo-select, backup, routine, high-load and burnout fields.
 
 ## Black Box
 
-Black Box provides offline text capture to `BlackBoxEntry`, later processed through Gate or Focus. Speech capture stays local until the existing Supabase `transcribe` workflow uses Groq `whisper-large-v3`; retention follows capture services.
+Black Box provides offline text capture and later Gate/Focus processing. Speech retention and remote transcription remain controlled by the existing capture and Supabase workflow.
 
-## Task Sidecar / Attention Metadata
+## Task Sidecar
 
-Sidecar data uses `attentionMeta` and describes risks, blockers, waiting notes and attention items; it must not create Flow graph topology.
+Sidecar data is attention metadata; it must not create Flow graph topology.
 
 ## Android Widget
 
-Android TWA `app.nanoflow.twa` uses existing registration, summary, notification and action Edge Functions with FCM and WorkManager fallback. Missing Firebase configuration degrades to manual/unlock/periodic refresh.
+Android TWA uses existing registration, summary, notification and action functions with FCM/WorkManager fallbacks.
 
-## Import, Export, Trash, and Recovery
+## Recovery
 
-Core recovery includes project JSON, attachment ZIP, trash restore, local desktop backup, disaster backup and rejected-data isolation. High-risk work must preserve recoverability and avoid irreversible deletion.
-
-## Black Box SVG action semantics
-
-Entry, panel, mobile drawer and Strata actions use inline 24-unit SVGs with `currentColor`, rounded strokes and hidden decorative semantics. Labels retain the action meaning; rows wrap on narrow screens. This changes presentation only, not durable methods, sync decisions, confirmations, shortcuts or local-first persistence.
+Project JSON, attachment ZIP, trash restoration, desktop backups and disaster recovery are core product paths. High-risk changes must preserve recoverability.
