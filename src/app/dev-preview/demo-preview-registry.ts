@@ -6,6 +6,8 @@ export const DEMO_PREVIEW_SCENARIOS: readonly DemoPreviewScenario[] = [
   { widget: 'flow', state: 'overview-selected', title: '小地图 · 选中发光结果', steps: '静态结果示例；切换树 3 的任务或清除选择。' },
   { widget: 'flow', state: 'overview-zoomed', title: '小地图 · 放大结果', steps: '继续点击放大主图，检查任务块与连线同步放大。' },
   { widget: 'flow', state: 'overview-dense-mobile', title: '小地图 · 手机多树定位', steps: '100×80 小地图；选中任务后显示持续柔光。' },
+  { widget: 'dock', state: 'mobile-entry', title: '手机停泊坞 · 透明入口', steps: '底部入口保持透明；需要时点按打开停泊任务。' },
+  { widget: 'dock', state: 'mobile-open', title: '手机停泊坞 · 展开结果', steps: '直接查看当前、候选与待命分组；预览后可选择是否确认。' },
 ];
 export function resolveDemoPreviewScenario(widget: string, state: string): DemoPreviewScenario | undefined {
   return DEMO_PREVIEW_SCENARIOS.find(scenario => scenario.widget === widget && scenario.state === state);

@@ -2,12 +2,13 @@
 title: Feature Workflows
 status: canonical
 audience: ai-agent, maintainer
-last_verified: 2026-06-09
+last_verified: 2026-11-28
 source_paths:
   - src/app/features/text/
   - src/app/features/flow/
   - src/app/features/focus/
   - src/app/features/parking/
+  - src/app/dev-preview/demo-dock-entry-preview.component.ts
   - src/services/dock-*.ts
   - src/services/black-box*.ts
 ---
@@ -20,153 +21,40 @@ This page summarizes the major user-facing workflows and the architecture bounda
 
 Text view is the default daily workflow and the default mobile surface.
 
-Use it for:
-
-- fast task creation and editing
-- hierarchical organization
-- filtering and search
-- Markdown content editing
-- mobile-first task management
-
-Architectural expectations:
-
-- Text operations go through task services and stores.
-- Edits persist locally first.
-- UI should not wait for cloud sync before reflecting user input.
+Use it for fast task creation and editing, hierarchical organization, filtering, search, Markdown content editing, and mobile-first task management. Text operations go through task services and stores; edits persist locally first, and UI must not wait for cloud sync before reflecting input.
 
 ## Flow View
 
-Flow view uses GoJS to visualize task structure and relationships.
-
-Use it for:
-
-- graph inspection
-- spatial task organization
-- relationship lines and labels
-- PNG, SVG, or Markdown context export
-
-Rules:
-
-- Flow view is not the mobile default.
-- Flow should be lazy-loaded.
-- Do not keep GoJS diagram instances alive under `visibility:hidden`.
-- Destroy and recreate diagrams when view lifecycle requires it.
-- Flow events are decoupled through `FlowTemplateService -> flow-template-events.ts -> FlowEventService`.
+Flow uses GoJS to inspect structure, arrange tasks spatially, edit relationships and export context. It is not the mobile default and must remain lazy-loaded; never keep instances under `visibility:hidden`. Flow events remain decoupled through `FlowTemplateService -> flow-template-events.ts -> FlowEventService`.
 
 ## Parking Dock
 
-Parking Dock is for tasks that should be paused without being lost.
+Parking Dock temporarily holds work without deleting or archiving it. Entries remain project tasks or dock-created inline tasks. Wait timers, reminders, current-task state and Focus transitions belong to the existing Dock state machine.
 
-Key concepts:
+The mobile Text view presents a low-emphasis transparent Dock trigger at the bottom edge so the workspace remains the visual focus. It shows only Dock name/count and a chevron; its background, border and shadow remain transparent. Hover, touch feedback and keyboard focus reveal a subtle surface, while the target remains at least 44px high. Focus remains a quiet secondary action. Opening the trigger presents the normal current/candidate/standby drawer. Previewing an entry never switches the current task; only explicit confirmation follows the parent Dock task-selection path. The real component is directly previewable at `/#/dev-preview/dock/mobile-entry` and `/#/dev-preview/dock/mobile-open` using isolated in-memory entries.
 
-- parked tasks are still tasks
-- parking metadata lives on tasks through `parkingMeta`
-- dock entries can point to project tasks or dock-created inline tasks
-- wait timers, reminders, main-task state, and focus transitions are part of dock state
-
-Important status values:
-
-- `pending_start`
-- `focusing`
-- `suspended_waiting`
-- `wait_finished`
-- `stalled`
-- `completed`
-
-User-facing dock behavior:
-
-1. Park a task from Text or Flow.
-2. Optionally set reminder, wait, load, or expected time.
-3. Let Dock or Focus Console promote work when appropriate.
-4. Complete, suspend, resume, or return task context.
+Desktop Dock layout, entry classification, task persistence and sync remain unchanged by this collapsed-trigger treatment.
 
 ## Focus Mode
 
-Focus Mode is a higher-level execution workflow. It includes:
-
-- Gate: review pending Black Box entries
-- Strata: resurface completed or historical items
-- Focus Console: execute docked or selected tasks
-- fragment phase: small interlude tasks and breaks
-
-Core limits:
-
-- `FOCUS_CONFIG.GATE.MAX_SNOOZE_PER_DAY = 3`
-- speech transcription quota is 50 per day
-- Strata displays up to 30 days
-
-Focus session state uses versioned snapshots. `FocusSessionStateV2` includes command center tasks, combo-select tasks, backup tasks, routine slots, high-load counters, and burnout state.
+Focus includes Gate, Strata, Focus Console, and fragment interludes. Gate snooze remains limited to three per day; speech transcription quota remains 50 per day; Strata shows up to 30 days. Focus snapshots remain versioned; V2 covers command center, combo-select, backup, routine, high-load and burnout fields.
 
 ## Black Box
 
-Black Box is for quick capture before organization.
-
-Text capture:
-
-- offline capable
-- creates `BlackBoxEntry`
-- processed later through Gate or Focus flows
-
-Speech capture:
-
-- records audio locally
-- caches offline audio when needed
-- sends audio to Supabase Edge Function `transcribe`
-- uses Groq `whisper-large-v3`
-- deletes or stops retaining audio after transcription workflow as implemented by capture services
+Black Box provides offline text capture to `BlackBoxEntry`, later processed through Gate or Focus. Speech capture stays local until the existing Supabase `transcribe` workflow uses Groq `whisper-large-v3`; retention follows capture services.
 
 ## Task Sidecar / Attention Metadata
 
-Task sidecar information is stored in `attentionMeta`.
-
-It is an attention summary layer, not a graph topology layer. It should not create new Flow nodes or links.
-
-Use it for:
-
-- risks
-- blockers
-- waiting notes
-- user-written attention items
-- compact badges in Text and Flow surfaces
+Sidecar data uses `attentionMeta` and describes risks, blockers, waiting notes and attention items; it must not create Flow graph topology.
 
 ## Android Widget
 
-The Android widget path uses:
-
-- Android TWA host package `app.nanoflow.twa`
-- Supabase Edge Functions for registration, summary, notifications, and actions
-- optional FCM dirty push
-- fallback refresh paths when FCM is unavailable
-
-Widget-related Edge Functions:
-
-- `widget-register`
-- `widget-summary`
-- `widget-notify`
-- `widget-black-box-action`
-- `widget-focus-action`
-
-If `android/app/google-services.json` or FCM secrets are missing, the widget path should degrade to manual refresh, unlock-triggered refresh, or WorkManager periodic refresh.
+Android TWA `app.nanoflow.twa` uses existing registration, summary, notification and action Edge Functions with FCM and WorkManager fallback. Missing Firebase configuration degrades to manual/unlock/periodic refresh.
 
 ## Import, Export, Trash, and Recovery
 
-Recovery tools are part of the core product, not auxiliary features.
-
-Supported paths:
-
-- JSON export/import for structured project data
-- attachment ZIP export/import for files
-- trash restoration for deleted and archived tasks
-- local desktop auto-backup where supported
-- disaster backup and rejected-data isolation paths
-
-High-risk changes must preserve recoverability and avoid irreversible deletion.
+Core recovery includes project JSON, attachment ZIP, trash restore, local desktop backup, disaster backup and rejected-data isolation. High-risk work must preserve recoverability and avoid irreversible deletion.
 
 ## Black Box SVG action semantics
 
-Entry, panel, mobile drawer and Strata restore icons use inline 24-unit SVGs with
-`currentColor`, rounded strokes and hidden decorative semantics. Visible labels
-remain the primary meaning: read, complete, delete, pending sync and restore.
-Actions are visible without hover; rows wrap rather than overflow on narrow screens.
-This changes presentation only: durable methods, sync decisions, confirmation,
-keyboard shortcuts and local-first persistence are unchanged.
+Entry, panel, mobile drawer and Strata actions use inline 24-unit SVGs with `currentColor`, rounded strokes and hidden decorative semantics. Labels retain the action meaning; rows wrap on narrow screens. This changes presentation only, not durable methods, sync decisions, confirmations, shortcuts or local-first persistence.
