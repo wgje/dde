@@ -6,7 +6,7 @@
 - 基线：`origin/main` at `1614794fd0311a271f8968712c53acf0ec937448`
 - 修复提交：`03a6222c` (`fix(sync): fence offline receipts and owner upserts`)
 - 已推送：`origin/main` 已读回为 `03a6222c`
-- 前端生产版本已读回 `version.json.gitSha=be277cb4f7a58c731044f0b6bb45794637cbdf6b`。生产数据库已应用 owner-race DDL migration `20261128153245`；业务行、Auth 用户、Storage 对象和队列均未写入/删除（`productionBusinessWrites=0`）。收据 migration 尚未应用，因此完整 `productionProof=false`，收据相关 `NO_RELEASE` 保持。
+- 前端生产版本已读回 `version.json.gitSha=be277cb4f7a58c731044f0b6bb45794637cbdf6b`。生产数据库已应用 owner-race DDL migration `20261128153245`；业务行、Auth 用户、Storage 对象和队列均未写入/删除（`productionBusinessWrites=0`）。收据 migration 已应用，migration ledger 版本为 `20261128154611`；完整 `productionProof=false` 仍保持，因为 connection stale、Auth、清理调度、双账号 smoke 和 rollback 读回尚未闭合。
 
 ## 已闭合的本地缺口
 
@@ -31,7 +31,7 @@
 
 - 前端新提交已部署到生产，线上 SHA 为 `be277cb4...`。GitHub Actions API 未返回对应 run，推测为 Pages 外部部署路径；GitHub CLI 未登录，不能把 workflow dispatch 说成已执行。
 - 生产 `sync_upsert_focus_session` / `sync_upsert_routine_task` 已应用 `20261128153245`；读回分别为 body MD5 `8aa84012131ac841c57f6f1af308b5c7` / `c0907bd763a35c1d04827baf26c2a0f8`，owner predicate 与 zero-row guard 均为 true。
-- 生产 `sync_apply_offline_command` 当前 body MD5 仍为 `ec10ff...`；`20261128100000` 未应用，不能声称线上 receipt collision 已修复。
+- 生产 `sync_apply_offline_command` 已应用 `20261128154611`；读回 body MD5 `aba5dc9e20471a2892592123c9ef9852`，`sync_get_offline_command_status` 为 `858902a0c4e78f2168ef8e586dea0103`，identity helper 为 `5535b3866ef2fc75b15cbf978c9a7777`。`sync_command_log` 当前 0 行，NULL digest 0 行；没有回填或改写历史收据。
 - 生产 `sync_upsert_connection` stale payload 仍是独立待修链路；本提交没有覆盖，须另做 forward migration 和生产 clone 证据。
 - Auth/GoTrue、Service Worker 冷启动/旧 chunk、双账号线上读回、Storage/Edge 清理调度仍未达到生产证据门槛。
 - 纯 PostgreSQL fresh-init 执行因缺少 Supabase 平台基线（`auth.users`、`storage`、`supabase_realtime` 等）中止；静态 fresh-init contract 通过，不能把裸 Postgres 执行失败描述成迁移 SQL 生产失败。
